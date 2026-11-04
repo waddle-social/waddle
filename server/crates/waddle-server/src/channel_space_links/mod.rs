@@ -38,6 +38,7 @@ mod tests;
 pub use storage::InMemoryChannelSpaceLinkStore;
 
 mod links;
+pub use crate::spaces_metadata::SpaceStoreAttachError as ChannelSpaceLinkAttachError;
 pub use links::build_channel_space_link_store;
 use links::decode_row;
 use links::ensure_sqlite_parent_dir;

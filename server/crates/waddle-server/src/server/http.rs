@@ -73,7 +73,7 @@ use crate::server::session_janitors::{
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
-use crate::server::{AppState, XmppConfig};
+use crate::server::{AppState, ResolvedXmppDatabaseUrl, XmppConfig};
 use crate::threads::storage::InboxBackedThreadsStorage;
 use crate::vcard::VCardStore;
 use anyhow::{Context, Result};
@@ -271,6 +271,24 @@ enum IngressColocationError {
     },
     #[error("Storage and ingress must share one durable SQLite database")]
     SqliteDatabase,
+    #[error(
+        "cannot open an independent PostgreSQL child store from a physically attested pool; \
+         use a supported shared-pool store handle"
+    )]
+    AttestedChildPoolUnsupported,
+    #[error(
+        "an attested PostgreSQL inbox must inherit WADDLE_DATABASE_URL without an explicit inbox override"
+    )]
+    AttestedInboxRequiresInheritedGlobal,
+    #[error(
+        "an attested PostgreSQL {store} store must inherit WADDLE_DATABASE_URL without an explicit override"
+    )]
+    AttestedStoreRequiresInheritedGlobal { store: &'static str },
+    #[error("clustered SM cannot yet attach to an attested PostgreSQL runtime database")]
+    AttestedClusteredSmUnsupported,
+    #[cfg(feature = "clustering")]
+    #[error("clustered pending delivery requires live claim handles")]
+    AttestedPendingClaimsUnavailable,
 }
 
 async fn ensure_postgres_ingress_colocation(
@@ -295,10 +313,27 @@ async fn ensure_postgres_ingress_colocation(
 
 /// Open inbox reads on the database/schema used by ingress projection writes.
 /// This startup invariant applies with or without clustering.
+pub(crate) enum InboxStartup {
+    /// The store shares the physically attested global handle, so its lineage
+    /// must be registered as an alias of that exact boundary.
+    AttachedGlobal(Arc<DatabaseInboxStorage>),
+    /// The existing SQLite or ordinary PostgreSQL owner bootstrap path.
+    OwnerInitialized(Arc<DatabaseInboxStorage>),
+}
+
+impl InboxStartup {
+    pub(crate) fn storage(&self) -> &Arc<DatabaseInboxStorage> {
+        match self {
+            Self::AttachedGlobal(storage) | Self::OwnerInitialized(storage) => storage,
+        }
+    }
+}
+
 pub(crate) async fn create_ingress_inbox_storage(
-    database_url: Option<&str>,
+    selection: &ResolvedXmppDatabaseUrl,
     global: &Database,
-) -> Result<Arc<DatabaseInboxStorage>> {
+) -> Result<InboxStartup> {
+    let database_url = selection.as_deref();
     let storage = match global.driver() {
         DatabaseDriver::Sqlite => {
             if database_url.is_some_and(|url| url != global.database_url()) {
@@ -307,6 +342,15 @@ pub(crate) async fn create_ingress_inbox_storage(
             DatabaseInboxStorage::from_database(global.clone()).await?
         }
         DatabaseDriver::Postgres => {
+            if global.uses_attested_postgres_pool() {
+                // Only inherited selection identifies the already supplied
+                // global handle. Never probe or open an explicit child URL.
+                if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+                    return Err(IngressColocationError::AttestedInboxRequiresInheritedGlobal.into());
+                }
+                let storage = DatabaseInboxStorage::attach_runtime_postgres(global.clone()).await?;
+                return Ok(InboxStartup::AttachedGlobal(Arc::new(storage)));
+            }
             let database_url = database_url.unwrap_or_else(|| global.database_url());
             // Opening inbox storage mutates its schema. Check the live identity
             // through a plain pool before initializing the configured database.
@@ -327,7 +371,7 @@ pub(crate) async fn create_ingress_inbox_storage(
             storage
         }
     };
-    Ok(Arc::new(storage))
+    Ok(InboxStartup::OwnerInitialized(Arc::new(storage)))
 }
 
 async fn ensure_mam_ingress_colocation(storage: &SqlxMamStorage, global: &Database) -> Result<()> {
@@ -393,6 +437,12 @@ pub(crate) async fn create_websocket_mam_storage(
             SqlxMamStorage::from_sqlite_pool(pool.clone()).await?
         }
         DatabaseDriver::Postgres => {
+            if global_db.uses_attested_postgres_pool() {
+                // `SqlxMamStorage::open` creates its own raw PgPool, so this
+                // startup path cannot safely consume the physically attested
+                // main/ingress pool yet.
+                return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+            }
             let database_url = database_url
                 .as_deref()
                 .unwrap_or_else(|| global_db.database_url());
@@ -687,15 +737,59 @@ async fn open_ingress_authority(
         None
     };
     Ok(Arc::new(
-        IngressAuthority::try_new(
-            config.ingress.clone(),
-            state.db_pool.global().clone(),
-            state.lineage_config.clone(),
+        create_ingress_authority(
+            &config.ingress,
+            &state.db_pool,
+            &state.lineage_config,
             #[cfg(feature = "clustering")]
             node_identity,
         )
         .await?,
     ))
+}
+
+async fn create_ingress_authority(
+    config: &crate::config::IngressConfig,
+    pool: &crate::db::DatabasePool,
+    lineage: &crate::config::LineageConfig,
+    #[cfg(feature = "clustering")] node_identity: Option<
+        waddle_xmpp::ownership::SharedNodeIdentity,
+    >,
+) -> Result<IngressAuthority, crate::ingress::IngressStartupError> {
+    if pool.global().uses_attested_postgres_pool() {
+        return IngressAuthority::try_new_with_attested_database(
+            config.clone(),
+            pool.ingress(),
+            lineage.clone(),
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await;
+    }
+    IngressAuthority::try_new(
+        config.clone(),
+        pool.global().clone(),
+        lineage.clone(),
+        #[cfg(feature = "clustering")]
+        node_identity,
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn create_ingress_authority_for_test(
+    config: &crate::config::IngressConfig,
+    pool: &crate::db::DatabasePool,
+    lineage: &crate::config::LineageConfig,
+) -> Result<IngressAuthority, crate::ingress::IngressStartupError> {
+    create_ingress_authority(
+        config,
+        pool,
+        lineage,
+        #[cfg(feature = "clustering")]
+        None,
+    )
+    .await
 }
 
 async fn create_websocket_state(
@@ -1688,7 +1782,7 @@ async fn create_sm_session_registry(
         );
     }
     let sm_persistence = create_ingress_sm_storage(
-        sm_database_url.as_deref(),
+        ingress_store_url(&sm_database_url, global_db, "SM")?,
         server_config.clustering.enabled,
         clustering.claim_pair(),
         global_db,
@@ -1753,6 +1847,52 @@ async fn create_sm_session_registry(
     Ok(sm_session_registry)
 }
 
+/// Preserve whether the URL was inherited before passing an override to a
+/// shared-pool store. An attested pool cannot safely reopen an explicit URL,
+/// even when its text happens to match the global DSN.
+fn ingress_store_url<'a>(
+    selection: &'a ResolvedXmppDatabaseUrl,
+    global: &Database,
+    store: &'static str,
+) -> Result<Option<&'a str>> {
+    if global.uses_attested_postgres_pool() {
+        return match selection {
+            ResolvedXmppDatabaseUrl::InheritedGlobal(_) => Ok(None),
+            ResolvedXmppDatabaseUrl::Explicit(_) | ResolvedXmppDatabaseUrl::EphemeralFallback => {
+                Err(IngressColocationError::AttestedStoreRequiresInheritedGlobal { store }.into())
+            }
+        };
+    }
+    Ok(selection.as_deref())
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn attach_sm_startup_for_test(
+    selection: &ResolvedXmppDatabaseUrl,
+    global: &Database,
+    clustering_enabled: bool,
+) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
+    create_ingress_sm_storage(
+        ingress_store_url(selection, global, "SM")?,
+        clustering_enabled,
+        None,
+        global,
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn attach_pending_startup_for_test(
+    selection: &ResolvedXmppDatabaseUrl,
+    global: &Database,
+) -> Result<DatabasePendingDeliveryStorage> {
+    create_ingress_pending_storage(
+        ingress_store_url(selection, global, "pending delivery")?,
+        global,
+    )
+    .await
+}
+
 /// Reject split stores before initializing schemas or hydrating retained sessions.
 async fn ensure_ingress_storage_colocation(
     database_url: Option<&str>,
@@ -1765,6 +1905,13 @@ async fn ensure_ingress_storage_colocation(
             }
         }
         DatabaseDriver::Postgres => {
+            if global.uses_attested_postgres_pool() && database_url.is_some() {
+                // Do not probe a separately configured URL with an ordinary
+                // pool when the global database was opened with exact,
+                // hook-bearing connection options. With no URL, the
+                // downstream SM/pending store uses the same Database handle.
+                return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+            }
             if let Some(database_url) = database_url {
                 if !database_url.starts_with("postgres://")
                     && !database_url.starts_with("postgresql://")
@@ -1794,6 +1941,18 @@ async fn create_ingress_sm_storage(
     global: &Database,
 ) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
     ensure_ingress_storage_colocation(database_url, global).await?;
+    if global.uses_attested_postgres_pool() {
+        // The fenced implementation does not yet have a restricted runtime
+        // attachment. Do not fall back to portable persistence or invoke its
+        // owner initializer under the runtime credential.
+        if clustering_enabled {
+            return Err(IngressColocationError::AttestedClusteredSmUnsupported.into());
+        }
+        return Ok(Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::attach_runtime_postgres(global.clone())
+                .await?,
+        ));
+    }
     Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
         clustering_enabled,
         claim_pair,
@@ -1809,6 +1968,13 @@ async fn create_ingress_pending_storage(
     global: &Database,
 ) -> Result<DatabasePendingDeliveryStorage> {
     ensure_ingress_storage_colocation(database_url, global).await?;
+    if global.uses_attested_postgres_pool() {
+        return Ok(DatabasePendingDeliveryStorage::attach_runtime_postgres(
+            global.clone(),
+            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        )
+        .await?);
+    }
     // Sharing the pool also preserves private in-memory SQLite identity.
     Ok(DatabasePendingDeliveryStorage::from_database(
         global.clone(),
@@ -1834,13 +2000,18 @@ async fn create_pending_delivery_storage(
              for durable offline delivery (issue #209)."
         );
     }
-    let storage =
-        create_ingress_pending_storage(pending_delivery_url.as_deref(), global_db).await?;
+    let storage = create_ingress_pending_storage(
+        ingress_store_url(&pending_delivery_url, global_db, "pending delivery")?,
+        global_db,
+    )
+    .await?;
     #[cfg(feature = "clustering")]
     let storage =
         if server_config.clustering.enabled && global_db.driver() == DatabaseDriver::Postgres {
             if let Some((claim_store, node_identity)) = clustering.claim_pair() {
                 storage.with_cluster_fencing(claim_store, node_identity)
+            } else if global_db.uses_attested_postgres_pool() {
+                return Err(IngressColocationError::AttestedPendingClaimsUnavailable.into());
             } else {
                 warn!(
                 "clustered pending delivery has no claim handles; using unfenced promotion inserts"
@@ -1853,7 +2024,11 @@ async fn create_pending_delivery_storage(
     #[cfg(not(feature = "clustering"))]
     let _ = (server_config, clustering);
     let database = storage.database();
-    if database.is_in_memory_sqlite() {
+    if database.uses_attested_postgres_pool() {
+        // `create_ingress_pending_storage` attached the exact global handle;
+        // re-running the owner lineage bootstrap here would perform runtime DDL.
+        state.register_lineage_alias(DurableStore::PendingDelivery, DurableStore::Global);
+    } else if database.is_in_memory_sqlite() {
         state.register_lineage_ephemeral(DurableStore::PendingDelivery);
     } else {
         crate::server::bootstrap_store_lineage(
@@ -1999,9 +2174,12 @@ mod ingress_colocation_tests {
         )
         .await
         .expect("documented MAM boots");
-        create_ingress_inbox_storage(Some(&configured("WADDLE_XMPP_INBOX_DATABASE_URL")), &global)
-            .await
-            .expect("documented inbox boots");
+        create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(configured("WADDLE_XMPP_INBOX_DATABASE_URL")),
+            &global,
+        )
+        .await
+        .expect("documented inbox boots");
     }
 
     const LEGACY_MAM_OBJECTS: &[&str] = &[
@@ -2209,13 +2387,19 @@ mod ingress_colocation_tests {
         let global = crate::db::Database::from_config("ingress-colocation", &config)
             .await
             .expect("global");
-        let shared = create_ingress_inbox_storage(Some(global_url.as_str()), &global)
-            .await
-            .expect("colocated inbox");
-        let error = create_ingress_inbox_storage(Some(separate_url.as_str()), &global)
-            .await
-            .err()
-            .expect("startup rejects split inbox schema without clustering");
+        let shared = create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(global_url.to_string()),
+            &global,
+        )
+        .await
+        .expect("colocated inbox");
+        let error = create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(separate_url.to_string()),
+            &global,
+        )
+        .await
+        .err()
+        .expect("startup rejects split inbox schema without clustering");
         assert!(matches!(
             error.downcast_ref::<IngressColocationError>(),
             Some(IngressColocationError::PostgresIdentity { .. })
@@ -2248,17 +2432,23 @@ mod ingress_colocation_tests {
             crate::db::Database::open_local("inbox-colocation", directory.path().join("global.db"))
                 .await
                 .expect("global");
-        create_ingress_inbox_storage(Some(global.database_url()), &global)
-            .await
-            .expect("colocated inbox");
+        create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(global.database_url().to_owned()),
+            &global,
+        )
+        .await
+        .expect("colocated inbox");
         let separate =
             crate::db::Database::open_local("separate-inbox", directory.path().join("inbox.db"))
                 .await
                 .expect("separate");
-        let error = create_ingress_inbox_storage(Some(separate.database_url()), &global)
-            .await
-            .err()
-            .expect("startup rejects split inbox database");
+        let error = create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(separate.database_url().to_owned()),
+            &global,
+        )
+        .await
+        .err()
+        .expect("startup rejects split inbox database");
         assert!(matches!(
             error.downcast_ref::<IngressColocationError>(),
             Some(IngressColocationError::SqliteDatabase)
@@ -2282,10 +2472,12 @@ mod ingress_colocation_tests {
             .execute("CREATE TABLE shared_pool_marker (id INTEGER)")
             .await
             .expect("marker");
-        let inbox = create_ingress_inbox_storage(None, &global)
-            .await
-            .expect("shared inbox");
+        let inbox =
+            create_ingress_inbox_storage(&ResolvedXmppDatabaseUrl::EphemeralFallback, &global)
+                .await
+                .expect("shared inbox");
         inbox
+            .storage()
             .database()
             .execute("INSERT INTO shared_pool_marker VALUES (1)")
             .await

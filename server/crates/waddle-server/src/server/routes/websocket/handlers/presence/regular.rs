@@ -21,7 +21,7 @@ use waddle_xmpp::Stanza;
 /// Handle a broadcast (undirected) presence update from a live connection.
 ///
 /// `owner` is the connection's registry ownership token
-/// (`WsConnState::registry_owner`, the carbons handle returned by
+/// (`WsConnState::registry_owner`, the local binding ID returned by
 /// `register_*`). Every JID-keyed registry write below is owner-gated
 /// (issue #1208): a superseded same-full-JID connection processing a late
 /// presence frame must neither stamp stale presence onto the replacement's
@@ -32,7 +32,7 @@ use waddle_xmpp::Stanza;
 pub(super) async fn handle_regular_presence_update(
     state: &WebSocketState,
     sender_jid: &FullJid,
-    owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     presence: xmpp_parsers::presence::Presence,
     ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
@@ -186,7 +186,7 @@ pub(super) async fn handle_regular_presence_update(
 async fn mirror_remote_presence_update(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     available: bool,
     priority: i8,
     presence_state: Option<RemotePresenceStateSnapshot>,
@@ -216,7 +216,7 @@ async fn mirror_remote_presence_update(
 async fn mirror_remote_presence_update(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     _available: bool,
     _priority: i8,
     _presence_state: Option<()>,
@@ -273,7 +273,7 @@ struct OfflineFlushPlan {
 fn plan_offline_flush(
     state: &WebSocketState,
     sender_jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> Option<OfflineFlushPlan> {
     let entry = state
         .deps
@@ -306,7 +306,7 @@ fn plan_offline_flush(
 fn spawn_session_recovery_delivery(
     state: &WebSocketState,
     resource: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     flush_plan: Option<OfflineFlushPlan>,
     subscribe_stanzas: Vec<Stanza>,
 ) {
@@ -321,7 +321,7 @@ fn spawn_session_recovery_delivery(
     let server_domain = state.deps.auth_state.xmpp_domain.clone();
     let recipient = resource.to_bare();
     let resource = resource.clone();
-    let owner = std::sync::Arc::clone(owner);
+    let owner = *owner;
     // Carry the current tracing span into the spawned task (issue #1220): the
     // flush is logically part of this presence-handling flow, but `tokio::spawn`
     // resets the task-local span context, which would orphan the flush's own

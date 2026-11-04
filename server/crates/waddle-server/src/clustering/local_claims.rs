@@ -33,7 +33,7 @@ use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
 use waddle_xmpp::muc::room_actor::HealthCheck;
 use waddle_xmpp::muc::RoomRegistry;
-use waddle_xmpp::ownership::{Entity, EntityType};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 use waddle_xmpp::registry::user_actor::HealthCheck as UserHealthCheck;
 use waddle_xmpp::registry::{
     ConnectionRegistry, DemoteUserActor, DemoteUserActorIfOwner, DemotedUserResource,
@@ -192,6 +192,7 @@ impl SmSessionLocalClaims {
                 let (ack, ack_rx) = tokio::sync::oneshot::channel();
                 let request = ForceDetachRequest {
                     origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                    target_binding: entry.binding_ref().cloned(),
                     requester_bare_jid: jid.to_bare(),
                     ack,
                 };
@@ -468,6 +469,33 @@ impl LocallyClaimedEntities for RoomLocalClaims {
                      cannot itself observe)"
                 );
                 Vec::new()
+            }
+        }
+    }
+
+    async fn room_claim_fences_for_drain(
+        &self,
+        owner: &NodeIdentity,
+    ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+        let registry = self.registry.get()?;
+        match registry
+            .list_room_claim_fences_owned_by(owner.clone())
+            .await
+        {
+            Ok(fences) => Some(
+                fences
+                    .into_iter()
+                    .filter(|fence| &fence.owner == owner)
+                    .map(|fence| (fence.entity, fence.epoch))
+                    .collect(),
+            ),
+            Err(_error) => {
+                tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
+                    owner = %owner.node_id,
+                    "RoomLocalClaims exact-fence drain snapshot failed; no claims will be released"
+                );
+                None
             }
         }
     }
@@ -802,10 +830,11 @@ impl UserLocalClaims {
             return;
         };
         for (jid, entry) in entries {
-            let owner = entry.carbons_handle();
+            let owner = entry.binding_id();
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
                 origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                target_binding: entry.binding_ref().cloned(),
                 requester_bare_jid: bare_jid.clone(),
                 ack,
             };
@@ -1135,6 +1164,13 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         owned.extend(self.room.owned().await);
         owned.extend(self.user.owned().await);
         owned
+    }
+
+    async fn room_claim_fences_for_drain(
+        &self,
+        owner: &NodeIdentity,
+    ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+        self.room.room_claim_fences_for_drain(owner).await
     }
 
     async fn terminal_sweep(&self) -> Vec<Entity> {
@@ -1528,6 +1564,7 @@ mod tests {
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let filler = ForceDetachRequest {
                 origin: ForceDetachOrigin::OwnerManagedRetirement,
+                target_binding: None,
                 requester_bare_jid: jid.to_bare(),
                 ack,
             };

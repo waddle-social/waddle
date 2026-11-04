@@ -53,6 +53,8 @@ struct FailFirstPendingStorage {
     inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage,
     fail_next_insert: std::sync::atomic::AtomicBool,
     fail_next_ack: std::sync::atomic::AtomicBool,
+    reject_next_fenced_ack: std::sync::atomic::AtomicBool,
+    saw_fenced_ack: std::sync::atomic::AtomicBool,
 }
 
 impl FailFirstPendingStorage {
@@ -62,6 +64,8 @@ impl FailFirstPendingStorage {
                 waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
             fail_next_insert: std::sync::atomic::AtomicBool::new(true),
             fail_next_ack: std::sync::atomic::AtomicBool::new(false),
+            reject_next_fenced_ack: std::sync::atomic::AtomicBool::new(false),
+            saw_fenced_ack: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -268,7 +272,25 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        if let waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(_) = authority {
+            self.saw_fenced_ack
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .reject_next_fenced_ack
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(
+                    waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner {
+                        entity: waddle_xmpp::ownership::Entity::new(
+                            waddle_xmpp::ownership::EntityType::SmSession,
+                            session.as_str().to_string(),
+                        ),
+                    },
+                );
+            }
+        }
         if self
             .fail_next_ack
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -280,7 +302,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
             );
         }
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -977,9 +999,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -1240,9 +1263,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -1661,7 +1685,7 @@ async fn force_detach_cleanup_returns_not_persisted_when_remote_owner_unregister
     bridge
         .test_insert_remote_socket_registration(
             jid.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("missing-owner-node".to_string()),
         )
         .await;
@@ -2066,6 +2090,7 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
         .force_detach_sender()
         .try_send(ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: crossnode_ack_tx,
         })
@@ -2102,6 +2127,7 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
             let drained = super::super::connection::drain_ready_force_detach_requests(
                 &mut force_detach_rx,
                 &bare_jid,
+                None,
             );
             if !drained.is_empty() {
                 break drained;
@@ -2188,11 +2214,13 @@ async fn cross_node_origin_is_authoritative_when_stale_retirement_queues_first()
     let mut pending_force_detach = vec![
         ForceDetachRequest {
             origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: stale_ack_tx,
         },
         ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: crossnode_ack_tx,
         },
@@ -2243,16 +2271,19 @@ async fn fresh_replacement_wins_queued_resume_and_releases_stale_actor_waiter() 
         let mut requests = vec![
             ForceDetachRequest {
                 origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+                target_binding: None,
                 requester_bare_jid: bare_jid.clone(),
                 ack: stale_tx,
             },
             ForceDetachRequest {
                 origin: ForceDetachOrigin::CrossNodeResume,
+                target_binding: None,
                 requester_bare_jid: bare_jid.clone(),
                 ack: resume_tx,
             },
             ForceDetachRequest {
                 origin: ForceDetachOrigin::FreshBindReplacement,
+                target_binding: None,
                 requester_bare_jid: bare_jid,
                 ack: fresh_tx,
             },
@@ -2298,11 +2329,13 @@ async fn owner_managed_force_detach_waiter_stays_queued_during_cross_node_cleanu
     let mut pending_force_detach = vec![
         ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: crossnode_ack_tx,
         },
         ForceDetachRequest {
             origin: ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: owner_managed_ack_tx,
         },
@@ -3549,6 +3582,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         recipient: &BareJid,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         sequences: &std::collections::HashSet<u32>,
+        expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
         if self
             .fail_next_release
@@ -3561,7 +3595,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             );
         }
         self.inner
-            .release_rows_for_outbound_sequences(recipient, session, sequences)
+            .release_rows_for_outbound_sequences(recipient, session, sequences, expected_fence)
             .await
     }
 
@@ -3578,9 +3612,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -3862,9 +3897,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -4245,6 +4281,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         recipient: &BareJid,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         sequences: &std::collections::HashSet<u32>,
+        expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
         if self
             .fail_next_release
@@ -4257,7 +4294,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             );
         }
         self.inner
-            .release_rows_for_outbound_sequences(recipient, session, sequences)
+            .release_rows_for_outbound_sequences(recipient, session, sequences, expected_fence)
             .await
     }
 
@@ -4274,9 +4311,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -4949,9 +4987,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -5610,9 +5649,10 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -7930,6 +7970,86 @@ async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
 }
 
 #[tokio::test]
+async fn sm_live_ack_with_lost_claim_closes_stream_without_purging_pending_rows() {
+    let pending = Arc::new(FailFirstPendingStorage::new());
+    pending
+        .fail_next_insert
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    pending
+        .reject_next_fenced_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        Arc::new(InMemorySmSessionRegistry::new()),
+        pending.clone(),
+    )
+    .await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
+    if conn.sm_ingress_fence.is_none() {
+        // The standalone route fixture has no cluster identity. Supply a
+        // captured-fence-shaped token so this wire test exercises the
+        // same NotOwner response used by the clustered backend.
+        conn.sm_ingress_fence = Some(
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                NodeIdentity::new(
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                ),
+                waddle_xmpp::ownership::ClaimEpoch(1),
+            ),
+        );
+    }
+    assert!(
+        conn.sm_ingress_fence.is_some(),
+        "resumable SM has captured fence"
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        SmEvictionPath::DirectOutbound,
+    );
+    let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
+    seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
+
+    let responses = handle_xmpp_frame(
+        "<a xmlns='urn:xmpp:sm:3' h='1'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+
+    assert!(
+        pending
+            .saw_fenced_ack
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "live resumable ACK must carry the immutable capture fence"
+    );
+    assert_eq!(responses.len(), 2, "lost ownership closes the XMPP stream");
+    let stream_error = Element::from_str(&responses[0]).expect("stream error XML");
+    assert_eq!(stream_error.name(), "error");
+    assert_eq!(stream_error.ns(), waddle_xmpp::ns::STREAM);
+    assert!(responses[0].contains("internal-server-error"));
+    let close = Element::from_str(&responses[1]).expect("close frame XML");
+    assert_eq!(close.name(), "close");
+    assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
+    assert!(conn.phase.is_closing());
+    assert_eq!(
+        conn.sm_state.unacked_count(),
+        0,
+        "ACK was applied before storage failed"
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&recipient)
+        .await
+        .expect("list pending rows");
+    assert_eq!(rows.len(), 1, "lost-owner ACK leaves pending row untouched");
+}
+
+#[tokio::test]
 async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
     // Boundary: h == send-count is a full ack, not a violation
     // (XEP-0198 §4 only forbids h GREATER than the sent count).
@@ -8440,7 +8560,7 @@ async fn sm_resume_settles_pending_ack_before_expired_completion_and_reconnect()
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let (sender, _receiver) = mpsc::channel(8);
     let owner = register_test_connection(state.as_ref(), &jid, sender).await;
-    conn.registry_owner = Some(owner.clone());
+    conn.registry_owner = Some(owner);
     let report =
         finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
     let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
@@ -8578,7 +8698,7 @@ async fn sm_resume_ack_survives_failed_completion_then_expiry_and_reconnect() {
     assert!(conn.pending_resume_claim.is_some());
     let (sender, _receiver) = mpsc::channel(8);
     let owner = register_test_connection(state.as_ref(), &jid, sender).await;
-    conn.registry_owner = Some(owner.clone());
+    conn.registry_owner = Some(owner);
     let report =
         finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
     let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
@@ -8737,6 +8857,20 @@ async fn sm_resume_restores_session_and_replays_unacked() {
     assert!(conn.phase.is_resumed());
     assert!(conn.carbons_enabled);
     assert_eq!(conn.occupancy_session, occupancy_session);
+    assert_eq!(
+        super::super::state::authenticated_client_room_origin(
+            &conn.phase,
+            conn.authenticated_session.as_ref(),
+            conn.occupancy_session,
+        ),
+        Some(
+            crate::server::routes::interpret::effects::ClientRoomOrigin {
+                full_jid: jid.clone(),
+                occupancy_session,
+            }
+        ),
+        "the resumed binding retains the detached client room origin"
+    );
     assert!(matches!(
         &conn.phase,
         ConnectionPhase::Ready {
@@ -9956,13 +10090,30 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
-    let _ = handle_xmpp_frame(
+    let (bob_tx, _bob_rx) = mpsc::channel(8);
+    let bob_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob_jid.clone(), bob_tx);
+    bob.registry_owner = Some(bob_owner);
+    let roster_reply = handle_xmpp_frame(
             r#"<iq xmlns="jabber:client" type="get" id="bob-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
             "example.com",
             state.as_ref(),
             &mut bob,
         )
         .await;
+    assert!(roster_reply
+        .iter()
+        .any(|frame| frame.contains("type='result'")));
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister_if_owner(&bob_jid, &bob_owner)
+        .is_some());
+    bob.registry_owner = None;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -10189,6 +10340,12 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
+    assert_eq!(conn.resume_binding_attempts.len(), 1);
+    assert_eq!(
+        conn.resume_binding_attempts[0].connection_ref(),
+        &conn.connection_ref
+    );
+    assert!(conn.binding_ref.is_none());
     // Write-gated accounting: the failure is staged for the main loop to
     // record once the batch carrying the <failed/> frame is written; frame
     // handling alone must not have counted it.
@@ -12470,9 +12627,10 @@ mod terminal_ordering_release_tests {
             session: &waddle_xmpp::pending_delivery::SmSessionId,
             from_exclusive: u32,
             to_inclusive: u32,
+            authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
         ) -> Result<u64, PendingStorageError> {
             self.inner()
-                .delete_acked_in_window(session, from_exclusive, to_inclusive)
+                .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
                 .await
         }
         async fn list_orphaned_claims(
@@ -12864,7 +13022,12 @@ mod terminal_ordering_release_tests {
         }
         assert_eq!(
             storage
-                .delete_acked_in_window(&phone_stream, 0, 1)
+                .delete_acked_in_window(
+                    &phone_stream,
+                    0,
+                    1,
+                    waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+                )
                 .await
                 .expect("phone ACK"),
             1
@@ -12976,7 +13139,6 @@ mod terminal_ordering_release_tests {
             let state = state.clone();
             let resource = resource.clone();
             let session = session.clone();
-            let owner = owner.clone();
             tokio::spawn(async move {
                 let resolver = crate::pending_delivery::MamArchiveResolver {
                     mam_storage: state.deps.protocol.mam_storage.clone(),
@@ -13023,7 +13185,12 @@ mod terminal_ordering_release_tests {
         );
         assert_eq!(
             storage
-                .delete_acked_in_window(&phone, 0, 1)
+                .delete_acked_in_window(
+                    &phone,
+                    0,
+                    1,
+                    waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+                )
                 .await
                 .expect("predecessor ACK"),
             1
@@ -13385,7 +13552,12 @@ mod terminal_ordering_release_tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(
             storage
-                .delete_acked_in_window(&phone, 0, 1)
+                .delete_acked_in_window(
+                    &phone,
+                    0,
+                    1,
+                    waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+                )
                 .await
                 .expect("A acknowledged"),
             1
@@ -13487,7 +13659,7 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
             .await
             .expect("enabled stream claim"),
     );
-    let old_owner = old.registry_owner.clone().expect("old owner");
+    let old_owner = old.registry_owner.expect("old owner");
     let lifecycle = old.socket_lifecycle.clone().expect("old socket lifecycle");
     let generation = old.occupancy_session;
     let mut detach_requests = lifecycle

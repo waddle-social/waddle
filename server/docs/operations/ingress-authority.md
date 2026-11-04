@@ -355,16 +355,31 @@ Repair-path and stream-retirement attributions are separated by `phase` and excl
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
-The collector and CNPG backlog/oldest-age queries share this candidate
-predicate: `terminal_at IS NOT NULL AND (retention_eligible_at IS NULL OR retention_eligible_at <= now() - interval '8 days')
-AND receipts_complete AND NOT has_ref AND NOT has_pending_descendant`, where
-`has_ref` includes SM custody and pending archive-dispatch references, and
-`has_pending_descendant` means an unsettled Foundation scheduling reference.
-`receipts_complete` means every recorded
-intent has a receipt with the same message key, kind, and semantic identity
-hash. Expired delivery markers are GC work only when receipts are complete,
-including when no alias or stream reference remains. Stream references and
-pending descendants retain the aliases and delivery bindings too. Descendant
+The collector and CNPG backlog/oldest-age queries share the same candidate
+predicate. A terminal row is a candidate when its retention clock is unset or
+has passed the eight-day cutoff, every intent has its matching receipt, and it
+has no SM custody, pending archive delivery, unsettled descendant, or undecided
+bound remote-room owner result. A mapped rejection child is never a candidate
+on its own. Its source is a candidate only after the rejected decision is
+latched and the child also satisfies those conditions and its own retention
+clock. A ready pair occupies one candidate slot and contributes two messages to
+the committed deletion count. Blocked pairs are excluded before the scan
+limit, so they cannot starve later candidates. The CNPG eligible gauge counts
+candidate slots, including one per ready pair.
+
+An owner rejection starts a fresh full source tail once the source's own
+obligations are settled; the child starts its own tail when its obligations
+settle. The mapping and both messages remain available for source replay until
+both tails have elapsed. GC holds the epoch proof, locks source then child,
+rechecks both rows, and deletes child then source in one transaction. A failed
+or timed-out commit does not increment the reported committed deletion count.
+Its actual outcome stays unknown until the original backend is fenced or an
+equivalent transaction barrier has passed; only then can authoritative readback
+determine whether the pair remains. An immediate read seeing both rows is not
+rollback proof. A bound remote-room
+source with an undecided owner result remains retained even after its outbound
+dispatch receipt. Legacy rows without a source binding keep their earlier
+retention behavior. Descendant
 fanout/coalescing copies all canonical ancestry before settling the predecessor;
 a transport ACK alone cannot discharge it. A new pending reference clears the
 frontier under the canonical lock. The retained-reference gauge includes rows

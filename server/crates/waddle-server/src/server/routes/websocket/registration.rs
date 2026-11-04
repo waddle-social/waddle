@@ -4,7 +4,7 @@ use super::stream_management::{
     finalize_sm_after_registry_registration, reject_unregistered_resume, sm_show_name,
     SmRegistrationFinalization,
 };
-use super::{error, info, mpsc, Blocklist, FullJid, OutboundStanza, WebSocketState};
+use super::{error, info, Blocklist, FullJid, WebSocketState};
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceRegisterOutcome;
 use crate::clustering::NodeAdmissionPermit;
@@ -13,6 +13,7 @@ use crate::server::dual_registration::MirrorRegisterOutcome;
 use crate::sm_promotion::DisplacedPromotionDeps;
 #[cfg(test)]
 use std::sync::Arc;
+use waddle_xmpp::registry::SocketOutboundEndpoint;
 
 /// A resume can briefly observe the previous node's `UserActor` while its
 /// force-detach cleanup drains.  Bound retries keep that handoff from turning
@@ -86,13 +87,21 @@ async fn prepare_socket_bind(
                 } else {
                     ForceDetachOrigin::FreshBindReplacement
                 },
+                target_binding: incumbent.entry.binding_ref().cloned(),
                 requester_bare_jid: jid.to_bare(),
                 ack,
             };
             let _ = if resumed {
-                incumbent.entry.force_detach_sender().try_send(request)
+                incumbent
+                    .entry
+                    .force_detach_sender()
+                    .try_send(request)
+                    .is_ok()
             } else {
-                incumbent.entry.try_force_detach_and_interrupt(request)
+                incumbent
+                    .entry
+                    .try_force_detach_and_interrupt(request)
+                    .is_ok()
             };
             // Neither a closed channel nor a missing route proves cleanup.
             incumbent.wait_stopped().await;
@@ -233,9 +242,10 @@ fn registration_authoritative(
 async fn rollback_registered_connection(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     conn: &mut WsConnState,
 ) {
+    conn.retire_binding_ref();
     state
         .deps
         .protocol
@@ -244,7 +254,7 @@ async fn rollback_registered_connection(
     crate::server::dual_registration::mirror_unregister(
         &state.deps.protocol.user_registry,
         jid,
-        Some(owner.clone()),
+        Some(*owner),
     )
     .await;
     unregister_remote_clustered_resource_if_owner(state, jid, owner).await;
@@ -255,7 +265,7 @@ async fn rollback_registered_connection(
 async fn unregister_remote_clustered_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -274,7 +284,7 @@ async fn unregister_remote_clustered_resource_if_owner(
 async fn unregister_remote_clustered_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 
@@ -350,7 +360,7 @@ pub(super) fn record_session_init_failure(
 pub(super) fn publish_stream_id_and_presence(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     conn: &WsConnState,
 ) {
     // Owner-gated: a racing same-JID replacement can take the slot between
@@ -419,12 +429,15 @@ pub(super) fn publish_stream_id_and_presence(
 }
 
 #[cfg(test)]
-pub(super) async fn register_bound_connection_after_frame(
+pub(super) async fn register_bound_connection_after_frame<E>(
     state: &WebSocketState,
     domain: &str,
     conn: &mut WsConnState,
-    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
-) -> RegistrationAfterFrame {
+    pending_tx: &mut Option<E>,
+) -> RegistrationAfterFrame
+where
+    E: Into<SocketOutboundEndpoint>,
+{
     let lifecycle = crate::clustering::NodeLifecycle::new();
     let permit = lifecycle.admit().expect("fresh serving lifecycle");
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -434,21 +447,49 @@ pub(super) async fn register_bound_connection_after_frame(
     .await
 }
 
-pub(super) async fn register_bound_connection_after_frame_with_admission(
+pub(super) async fn register_bound_connection_after_frame_with_admission<E>(
     state: &WebSocketState,
     domain: &str,
     conn: &mut WsConnState,
-    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
+    pending_tx: &mut Option<E>,
     permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
-) -> RegistrationAfterFrame {
+) -> RegistrationAfterFrame
+where
+    E: Into<SocketOutboundEndpoint>,
+{
+    // Take the provisional resume identity before any early return or await.
+    // It is reinstalled only if this registration reaches local publication.
+    let pending_resume_binding = if conn.pending_resume_stream_id.is_some() {
+        conn.binding_ref.take()
+    } else {
+        None
+    };
     if !registration_authoritative(permit, shutdown) {
         return RegistrationAfterFrame::AuthorityRevoked;
     }
     let Some(jid) = conn.phase.bound_jid().cloned() else {
         return RegistrationAfterFrame::Unchanged;
     };
-    if pending_tx.is_none() {
+    if conn.resume_endpoint_handoff_blocked {
+        error!(
+            jid = %jid,
+            "same-socket bind refused because failed-resume endpoint custody is unresolved"
+        );
+        // Match the pre-existing no-endpoint path and leave the connection
+        // loop's receiver attached to the old queue. Its nonempty disposition
+        // remains unresolved; converting this refusal into a session-init
+        // failure would close the socket and drop that receiver immediately.
+        return RegistrationAfterFrame::Unchanged;
+    }
+    if pending_tx.is_some() && conn.recovered_pending_endpoint.is_some() {
+        error!(
+            jid = %jid,
+            "same-socket bind has two outbound endpoint custody sources"
+        );
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
+    if pending_tx.is_none() && conn.recovered_pending_endpoint.is_none() {
         return RegistrationAfterFrame::Unchanged;
     }
 
@@ -457,6 +498,18 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
     // reach `on_peer_stanza`. We detect SM-resume vs fresh bind from whether
     // `pending_resume_stream_id` is waiting to be consumed below.
     let resumed = conn.pending_resume_stream_id.is_some();
+    let binding_ref = if resumed {
+        match pending_resume_binding {
+            Some(binding) if binding.connection_ref() == &conn.connection_ref => binding,
+            _ => {
+                error!("resume binding identity is missing or belongs to another socket");
+                return RegistrationAfterFrame::SessionInitializationFailed;
+            }
+        }
+    } else {
+        conn.retire_binding_ref();
+        waddle_xmpp::ownership::BindingRef::fresh(conn.connection_ref.clone())
+    };
 
     let blocklist = if resumed {
         // XEP-0198 resume: the previous session was detached/dropped, but we
@@ -579,11 +632,23 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         blocklist,
     );
 
-    let Some(tx) = pending_tx.take() else {
+    let tx: SocketOutboundEndpoint = if let Some(tx) = pending_tx.take() {
+        tx.into()
+    } else if let Some(endpoint) = conn.recovered_pending_endpoint.take() {
+        endpoint
+    } else {
         return RegistrationAfterFrame::Unchanged;
     };
 
-    let mut entry = waddle_xmpp::registry::ConnectionEntry::new(tx);
+    conn.binding_ref = Some(binding_ref.clone());
+    let mut entry = match &conn.local_io_relinquishment {
+        Some(witness) => waddle_xmpp::registry::ConnectionEntry::new_for_binding_with_local_io(
+            tx,
+            binding_ref,
+            witness.clone(),
+        ),
+        None => waddle_xmpp::registry::ConnectionEntry::new_for_binding(tx, binding_ref),
+    };
     entry.write_interruption = conn.write_interruption.clone();
     let wired = entry.wire_resume_control(jid.clone(), conn.live_resume_control.clone());
     debug_assert!(wired, "new connection resume control must be unbound");
@@ -597,12 +662,16 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         conn.blocklist_interested,
         std::sync::atomic::Ordering::Relaxed,
     );
-    let owner = state
+    let Some(owner) = state
         .deps
         .protocol
         .connection_registry
-        .register_entry(jid.clone(), entry);
-    conn.registry_owner = Some(owner.clone());
+        .register_socket_entry(jid.clone(), entry)
+    else {
+        conn.retire_binding_ref();
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    };
+    conn.registry_owner = Some(owner);
     if let Some(entry) = state
         .deps
         .protocol
@@ -713,7 +782,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
                     entered.notify_one();
                     release.notified().await;
                 }
-                register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
+                register_remote_clustered_resource(state, &jid, entry, owner).await
             }
             outcome => outcome,
         };
@@ -724,6 +793,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         if registration_outcome == MirrorRegisterOutcome::Registered {
             bind_guard.complete_actor_retirements_after_registration();
         } else {
+            conn.retire_binding_ref();
             // Rollback also clears the presence_states published above.
             state
                 .deps
@@ -739,7 +809,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 &jid,
-                Some(owner.clone()),
+                Some(owner),
             )
             .await;
             conn.registry_owner = None;
@@ -763,6 +833,9 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         }
     }
 
+    #[cfg(feature = "test-support")]
+    super::characterization_seams::pause_published_resume_finalization(state, conn, &jid, &owner)
+        .await;
     let sm_report = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     #[cfg(test)]
     if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {
@@ -810,7 +883,7 @@ async fn register_remote_clustered_resource(
     state: &WebSocketState,
     jid: &FullJid,
     entry: waddle_xmpp::registry::ConnectionEntry,
-    owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> MirrorRegisterOutcome {
     use crate::server::dual_registration::MirrorRegisterOutcome;
     let Some(bridge) = state
@@ -830,7 +903,7 @@ async fn register_remote_clustered_resource(
     // across an unstable claim or falling through to an unregistered socket.
     for attempt in 0..RESUME_REGISTRATION_BUSY_ATTEMPTS {
         match bridge
-            .try_register_remote_user_resource(jid, entry.clone(), owner.clone())
+            .try_register_remote_user_resource(jid, entry.clone(), owner)
             .await
         {
             RemoteResourceRegisterOutcome::Registered => {
@@ -868,7 +941,7 @@ async fn register_remote_clustered_resource(
     _state: &WebSocketState,
     _jid: &FullJid,
     _entry: waddle_xmpp::registry::ConnectionEntry,
-    _owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> MirrorRegisterOutcome {
     MirrorRegisterOutcome::Failed
 }

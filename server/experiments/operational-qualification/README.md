@@ -22,6 +22,10 @@ cargo run --offline --locked -- local-isolation < examples/local-isolation.json 
 cargo run --offline --locked -- local-isolation < examples/isolation-probe.json > /tmp/waddle-isolation-probe.json
 ```
 
+For a bounded fanout smoke profile and a template for recording a future local
+baseline, see [the baseline evidence template](BASELINE-EVIDENCE.md). Planning
+that profile is offline and does not start a workload or measure Waddle.
+
 The workload commands read bounded local JSON files; each input is limited to
 8 MiB. `local-isolation` reads at most 64 KiB from stdin and accepts no path
 operand. All commands emit JSON to stdout. Unknown fields, malformed JSON and

@@ -6930,6 +6930,13 @@ pub struct ListRoomsOwnedBy {
     pub owner: NodeIdentity,
 }
 
+/// Snapshot every exact room-claim fence represented by this registry for one
+/// owner. Unlike [`ListRoomsOwnedBy`], this retains the epoch required by a
+/// safe terminal release predicate.
+pub struct ListRoomClaimFencesOwnedBy {
+    pub owner: NodeIdentity,
+}
+
 /// Hard-kill and forget a room only while its live entry still belongs to
 /// `owner`. The comparison and mutation share the registry mailbox turn, so
 /// a fresh same-JID replacement cannot be demoted by a stale owner sweep.
@@ -7099,6 +7106,56 @@ impl kameo::message::Message<ListRoomsOwnedBy> for RoomRegistryActor {
         room_jids.sort();
         room_jids.dedup();
         Ok(room_jids)
+    }
+}
+
+impl kameo::message::Message<ListRoomClaimFencesOwnedBy> for RoomRegistryActor {
+    type Reply = Result<Vec<super::super::RoomClaimFenceContext>, RoomRegistryError>;
+
+    async fn handle(
+        &mut self,
+        msg: ListRoomClaimFencesOwnedBy,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut fences = HashSet::new();
+        fences.extend(
+            self.rooms
+                .values()
+                .map(|entry| &entry.claim_fence)
+                .filter(|fence| fence.owner == msg.owner)
+                .cloned(),
+        );
+        fences.extend(
+            self.pending_room_preparations
+                .values()
+                .map(|pending| &pending.claim_fence)
+                .filter(|fence| fence.owner == msg.owner)
+                .cloned(),
+        );
+        fences.extend(
+            self.pending_room_releases
+                .keys()
+                .map(|(_, fence)| fence)
+                .filter(|fence| fence.owner == msg.owner)
+                .cloned(),
+        );
+        fences.extend(
+            self.pending_reclaimed_rooms
+                .keys()
+                .map(|(_, fence)| fence)
+                .filter(|fence| fence.owner == msg.owner)
+                .cloned(),
+        );
+        let mut fences = fences.into_iter().collect::<Vec<_>>();
+        fences.sort_by(|left, right| {
+            left.entity
+                .entity_type
+                .as_db_str()
+                .cmp(right.entity.entity_type.as_db_str())
+                .then_with(|| left.entity.id.cmp(&right.entity.id))
+                .then_with(|| left.epoch.cmp(&right.epoch))
+        });
+        Ok(fences)
     }
 }
 

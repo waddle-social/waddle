@@ -1292,15 +1292,15 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
                     }
                 };
                 if attempts >= max_promotion_attempts_from_env() {
-                    waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
-                    error!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        attempts,
-                        "SM janitor: row reconciliation has repeatedly failed; \
-                         dead-lettering the durable row to break the retry loop"
-                    );
                     if confirm_expired_ingress_stream(state, &session).await {
+                        waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
+                        error!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            attempts,
+                            "SM janitor: row reconciliation has repeatedly failed; \
+                             dead-lettering the durable row to break the retry loop"
+                        );
                         promotion_guard.complete();
                         // Dead-lettering discards the replay queue, but the
                         // rows the dead stream still claims must go back to
@@ -1340,6 +1340,13 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
                         }
                     } else {
                         sweep_failed = true;
+                        warn!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            attempts,
+                            "SM janitor: terminal ACK settlement or source confirmation failed; \
+                             retaining the durable source for retry"
+                        );
                     }
                     continue;
                 }
@@ -1403,17 +1410,19 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
                         }
                     };
                     if attempts >= max_promotion_attempts_from_env() {
-                        waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
-                        error!(
-                            jid = %session.jid,
-                            stream_id = %session.stream_id,
-                            attempts,
-                            error = %error,
-                            "SM janitor: blocklist load has repeatedly failed; \
-                             dead-lettering the durable row to break the retry loop"
-                        );
                         if confirm_expired_ingress_stream(state, &session).await {
+                            waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
+                            error!(
+                                jid = %session.jid,
+                                stream_id = %session.stream_id,
+                                attempts,
+                                error = %error,
+                                "SM janitor: blocklist load has repeatedly failed; \
+                                 dead-lettering the durable row to break the retry loop"
+                            );
                             promotion_guard.complete();
+                        } else {
+                            sweep_failed = true;
                         }
                         continue;
                     }
@@ -1533,17 +1542,19 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
                     }
                 };
                 if attempts >= max_promotion_attempts_from_env() {
-                    waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
-                    error!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        attempts,
-                        storage_failed = summary.storage_failed,
-                        "SM janitor: Q6 promotion repeatedly failed; \
-                         dead-lettering the durable row to break the retry loop"
-                    );
                     if confirm_expired_ingress_stream(state, &session).await {
+                        waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
+                        error!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            attempts,
+                            storage_failed = summary.storage_failed,
+                            "SM janitor: Q6 promotion repeatedly failed; \
+                             dead-lettering the durable row to break the retry loop"
+                        );
                         promotion_guard.complete();
+                    } else {
+                        sweep_failed = true;
                     }
                     continue;
                 }
@@ -1594,7 +1605,7 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
             // `unregister`. A plain unregister removes whatever currently
             // holds the full JID — which is a live REPLACEMENT session S2 if
             // it rebound the same resource after this session (S1) detached.
-            // The removed entry's `carbons_enabled` would then be S2's token,
+            // The removed entry's binding ID would then be S2's token,
             // so the actor mirror below would evict S2's actor-tree entry
             // too — and under Slice 1 the actor tree is the bare-JID
             // selection source, so S2 would silently stop receiving
@@ -1621,7 +1632,7 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
                 if crate::server::dual_registration::mirror_unregister(
                     &state.deps.protocol.user_registry,
                     &session.jid,
-                    Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+                    Some(entry.binding_id()),
                 )
                 .await
                     == MirrorUnregisterOutcome::Failed
@@ -1850,6 +1861,20 @@ pub(in crate::server::session_janitors) async fn confirm_expired_ingress_stream(
     session: &waddle_xmpp::stream_management::DetachedSession,
 ) -> bool {
     let stream_id = &waddle_xmpp::pending_delivery::SmSessionId::new(&session.stream_id);
+    if let Err(error) = crate::sm_promotion::settle_terminal_ack_proofs(
+        &state.deps.protocol.sm_session_registry,
+        state.deps.protocol.pending_delivery_storage.as_ref(),
+        session,
+    )
+    .await
+    {
+        warn!(
+            %stream_id,
+            %error,
+            "SM janitor: terminal ACK proofs could not be settled; retaining source for retry"
+        );
+        return false;
+    }
     if !state
         .deps
         .protocol

@@ -9,6 +9,9 @@ use super::Path;
 use super::SpaceNode;
 use super::{info, instrument};
 use super::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
+use crate::spaces_metadata::runtime_attach::{
+    ColumnContract, ColumnKind, IndexContract, TableContract,
+};
 
 /// Typed payload for a row in `channel_space_links`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,38 @@ pub struct DatabaseChannelSpaceLinkStore {
     pub(in crate::channel_space_links) db: Database,
 }
 
+const CHANNEL_SPACE_LINK_COLUMNS: &[ColumnContract] = &[
+    ColumnContract::plain("channel_jid", ColumnKind::Text, true),
+    ColumnContract::plain("space_jid", ColumnKind::Text, true),
+    ColumnContract::optional_empty_text_default("space_node", ColumnKind::Text, true),
+    ColumnContract::plain("created_at", ColumnKind::Bigint, true),
+];
+
+const CHANNEL_SPACE_LINK_INDEXES: &[IndexContract] = &[
+    IndexContract {
+        name: "idx_channel_space_links_space",
+        unique: false,
+        columns: &["space_jid", "created_at", "channel_jid"],
+    },
+    IndexContract {
+        name: "idx_channel_space_links_space_node",
+        unique: false,
+        columns: &["space_node", "created_at", "channel_jid"],
+    },
+    IndexContract {
+        name: "idx_channel_space_links_created_at",
+        unique: false,
+        columns: &["created_at", "channel_jid"],
+    },
+];
+
+const CHANNEL_SPACE_LINK_CONTRACT: TableContract = TableContract {
+    name: "channel_space_links",
+    columns: CHANNEL_SPACE_LINK_COLUMNS,
+    primary_key: &["channel_jid"],
+    indexes: CHANNEL_SPACE_LINK_INDEXES,
+};
+
 impl DatabaseChannelSpaceLinkStore {
     pub fn database(&self) -> Database {
         self.db.clone()
@@ -96,10 +131,29 @@ impl DatabaseChannelSpaceLinkStore {
                 .await
                 .map_err(|error| ChannelSpaceLinkError::Storage(error.to_string()))?,
         };
+        Self::initialize_owner(db).await
+    }
+
+    /// Initialize the channel-space link schema using this exact owner
+    /// database handle. This avoids reopening a URL when owner-prepared
+    /// stores share one database.
+    pub async fn initialize_owner(db: Database) -> Result<Self, ChannelSpaceLinkError> {
         let store = Self { db };
         schema::initialize(&store).await?;
         info!(driver = ?store.db.driver(), "Channel-space link storage initialized");
         Ok(store)
+    }
+
+    /// Attach to an owner-prepared store through the exact physically
+    /// attested PostgreSQL main-pool handle. This path is read-only and never
+    /// opens a URL or applies schema DDL.
+    pub async fn attach_existing(db: Database) -> Result<Self, super::ChannelSpaceLinkAttachError> {
+        crate::spaces_metadata::runtime_attach::verify_attested_store(
+            &db,
+            &CHANNEL_SPACE_LINK_CONTRACT,
+        )
+        .await?;
+        Ok(Self { db })
     }
 
     pub(crate) async fn execute(

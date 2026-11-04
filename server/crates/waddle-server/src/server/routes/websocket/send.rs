@@ -1,17 +1,18 @@
 use super::{debug, error, Arc, Message, Sink, SinkExt};
 use crate::clustering::NodeAdmissionPermit;
 
-/// Interrupt only socket I/O when a verified resume targets this exact live
-/// connection. Protocol handlers finish their current durable work normally.
+/// Interrupt ordinary writes when a verified detach targets this physical
+/// connection. Protocol handlers finish their current durable work normally;
+/// bounded conflict/close writes may explicitly bypass this wrapper.
 pub(super) struct InterruptibleSink<S> {
     inner: S,
-    interrupt: tokio_util::sync::CancellationToken,
+    interrupt: waddle_xmpp::registry::SocketWriteInterruption,
     cancelled: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     resume_control: Option<Arc<waddle_xmpp::registry::LiveResumeControl>>,
 }
 
 impl<S> InterruptibleSink<S> {
-    pub(super) fn new(inner: S, interrupt: tokio_util::sync::CancellationToken) -> Self {
+    pub(super) fn new(inner: S, interrupt: waddle_xmpp::registry::SocketWriteInterruption) -> Self {
         let cancelled = Box::pin(interrupt.clone().cancelled_owned());
         Self {
             inner,
@@ -100,11 +101,9 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
         let this = self.get_mut();
-        if this.interrupt.is_cancelled() {
-            return Err(InterruptedWrite::Detached);
-        }
-        std::pin::Pin::new(&mut this.inner)
-            .start_send(item)
+        this.interrupt
+            .with_uninterrupted(|| std::pin::Pin::new(&mut this.inner).start_send(item))
+            .ok_or(InterruptedWrite::Detached)?
             .map_err(InterruptedWrite::Transport)
     }
 
@@ -255,9 +254,12 @@ where
 /// That is too coarse for a generation fence: a revocation can occur while
 /// `poll_ready` is parked, and a later poll of that future would otherwise run
 /// `start_send` before the caller can observe cancellation. Keep readiness
-/// cancellable, then revalidate immediately before the synchronous
-/// `start_send` commit. Once committed, finish flushing normally; the frame
-/// was already legitimately accepted by the transport.
+/// cancellable, then validate the bound source revision and generation under
+/// read guards held only for the synchronous `start_send`. In the `SplitSink` path this is a local
+/// enqueue: after it returns, a later flush may still reach the WebSocket
+/// after revocation as already-authorized in-flight work. The independent
+/// shutdown token check remains best effort and is not atomic with that
+/// enqueue.
 pub(super) async fn send_ws_message_with_authority<S, E>(
     sender: &mut S,
     message: Message,
@@ -309,16 +311,30 @@ where
         }
     }
     // `poll_ready` may have parked while the generation was revoked, then
-    // returned Ready in the same poll that wakes this task. This is the last
-    // point at which the pending frame can still be suppressed.
-    if !authoritative() {
-        return AuthoritySendOutcome::AuthorityRevoked;
-    }
-    if let Err(error) = std::pin::Pin::new(&mut *sender).start_send(message) {
-        log_write_failure(&error, failure_message);
-        return AuthoritySendOutcome::TransportClosed;
+    // returned Ready in the same poll that wakes this task. Check the
+    // independent shutdown token again, then hold the bound source and
+    // lifecycle guards only across synchronous `start_send` so neither can
+    // change between validation and local enqueue.
+    let start_send_result = match authority {
+        Some((permit, shutdown)) => {
+            if shutdown.is_cancelled() {
+                return AuthoritySendOutcome::AuthorityRevoked;
+            }
+            permit.start_send_if_current(|| std::pin::Pin::new(&mut *sender).start_send(message))
+        }
+        None => Ok(std::pin::Pin::new(&mut *sender).start_send(message)),
+    };
+    match start_send_result {
+        Err(_revoked) => return AuthoritySendOutcome::AuthorityRevoked,
+        Ok(Err(error)) => {
+            log_write_failure(&error, failure_message);
+            return AuthoritySendOutcome::TransportClosed;
+        }
+        Ok(Ok(())) => {}
     }
 
+    // The admission guard has been released. A revoke may now complete while
+    // this already-authorized local enqueue is being flushed.
     match tokio::time::timeout(SEND_STALL_TIMEOUT, sender.flush()).await {
         Ok(Ok(())) => AuthoritySendOutcome::Sent,
         Ok(Err(error)) => {

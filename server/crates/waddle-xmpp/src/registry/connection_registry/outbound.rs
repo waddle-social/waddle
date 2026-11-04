@@ -1,7 +1,10 @@
-use super::{mpsc, Arc, AtomicBool, Ordering, Stanza};
+use super::endpoint::{BindingOutboundEndpoint, SocketOutboundEndpoint};
+use super::{mpsc, Arc, Ordering, Stanza};
+use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
+use std::sync::atomic::AtomicBool;
 
 /// How the destination connection should handle an inbound
 /// [`OutboundStanza`].
@@ -64,8 +67,7 @@ impl OutboundWriteAcceptance {
         )
     }
 
-    /// This is deliberately idempotent because a registry send may retry a
-    /// replacement connection while holding a clone of the same acceptance.
+    /// Shared acceptance handles may acknowledge only once.
     pub fn acknowledge(&self) {
         if let Ok(mut sender) = self.0.lock() {
             if let Some(sender) = sender.take() {
@@ -223,17 +225,32 @@ pub struct ForceDetachRequest {
     /// identity-gated, including on the cross-node resume path that already
     /// checked the registry's reverse index before sending.
     pub requester_bare_jid: jid::BareJid,
-    /// Answered exactly once, after the connection either force-detaches
-    /// (identity matched) or declines (identity mismatch).
+    /// Exact local binding targeted by an interrupting request. A request
+    /// queued before rollback may reach the receiver after that binding has
+    /// retired; the connection owner must reject it before force cleanup.
+    pub target_binding: Option<BindingRef>,
+    /// Reply for this request. An unanswered or dropped sender is
+    /// inconclusive; only [`ForceDetachOutcome::Detached`] proves the
+    /// force-detach completion required by a resumer.
     pub ack: tokio::sync::oneshot::Sender<ForceDetachOutcome>,
+}
+
+impl ForceDetachRequest {
+    /// An unstamped request retains its legacy semantics. A stamped request
+    /// may act only on the exact binding captured when it was queued.
+    pub fn targets_binding(&self, current: Option<&BindingRef>) -> bool {
+        self.target_binding
+            .as_ref()
+            .is_none_or(|target| Some(target) == current)
+    }
 }
 
 /// Outcome of a [`ForceDetachRequest`], reported back to the asker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForceDetachOutcome {
-    /// Identity matched, the connection sent `<conflict/>` and closed, AND
-    /// its subsequent XEP-0198 detach-for-resume cleanup actually persisted
-    /// a resumable snapshot (council-adjudicated fix: this is the ONLY
+    /// Identity matched, the connection followed the force-detach path (with
+    /// a bounded conflict-close attempt where possible), and XEP-0198 cleanup
+    /// persisted a resumable snapshot (council-adjudicated fix: this is the ONLY
     /// variant that authorizes the asker to proceed with
     /// `steal_for_resume` — see [`Self::NotPersisted`] for every other
     /// outcome of that same cleanup pass).
@@ -241,18 +258,41 @@ pub enum ForceDetachOutcome {
     /// The requester's bare JID did not match this connection's own bound
     /// JID — the destructive close was refused.
     IdentityMismatch,
-    /// Identity matched and the connection closed, but its detach-for
-    /// -resume cleanup did NOT end in a persisted, resumable snapshot
-    /// (council-adjudicated fix — a storage-write failure that fell back to
-    /// full cleanup, an ownership race that promoted the queue instead of
-    /// storing it, no registry ownership at all, or any other early-return
-    /// path in `cleanup_connection_shutdown`). Distinct from
-    /// [`Self::Detached`] so the asker never proceeds with
-    /// `steal_for_resume` against a snapshot that was never actually
-    /// written — the caller maps this the same as
-    /// `LocalForcedDetachOutcome::NotLiveLocally` (re-check persistence and
-    /// retry).
+    /// This request did not obtain proof of a completed force-detach and a
+    /// persisted resumable snapshot. Cleanup may have failed, or an ordinary
+    /// shutdown may have already selected its own cleanup before this request
+    /// was observed. This outcome does not prove that no snapshot exists:
+    /// callers must re-check persistence and retry rather than treating it as
+    /// [`Self::Detached`].
     NotPersisted,
+}
+
+/// Whether an accepted interrupting control request also stopped this socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceDetachInterruption {
+    Stopped,
+    /// The binding retired after enqueue. The request remains accepted and
+    /// its acknowledgement is the only possible evidence of cleanup.
+    QueuedAfterRetirement,
+}
+
+/// A control request was not enqueued, retaining the original request.
+#[derive(Debug)]
+pub enum ForceDetachOfferError {
+    NoLocalBinding(Box<ForceDetachRequest>),
+    Full(Box<ForceDetachRequest>),
+    Closed(Box<ForceDetachRequest>),
+}
+
+/// Node-local identity of one published resource binding. This value is
+/// equality evidence, not a node lease or durable endpoint authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalConnectionBindingId(uuid::Uuid);
+
+impl LocalConnectionBindingId {
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
 }
 
 /// Connection state stored in the registry.
@@ -261,14 +301,22 @@ pub enum ForceDetachOutcome {
 /// by the registry (like carbons_enabled status for XEP-0280).
 #[derive(Debug, Clone)]
 pub struct ConnectionEntry {
+    binding_id: LocalConnectionBindingId,
+    connection_ref: ConnectionRef,
+    // The current v4 remote registration carries only the physical source.
+    // A mirror must not fabricate a source binding attempt from its own ID.
+    binding_ref: Option<BindingRef>,
+    // Present only when supplied by this node's physical transport owner.
+    local_io_relinquishment: Option<super::LocalIoRelinquishment>,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
     resume_control: Arc<std::sync::OnceLock<Arc<super::LiveResumeControl>>>,
     /// Bounds terminal ordering retry tasks to one per connection generation.
     terminal_ordering_retry: Arc<AtomicBool>,
-    /// Channel to send stanzas to this connection
-    pub sender: mpsc::Sender<OutboundStanza>,
+    /// Opaque per-socket sink shared by every registry and UserActor clone.
+    /// The raw Tokio sender is created and retained inside this endpoint.
+    pub(super) endpoint: BindingOutboundEndpoint,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
     pub carbons_enabled: Arc<AtomicBool>,
     /// Whether this resource is currently available (presence type != unavailable)
@@ -343,7 +391,7 @@ pub struct ConnectionEntry {
     /// Per-generation socket I/O interruption, shared only with its owning
     /// transport. Cancel after successfully queueing an identity-verified
     /// force detach so blocked writes yield to connection-owned cleanup.
-    pub write_interruption: tokio_util::sync::CancellationToken,
+    pub write_interruption: super::SocketWriteInterruption,
 }
 
 /// See [`ConnectionEntry::force_detach_tx`]'s doc comment for why this is
@@ -352,14 +400,91 @@ const FORCE_DETACH_CHANNEL_CAPACITY: usize = 8;
 
 impl ConnectionEntry {
     /// Create a new connection entry with carbons disabled by default.
-    pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+    pub fn new(endpoint: impl Into<SocketOutboundEndpoint>) -> Self {
+        Self::new_for_connection(
+            endpoint,
+            ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        )
+    }
+
+    /// Create a new local registry entry for an already-identified physical
+    /// connection. Each call still mints a new JID-binding token.
+    pub fn new_for_connection(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        connection_ref: ConnectionRef,
+    ) -> Self {
+        Self::new_for_binding(endpoint, BindingRef::fresh(connection_ref))
+    }
+
+    /// Create a local registry entry for the exact bind or resume attempt.
+    /// The independently minted local owner ID still fences this registry entry.
+    pub fn new_for_binding(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        binding_ref: BindingRef,
+    ) -> Self {
+        Self::new_entry(
+            endpoint.into(),
+            binding_ref.connection_ref().clone(),
+            Some(binding_ref),
+            super::BindingAdmissionState::Active,
+        )
+    }
+
+    /// Associate this local binding with its physical socket's observer. The
+    /// caller must supply the observer created with this binding's transport;
+    /// every later binding on that socket must retain the same observer.
+    pub fn new_for_binding_with_local_io(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        binding_ref: BindingRef,
+        witness: super::LocalIoRelinquishment,
+    ) -> Self {
+        let mut entry = Self::new_for_binding(endpoint, binding_ref);
+        entry.local_io_relinquishment = Some(witness);
+        entry
+    }
+
+    /// Create a non-admitting local binding candidate for the dark P3.1
+    /// admission transition. The returned type cannot be passed to registry
+    /// or UserActor publication APIs; exact activation converts it into a
+    /// [`ConnectionEntry`]. Production registration still uses
+    /// [`Self::new_for_binding`].
+    pub fn new_provisional_for_binding(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        binding_ref: BindingRef,
+    ) -> ProvisionalConnectionEntry {
+        ProvisionalConnectionEntry {
+            entry: Self::new_entry(
+                endpoint.into(),
+                binding_ref.connection_ref().clone(),
+                Some(binding_ref),
+                super::BindingAdmissionState::Provisional,
+            ),
+        }
+    }
+
+    fn new_entry(
+        endpoint: SocketOutboundEndpoint,
+        connection_ref: ConnectionRef,
+        binding_ref: Option<BindingRef>,
+        admission_state: super::BindingAdmissionState,
+    ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
+        let binding_id = LocalConnectionBindingId::fresh();
+        let endpoint = endpoint.bind(binding_id, binding_ref.clone(), admission_state);
+        let write_interruption = super::SocketWriteInterruption::new();
+        if let Some(binding) = &binding_ref {
+            let _ = write_interruption.publish_binding(binding, || ());
+        }
         Self {
+            binding_id,
+            connection_ref,
+            binding_ref,
+            local_io_relinquishment: None,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
             archive_dispatch: Arc::new(std::sync::Mutex::new(Default::default())),
-            sender,
+            endpoint,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
             presence_available: Arc::new(AtomicBool::new(false)),
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
@@ -371,7 +496,7 @@ impl ConnectionEntry {
             occupancy_session: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
-            write_interruption: tokio_util::sync::CancellationToken::new(),
+            write_interruption,
         }
     }
 
@@ -384,6 +509,7 @@ impl ConnectionEntry {
         if !control.bind(
             owner,
             Arc::clone(&self.sm_stream_id),
+            self.binding_ref.clone(),
             self.force_detach_tx.clone(),
         ) {
             return false;
@@ -395,10 +521,91 @@ impl ConnectionEntry {
         self.resume_control.get().cloned()
     }
 
-    pub fn remote_hosted(sender: mpsc::Sender<OutboundStanza>) -> Self {
-        let mut entry = Self::new(sender);
+    pub fn remote_hosted(endpoint: impl Into<SocketOutboundEndpoint>) -> Self {
+        Self::remote_hosted_for_connection(
+            endpoint,
+            ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        )
+    }
+
+    /// Create a remote-hosted account mirror which retains the originating
+    /// physical connection reference while minting a mirror-local binding.
+    pub fn remote_hosted_for_connection(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        connection_ref: ConnectionRef,
+    ) -> Self {
+        let mut entry = Self::new_entry(
+            endpoint.into(),
+            connection_ref,
+            None,
+            super::BindingAdmissionState::Active,
+        );
         entry.hosting = ConnectionHosting::Remote;
         entry
+    }
+
+    /// Atomically activate this exact local binding candidate. A sealed
+    /// binding cannot be reactivated. Only the provisional wrapper exposes
+    /// the resulting entry to publication APIs.
+    fn activate_binding(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
+        self.endpoint.activate(owner, binding_ref)
+    }
+
+    /// Atomically seal this exact local binding against future queue
+    /// acceptance. Enqueue and reserved-permit commits hold the same admission
+    /// lock, so a commit is ordered wholly before or after this transition.
+    /// Returns false for an owner or binding-attempt mismatch. This dark
+    /// primitive is not wired into registration or cleanup.
+    pub fn seal_binding(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
+        self.endpoint.seal(owner, binding_ref)
+    }
+
+    /// Recover this local socket's original outbound queue after its exact
+    /// binding has been sealed, but only when no accepted frames or reserved
+    /// permits remain. The returned endpoint shares the same queue and is
+    /// intended for a new binding attempt on the same physical socket.
+    pub fn into_socket_outbound_endpoint_if_empty(
+        self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> Option<SocketOutboundEndpoint> {
+        if self.binding_id != owner || self.binding_ref.as_ref() != Some(binding_ref) {
+            return None;
+        }
+        let Self { endpoint, .. } = self;
+        endpoint
+            .into_socket_endpoint_if_empty(owner, binding_ref)
+            .ok()
+    }
+
+    /// Immutable physical transport identity carried by this registry entry.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
+
+    /// This entry's source binding attempt when locally hosted. The current
+    /// remote registration protocol carries only the source transport, so a
+    /// remote-hosted mirror returns `None` instead of minting a false attempt.
+    pub fn binding_ref(&self) -> Option<&BindingRef> {
+        self.binding_ref.as_ref()
+    }
+
+    /// Local I/O evidence, when supplied by the actual socket owner. Remote
+    /// mirrors and entries constructed without that owner have no witness.
+    pub fn local_io_relinquishment(&self) -> Option<&super::LocalIoRelinquishment> {
+        self.local_io_relinquishment.as_ref()
+    }
+
+    /// Read-only observation for the WebSocket queue characterization seam.
+    #[cfg(feature = "test-utils")]
+    pub fn outbound_queue_is_empty_for_test(&self) -> bool {
+        self.endpoint.capacity() == self.endpoint.max_capacity()
+    }
+
+    /// Read-only observation for the WebSocket queue characterization seam.
+    #[cfg(feature = "test-utils")]
+    pub fn outbound_queue_is_closed_for_test(&self) -> bool {
+        self.endpoint.is_closed()
     }
 
     pub fn is_locally_hosted(&self) -> bool {
@@ -429,13 +636,51 @@ impl ConnectionEntry {
     /// applicable stream or occupancy generation. Cleanup and acknowledgement
     /// remain the owning task's responsibility. A failed enqueue leaves I/O
     /// uninterrupted; callers that must preserve I/O use the ordinary sender.
+    /// A successful offer remains accepted even if the binding retires before
+    /// the stop transition. In that case the request is stamped with the old
+    /// binding and must not interrupt or force cleanup of its successor.
     pub fn try_force_detach_and_interrupt(
         &self,
         request: ForceDetachRequest,
-    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
-        self.force_detach_tx.try_send(request)?;
-        self.write_interruption.cancel();
-        Ok(())
+    ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
+        self.try_force_detach_and_interrupt_after_offer(request, || {})
+    }
+
+    fn try_force_detach_and_interrupt_after_offer(
+        &self,
+        mut request: ForceDetachRequest,
+        after_offer: impl FnOnce(),
+    ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
+        let Some(binding) = self.binding_ref.as_ref() else {
+            return Err(ForceDetachOfferError::NoLocalBinding(Box::new(request)));
+        };
+        request.target_binding = Some(binding.clone());
+        self.force_detach_tx
+            .try_send(request)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(request) => {
+                    ForceDetachOfferError::Full(Box::new(request))
+                }
+                mpsc::error::TrySendError::Closed(request) => {
+                    ForceDetachOfferError::Closed(Box::new(request))
+                }
+            })?;
+        after_offer();
+        Ok(if self.write_interruption.cancel_if_binding(binding) {
+            ForceDetachInterruption::Stopped
+        } else {
+            ForceDetachInterruption::QueuedAfterRetirement
+        })
+    }
+
+    /// Pause the real interrupting path after its offer but before its stop.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn try_force_detach_and_interrupt_after_offer_for_test(
+        &self,
+        request: ForceDetachRequest,
+        after_offer: impl FnOnce(),
+    ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
+        self.try_force_detach_and_interrupt_after_offer(request, after_offer)
     }
 
     /// Take this connection's force-detach receiver, wiring it into the
@@ -449,12 +694,10 @@ impl ConnectionEntry {
         self.force_detach_rx.lock().ok().and_then(|mut g| g.take())
     }
 
-    /// Get the carbons_enabled handle for this connection.
-    ///
-    /// The returned Arc can be used by the WebSocket C2S adapter to update
-    /// the carbons status when enable/disable IQs are received.
-    pub fn carbons_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.carbons_enabled)
+    /// Return this entry's stable local binding identity. Re-publishing a
+    /// clone retains the identity; a new entry gets a new one.
+    pub fn binding_id(&self) -> LocalConnectionBindingId {
+        self.binding_id
     }
 
     /// Check if carbons is enabled for this connection.
@@ -534,6 +777,60 @@ impl ConnectionEntry {
     }
 }
 
+/// A local binding candidate that is not accepted by registry or actor
+/// publication APIs. It can become a [`ConnectionEntry`] only by activating
+/// the exact local owner and binding attempt that it carries.
+///
+/// ```compile_fail
+/// use jid::FullJid;
+/// use waddle_xmpp::registry::{ConnectionRegistry, ProvisionalConnectionEntry};
+///
+/// fn publish(
+///     registry: &ConnectionRegistry,
+///     jid: FullJid,
+///     candidate: ProvisionalConnectionEntry,
+/// ) {
+///     registry.register_entry(jid, candidate);
+/// }
+/// ```
+///
+/// UserActor publication also accepts only [`ConnectionEntry`]:
+///
+/// ```compile_fail
+/// use jid::FullJid;
+/// use waddle_xmpp::registry::{user_actor::RegisterConnection, ProvisionalConnectionEntry};
+///
+/// fn publish_to_actor(jid: FullJid, candidate: ProvisionalConnectionEntry) {
+///     let _ = RegisterConnection { jid, entry: candidate };
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ProvisionalConnectionEntry {
+    entry: ConnectionEntry,
+}
+
+impl ProvisionalConnectionEntry {
+    /// Return this candidate's stable local owner identity.
+    pub fn binding_id(&self) -> LocalConnectionBindingId {
+        self.entry.binding_id()
+    }
+
+    /// Activate the exact local owner and binding attempt, yielding the
+    /// registerable entry only on success. A mismatch or sealed candidate is
+    /// discarded and cannot be retried through this API.
+    pub fn activate_binding(
+        self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> Option<ConnectionEntry> {
+        if self.entry.activate_binding(owner, binding_ref) {
+            Some(self.entry)
+        } else {
+            None
+        }
+    }
+}
+
 /// Exclusive ownership of a connection's terminal ordering retry task slot.
 #[derive(Debug)]
 #[must_use = "hold the lease for the lifetime of the terminal ordering retry task"]
@@ -597,5 +894,108 @@ impl BroadcastOutcome {
     /// True iff the stanza was enqueued for delivery.
     pub fn is_delivered(self) -> bool {
         matches!(self, BroadcastOutcome::Delivered)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::endpoint::{EndpointEnqueueOutcome, EndpointEnqueueRejection};
+    use super::{ConnectionEntry, OutboundStanza, SocketOutboundEndpoint};
+    use crate::ingress::{IngressEffectKind, MessageKey};
+    use crate::mam::ArchiveOrdinal;
+    use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+    use crate::stream_management::{
+        ArchiveDispatchPosition, SmIngressAppendKey, SmIngressReceiptKind,
+        SmRelayedAppendObligation,
+    };
+    use crate::Stanza;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn sealed_candidate_cannot_activate_or_enqueue() {
+        let (endpoint, mut receiver) = SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let candidate = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+        let owner = candidate.binding_id();
+
+        assert!(candidate.entry.seal_binding(owner, &binding_ref));
+        assert!(matches!(
+            candidate
+                .entry
+                .endpoint
+                .try_send(OutboundStanza::new(Stanza::Message(
+                    xmpp_parsers::message::Message::new(None),
+                ))),
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::Sealed,
+                ..
+            }
+        ));
+        assert!(candidate.activate_binding(owner, &binding_ref).is_none());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn carbon_opt_out_requires_the_exact_binding_to_be_active() {
+        let resource: jid::FullJid = "bob@example.test/phone".parse().expect("resource");
+        for kind in [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons] {
+            for archived in [false, true] {
+                let (endpoint, mut receiver) = SocketOutboundEndpoint::channel(1);
+                let binding_ref =
+                    BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+                let candidate =
+                    ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+                let owner = candidate.binding_id();
+                let outbound = OutboundStanza::new(Stanza::Message(
+                    xmpp_parsers::message::Message::new(Some(resource.clone().into())),
+                ))
+                .with_ingress_append(SmRelayedAppendObligation {
+                    key: SmIngressAppendKey {
+                        message_key: MessageKey::new(),
+                        kind: SmIngressReceiptKind::from_storage(kind.storage_tag()),
+                        semantic_identity_hash: [1; 32],
+                        resource: resource.clone(),
+                    },
+                    sender_bare: "alice@example.test".parse().expect("sender"),
+                    received_at: None,
+                    archive_positions: if archived {
+                        vec![ArchiveDispatchPosition {
+                            archive: resource.to_bare(),
+                            ordinal: ArchiveOrdinal::from_storage(1).expect("ordinal"),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    dispatch_stream: None,
+                });
+
+                assert_eq!(
+                    candidate.entry.try_send_archive_ordered(outbound.clone()),
+                    Err(EndpointEnqueueRejection::Provisional)
+                );
+                assert!(receiver.try_recv().is_err());
+
+                let entry = candidate
+                    .activate_binding(owner, &binding_ref)
+                    .expect("activate exact binding");
+                assert_eq!(entry.try_send_archive_ordered(outbound.clone()), Ok(()));
+                assert!(receiver.try_recv().is_err(), "active opt-out suppresses");
+
+                entry.carbons_enabled.store(true, Ordering::Relaxed);
+                assert_eq!(entry.try_send_archive_ordered(outbound.clone()), Ok(()));
+                receiver
+                    .try_recv()
+                    .expect("opt-in enqueues the same obligation");
+
+                entry.carbons_enabled.store(false, Ordering::Relaxed);
+                assert!(entry.seal_binding(owner, &binding_ref));
+                assert_eq!(
+                    entry.try_send_archive_ordered(outbound),
+                    Err(EndpointEnqueueRejection::Sealed)
+                );
+                assert!(receiver.try_recv().is_err());
+            }
+        }
     }
 }

@@ -841,8 +841,8 @@ async fn ingress_post_registration_resume_settles_replayed_receipt() {
             Ok::<_, std::io::Error>(captured)
         },
     ));
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let mut pending_tx = Some(tx);
+    let (endpoint, _rx) = waddle_xmpp::registry::SocketOutboundEndpoint::channel(8);
+    let mut pending_tx = Some(endpoint);
     let mut force_detach_rx = None;
     assert!(
         handle_inbound_text(

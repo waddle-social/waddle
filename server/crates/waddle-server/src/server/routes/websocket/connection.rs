@@ -29,21 +29,17 @@ use super::{
     Message, OutboundStanza, Response, Router, Sink, Stanza, State, StreamExt, WebSocket,
     WebSocketState, WebSocketUpgrade,
 };
-use crate::clustering::NodeAdmissionError;
 use crate::clustering::NodeAdmissionPermit;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
+use crate::websocket_transport::LegacySocketAdmission;
 use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
+use futures::stream::{SplitSink, SplitStream};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint};
 use waddle_xmpp::stream_management::SmRequest;
-
-#[derive(Debug, PartialEq, Eq)]
-enum WebSocketAdmissionRevocation {
-    Shutdown,
-    Lifecycle(NodeAdmissionError),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchCompletionOutcome {
@@ -52,39 +48,30 @@ enum BatchCompletionOutcome {
     RetryOnly,
 }
 
-/// Revalidate immediately before returning the upgrade response, and again
-/// inside the upgrade callback before any XMPP state is created. Axum/Hyper
-/// writes HTTP 101 after the handler returns, so a lifecycle transition in
-/// that final transport-only gap may still result in 101; the callback check
-/// guarantees that socket is then dropped without processing XMPP.
-fn revalidate_websocket_admission(
-    state: &WebSocketState,
-    permit: &NodeAdmissionPermit,
-) -> Result<(), WebSocketAdmissionRevocation> {
-    if state.deps.shutdown.stop_token().is_cancelled() {
-        return Err(WebSocketAdmissionRevocation::Shutdown);
-    }
-    permit
-        .revalidate()
-        .map_err(WebSocketAdmissionRevocation::Lifecycle)
-}
-
 async fn close_revoked_upgraded_socket<S, E>(socket: &mut S)
 where
     S: futures::Sink<Message, Error = E> + Unpin,
     E: super::send::WebSocketWriteError,
 {
-    let _ = send_ws_message(
-        socket,
-        Message::Close(None),
-        "Failed to send WebSocket close frame after admission revocation",
-    )
-    .await;
-    let _ = close_ws_connection(
-        socket,
-        "Failed to close WebSocket after admission revocation",
-    )
-    .await;
+    let close = async {
+        let _ = send_ws_message(
+            socket,
+            Message::Close(None),
+            "Failed to send WebSocket close frame after admission revocation",
+        )
+        .await;
+        let _ = close_ws_connection(
+            socket,
+            "Failed to close WebSocket after admission revocation",
+        )
+        .await;
+    };
+    if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close)
+        .await
+        .is_err()
+    {
+        warn!("Timed out closing WebSocket after admission revocation");
+    }
 }
 
 /// Create the WebSocket router
@@ -119,8 +106,8 @@ async fn xmpp_websocket_handler(
     // the RFC 7395 upgrade. A fenced, recovering, draining, or terminally
     // failed node must return plain HTTP 503 rather than open an XMPP stream
     // it cannot safely own.
-    let admission_permit = match state.deps.app_state.node_lifecycle.admit() {
-        Ok(permit) => permit,
+    let gate = match state.deps.app_state.websocket_admission_gate() {
+        Ok(gate) => gate,
         Err(error) => {
             info!(%error, "Rejecting XMPP WebSocket upgrade: node is not serving");
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -128,12 +115,39 @@ async fn xmpp_websocket_handler(
     };
     info!("XMPP WebSocket connection request");
 
+    #[cfg(feature = "test-support")]
+    if let Some(barrier) = &state
+        .deps
+        .app_state
+        .websocket_admission_test_barriers
+        .before_parse
+    {
+        barrier.arrive().await;
+    }
     let ws = match WebSocketUpgrade::from_request(request, &state).await {
         Ok(ws) => ws,
         Err(rejection) => return rejection.into_response(),
     };
 
-    if let Err(reason) = revalidate_websocket_admission(&state, &admission_permit) {
+    // Parsing must succeed before a bounded slot is held. The exact lifecycle,
+    // identity source and per-process inventory all come from this AppState.
+    let admission = match gate.reserve(state.deps.shutdown.stop_token()) {
+        Ok(admission) => admission,
+        Err(error) => {
+            info!(%error, "Rejecting XMPP WebSocket upgrade: admission failed");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    #[cfg(feature = "test-support")]
+    if let Some(barrier) = &state
+        .deps
+        .app_state
+        .websocket_admission_test_barriers
+        .before_response
+    {
+        barrier.arrive().await;
+    }
+    if let Err(reason) = admission.revalidate() {
         info!(
             ?reason,
             "Rejecting XMPP WebSocket upgrade: admission was revoked"
@@ -141,21 +155,15 @@ async fn xmpp_websocket_handler(
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
-    ws.protocols(["xmpp"])
-        .on_upgrade(move |mut socket| async move {
-            if let Err(reason) = revalidate_websocket_admission(&state, &admission_permit) {
-                info!(
-                    ?reason,
-                    "Closing upgraded WebSocket: admission was revoked before XMPP start"
-                );
-                // HTTP 101 is already on the wire. RFC 7395 therefore requires a
-                // WebSocket close handshake rather than silently dropping the
-                // upgraded TCP stream; no XMPP stream exists at this boundary.
-                close_revoked_upgraded_socket(&mut socket).await;
-                return;
-            }
-            handle_xmpp_websocket(socket, state, connection_guard, admission_permit).await;
-        })
+    ws.protocols(["xmpp"]).on_upgrade(move |socket| {
+        LiveWebSocketConnection {
+            phase: LiveSocketPhase::Upgraded(Box::new(socket)),
+            state,
+            admission,
+            _connection_guard: connection_guard,
+        }
+        .run()
+    })
 }
 
 /// Size of the outbound message channel buffer
@@ -210,7 +218,7 @@ const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
 /// `handle_inbound_text` stays under the clippy too-many-arguments
 /// threshold, mirroring `SmCtx`'s identical rationale one file over.
 pub(super) struct RegistrationChannels<'a> {
-    pub(super) pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
+    pub(super) pending_tx: &'a mut Option<SocketOutboundEndpoint>,
     pub(super) force_detach_rx:
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
 }
@@ -240,521 +248,640 @@ async fn recv_optional<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     }
 }
 
-/// Handle an XMPP WebSocket connection
-async fn handle_xmpp_websocket(
-    socket: WebSocket,
+/// Owns an upgraded socket and its connection lifecycle in one task.
+struct LiveWebSocketConnection {
+    // Drop the connection's live resources before releasing the drain guard.
+    phase: LiveSocketPhase,
     state: Arc<WebSocketState>,
+    // Keep capacity reserved through connection cleanup and release it before
+    // the drain guard, after the physical socket and connection state drop.
+    admission: LegacySocketAdmission,
     // Minted in the upgrade handler and held for the connection's whole
     // lifetime — including the detach/cleanup below — so the ecdysis
     // drain (issue #1091) only completes once every live session has
     // been closed AND its SM state handed to the session registry for
     // Q6 promotion.
     _connection_guard: waddle_ecdysis::ConnectionGuard,
-    admission_permit: NodeAdmissionPermit,
-) {
-    let domain = state.deps.auth_state.xmpp_domain.clone();
-    let shutdown_token = state.deps.shutdown.stop_token();
-    info!(domain = %domain, "XMPP WebSocket connection established");
+}
 
-    let (ws_sender, mut ws_receiver) = socket.split();
+enum LiveSocketPhase {
+    Upgraded(Box<WebSocket>),
+    Active(Box<LiveSocketState>),
+    // Used only while moving the upgraded socket into the active state. The
+    // transition does not await, so cancellation cannot interrupt it.
+    Transitioning,
+}
 
-    // Create outbound channel for receiving messages from other connections.
-    // After the session is registered, `pending_tx` is handed to the
-    // ConnectionRegistry and `None`'d out here — the registry becomes the sole
-    // holder of the sender. If another session arrives for the same FullJid,
-    // the registry replaces our entry, drops the sender, and our `recv()`
-    // returns `None` — that's how we detect replacement and exit cleanly.
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundStanza>(OUTBOUND_CHANNEL_SIZE);
-    let mut pending_tx: Option<mpsc::Sender<OutboundStanza>> = Some(outbound_tx);
+type LiveSocketIo =
+    LocalSocketIo<InterruptibleSink<SplitSink<WebSocket, Message>>, SplitStream<WebSocket>>;
 
-    // ADR-0017 Phase 3 Slice 6: the cross-node resume live-steal handshake's
-    // force-detach receiver. `None` until this connection registers — the
-    // registry mints a fresh channel pair per `ConnectionEntry`
-    // (`ConnectionEntry::new`), and `handle_inbound_text` takes the receiver
-    // half via `entry.take_force_detach_rx()` immediately after
-    // registration succeeds, mirroring `pending_tx`'s own hand-off pattern.
-    let mut force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>> =
-        None;
-    // Set when this connection is asked (identity-matched) to force-detach.
-    // The ack is deliberately sent only AFTER
-    // `cleanup_connection_shutdown` below has run this connection's normal
-    // XEP-0198 detach-for-resume persistence — the asking lifecycle must
-    // never proceed until the detach-flush this node performs has actually
-    // landed.
-    let mut pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest> = Vec::new();
+struct LiveSocketState {
+    // Keep the pre-extraction drop order on cancellation: channels and timers
+    // first, then both physical halves, then the resume owner and conn state.
+    superseded: bool,
+    timers: TransportTimers,
+    handoff_rx: mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
+    socket_io: Option<LiveSocketIo>,
+    _live_resume_owner_guard: LiveResumeOwnerGuard,
+    live_resume_control: Arc<waddle_xmpp::registry::LiveResumeControl>,
+    conn: WsConnState,
+    pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest>,
+    force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+    pending_tx: Option<SocketOutboundEndpoint>,
+    outbound_rx: mpsc::Receiver<OutboundStanza>,
+}
 
-    // Track connection state
-    let mut conn = WsConnState::new();
-    let live_resume_control = conn.live_resume_control.clone();
-    let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
-    let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
-        .with_resume_control(live_resume_control.clone());
-    let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<OrderedRelayHandoffCompletion>();
-    conn.ordered_relay_handoff_tx = Some(handoff_tx);
-    // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
-    // in the per-connection sans-io machine, so one must exist from
-    // the very first instant — a client that wedges before
-    // authenticating is reaped by the same clock. `TransportReady`
-    // arms the keepalive timer; the machine re-arms it on every tick.
-    conn.init_prebind_state_machine(
-        &domain,
-        &state.deps.protocol.dispatcher,
-        state.deps.ws_keepalive,
-    );
-    let mut timers = TransportTimers::new();
-    if let Some(sm) = conn.state_machine.as_mut() {
-        let events = sm.handle(InboundEvent::TransportReady);
-        let interpret_deps = build_interpret_deps(state.as_ref(), None);
-        let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
-        timers.apply(drive.timer_commands);
-    }
-    // Set when our own registry slot was replaced by a newer connection for
-    // the same FullJid (detected via outbound_rx closing). In that case the
-    // cleanup must preserve the newcomer's registry slot and sweep only the
-    // departing occupancy generation. Rooms the newcomer already rejoined
-    // reject that old-generation leave; rooms it never rejoined still depart.
-    let mut superseded = false;
-
-    'connection: loop {
-        // Loop-level XEP-0198 send-window gate (issue #1219). When the
-        // outstanding unacked count has latched the pause, stop draining the
-        // outbound mpsc (its `recv()` arm is guarded below): producers then
-        // backpressure on the 256-slot channel instead of piling more into
-        // the SM unacked queue, while `ws_receiver` keeps delivering the
-        // `<a/>` acks that shrink the window. On the rising edge send one
-        // forced `<r/>` (the wasm client acks only when asked) and arm a
-        // deadline; on recovery, disarm. No await lives inside a select arm
-        // for this — acks flow freely and the gate is deadlock-free by
-        // construction.
-        let send_window_paused = conn.sm_state.needs_send_pause();
-        if send_window_paused {
-            let rising_edge = conn.send_window_pause_deadline.is_none();
-            if rising_edge {
-                conn.send_window_pause_deadline =
-                    Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
-                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
-            }
-            // Prompt an ack on the rising edge, and AGAIN whenever the client
-            // has acked since our last prompt but not yet recovered the
-            // window. The wasm client acks only when asked, so without the
-            // re-request a partial ack (XEP-0198 §5 `h` = handled ≤ received)
-            // would strand the stream in the hysteresis band until the
-            // deadline (mirrors the batch writer's inline re-request). The
-            // deadline stays armed from the rising edge as the true dead-peer
-            // bound, so a genuinely stuck client is still detached in time.
-            if rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked {
-                conn.send_window_last_request_acked = conn.sm_state.last_acked;
-                if shutdown_token.is_cancelled() || admission_permit.revalidate().is_err() {
-                    close_live_session_for_node_unavailable(&mut ws_sender, &conn).await;
-                    break;
-                }
-                if !matches!(
-                    send_ws_message_with_authority(
-                        &mut ws_sender,
-                        Message::Text(SmRequest::to_xml().into()),
-                        "Failed to send SM <r/> at send-window loop pause",
-                        Some((&admission_permit, &shutdown_token)),
-                    )
-                    .await,
-                    AuthoritySendOutcome::Sent
-                ) {
-                    break;
-                }
-                conn.sm_state.note_ack_request_sent();
-            }
-        } else {
-            conn.send_window_pause_deadline = None;
+impl LiveWebSocketConnection {
+    /// Run the connection through its live I/O loop and shutdown settlement.
+    async fn run(mut self) {
+        #[cfg(feature = "test-support")]
+        if let Some(barrier) = &self
+            .state
+            .deps
+            .app_state
+            .websocket_admission_test_barriers
+            .in_callback
+        {
+            barrier.arrive().await;
         }
-        let send_window_pause_deadline = conn.send_window_pause_deadline;
+        if let Err(reason) = self.admission.revalidate() {
+            info!(
+                ?reason,
+                "Closing upgraded WebSocket: admission was revoked before XMPP start"
+            );
+            // HTTP 101 is already on the wire. RFC 7395 therefore requires a
+            // WebSocket close handshake rather than silently dropping the
+            // upgraded TCP stream; no XMPP stream exists at this boundary.
+            let LiveSocketPhase::Upgraded(socket) = &mut self.phase else {
+                unreachable!("run starts with the upgraded socket");
+            };
+            close_revoked_upgraded_socket(socket.as_mut()).await;
+            return;
+        }
+        let LiveSocketPhase::Upgraded(socket) =
+            std::mem::replace(&mut self.phase, LiveSocketPhase::Transitioning)
+        else {
+            unreachable!("run starts with the upgraded socket");
+        };
+        let state = &self.state;
+        let admission = &self.admission;
+        let admission_permit = admission.permit();
+        let domain = state.deps.auth_state.xmpp_domain.clone();
+        let shutdown_token = state.deps.shutdown.stop_token();
+        info!(domain = %domain, "XMPP WebSocket connection established");
 
-        // Frames the mid-batch ack drain (issue #1089) pulled off the
-        // socket ahead of the dispatcher must be processed in arrival
-        // order BEFORE the socket is polled again — so the socket arm
-        // below is gated on the queue being empty, and an
-        // always-ready arm processes a bounded ordered chunk per
-        // iteration. Deferred processing stays a select arm (not a
-        // pre-select loop), and yields between chunks, so a client
-        // streaming frames mid-flood cannot monopolize the executor.
-        let deferred_pending = !conn.deferred_inbound.is_empty();
-        tokio::select! {
-            biased;
+        let (ws_sender, ws_receiver) = (*socket).split();
 
-            // The exact serving generation that admitted this socket is its
-            // authority. Revoke it ahead of every queued frame, outbound item,
-            // and deferred stanza; recovery mints a new generation and can
-            // never resurrect this transport.
-            _ = admission_permit.revoked() => {
-                info!(
-                    jid = ?conn.phase.bound_jid(),
-                    "Node lifecycle changed: closing live session"
-                );
-                close_live_session_for_node_unavailable(&mut ws_sender, &conn).await;
-                break;
+        // Create outbound channel for receiving messages from other connections.
+        // After the session is registered, `pending_tx` is handed to the
+        // ConnectionRegistry and `None`'d out here — the registry becomes the sole
+        // holder of the opaque endpoint. If another session arrives for the same FullJid,
+        // the registry replaces its entry, and our `recv()`
+        // returns `None` — that's how we detect replacement and exit cleanly.
+        let (outbound_endpoint, outbound_rx) =
+            SocketOutboundEndpoint::channel(OUTBOUND_CHANNEL_SIZE);
+        let pending_tx: Option<SocketOutboundEndpoint> = Some(outbound_endpoint);
+
+        // ADR-0017 Phase 3 Slice 6: the cross-node resume live-steal handshake's
+        // force-detach receiver. `None` until this connection registers — the
+        // registry mints a fresh channel pair per `ConnectionEntry`
+        // (`ConnectionEntry::new`), and `handle_inbound_text` takes the receiver
+        // half via `entry.take_force_detach_rx()` immediately after
+        // registration succeeds, mirroring `pending_tx`'s own hand-off pattern.
+        let force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>> =
+            None;
+        // Set when this connection is asked (identity-matched) to force-detach.
+        // The ack is deliberately sent only AFTER
+        // `cleanup_connection_shutdown` below has run this connection's normal
+        // XEP-0198 detach-for-resume persistence — the asking lifecycle must
+        // never proceed until the detach-flush this node performs has actually
+        // landed.
+        let pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest> = Vec::new();
+
+        // Track connection state
+        let mut conn = WsConnState::new_for_connection_ref(admission.connection_ref().clone());
+        let live_resume_control = conn.live_resume_control.clone();
+        let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
+        let ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
+            .with_resume_control(live_resume_control.clone());
+        // This owner spans live I/O and shutdown settlement, including
+        // cancellation/unwind. It publishes only after both halves are dropped.
+        let (socket_io, witness) = LocalSocketIo::new(ws_sender, ws_receiver);
+        conn.local_io_relinquishment = Some(witness);
+        let (handoff_tx, handoff_rx) = mpsc::unbounded_channel::<OrderedRelayHandoffCompletion>();
+        conn.ordered_relay_handoff_tx = Some(handoff_tx);
+        // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
+        // in the per-connection sans-io machine, so one must exist from
+        // the very first instant — a client that wedges before
+        // authenticating is reaped by the same clock. `TransportReady`
+        // arms the keepalive timer; the machine re-arms it on every tick.
+        conn.init_prebind_state_machine(
+            &domain,
+            &state.deps.protocol.dispatcher,
+            state.deps.ws_keepalive,
+        );
+        // Set when our registry slot was replaced by a newer connection for
+        // the same FullJid. Cleanup then preserves the newcomer's route while
+        // sweeping only this connection's occupancy generation.
+        self.phase = LiveSocketPhase::Active(Box::new(LiveSocketState {
+            superseded: false,
+            timers: TransportTimers::new(),
+            handoff_rx,
+            socket_io: Some(socket_io),
+            _live_resume_owner_guard,
+            live_resume_control,
+            conn,
+            pending_force_detach,
+            force_detach_rx,
+            pending_tx,
+            outbound_rx,
+        }));
+        let LiveSocketPhase::Active(live) = &mut self.phase else {
+            unreachable!("the connection was just activated");
+        };
+        let LiveSocketState {
+            superseded,
+            timers,
+            handoff_rx,
+            socket_io,
+            live_resume_control,
+            conn,
+            pending_force_detach,
+            force_detach_rx,
+            pending_tx,
+            outbound_rx,
+            ..
+        } = live.as_mut();
+        let Some(socket_halves) = socket_io.as_mut() else {
+            unreachable!("the live connection owns its socket halves");
+        };
+        let (mut ws_sender, mut ws_receiver) = socket_halves.halves_mut();
+
+        if let Some(sm) = conn.state_machine.as_mut() {
+            let events = sm.handle(InboundEvent::TransportReady);
+            let interpret_deps = build_interpret_deps(state.as_ref(), None);
+            let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+            timers.apply(drive.timer_commands);
+        }
+        'connection: loop {
+            // Loop-level XEP-0198 send-window gate (issue #1219). When the
+            // outstanding unacked count has latched the pause, stop draining the
+            // outbound mpsc (its `recv()` arm is guarded below): producers then
+            // backpressure on the 256-slot channel instead of piling more into
+            // the SM unacked queue, while `ws_receiver` keeps delivering the
+            // `<a/>` acks that shrink the window. On the rising edge send one
+            // forced `<r/>` (the wasm client acks only when asked) and arm a
+            // deadline; on recovery, disarm. No await lives inside a select arm
+            // for this — acks flow freely and the gate is deadlock-free by
+            // construction.
+            let send_window_paused = conn.sm_state.needs_send_pause();
+            if send_window_paused {
+                let rising_edge = conn.send_window_pause_deadline.is_none();
+                if rising_edge {
+                    conn.send_window_pause_deadline =
+                        Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
+                    waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
+                }
+                // Prompt an ack on the rising edge, and AGAIN whenever the client
+                // has acked since our last prompt but not yet recovered the
+                // window. The wasm client acks only when asked, so without the
+                // re-request a partial ack (XEP-0198 §5 `h` = handled ≤ received)
+                // would strand the stream in the hysteresis band until the
+                // deadline (mirrors the batch writer's inline re-request). The
+                // deadline stays armed from the rising edge as the true dead-peer
+                // bound, so a genuinely stuck client is still detached in time.
+                if rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked {
+                    conn.send_window_last_request_acked = conn.sm_state.last_acked;
+                    if admission.revalidate().is_err() {
+                        close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                        break;
+                    }
+                    if !matches!(
+                        send_ws_message_with_authority(
+                            &mut ws_sender,
+                            Message::Text(SmRequest::to_xml().into()),
+                            "Failed to send SM <r/> at send-window loop pause",
+                            Some((admission_permit, &shutdown_token)),
+                        )
+                        .await,
+                        AuthoritySendOutcome::Sent
+                    ) {
+                        break;
+                    }
+                    conn.sm_state.note_ack_request_sent();
+                }
+            } else {
+                conn.send_window_pause_deadline = None;
             }
+            let send_window_pause_deadline = conn.send_window_pause_deadline;
 
-            // Process stop is the highest-priority event. If cancellation and
-            // a queued frame/work item are both ready, no further stanza work
-            // starts after the node has begun draining or failed critically.
-            _ = shutdown_token.cancelled() => {
-                info!(
-                    jid = ?conn.phase.bound_jid(),
-                    "Graceful shutdown: closing live session with system-shutdown stream error"
-                );
-                close_live_session_for_node_unavailable(&mut ws_sender, &conn).await;
-                break;
-            }
+            // Frames the mid-batch ack drain (issue #1089) pulled off the
+            // socket ahead of the dispatcher must be processed in arrival
+            // order BEFORE the socket is polled again — so the socket arm
+            // below is gated on the queue being empty, and an
+            // always-ready arm processes a bounded ordered chunk per
+            // iteration. Deferred processing stays a select arm (not a
+            // pre-select loop), and yields between chunks, so a client
+            // streaming frames mid-flood cannot monopolize the executor.
+            let deferred_pending = !conn.deferred_inbound.is_empty();
+            tokio::select! {
+                biased;
 
-            // A force-detach request for this connection's own stream —
-            // deliberately ahead of every inbound/deferred/outbound arm in
-            // this biased select: a continuously busy client must not starve
-            // its own termination signal (conflict kill, cross-node steal,
-            // or SM claim demotion, whose fence is already removed — every
-            // starved iteration would process stanzas fenceless). Frames the
-            // client already sent are replayed by it after resume (XEP-0198
-            // retransmission), so preempting them loses nothing durable. Cross-node
-            // XEP-0198 resume uses the live-steal handshake; stale UserActor
-            // retirement uses the same safe connection-owned close path.
-            // The identity check gates the destructive close itself (defense
-            // in depth against a wrong-identity `previd` forcing a disconnect
-            // before rejection) — a mismatch answers inline and this
-            // connection keeps serving normally; a match sends `<conflict/>`
-            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
-            // the SAME detach-for-resume cleanup a graceful/keepalive close
-            // uses (never transitions `phase` to `Closing`).
-            request = recv_optional(&mut force_detach_rx) => {
-                match request {
-                    Some(request) => {
-                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
-                        if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
-                            warn!("force-detach rejected: identity mismatch");
-                            let _ = request
-                                .ack
-                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
-                        } else if shutdown_token.is_cancelled()
-                            || admission_permit.revalidate().is_err()
-                        {
-                            // The old serving generation may no longer emit
-                            // the optional `<conflict/>`. Still acknowledge
-                            // only after normal detach persistence below.
-                            pending_force_detach.push(request);
-                            if let Some(bound_bare) = bound_bare.as_ref() {
-                                pending_force_detach.extend(drain_ready_force_detach_requests(
-                                    &mut force_detach_rx,
-                                    bound_bare,
-                                ));
+                // Observe source revision changes at select boundaries. The
+                // bound permit also fences each ordinary synchronous enqueue.
+                _ = admission.identity_revoked() => {
+                    info!(
+                        jid = ?conn.phase.bound_jid(),
+                        "Node identity changed: closing live session"
+                    );
+                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                    break;
+                }
+
+                // Lifecycle recovery mints a new generation and cannot
+                // resurrect the permit that admitted this connection.
+                _ = admission_permit.revoked() => {
+                    info!(
+                        jid = ?conn.phase.bound_jid(),
+                        "Node lifecycle changed: closing live session"
+                    );
+                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                    break;
+                }
+
+                // Process stop is the highest-priority event. If cancellation and
+                // a queued frame/work item are both ready, no further stanza work
+                // starts after the node has begun draining or failed critically.
+                _ = shutdown_token.cancelled() => {
+                    info!(
+                        jid = ?conn.phase.bound_jid(),
+                        "Graceful shutdown: closing live session with system-shutdown stream error"
+                    );
+                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                    break;
+                }
+
+                // A force-detach request for this connection's own stream —
+                // deliberately ahead of every inbound/deferred/outbound arm in
+                // this biased select: a continuously busy client must not starve
+                // its own termination signal (conflict kill, cross-node steal,
+                // or SM claim demotion, whose fence is already removed — every
+                // starved iteration would process stanzas fenceless). Frames the
+                // client already sent are replayed by it after resume (XEP-0198
+                // retransmission), so preempting them loses nothing durable. Cross-node
+                // XEP-0198 resume uses the live-steal handshake; stale UserActor
+                // retirement uses the same safe connection-owned close path.
+                // The identity check gates the destructive close itself (defense
+                // in depth against a wrong-identity `previd` forcing a disconnect
+                // before rejection) — a mismatch answers inline and this
+                // connection keeps serving normally; a match sends `<conflict/>`
+                // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
+                // the SAME detach-for-resume cleanup a graceful/keepalive close
+                // uses (never transitions `phase` to `Closing`).
+                request = recv_optional(&mut *force_detach_rx) => {
+                    match request {
+                        Some(request) => {
+                            let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
+                            if !request.targets_binding(conn.binding_ref.as_ref()) {
+                                // Closing the acknowledgement is an unknown outcome,
+                                // never proof that this socket completed cleanup.
+                                debug!("force-detach ignored: binding retired after enqueue");
+                            } else if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
+                                warn!("force-detach rejected: identity mismatch");
+                                let _ = request
+                                    .ack
+                                    .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+                            } else if shutdown_token.is_cancelled()
+                                || admission_permit.revalidate().is_err()
+                            {
+                                // The old serving generation may no longer emit
+                                // the optional `<conflict/>`. Still acknowledge
+                                // only after normal detach persistence below.
+                                pending_force_detach.push(request);
+                                if let Some(bound_bare) = bound_bare.as_ref() {
+                                    pending_force_detach.extend(drain_ready_force_detach_requests(
+                                        &mut *force_detach_rx,
+                                        bound_bare,
+                                        conn.binding_ref.as_ref(),
+                                    ));
+                                }
+                                break;
+                            } else {
+                                info!("force-detaching this session (<conflict/> close)");
+                                close_live_session_for_force_detach(
+                                    ws_sender.uninterrupted(),
+                                    &*conn,
+                                    admission_permit,
+                                    &shutdown_token,
+                                )
+                                .await;
+                                // Deferred: acked only after this connection's own
+                                // detach-for-resume cleanup below actually runs.
+                                pending_force_detach.push(request);
+                                if let Some(bound_bare) = bound_bare.as_ref() {
+                                    pending_force_detach.extend(drain_ready_force_detach_requests(
+                                        &mut *force_detach_rx,
+                                        bound_bare,
+                                        conn.binding_ref.as_ref(),
+                                    ));
+                                }
+                                break;
                             }
-                            break;
-                        } else {
-                            info!("force-detaching this session (<conflict/> close)");
-                            close_live_session_for_force_detach(
-                                ws_sender.uninterrupted(),
-                                &conn,
-                                &admission_permit,
-                                &shutdown_token,
-                            )
-                            .await;
-                            // Deferred: acked only after this connection's own
-                            // detach-for-resume cleanup below actually runs.
-                            pending_force_detach.push(request);
-                            if let Some(bound_bare) = bound_bare.as_ref() {
-                                pending_force_detach.extend(drain_ready_force_detach_requests(
-                                    &mut force_detach_rx,
-                                    bound_bare,
-                                ));
-                            }
-                            break;
+                        }
+                        None => {
+                            // The registry entry was removed (e.g. superseded)
+                            // without this channel ever being used — disable
+                            // this arm for the remainder of the loop.
+                            *force_detach_rx = None;
                         }
                     }
-                    None => {
-                        // The registry entry was removed (e.g. superseded)
-                        // without this channel ever being used — disable
-                        // this arm for the remainder of the loop.
-                        force_detach_rx = None;
-                    }
                 }
-            }
 
-            // Accepted detach requests stay ahead of new preflight work, so
-            // a stream of rejected attempts cannot starve its own retirement.
-            // Validation still precedes ordinary inbound/deferred work.
-            _ = std::future::poll_fn(|cx| live_resume_control.poll(cx)) => {}
+                // Accepted detach requests stay ahead of new preflight work, so
+                // a stream of rejected attempts cannot starve its own retirement.
+                // Validation still precedes ordinary inbound/deferred work.
+                _ = std::future::poll_fn(|cx| live_resume_control.poll(cx)) => {}
 
-            // Process a bounded drain-deferred inbound chunk.
-            _ = std::future::ready(()), if deferred_pending => {
-                for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
-                    let Some(text) = conn.deferred_inbound.pop_front() else {
-                        break;
-                    };
-                    if !handle_inbound_text(
-                        &text,
-                        &domain,
-                        &state,
-                        &mut conn,
-                        RegistrationChannels {
-                            pending_tx: &mut pending_tx,
-                            force_detach_rx: &mut force_detach_rx,
-                        },
-                        ConnectionIo {
-                            sender: &mut ws_sender,
-                            receiver: &mut ws_receiver,
-                        },
-                        FrameAuthority {
-                            permit: &admission_permit,
-                            shutdown: &shutdown_token,
-                        },
-                    )
-                    .await
-                    {
-                        break 'connection;
-                    }
-                }
-                tokio::task::yield_now().await;
-            }
-
-            // Handle inbound WebSocket messages from the client
-            msg = ws_receiver.next(), if !deferred_pending => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
+                // Process a bounded drain-deferred inbound chunk.
+                _ = std::future::ready(()), if deferred_pending => {
+                    for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
+                        let Some(text) = conn.deferred_inbound.pop_front() else {
+                            break;
+                        };
                         if !handle_inbound_text(
-                            text.as_str(),
+                            &text,
                             &domain,
-                            &state,
-                            &mut conn,
+                            state,
+                            &mut *conn,
                             RegistrationChannels {
-                                pending_tx: &mut pending_tx,
-                                force_detach_rx: &mut force_detach_rx,
+                                pending_tx: &mut *pending_tx,
+                                force_detach_rx: &mut *force_detach_rx,
                             },
                             ConnectionIo {
                                 sender: &mut ws_sender,
                                 receiver: &mut ws_receiver,
                             },
                             FrameAuthority {
-                                permit: &admission_permit,
+                                permit: admission_permit,
                                 shutdown: &shutdown_token,
                             },
                         )
                         .await
                         {
+                            break 'connection;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+
+                // Handle inbound WebSocket messages from the client
+                msg = ws_receiver.next(), if !deferred_pending => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if !handle_inbound_text(
+                                text.as_str(),
+                                &domain,
+                                state,
+                                &mut *conn,
+                                RegistrationChannels {
+                                    pending_tx: &mut *pending_tx,
+                                    force_detach_rx: &mut *force_detach_rx,
+                                },
+                                ConnectionIo {
+                                    sender: &mut ws_sender,
+                                    receiver: &mut ws_receiver,
+                                },
+                                FrameAuthority {
+                                    permit: admission_permit,
+                                    shutdown: &shutdown_token,
+                                },
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Binary(_))) => {
+                            conn.note_transport_activity();
+                            warn!("Received binary WebSocket message (not supported for XMPP)");
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            conn.note_transport_activity();
+                            if !matches!(
+                                send_ws_message_with_authority(
+                                    &mut ws_sender,
+                                    Message::Pong(data),
+                                    "Failed to send pong",
+                                    Some((admission_permit, &shutdown_token)),
+                                )
+                                .await,
+                                AuthoritySendOutcome::Sent
+                            ) {
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {
+                            // Liveness evidence for the keepalive policy —
+                            // any payload counts, no probe correlation
+                            // (issue #1090 "any inbound frame = alive").
+                            conn.note_transport_activity();
+                        }
+                        Some(Ok(Message::Close(_))) => {
+                            info!("WebSocket close requested");
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            error!(error = %e, "WebSocket error");
+                            break;
+                        }
+                        None => {
+                            // Stream ended
+                            debug!("WebSocket stream ended");
                             break;
                         }
                     }
-                    Some(Ok(Message::Binary(_))) => {
-                        conn.note_transport_activity();
-                        warn!("Received binary WebSocket message (not supported for XMPP)");
+                }
+
+                // Handle outbound messages routed from other connections.
+                // Gated by the send-window pause (issue #1219): while paused we
+                // do not pull new outbound work, so its producers backpressure on
+                // the mpsc rather than overflowing the SM unacked queue. The
+                // `ws_receiver` arm above stays active, so client acks keep
+                // arriving and releasing the pause.
+                outbound = outbound_rx.recv(), if !send_window_paused => {
+                    match outbound {
+                        Some(outbound_stanza) => {
+                            if !handle_outbound_stanza(
+                                &mut ws_sender,
+                                &mut ws_receiver,
+                                state,
+                                &mut *conn,
+                                &mut *timers,
+                                outbound_stanza,
+                                OutboundAuthority {
+                                    permit: admission_permit,
+                                    shutdown: &shutdown_token,
+                                },
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        None => {
+                            // Outbound channel closed. All clones of the sender (our
+                            // own outbound_tx + any copy held by the registry) have
+                            // been dropped. The only path to this state after
+                            // registration is a replacement register for the same
+                            // FullJid: the registry drops our entry (and with it
+                            // the sender) to install the new session's sender.
+                            // Superseded cleanup preserves the replacement's route
+                            // and does not detach this old stream. It still sweeps
+                            // this stream's occupancy generation in every room.
+                            info!("Outbound channel closed; session superseded by replacement");
+                            *superseded = true;
+                            break;
+                        }
                     }
-                    Some(Ok(Message::Ping(data))) => {
-                        conn.note_transport_activity();
+                }
+
+                handoff = handoff_rx.recv() => {
+                    match handoff {
+                        Some(handoff) => {
+                            if !handle_ordered_relay_handoff_completion(
+                                &mut ws_sender,
+                                &mut ws_receiver,
+                                state,
+                                &mut *conn,
+                                handoff,
+                                admission_permit,
+                                &shutdown_token,
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        None => {
+                            warn!("Ordered relay handoff completion channel closed");
+                            break;
+                        }
+                    }
+                }
+
+                // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
+                // when the state machine armed a timer; the tick is fed
+                // back into the machine, whose policy decides: quiet
+                // re-arm, probe + re-arm, or close a dead peer. A
+                // keepalive close breaks the loop with a graceful WS close
+                // handshake and rides the normal shutdown fork below — SM
+                // detach-for-resume when negotiated, full cleanup
+                // otherwise.
+                timer_id = timers.next_expired() => {
+                    let session = conn.authenticated_session.clone();
+                    let principal = session
+                        .as_ref()
+                        .map(super::ResolvedPrincipal::from_authenticated_session);
+                    let Some(sm) = conn.state_machine.as_mut() else {
+                        warn!(timer_id = timer_id.0, "Timer fired without a state machine; disarming");
+                        continue;
+                    };
+                    let events = sm.handle(InboundEvent::Tick(timer_id));
+                    let interpret_deps =
+                        build_interpret_deps(state.as_ref(), principal);
+                    let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+                    timers.apply(drive.timer_commands);
+                    if !drive.frames.is_empty() {
+                        // No tick pathway emits stanzas today; a frame here
+                        // means a new timer consumer forgot to extend this
+                        // arm with the SM-recording write contract.
+                        warn!(
+                            frames = drive.frames.len(),
+                            "Timer tick produced wire frames; dropping"
+                        );
+                    }
+                    let mut ping_send_failed = false;
+                    for _ in 0..drive.keepalive_probes {
                         if !matches!(
                             send_ws_message_with_authority(
                                 &mut ws_sender,
-                                Message::Pong(data),
-                                "Failed to send pong",
-                                Some((&admission_permit, &shutdown_token)),
+                                Message::Ping(axum::body::Bytes::new()),
+                                "Failed to send keepalive ping",
+                                Some((admission_permit, &shutdown_token)),
                             )
                             .await,
                             AuthoritySendOutcome::Sent
                         ) {
+                            ping_send_failed = true;
                             break;
                         }
                     }
-                    Some(Ok(Message::Pong(_))) => {
-                        // Liveness evidence for the keepalive policy —
-                        // any payload counts, no probe correlation
-                        // (issue #1090 "any inbound frame = alive").
-                        conn.note_transport_activity();
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        info!("WebSocket close requested");
+                    if ping_send_failed {
                         break;
                     }
-                    Some(Err(e)) => {
-                        error!(error = %e, "WebSocket error");
-                        break;
-                    }
-                    None => {
-                        // Stream ended
-                        debug!("WebSocket stream ended");
-                        break;
-                    }
-                }
-            }
-
-            // Handle outbound messages routed from other connections.
-            // Gated by the send-window pause (issue #1219): while paused we
-            // do not pull new outbound work, so its producers backpressure on
-            // the mpsc rather than overflowing the SM unacked queue. The
-            // `ws_receiver` arm above stays active, so client acks keep
-            // arriving and releasing the pause.
-            outbound = outbound_rx.recv(), if !send_window_paused => {
-                match outbound {
-                    Some(outbound_stanza) => {
-                        if !handle_outbound_stanza(
+                    if drive.close {
+                        // The policy's Log event (relayed above via interpret)
+                        // carries the reason (miss limit vs negotiation
+                        // deadline); this line adds the connection identity
+                        // for correlation with gateway/Loki reset queries.
+                        info!(
+                            jid = ?conn.phase.bound_jid(),
+                            "Keepalive policy closed the connection"
+                        );
+                        let _ = close_ws_connection(
                             &mut ws_sender,
-                            &mut ws_receiver,
-                            &state,
-                            &mut conn,
-                            &mut timers,
-                            outbound_stanza,
-                            OutboundAuthority {
-                                permit: &admission_permit,
-                                shutdown: &shutdown_token,
-                            },
+                            "Failed to send WebSocket close frame after keepalive close",
                         )
-                        .await
-                        {
-                            break;
-                        }
-                    }
-                    None => {
-                        // Outbound channel closed. All clones of the sender (our
-                        // own outbound_tx + any copy held by the registry) have
-                        // been dropped. The only path to this state after
-                        // registration is a replacement register for the same
-                        // FullJid: the registry drops our entry (and with it
-                        // the sender) to install the new session's sender.
-                        // Superseded cleanup preserves the replacement's route
-                        // and does not detach this old stream. It still sweeps
-                        // this stream's occupancy generation in every room.
-                        info!("Outbound channel closed; session superseded by replacement");
-                        superseded = true;
+                        .await;
                         break;
                     }
                 }
-            }
 
-            handoff = handoff_rx.recv() => {
-                match handoff {
-                    Some(handoff) => {
-                        if !handle_ordered_relay_handoff_completion(
-                            &mut ws_sender,
-                            &mut ws_receiver,
-                            &state,
-                            &mut conn,
-                            handoff,
-                            &admission_permit,
-                            &shutdown_token,
-                        )
-                        .await
-                        {
-                            break;
-                        }
+                // Loop-level send-window pause deadline (issue #1219). Fires
+                // only while paused; if the client never acks the window down in
+                // time it is dead, so break WITHOUT transitioning to Closing —
+                // the cleanup fork below detaches an SM session for resume, and
+                // the retained queue is bounded (pacing kept it ≤ cap) so that
+                // resume stays clean.
+                _ = async {
+                    match send_window_pause_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
                     }
-                    None => {
-                        warn!("Ordered relay handoff completion channel closed");
-                        break;
-                    }
-                }
-            }
-
-            // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
-            // when the state machine armed a timer; the tick is fed
-            // back into the machine, whose policy decides: quiet
-            // re-arm, probe + re-arm, or close a dead peer. A
-            // keepalive close breaks the loop with a graceful WS close
-            // handshake and rides the normal shutdown fork below — SM
-            // detach-for-resume when negotiated, full cleanup
-            // otherwise.
-            timer_id = timers.next_expired() => {
-                let session = conn.authenticated_session.clone();
-                let principal = session
-                    .as_ref()
-                    .map(super::ResolvedPrincipal::from_authenticated_session);
-                let Some(sm) = conn.state_machine.as_mut() else {
-                    warn!(timer_id = timer_id.0, "Timer fired without a state machine; disarming");
-                    continue;
-                };
-                let events = sm.handle(InboundEvent::Tick(timer_id));
-                let interpret_deps =
-                    build_interpret_deps(state.as_ref(), principal);
-                let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
-                timers.apply(drive.timer_commands);
-                if !drive.frames.is_empty() {
-                    // No tick pathway emits stanzas today; a frame here
-                    // means a new timer consumer forgot to extend this
-                    // arm with the SM-recording write contract.
+                }, if send_window_paused => {
+                    waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
                     warn!(
-                        frames = drive.frames.len(),
-                        "Timer tick produced wire frames; dropping"
-                    );
-                }
-                let mut ping_send_failed = false;
-                for _ in 0..drive.keepalive_probes {
-                    if !matches!(
-                        send_ws_message_with_authority(
-                            &mut ws_sender,
-                            Message::Ping(axum::body::Bytes::new()),
-                            "Failed to send keepalive ping",
-                            Some((&admission_permit, &shutdown_token)),
-                        )
-                        .await,
-                        AuthoritySendOutcome::Sent
-                    ) {
-                        ping_send_failed = true;
-                        break;
-                    }
-                }
-                if ping_send_failed {
-                    break;
-                }
-                if drive.close {
-                    // The policy's Log event (relayed above via interpret)
-                    // carries the reason (miss limit vs negotiation
-                    // deadline); this line adds the connection identity
-                    // for correlation with gateway/Loki reset queries.
-                    info!(
                         jid = ?conn.phase.bound_jid(),
-                        "Keepalive policy closed the connection"
+                        deadline_secs = SEND_WINDOW_LOOP_PAUSE_DEADLINE.as_secs(),
+                        "SM send-window loop pause timed out with no recovering ack; \
+                         closing into detach-for-resume"
                     );
-                    let _ = close_ws_connection(
-                        &mut ws_sender,
-                        "Failed to send WebSocket close frame after keepalive close",
-                    )
-                    .await;
                     break;
                 }
-            }
-
-            // Loop-level send-window pause deadline (issue #1219). Fires
-            // only while paused; if the client never acks the window down in
-            // time it is dead, so break WITHOUT transitioning to Closing —
-            // the cleanup fork below detaches an SM session for resume, and
-            // the retained queue is bounded (pacing kept it ≤ cap) so that
-            // resume stays clean.
-            _ = async {
-                match send_window_pause_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending().await,
-                }
-            }, if send_window_paused => {
-                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
-                warn!(
-                    jid = ?conn.phase.bound_jid(),
-                    deadline_secs = SEND_WINDOW_LOOP_PAUSE_DEADLINE.as_secs(),
-                    "SM send-window loop pause timed out with no recovering ack; \
-                     closing into detach-for-resume"
-                );
-                break;
             }
         }
-    }
 
-    finish_connection(
-        &state,
-        &mut conn,
-        ws_sender.uninterrupted(),
-        FrameAuthority {
-            permit: &admission_permit,
-            shutdown: &shutdown_token,
-        },
-        superseded,
-        ConnectionShutdownChannels {
-            outbound_rx: &mut outbound_rx,
-            handoff_rx: &mut handoff_rx,
-            force_detach_rx: &mut force_detach_rx,
-            pending_force_detach: &mut pending_force_detach,
-        },
-    )
-    .await;
+        let Some(socket_io) = socket_io.take() else {
+            unreachable!("the live connection owns its socket halves until settlement");
+        };
+        finish_connection(
+            state,
+            &mut *conn,
+            socket_io,
+            FrameAuthority {
+                permit: admission_permit,
+                shutdown: &shutdown_token,
+            },
+            *superseded,
+            ConnectionShutdownChannels {
+                outbound_rx: &mut *outbound_rx,
+                handoff_rx: &mut *handoff_rx,
+                force_detach_rx: &mut *force_detach_rx,
+                pending_force_detach: &mut *pending_force_detach,
+            },
+        )
+        .await;
+    }
 }
 
 /// Channel state carried from the live loop into its connection-owned shutdown.
@@ -767,12 +894,12 @@ pub(super) struct ConnectionShutdownChannels<'a> {
 }
 
 /// Complete the connection-owned shutdown after the live loop stops.
-/// The sender must bypass live-write interruption so a queued detach request
-/// can still receive its bounded best-effort conflict close.
-pub(super) async fn finish_connection<S, E>(
+/// Final socket writes bypass live-write interruption so a queued detach
+/// request can still receive its bounded best-effort conflict close.
+pub(super) async fn finish_connection<S, R, E>(
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
-    ws_sender: &mut S,
+    mut socket_io: LocalSocketIo<InterruptibleSink<S>, R>,
     authority: FrameAuthority<'_>,
     mut superseded: bool,
     channels: ConnectionShutdownChannels<'_>,
@@ -800,10 +927,17 @@ pub(super) async fn finish_connection<S, E>(
         pending_force_detach.extend(drain_ready_force_detach_requests(
             force_detach_rx,
             &bound_bare,
+            conn.binding_ref.as_ref(),
         ));
         if !was_detaching && !pending_force_detach.is_empty() {
-            close_live_session_for_force_detach(ws_sender, conn, admission_permit, shutdown_token)
-                .await;
+            let (sender, _) = socket_io.halves_mut();
+            close_live_session_for_force_detach(
+                sender.uninterrupted(),
+                conn,
+                admission_permit,
+                shutdown_token,
+            )
+            .await;
         }
     }
 
@@ -848,6 +982,11 @@ pub(super) async fn finish_connection<S, E>(
         drain_ordered_relay_handoffs_before_cleanup(handoff_rx, conn).await;
     }
 
+    // No later shutdown work uses either transport half. Release them before
+    // potentially slow persistence and lifecycle cleanup, without treating the
+    // local witness as evidence that cleanup or peer closure has completed.
+    drop(socket_io);
+
     // Connection is ending. Decide between two paths:
     //   A. Fully clean up (unregister + remove MUC occupants) — the default
     //      for non-SM sessions and for SM sessions that didn't negotiate
@@ -869,24 +1008,56 @@ pub(super) async fn finish_connection<S, E>(
             pending_force_detach.extend(drain_ready_force_detach_requests(
                 force_detach_rx,
                 &bound_bare,
+                conn.binding_ref.as_ref(),
             ));
         }
     }
-    let shutdown_outcome = if !pending_force_detach.is_empty() {
-        cleanup_force_detach_shutdown_with_late_waiter_service(
-            state.as_ref(),
-            outbound_rx,
-            conn,
-            superseded,
-            force_detach_rx,
-            pending_force_detach,
-        )
-        .await
-    } else {
-        cleanup_connection_shutdown(state.as_ref(), outbound_rx, conn, superseded).await
+    let primary_origin = authoritative_force_detach_origin(pending_force_detach);
+    release_stale_force_detach_waiters_before_cross_node_cleanup(
+        pending_force_detach,
+        primary_origin,
+    );
+    let cleanup_bare = conn.phase.cleanup_jid().map(|jid| jid.to_bare());
+    let cleanup_binding = conn.binding_ref.clone();
+    let cleanup = async {
+        #[cfg(feature = "test-support")]
+        if let Some(barrier) = &state
+            .deps
+            .app_state
+            .websocket_admission_test_barriers
+            .before_cleanup
+        {
+            barrier.arrive().await;
+        }
+        let outcome = if let Some(origin) = primary_origin {
+            cleanup::cleanup_force_detach_connection_shutdown(
+                state.as_ref(),
+                outbound_rx,
+                conn,
+                superseded,
+                origin,
+            )
+            .await
+        } else {
+            cleanup_connection_shutdown(state.as_ref(), outbound_rx, conn, superseded).await
+        };
+        finalize_replay_recorded_completions(state, conn, outcome);
+        cleanup::finish_socket_cleanup(state, conn, outcome).await;
+        outcome
     };
-    finalize_replay_recorded_completions(state, conn, shutdown_outcome);
-    cleanup::finish_socket_cleanup(state, conn, shutdown_outcome).await;
+    let (shutdown_outcome, late_requests) = match (force_detach_rx.take(), cleanup_bare) {
+        (Some(receiver), Some(bound_bare)) => {
+            service_late_force_detach_waiters(
+                receiver,
+                bound_bare,
+                cleanup_binding,
+                primary_origin,
+                cleanup,
+            )
+            .await
+        }
+        _ => (cleanup.await, Vec::new()),
+    };
 
     // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
     // detach-for-resume persistence has actually run above — tell the
@@ -898,6 +1069,14 @@ pub(super) async fn finish_connection<S, E>(
     // storage-error fallback, an ownership-race promotion, or any other
     // non-detach cleanup path).
     ack_force_detach_requests(std::mem::take(pending_force_detach), shutdown_outcome);
+    // If ordinary settlement began without a detach request, a later request
+    // cannot retroactively select force cleanup or prove its conflict close.
+    let late_outcome = if primary_origin.is_some() {
+        shutdown_outcome
+    } else {
+        cleanup::ConnectionShutdownOutcome::NotPersisted
+    };
+    ack_force_detach_requests(late_requests, late_outcome);
 
     info!("XMPP WebSocket connection closed");
 }
@@ -988,6 +1167,7 @@ fn force_detach_outcome_from_shutdown(
 pub(super) fn drain_ready_force_detach_requests(
     rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
     bound_bare: &jid::BareJid,
+    binding: Option<&waddle_xmpp::ownership::BindingRef>,
 ) -> Vec<waddle_xmpp::registry::ForceDetachRequest> {
     let mut drained = Vec::new();
     let Some(receiver) = rx.as_mut() else {
@@ -996,6 +1176,10 @@ pub(super) fn drain_ready_force_detach_requests(
     loop {
         match receiver.try_recv() {
             Ok(request) => {
+                if !request.targets_binding(binding) {
+                    debug!("force-detach ignored while draining: binding retired after enqueue");
+                    continue;
+                }
                 if request.requester_bare_jid != *bound_bare {
                     warn!("force-detach rejected while draining queue: identity mismatch");
                     let _ = request
@@ -1069,54 +1253,7 @@ pub(super) fn release_stale_force_detach_waiters_before_cross_node_cleanup(
     *requests = remaining;
 }
 
-async fn cleanup_force_detach_shutdown_with_late_waiter_service(
-    state: &WebSocketState,
-    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
-    conn: &mut WsConnState,
-    superseded: bool,
-    force_detach_rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
-    pending_force_detach: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
-) -> cleanup::ConnectionShutdownOutcome {
-    let primary_force_detach_origin = authoritative_force_detach_origin(pending_force_detach);
-    release_stale_force_detach_waiters_before_cross_node_cleanup(
-        pending_force_detach,
-        primary_force_detach_origin,
-    );
-
-    let Some(origin) = primary_force_detach_origin else {
-        return cleanup_connection_shutdown(state, outbound_rx, conn, superseded).await;
-    };
-
-    let late_waiter_task = conn
-        .phase
-        .bound_jid()
-        .map(|jid| jid.to_bare())
-        .and_then(|bound_bare| {
-            start_late_force_detach_waiter_service(force_detach_rx, bound_bare, origin)
-        });
-
-    let shutdown_outcome = cleanup::cleanup_force_detach_connection_shutdown(
-        state,
-        outbound_rx,
-        conn,
-        superseded,
-        origin,
-    )
-    .await;
-
-    if let Some((cancel, task)) = late_waiter_task {
-        cancel.cancel();
-        match task.await {
-            Ok(mut late_requests) => pending_force_detach.append(&mut late_requests),
-            Err(error) => {
-                warn!(?error, "late force-detach waiter service task failed");
-            }
-        }
-    }
-
-    shutdown_outcome
-}
-
+#[cfg(test)]
 fn start_late_force_detach_waiter_service(
     force_detach_rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
     bound_bare: jid::BareJid,
@@ -1131,54 +1268,70 @@ fn start_late_force_detach_waiter_service(
     Some((
         cancel,
         tokio::spawn(async move {
-            service_late_force_detach_waiters_during_cross_node_cleanup(
+            let (_, requests) = service_late_force_detach_waiters(
                 receiver,
                 bound_bare,
-                primary_origin,
-                cancel_task,
+                None,
+                Some(primary_origin),
+                cancel_task.cancelled(),
             )
-            .await
+            .await;
+            requests
         }),
     ))
 }
 
-async fn service_late_force_detach_waiters_during_cross_node_cleanup(
+/// Service the captured entry's control channel while the connection itself
+/// completes cleanup. Keeping both futures in this task closes the receiver
+/// if connection cleanup is cancelled rather than leaving an orphan waiter.
+async fn service_late_force_detach_waiters<F>(
     mut receiver: mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>,
     bound_bare: jid::BareJid,
-    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
-    cancel: tokio_util::sync::CancellationToken,
-) -> Vec<waddle_xmpp::registry::ForceDetachRequest> {
+    binding: Option<waddle_xmpp::ownership::BindingRef>,
+    primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
+    cleanup: F,
+) -> (F::Output, Vec<waddle_xmpp::registry::ForceDetachRequest>)
+where
+    F: std::future::Future,
+{
+    tokio::pin!(cleanup);
     let mut pending = Vec::new();
-    loop {
+    let outcome = loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
-                drain_late_force_detach_waiters_during_cross_node_cleanup(
-                    &mut receiver,
-                    &bound_bare,
-                    primary_origin,
-                    &mut pending,
-                );
-                return pending;
-            }
+            biased;
+            outcome = &mut cleanup => break outcome,
             request = receiver.recv() => {
                 let Some(request) = request else {
-                    return pending;
+                    break cleanup.await;
                 };
                 handle_late_force_detach_waiter_during_cross_node_cleanup(
                     request,
                     &bound_bare,
+                    binding.as_ref(),
                     primary_origin,
                     &mut pending,
                 );
             }
         }
-    }
+    };
+    // Closing first rejects new sends. Drain what is already published, then
+    // drop the receiver rather than waiting indefinitely for a held permit.
+    receiver.close();
+    drain_late_force_detach_waiters_during_cross_node_cleanup(
+        &mut receiver,
+        &bound_bare,
+        binding.as_ref(),
+        primary_origin,
+        &mut pending,
+    );
+    (outcome, pending)
 }
 
 fn drain_late_force_detach_waiters_during_cross_node_cleanup(
     receiver: &mut mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>,
     bound_bare: &jid::BareJid,
-    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
+    binding: Option<&waddle_xmpp::ownership::BindingRef>,
+    primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
     pending: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
 ) {
     loop {
@@ -1186,6 +1339,7 @@ fn drain_late_force_detach_waiters_during_cross_node_cleanup(
             Ok(request) => handle_late_force_detach_waiter_during_cross_node_cleanup(
                 request,
                 bound_bare,
+                binding,
                 primary_origin,
                 pending,
             ),
@@ -1198,9 +1352,14 @@ fn drain_late_force_detach_waiters_during_cross_node_cleanup(
 fn handle_late_force_detach_waiter_during_cross_node_cleanup(
     request: waddle_xmpp::registry::ForceDetachRequest,
     bound_bare: &jid::BareJid,
-    primary_origin: waddle_xmpp::registry::ForceDetachOrigin,
+    binding: Option<&waddle_xmpp::ownership::BindingRef>,
+    primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
     pending: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
 ) {
+    if !request.targets_binding(binding) {
+        debug!("force-detach ignored during cleanup: binding retired after enqueue");
+        return;
+    }
     if request.requester_bare_jid != *bound_bare {
         warn!("force-detach rejected during cleanup: identity mismatch");
         let _ = request
@@ -1208,6 +1367,14 @@ fn handle_late_force_detach_waiter_during_cross_node_cleanup(
             .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
         return;
     }
+
+    let Some(primary_origin) = primary_origin else {
+        // Ordinary cleanup has already chosen its semantics. The request is
+        // inconclusive, but its caller may interpret an ACK as socket
+        // retirement, so retain it until lifecycle cleanup finishes.
+        pending.push(request);
+        return;
+    };
 
     if matches!(
         primary_origin,
@@ -1323,33 +1490,41 @@ mod admission_tests {
 
     #[tokio::test]
     async fn lifecycle_transition_revokes_an_inflight_upgrade_permit() {
+        use crate::websocket_transport::SocketAdmissionError;
         let state = super::super::tests::create_test_websocket_state().await;
-        let lifecycle = &state.deps.app_state.node_lifecycle;
-        let permit = lifecycle.admit().expect("initial serving permit");
+        let app = &state.deps.app_state;
+        let admission = app
+            .websocket_admission_gate()
+            .expect("gate")
+            .reserve(state.deps.shutdown.stop_token())
+            .expect("initial admission");
 
-        lifecycle.begin_fenced_recovery();
-        assert_eq!(
-            revalidate_websocket_admission(&state, &permit),
-            Err(WebSocketAdmissionRevocation::Lifecycle(
+        app.node_lifecycle.begin_fenced_recovery();
+        assert!(matches!(
+            admission.revalidate(),
+            Err(SocketAdmissionError::Lifecycle(
                 crate::clustering::NodeAdmissionError::NotServing(
                     crate::clustering::NodeAdmission::FencedRecovering
                 )
             ))
-        );
-
-        lifecycle.serve();
-        assert_eq!(
-            revalidate_websocket_admission(&state, &permit),
-            Err(WebSocketAdmissionRevocation::Lifecycle(
+        ));
+        app.node_lifecycle.serve();
+        assert!(matches!(
+            admission.revalidate(),
+            Err(SocketAdmissionError::Lifecycle(
                 crate::clustering::NodeAdmissionError::Revoked
             ))
-        );
-
-        let recovered_permit = lifecycle.admit().expect("recovered serving permit");
-        lifecycle.fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+        ));
+        let recovered = app
+            .websocket_admission_gate()
+            .expect("recovered gate")
+            .reserve(state.deps.shutdown.stop_token())
+            .expect("recovered admission");
+        app.node_lifecycle
+            .fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
         assert!(matches!(
-            revalidate_websocket_admission(&state, &recovered_permit),
-            Err(WebSocketAdmissionRevocation::Lifecycle(
+            recovered.revalidate(),
+            Err(SocketAdmissionError::Lifecycle(
                 crate::clustering::NodeAdmissionError::NotServing(
                     crate::clustering::NodeAdmission::Failed(
                         crate::clustering::CriticalNodeFailure::RoomRegistryTerminated
@@ -1362,19 +1537,18 @@ mod admission_tests {
     #[tokio::test]
     async fn ordinary_process_stop_revokes_upgrade_without_latching_critical_failure() {
         let state = super::super::tests::create_test_websocket_state().await;
-        let permit = state
+        let admission = state
             .deps
             .app_state
-            .node_lifecycle
-            .admit()
-            .expect("initial serving permit");
-
+            .websocket_admission_gate()
+            .expect("gate")
+            .reserve(state.deps.shutdown.stop_token())
+            .expect("initial admission");
         state.deps.shutdown.stop_token().cancel();
-
-        assert_eq!(
-            revalidate_websocket_admission(&state, &permit),
-            Err(WebSocketAdmissionRevocation::Shutdown)
-        );
+        assert!(matches!(
+            admission.revalidate(),
+            Err(crate::websocket_transport::SocketAdmissionError::Cancelled)
+        ));
         assert_eq!(state.deps.app_state.node_lifecycle.critical_failure(), None);
     }
 
@@ -2281,11 +2455,18 @@ mod tests {
     async fn unfinished_live_resume_returns_when_socket_owner_drops() {
         let conn = WsConnState::new();
         let (outbound, _outbound_rx) = mpsc::channel(1);
-        let entry = waddle_xmpp::registry::ConnectionEntry::new(outbound);
+        let binding_ref = waddle_xmpp::ownership::BindingRef::fresh(
+            waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::local_process(),
+            ),
+        );
+        let entry =
+            waddle_xmpp::registry::ConnectionEntry::new_for_binding(outbound, binding_ref.clone());
         let owner: FullJid = "alice@example.test/old".parse().expect("full JID");
         assert!(entry.wire_resume_control(owner.clone(), conn.live_resume_control.clone()));
         let guard = LiveResumeOwnerGuard(conn.live_resume_control.clone());
         let request = conn.live_resume_control.request(
+            binding_ref,
             waddle_xmpp::pending_delivery::SmSessionId::try_from_wire("old-stream")
                 .expect("valid stream ID"),
             owner.to_bare(),
@@ -2300,6 +2481,174 @@ mod tests {
             waddle_xmpp::registry::LocalResumeReply::NotPersisted
         );
         assert!(!conn.write_interruption.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stale_binding_requests_do_not_enter_initial_or_late_cleanup() {
+        use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+        use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachRequest};
+
+        let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        let old = BindingRef::fresh(connection.clone());
+        let current = BindingRef::fresh(connection);
+        let bare: BareJid = "alice@example.com".parse().expect("bare JID");
+        let (sender, receiver) = mpsc::channel(2);
+        let mut receiver = Some(receiver);
+        let (ack, reply) = oneshot::channel();
+        sender
+            .try_send(ForceDetachRequest {
+                origin: ForceDetachOrigin::FreshBindReplacement,
+                target_binding: Some(old.clone()),
+                requester_bare_jid: bare.clone(),
+                ack,
+            })
+            .expect("queue old request");
+        assert!(drain_ready_force_detach_requests(&mut receiver, &bare, Some(&current)).is_empty());
+        assert!(
+            reply.await.is_err(),
+            "stale request must not acknowledge cleanup"
+        );
+
+        let (ack, reply) = oneshot::channel();
+        sender
+            .try_send(ForceDetachRequest {
+                origin: ForceDetachOrigin::FreshBindReplacement,
+                target_binding: Some(old),
+                requester_bare_jid: bare.clone(),
+                ack,
+            })
+            .expect("queue old late request");
+        let (finish, finished) = oneshot::channel::<()>();
+        let task = tokio::spawn(service_late_force_detach_waiters(
+            receiver.take().expect("receiver"),
+            bare,
+            Some(current),
+            Some(ForceDetachOrigin::FreshBindReplacement),
+            async move { finished.await.expect("finish cleanup") },
+        ));
+        assert!(
+            reply.await.is_err(),
+            "stale late request must not acknowledge cleanup"
+        );
+        finish.send(()).expect("finish cleanup");
+        let (_, pending) = task.await.expect("late waiter task");
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn late_waiter_cutoff_is_bounded_with_an_outstanding_permit() {
+        use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest};
+
+        let bare: BareJid = "alice@example.com".parse().expect("bare JID");
+        let (sender, receiver) = mpsc::channel(2);
+        let (queued_ack, queued_reply) = oneshot::channel();
+        sender
+            .send(ForceDetachRequest {
+                origin: ForceDetachOrigin::CrossNodeResume,
+                target_binding: None,
+                requester_bare_jid: bare.clone(),
+                ack: queued_ack,
+            })
+            .await
+            .expect("queue before cutoff");
+        let permit = sender.reserve().await.expect("reserve before cutoff");
+
+        let (_, pending) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service_late_force_detach_waiters(receiver, bare.clone(), None, None, async {}),
+        )
+        .await
+        .expect("cutoff must not wait for an outstanding permit");
+        assert!(sender.is_closed());
+        ack_force_detach_requests(pending, cleanup::ConnectionShutdownOutcome::NotPersisted);
+        assert_eq!(
+            queued_reply.await.expect("queued reply"),
+            ForceDetachOutcome::NotPersisted
+        );
+
+        let (late_ack, late_reply) = oneshot::channel();
+        permit.send(ForceDetachRequest {
+            origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
+            requester_bare_jid: bare,
+            ack: late_ack,
+        });
+        // Tokio may retain a value sent through a pre-close permit until the
+        // last sender is dropped, even though no receiver can observe it.
+        drop(sender);
+        assert!(
+            late_reply.await.is_err(),
+            "unobserved permit cannot claim completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_waiters_in_ordinary_cleanup_retain_each_origin_until_completion() {
+        use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest};
+
+        let bare: BareJid = "alice@example.com".parse().expect("bare JID");
+        let (sender, receiver) = mpsc::channel(8);
+        let (finish, finished) = oneshot::channel::<()>();
+        let task = tokio::spawn(service_late_force_detach_waiters(
+            receiver,
+            bare.clone(),
+            None,
+            None,
+            async move { finished.await.expect("complete cleanup") },
+        ));
+        let mut replies = Vec::new();
+        for origin in [
+            ForceDetachOrigin::CrossNodeResume,
+            ForceDetachOrigin::FreshBindReplacement,
+            ForceDetachOrigin::RegistryStaleActorRetirement,
+            ForceDetachOrigin::OwnerManagedRetirement,
+        ] {
+            let (ack, reply) = oneshot::channel();
+            sender
+                .send(ForceDetachRequest {
+                    origin,
+                    target_binding: None,
+                    requester_bare_jid: bare.clone(),
+                    ack,
+                })
+                .await
+                .expect("queue late request");
+            replies.push(reply);
+        }
+        let (mismatch_ack, mismatch_reply) = oneshot::channel();
+        sender
+            .send(ForceDetachRequest {
+                origin: ForceDetachOrigin::CrossNodeResume,
+                target_binding: None,
+                requester_bare_jid: "other@example.com".parse().expect("other bare JID"),
+                ack: mismatch_ack,
+            })
+            .await
+            .expect("queue mismatch after matching requests");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), mismatch_reply)
+                .await
+                .expect("mismatch is serviced")
+                .expect("mismatch reply"),
+            ForceDetachOutcome::IdentityMismatch
+        );
+        for reply in &mut replies {
+            assert!(matches!(
+                reply.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        }
+
+        finish.send(()).expect("finish cleanup");
+        let (_, pending) = task.await.expect("service completes");
+        assert_eq!(pending.len(), 4);
+        ack_force_detach_requests(pending, cleanup::ConnectionShutdownOutcome::NotPersisted);
+        for reply in replies {
+            assert_eq!(
+                reply.await.expect("late reply"),
+                ForceDetachOutcome::NotPersisted
+            );
+        }
     }
 
     #[derive(Default)]
@@ -2709,6 +3058,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -2746,6 +3096,7 @@ mod tests {
         let (resume_tx, resume_rx) = oneshot::channel();
         tx.send(ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: resume_tx,
         })
@@ -2754,6 +3105,7 @@ mod tests {
         let (stale_tx, stale_rx) = oneshot::channel();
         tx.send(ForceDetachRequest {
             origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: stale_tx,
         })
@@ -2797,6 +3149,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -2833,6 +3186,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: BareJid::from_str("mismatch@example.com")
                 .expect("valid mismatched bare jid"),
             ack: ack_tx,
@@ -2870,6 +3224,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -2907,6 +3262,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -3952,6 +4308,7 @@ mod tests {
             .iter()
             .map(|&origin| waddle_xmpp::registry::ForceDetachRequest {
                 origin,
+                target_binding: None,
                 requester_bare_jid: "alice@example.com".parse().expect("requester JID"),
                 ack: tokio::sync::oneshot::channel().0,
             })

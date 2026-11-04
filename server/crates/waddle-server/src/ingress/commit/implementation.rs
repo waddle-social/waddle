@@ -128,12 +128,27 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     super::super::storage_hint::validate_capture(&submission.plan)?;
     #[cfg(test)]
     commit_race_gate::before_admission(submission.digest_input.origin()).await;
-    let mut tx = uow
-        .begin_with_timeouts(
-            std::time::Duration::from_millis(100),
-            std::time::Duration::from_millis(250),
+    let bounds = (
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(250),
+    );
+    #[cfg(test)]
+    let bounds = commit_hooks::ALIAS_TEST_BOUNDS
+        .try_with(|bounds| *bounds)
+        .unwrap_or(bounds);
+    let mut tx = uow.begin_with_timeouts(bounds.0, bounds.1).await?;
+    #[cfg(test)]
+    if let Ok((lock, statement)) = commit_hooks::ALIAS_TEST_BOUNDS.try_with(|bounds| *bounds) {
+        tx.set_local_timeouts(
+            u64::try_from(lock.as_millis()).expect("test lock timeout fits u64"),
+            u64::try_from(statement.as_millis()).expect("test statement timeout fits u64"),
         )
         .await?;
+    }
+    #[cfg(test)]
+    commit_hooks::observe_alias_bounds(&mut tx).await?;
+    #[cfg(test)]
+    commit_hooks::apply_search_path(&mut tx).await?;
     super::super::principal::assert_admission(&mut tx, submission).await?;
     #[cfg(test)]
     commit_race_gate::after_admission(submission.digest_input.origin()).await;
@@ -153,6 +168,34 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     }
     let stream = super::super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
+    let relayed_alias = match (&submission.identity, submission.digest_input.origin()) {
+        (
+            IngressStreamIdentity::Relayed {
+                canonical, room, ..
+            },
+            Some(origin),
+        ) => {
+            if submission.sender.to_bare() != canonical.sender_bare
+                || submission.digest_input.target() != &submission.target
+                || submission.target != waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone())
+            {
+                return Err(
+                    crate::ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into(),
+                );
+            }
+            CanonicalMessageRepository::assert_relayed_alias(
+                &mut tx,
+                canonical.message_key,
+                &canonical.sender_bare,
+                &submission.target,
+                origin,
+                &digest,
+            )
+            .await?;
+            Some(canonical.message_key)
+        }
+        _ => None,
+    };
     let transient_direct = super::super::storage_hint::protects_plan(&submission.plan);
     let envelope = if transient_direct {
         super::super::storage_hint::envelope(&submission.plan.sanitized_message)
@@ -162,12 +205,71 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     let mut rejection = super::super::rejection::planned_rejection(&submission.plan)?;
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
         (key, AliasOutcomeClass::Existing)
+    } else if let Some(key) = relayed_alias {
+        // The alias was checked under both locks above. In particular a denial
+        // must never resolve a different parent or mint a replacement here.
+        (key, AliasOutcomeClass::Existing)
     } else if rejection.is_some() {
         // A committed denial owns its origin id like any acceptance: the alias
         // is what lets a retransmission on a new wire position find the
         // recorded authority instead of re-deciding under today's policy.
         match submission.digest_input.origin() {
-            Some(origin) => match CanonicalMessageRepository::resolve_and_record_alias(
+            Some(origin) => {
+                let resolution = if tx.receipt_schema().is_some() {
+                    let (next, resolution) =
+                        CanonicalMessageRepository::resolve_prepared_origin_owned(
+                            tx,
+                            submission.principal.bare_jid(),
+                            &submission.target,
+                            origin,
+                            &digest,
+                        )
+                        .await?;
+                    tx = next;
+                    resolution
+                } else {
+                    CanonicalMessageRepository::resolve_and_record_alias(
+                        &mut tx,
+                        submission.principal.bare_jid(),
+                        &submission.target,
+                        origin,
+                        &digest,
+                        MessageKey::new,
+                    )
+                    .await?
+                };
+                match resolution {
+                    AliasResolution::Aliased(AliasOutcome::Existing(key)) => {
+                        (key, AliasOutcomeClass::Existing)
+                    }
+                    AliasResolution::Aliased(AliasOutcome::Inserted(key)) => {
+                        (key, AliasOutcomeClass::Inserted)
+                    }
+                    AliasResolution::NoOrigin(key) => (key, AliasOutcomeClass::NoOrigin),
+                    AliasResolution::Aliased(AliasOutcome::Conflict(_)) => {
+                        rejection = Some(IngressDecisionClass::AliasConflict);
+                        (MessageKey::new(), AliasOutcomeClass::Conflict)
+                    }
+                }
+            }
+            None => (MessageKey::new(), AliasOutcomeClass::NoOrigin),
+        }
+    } else if let IngressStreamIdentity::Relayed { canonical, .. } = &submission.identity {
+        (canonical.message_key, AliasOutcomeClass::Existing)
+    } else if let Some(origin) = submission.digest_input.origin() {
+        let resolution = if tx.receipt_schema().is_some() {
+            let (next, resolution) = CanonicalMessageRepository::resolve_prepared_origin_owned(
+                tx,
+                submission.principal.bare_jid(),
+                &submission.target,
+                origin,
+                &digest,
+            )
+            .await?;
+            tx = next;
+            resolution
+        } else {
+            CanonicalMessageRepository::resolve_and_record_alias(
                 &mut tx,
                 submission.principal.bare_jid(),
                 &submission.target,
@@ -176,34 +278,8 @@ pub(in crate::ingress::commit) async fn commit_attempt(
                 MessageKey::new,
             )
             .await?
-            {
-                AliasResolution::Aliased(AliasOutcome::Existing(key)) => {
-                    (key, AliasOutcomeClass::Existing)
-                }
-                AliasResolution::Aliased(AliasOutcome::Inserted(key)) => {
-                    (key, AliasOutcomeClass::Inserted)
-                }
-                AliasResolution::NoOrigin(key) => (key, AliasOutcomeClass::NoOrigin),
-                AliasResolution::Aliased(AliasOutcome::Conflict(_)) => {
-                    rejection = Some(IngressDecisionClass::AliasConflict);
-                    (MessageKey::new(), AliasOutcomeClass::Conflict)
-                }
-            },
-            None => (MessageKey::new(), AliasOutcomeClass::NoOrigin),
-        }
-    } else if let IngressStreamIdentity::Relayed { canonical, .. } = &submission.identity {
-        (canonical.message_key, AliasOutcomeClass::Existing)
-    } else if let Some(origin) = submission.digest_input.origin() {
-        match CanonicalMessageRepository::resolve_and_record_alias(
-            &mut tx,
-            submission.principal.bare_jid(),
-            &submission.target,
-            origin,
-            &digest,
-            MessageKey::new,
-        )
-        .await?
-        {
+        };
+        match resolution {
             AliasResolution::Aliased(AliasOutcome::Existing(key)) => {
                 (key, AliasOutcomeClass::Existing)
             }

@@ -87,6 +87,19 @@ pub struct PendingClaim {
     pub token: PendingClaimToken,
 }
 
+/// Authority for deleting pending rows acknowledged by an XEP-0198 client.
+///
+/// A resumable stream must carry its immutable clustered claim fence. A
+/// non-resumable stream has a fresh, one-off SM id that cannot be resumed or
+/// transferred, so its ACKs use that explicit authority. `Unavailable` is
+/// fail-closed and is never accepted by clustered storage.
+#[derive(Debug, Clone, Copy)]
+pub enum PendingAckAuthority<'a> {
+    Fenced(&'a SmClaimFence),
+    NonResumable,
+    Unavailable,
+}
+
 impl std::fmt::Display for PendingClaimToken {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -609,15 +622,19 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// return to ordinary pending-delivery redelivery instead of being
     /// promoted from its unacked XML a second time.
     ///
-    /// The default keeps storage implementations source-compatible while
-    /// preserving the ownership check through [`Self::release_row_if_session`].
-    /// Implementations may override it with a set-based query.
+    /// The portable default preserves the row/session ownership check through
+    /// [`Self::release_row_if_session`]. Implementations may override it with
+    /// a set-based query. Cluster-aware implementations must require
+    /// `expected_fence` and assert its exact owner and claim epoch in the same
+    /// transaction as the release; unfenced stores may ignore it.
     async fn release_rows_for_outbound_sequences(
         &self,
         recipient: &BareJid,
         session: &SmSessionId,
         sequences: &HashSet<u32>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> ReleaseRowsForOutboundSequencesOutcome {
+        let _ = expected_fence;
         if sequences.is_empty() {
             return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
         }
@@ -672,6 +689,12 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// whose flush stanzas haven't yet been ack'd stay claimed for a
     /// future ack.
     ///
+    /// Cluster-aware implementations require `Fenced` for resumable streams
+    /// and check its exact identity/claim epoch under a claim-row lock in the
+    /// same transaction as deletion. `NonResumable` is accepted only for
+    /// one-off streams that cannot be resumed or transferred. Portable
+    /// implementations may ignore the authority.
+    ///
     /// The interval is WRAP-AWARE: XEP-0198 counters are mod 2^32, so
     /// a valid wrap-spanning ack (`h` numerically small post-wrap)
     /// must also delete the pre-wrap rows near `u32::MAX` — see
@@ -687,6 +710,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError>;
 
     /// List rows whose `flushed_in_session` references a session
@@ -1555,7 +1579,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         recipient: &BareJid,
         session: &SmSessionId,
         sequences: &HashSet<u32>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> ReleaseRowsForOutboundSequencesOutcome {
+        let _ = expected_fence;
         if sequences.is_empty() {
             return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
         }
@@ -1617,6 +1643,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        _authority: PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         let mut guard = self
             .inner

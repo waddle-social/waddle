@@ -59,6 +59,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         permission_actor,
         server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),
         node_lifecycle: crate::clustering::NodeLifecycle::new(),
+        max_websocket_connections: crate::config::MaxWebSocketConnections::default(),
         clustering_claims: crate::clustering::ClusteringHandles::default(),
         lineage_config: crate::config::LineageConfig::default(),
         server_hats: waddle_xmpp::xep::xep0317::ServerHats::default(),

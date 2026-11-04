@@ -21,6 +21,21 @@ pub async fn lock_archive_sequence_on_connection(
     Ok(())
 }
 
+/// Lock the counter in the supplied PostgreSQL schema on the caller's transaction.
+pub async fn lock_archive_sequence_on_connection_in_schema(
+    conn: &mut PgConnection,
+    schema: &str,
+    archive: &BareJid,
+) -> Result<(), sqlx::Error> {
+    let relation = super::postgres_relation(Some(schema), "mam_archive_sequences");
+    let sql = format!("INSERT INTO {relation} AS target (archive_jid, next_seq) VALUES ($1, 0) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = target.next_seq");
+    sqlx::query(&sql)
+        .bind(archive.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn lock_archive_sequence_on_sqlite_connection(
     conn: &mut SqliteConnection,
     archive: &BareJid,
@@ -39,9 +54,14 @@ pub(super) fn decode_ordinal(value: i64) -> Result<ArchiveOrdinal, sqlx::Error> 
 pub(super) async fn allocate_postgres(
     conn: &mut PgConnection,
     archive: &BareJid,
+    schema: Option<&str>,
 ) -> Result<ArchiveOrdinal, sqlx::Error> {
+    let sql = schema.map(|schema| format!(
+        "INSERT INTO {} AS target (archive_jid, next_seq) VALUES ($1, 1) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = target.next_seq + 1 RETURNING next_seq",
+        super::postgres_relation(Some(schema), "mam_archive_sequences")
+    ));
     decode_ordinal(
-        sqlx::query_scalar(ALLOCATE)
+        sqlx::query_scalar(sql.as_deref().unwrap_or(ALLOCATE))
             .bind(archive.to_string())
             .fetch_one(conn)
             .await?,
@@ -64,8 +84,10 @@ pub(super) async fn preserve_postgres(
     conn: &mut PgConnection,
     archive: &BareJid,
     ordinal: ArchiveOrdinal,
+    schema: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO mam_archive_sequences (archive_jid, next_seq) VALUES ($1, $2) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = GREATEST(mam_archive_sequences.next_seq, EXCLUDED.next_seq)")
+    let sql = schema.map(|schema| format!("INSERT INTO {} AS target (archive_jid, next_seq) VALUES ($1, $2) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = GREATEST(target.next_seq, EXCLUDED.next_seq)", super::postgres_relation(Some(schema), "mam_archive_sequences")));
+    sqlx::query(sql.as_deref().unwrap_or("INSERT INTO mam_archive_sequences (archive_jid, next_seq) VALUES ($1, $2) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = GREATEST(mam_archive_sequences.next_seq, EXCLUDED.next_seq)"))
         .bind(archive.to_string()).bind(ordinal.to_storage()).execute(conn).await?;
     Ok(())
 }

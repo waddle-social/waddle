@@ -71,6 +71,124 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 
 use crate::db::{Database, DatabaseError};
 
+mod runtime_attach;
+pub use runtime_attach::{ClaimOccupancyAttachError, VerifiedMainClaimOccupancy};
+
+/// Verify claim and occupancy relations on one exact attested main pool.
+/// The result is structural evidence, not claim acquisition or an epoch grant.
+pub async fn attach_main_claim_occupancy(
+    db: Database,
+) -> Result<VerifiedMainClaimOccupancy, ClaimOccupancyAttachError> {
+    runtime_attach::verify(db).await
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimOwnerPreparationError {
+    #[error("claim owner preparation requires a non-runtime PostgreSQL owner handle")]
+    OwnerHandleRequired,
+    #[error("claim owner physical identity, role, or schema is unsafe")]
+    UnsafeOwnerBoundary,
+    #[error("claim owner preparation requires a fresh claim table and epoch sequence")]
+    ExistingClaimAuthority,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+/// Create a fresh claim table and epoch sequence on the supplied physical
+/// owner identity. The caller must prove the lineage is fresh, fence older
+/// writers/DDL/role changes, and ensure no previously allocated claim epoch
+/// can be reused. Existing or partially existing authority is never repaired
+/// or rewound. The NOLOGIN schema owner needs `pg_control_system()` EXECUTE.
+/// Other clustering tables and V0013 occupancy are provisioned separately.
+pub async fn initialize_fresh_claims_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), ClaimOwnerPreparationError> {
+    if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+        return Err(ClaimOwnerPreparationError::OwnerHandleRequired);
+    }
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
+        (),
+    )
+    .await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(6841445497037937991)",
+        (),
+    )
+    .await?;
+    crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+        .await
+        .map_err(|_| ClaimOwnerPreparationError::UnsafeOwnerBoundary)?;
+    let mut rows = tx.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = ? AND c.relname IN ('clustering_claims', 'clustering_claim_epoch_seq', \
+         'clustering_claims_node_id_node_epoch', 'clustering_claims_owner_type_entity', \
+         'clustering_claims_entity_type_entity', 'clustering_nodes', 'clustering_steal_intents', \
+         'clustering_orphan_reaper_cursors', 'clustering_muc_room_effects', \
+         'clustering_muc_destroy_outbox'))", crate::db_params![&identity.schema.name.0],
+    ).await?;
+    if matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(ClaimOwnerPreparationError::ExistingClaimAuthority);
+    }
+    // Fresh MUC and global migration tables may already exist. Refuse a
+    // reset when they retain rows, and inspect their kind before reading so
+    // an existing view/rule cannot execute under the owner role.
+    for table in [
+        "clustering_muc_rooms",
+        "clustering_muc_room_affiliations",
+        "clustering_muc_room_lifecycles",
+        "clustering_muc_admin_receipts",
+        "xmpp_occupancy_authority",
+    ] {
+        let mut relation = tx.query(
+            "SELECT c.relkind = 'r' AND c.relpersistence = 'p' AND c.relowner = n.nspowner \
+             AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
+             AND c.relam = (SELECT oid FROM pg_catalog.pg_am WHERE amname = 'heap') \
+             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ?",
+            crate::db_params![&identity.schema.name.0, table],
+        ).await?;
+        if let Some(row) = relation.next().await? {
+            if !row.get::<bool>(0)? {
+                return Err(ClaimOwnerPreparationError::ExistingClaimAuthority);
+            }
+            let schema = crate::db::physical_attestation::quote_identifier(&identity.schema.name.0);
+            let mut retained = tx
+                .query(
+                    &format!("SELECT EXISTS (SELECT 1 FROM {schema}.\"{table}\")"),
+                    (),
+                )
+                .await?;
+            if matches!(retained.next().await?, Some(row) if row.get::<bool>(0)?) {
+                return Err(ClaimOwnerPreparationError::ExistingClaimAuthority);
+            }
+        }
+    }
+    tx.execute("SET LOCAL default_table_access_method = heap", ())
+        .await?;
+    tx.execute(
+        "CREATE SEQUENCE clustering_claim_epoch_seq AS BIGINT MINVALUE 0 START WITH 1",
+        (),
+    )
+    .await?;
+    tx.execute("CREATE TABLE clustering_claims (entity TEXT PRIMARY KEY, entity_type TEXT NOT NULL, node_id TEXT NOT NULL, node_epoch TEXT NOT NULL, claim_epoch BIGINT NOT NULL DEFAULT nextval('clustering_claim_epoch_seq'::regclass))", ()).await?;
+    tx.execute("CREATE INDEX clustering_claims_node_id_node_epoch ON clustering_claims (node_id, node_epoch)", ()).await?;
+    tx.execute("CREATE INDEX clustering_claims_owner_type_entity ON clustering_claims (node_id, node_epoch, entity_type, entity)", ()).await?;
+    tx.execute("CREATE INDEX clustering_claims_entity_type_entity ON clustering_claims (entity_type, entity)", ()).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Convert a backend database failure into the upstream `ClaimError`. The
 /// concrete diagnostic (`DatabaseError`'s `Display`) is preserved as
 /// human-facing text; see [`ClaimError::Backend`]'s doc comment for why a
@@ -276,6 +394,12 @@ struct OrphanedSmClaimCleanup {
     malformed: bool,
 }
 
+#[derive(serde::Serialize)]
+struct ExactClaimReleaseRecord {
+    entity: String,
+    claim_epoch: i64,
+}
+
 impl PostgresClaimStore {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -431,6 +555,12 @@ impl PostgresClaimStore {
 #[async_trait]
 impl ClaimStore for PostgresClaimStore {
     async fn ensure_schema(&self) -> Result<(), ClaimError> {
+        if self.db.uses_attested_postgres_pool() {
+            return Err(ClaimError::Backend(
+                "claim schema must be prepared by the owner before restricted attachment"
+                    .to_owned(),
+            ));
+        }
         let conn = self.db.guard().await.map_err(db_err)?;
         conn.execute(
             r#"
@@ -1263,6 +1393,51 @@ impl ClaimStore for PostgresClaimStore {
                 .map(|entity| Value::from(entity_key(entity))),
         );
         conn.execute(&sql, params).await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn release_many_exact(
+        &self,
+        claims: &[(Entity, ClaimEpoch)],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        let mut seen = HashSet::with_capacity(claims.len());
+        let mut expected = Vec::with_capacity(claims.len());
+        for (entity, epoch) in claims {
+            if seen.insert((entity.clone(), *epoch)) {
+                expected.push(ExactClaimReleaseRecord {
+                    entity: entity_key(entity),
+                    claim_epoch: epoch.0,
+                });
+            }
+        }
+        if expected.is_empty() {
+            return Ok(());
+        }
+        if self.db.driver() != crate::db::DatabaseDriver::Postgres {
+            return Err(ClaimError::Backend(
+                "exact clustered claim release requires PostgreSQL".to_string(),
+            ));
+        }
+        let payload = serde_json::to_string(&expected)
+            .map_err(|error| ClaimError::Backend(error.to_string()))?;
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // Keep the full drain in one statement even at the ~18k modeled
+        // entity scale. A JSON recordset avoids PostgreSQL's bind-parameter
+        // ceiling while matching each row against its captured epoch.
+        conn.execute(
+            r#"
+                    DELETE FROM clustering_claims AS claim
+                    USING jsonb_to_recordset(?::jsonb) AS expected(entity TEXT, claim_epoch BIGINT)
+                    WHERE claim.node_id = ?
+                      AND claim.node_epoch = ?
+                      AND claim.entity = expected.entity
+                      AND claim.claim_epoch = expected.claim_epoch
+                    "#,
+            crate::db_params![payload, me.node_id.clone(), me.node_epoch.clone()],
+        )
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 }
@@ -3721,13 +3896,9 @@ mod tests {
     // runs (the doc comment's own example: "a resumed XEP-0198 session
     // legitimately steals back onto this node via `steal_for_resume`"),
     // is deleted by the stale batch entry regardless. This is the
-    // documented, accepted risk — not a bug — and Slice 10's own
-    // `crate::clustering::drain::tests::
-    // drain_seals_then_releases_only_room_entities_skipping_sm_sessions`
-    // proves the mitigation: `SmSession` entities (the only ones reachable
-    // via `steal_for_resume`) never enter a `release_many` batch in the
-    // first place, so this window is real at the store level but
-    // unreachable through the production drain path.
+    // generic API remains epoch-blind for its non-drain callers. The
+    // production drain now uses `release_many_exact`; the companion exact
+    // test below proves a captured stale epoch does not delete a fresh claim.
     #[tokio::test]
     async fn release_many_epoch_blind_window_deletes_a_fresh_same_node_resume() {
         let _guard = clustering_control_plane_table_lock().lock().await;
@@ -3775,6 +3946,67 @@ mod tests {
             "release_many's epoch-blind DELETE removes the fresh, genuinely-live claim too — \
              the documented ABA window, reproduced here at the SQL level"
         );
+    }
+
+    #[tokio::test]
+    async fn release_many_exact_preserves_a_fresh_same_node_resume() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        let entity = sm_entity("stream-exact-release-aba");
+        let epoch0 = store.acquire(&entity, &me).await.expect("initial acquire");
+
+        let jid: jid::BareJid = "resuming@example.com".parse().expect("valid jid");
+        let proof =
+            waddle_xmpp::ownership::verify_resume_identity(&jid, &jid).expect("identity match");
+        let epoch1 = store
+            .steal_for_resume(&entity, epoch0, proof, &me)
+            .await
+            .expect("same-node resume steal succeeds");
+        assert!(epoch1 > epoch0);
+
+        let released_entity = sm_entity("stream-exact-release-positive");
+        let released_epoch = store
+            .acquire(&released_entity, &me)
+            .await
+            .expect("claim for positive exact release");
+        let foreign_entity = sm_entity("stream-exact-release-foreign");
+        let foreign_owner = node_identity();
+        let foreign_epoch = store
+            .acquire(&foreign_entity, &foreign_owner)
+            .await
+            .expect("claim for different owner");
+
+        store
+            .release_many_exact(
+                &[
+                    (entity.clone(), epoch0),
+                    (entity.clone(), epoch0),
+                    (released_entity.clone(), released_epoch),
+                    (foreign_entity.clone(), foreign_epoch),
+                ],
+                &me,
+            )
+            .await
+            .expect("exact batch release");
+
+        assert!(
+            store
+                .fence(&entity, &me, epoch1)
+                .await
+                .expect("fence check"),
+            "exact batch must preserve the newer claim epoch"
+        );
+        assert!(!store
+            .fence(&released_entity, &me, released_epoch)
+            .await
+            .expect("positive release fence check"));
+        assert!(store
+            .fence(&foreign_entity, &foreign_owner, foreign_epoch)
+            .await
+            .expect("foreign claim fence check"));
     }
 
     // The ADR-named interleaving race: a steal CAS commits while a

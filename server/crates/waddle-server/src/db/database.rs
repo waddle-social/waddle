@@ -1,7 +1,11 @@
 //! Implementation behind the parent module facade.
 
+use super::backend::{PoolAdmission, PoolLane};
 use super::lineage;
 use super::migrations;
+use super::physical_attestation::{
+    AttestedPgPool, AttestedPostgresWriterCapability, PhysicalAttestationError,
+};
 use super::Error;
 use super::FromStr;
 #[cfg(test)]
@@ -33,6 +37,11 @@ pub enum DatabaseError {
     /// attestation is missing, malformed, or does not describe this database.
     #[error(transparent)]
     Lineage(#[from] lineage::LineageError),
+
+    /// Fail-closed refusal when a writer capability is detached from
+    /// its physically attested PostgreSQL pool or connection.
+    #[error(transparent)]
+    PhysicalAttestation(#[from] PhysicalAttestationError),
 
     /// A migration statement batch (or its ledger record insert) failed while
     /// applying. Carries which migration so a crash-looping pod's log names it.
@@ -74,6 +83,14 @@ pub enum DatabaseError {
     /// time instead.
     #[error("{which} pool size must be at least 1 (got 0)")]
     PoolSizeZero { which: &'static str },
+
+    #[error("combined main, ingress and control-plane pool size exceeds the supported range")]
+    PoolSizeOverflow,
+
+    #[error(
+        "attested PostgreSQL pool has capacity {actual}, but its lane budgets require {expected}"
+    )]
+    AttestedPoolLaneCapacityMismatch { expected: u32, actual: u32 },
 }
 
 /// Default main-pool connection cap, preserving the behavior that was
@@ -167,13 +184,23 @@ pub(crate) enum SqlitePoolStorage {
 #[derive(Clone, kameo::Reply)]
 pub struct Database {
     pub(in crate::db) backend: DatabaseBackend,
+    /// Admission for this logical lane over `backend`.
+    pub(in crate::db) admission: PoolAdmission,
+    /// Optional reserved ingress lane over the same physical pool. Only the
+    /// main handle stores this; `ingress_lane` returns a clone whose active
+    /// admission is this separate bounded semaphore.
+    pub(in crate::db) ingress_admission: Option<PoolAdmission>,
     /// The dedicated control-plane pool (ADR-0017 element 4/12), present
     /// only when [`DatabaseConfig::control_plane_pool`] was set. Hosts only
     /// node/claim liveness statements — see [`Database::control_plane_guard`].
     pub(in crate::db) control_plane_backend: Option<DatabaseBackend>,
+    pub(in crate::db) control_plane_admission: Option<PoolAdmission>,
+    /// Present only when the control-plane backend is the exact hook-bearing
+    /// pool paired with its physical attestation capability.
+    pub(in crate::db) control_plane_pg_writer: Option<Box<AttestedPostgresWriterCapability>>,
     pub(in crate::db) name: String,
     pub(in crate::db) driver: DatabaseDriver,
-    /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
+    /// The configured DSN for URL-backed handles (ADR-0017 Phase 3 Slice 4
     /// FIX 4): lets a caller compare "does this other resolved URL point
     /// at the same database as this handle" — e.g.
     /// `sm_persistence::open_for_cluster_mode`'s co-location check, which
@@ -185,8 +212,15 @@ pub struct Database {
     /// caller must go out of its way to read it, rather than have it leak
     /// into an incidental log/format call. Callers that log or embed this
     /// value in an error message MUST redact credentials first (DSNs
-    /// commonly carry a password in their userinfo component).
+    /// commonly carry a password in their userinfo component). A physically
+    /// attested PostgreSQL handle stores an intentionally invalid PostgreSQL
+    /// marker here because its `PgConnectOptions` cannot be round-tripped;
+    /// externally supplied pools may store other synthetic labels. Treat this
+    /// accessor as a reconnect URL only for URL-backed handles.
     pub(in crate::db) database_url: String,
+    /// Present only when the exact hook-bearing pool and its unforgeable
+    /// writer capability were consumed together.
+    pub(in crate::db) attested_pg_writer: Option<AttestedPostgresWriterCapability>,
 }
 
 impl Database {
@@ -205,6 +239,12 @@ impl Database {
     pub(crate) async fn detached_postgres_startup_connection(
         &self,
     ) -> Result<sqlx::PgConnection, DatabaseError> {
+        if self.ingress_admission.is_some() {
+            return Err(DatabaseError::QueryFailed(
+                "detached startup connections are unavailable after reserved pool lanes are created"
+                    .to_owned(),
+            ));
+        }
         match &self.backend {
             DatabaseBackend::Postgres(pool) => Ok(pool.acquire().await?.detach()),
             DatabaseBackend::Sqlite(_) => Err(DatabaseError::QueryFailed(
@@ -221,8 +261,15 @@ impl Database {
         storage: SqlitePoolStorage,
     ) -> Self {
         Self {
+            admission: PoolAdmission::unbounded(
+                pool.options().get_acquire_timeout(),
+                PoolLane::External,
+            ),
+            ingress_admission: None,
             backend: DatabaseBackend::Sqlite(pool),
             control_plane_backend: None,
+            control_plane_admission: None,
+            control_plane_pg_writer: None,
             name: name.to_string(),
             driver: DatabaseDriver::Sqlite,
             database_url: if storage == SqlitePoolStorage::InMemory {
@@ -230,17 +277,266 @@ impl Database {
             } else {
                 "sqlite:external-pool".to_string()
             },
+            attested_pg_writer: None,
         }
     }
 
     /// Wrap a physical external PostgreSQL pool without retaining its DSN.
     pub(crate) fn from_postgres_pool(name: &str, pool: PgPool) -> Self {
         Self {
+            admission: PoolAdmission::unbounded(
+                pool.options().get_acquire_timeout(),
+                PoolLane::External,
+            ),
+            ingress_admission: None,
             backend: DatabaseBackend::Postgres(pool),
             control_plane_backend: None,
+            control_plane_admission: None,
+            control_plane_pg_writer: None,
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             database_url: "postgres:external-pool".to_string(),
+            attested_pg_writer: None,
+        }
+    }
+
+    /// Wrap the exact physical-attestation pool and retain its dark writer
+    /// capability. This constructor accepts the private pool/capability
+    /// wrapper as one value, so it cannot bind a token to another pool.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_attested_postgres_pool(name: &str, pool: AttestedPgPool) -> Self {
+        let main_budget = pool.max_connections();
+        Self::from_attested_postgres_pool_with_budgets(name, pool, main_budget, None, None)
+            .expect("the attested pool's default main budget matches its own capacity")
+    }
+
+    pub(crate) async fn from_attested_postgres_pool_with_ingress(
+        name: &str,
+        pool: AttestedPgPool,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        Self::from_attested_postgres_pool_with_budgets(
+            name,
+            pool,
+            main_budget,
+            Some(ingress_budget),
+            None,
+        )
+    }
+
+    pub(crate) async fn from_attested_postgres_pool_with_ingress_and_control_plane(
+        name: &str,
+        pool: AttestedPgPool,
+        control_plane_pool: Option<(AttestedPgPool, u32)>,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        Self::from_attested_postgres_pool_with_budgets(
+            name,
+            pool,
+            main_budget,
+            Some(ingress_budget),
+            control_plane_pool,
+        )
+    }
+
+    fn from_attested_postgres_pool_with_budgets(
+        name: &str,
+        pool: AttestedPgPool,
+        main_budget: u32,
+        ingress_budget: Option<u32>,
+        control_plane_pool: Option<(AttestedPgPool, u32)>,
+    ) -> Result<Self, DatabaseError> {
+        if main_budget == 0 {
+            return Err(DatabaseError::PoolSizeZero { which: "main" });
+        }
+        if ingress_budget == Some(0) {
+            return Err(DatabaseError::PoolSizeZero { which: "ingress" });
+        }
+        let expected = match ingress_budget {
+            Some(ingress) => main_budget
+                .checked_add(ingress)
+                .ok_or(DatabaseError::PoolSizeOverflow)?,
+            None => main_budget,
+        };
+        let actual = pool.max_connections();
+        if actual != expected {
+            return Err(DatabaseError::AttestedPoolLaneCapacityMismatch { expected, actual });
+        }
+
+        if let Some((control_plane_pool, control_plane_budget)) = &control_plane_pool {
+            if *control_plane_budget == 0 {
+                return Err(DatabaseError::PoolSizeZero {
+                    which: "control-plane",
+                });
+            }
+            if !pool.has_same_attestation_config(control_plane_pool) {
+                return Err(PhysicalAttestationError::Mismatch {
+                    field: "control-plane pool attestation configuration",
+                }
+                .into());
+            }
+            let actual = control_plane_pool.max_connections();
+            if actual != *control_plane_budget {
+                return Err(DatabaseError::AttestedPoolLaneCapacityMismatch {
+                    expected: *control_plane_budget,
+                    actual,
+                });
+            }
+        }
+
+        // Check every wrapper before consuming either one. An outstanding
+        // raw test lease must not leave a half-combined pool pair.
+        pool.ensure_no_active_leases()?;
+        if let Some((control_plane_pool, _)) = &control_plane_pool {
+            control_plane_pool.ensure_no_active_leases()?;
+        }
+
+        let (pool, attested_pg_writer) = pool.into_parts()?;
+        let acquire_timeout = pool.options().get_acquire_timeout();
+        let (control_plane_backend, control_plane_admission, control_plane_pg_writer) =
+            match control_plane_pool {
+                Some((pool, budget)) => {
+                    let (pool, control_plane_capability) = pool.into_parts()?;
+                    let acquire_timeout = pool.options().get_acquire_timeout();
+                    (
+                        Some(DatabaseBackend::Postgres(pool)),
+                        Some(PoolAdmission::new(
+                            budget,
+                            acquire_timeout,
+                            PoolLane::ControlPlane,
+                        )),
+                        Some(Box::new(control_plane_capability)),
+                    )
+                }
+                None => (None, None, None),
+            };
+        Ok(Self {
+            admission: PoolAdmission::new(main_budget, acquire_timeout, PoolLane::Main),
+            ingress_admission: ingress_budget
+                .map(|size| PoolAdmission::new(size, acquire_timeout, PoolLane::Ingress)),
+            backend: DatabaseBackend::Postgres(pool),
+            control_plane_backend,
+            control_plane_admission,
+            control_plane_pg_writer,
+            name: name.to_string(),
+            driver: DatabaseDriver::Postgres,
+            // PgConnectOptions can carry startup parameters that SQLx's URL
+            // rendering drops. Keep an intentionally invalid PostgreSQL URI;
+            // PostgreSQL-prefix consumers select that driver and SQLx rejects
+            // it. The in-memory SQLite mode only prevents a disk file if a
+            // future consumer misclassifies this marker.
+            database_url: "postgres://[attested-pool?mode=memory".to_owned(),
+            attested_pg_writer: Some(attested_pg_writer),
+        })
+    }
+
+    /// Build a private logical view over only the attested control-plane pool.
+    /// It shares that pool's admission semaphore and capability, with no main,
+    /// ingress, or nested control-plane lane available to the verifier.
+    pub(crate) fn attested_control_plane_lineage_view(
+        &self,
+        configured_deployment: Option<lineage::DeploymentUuid>,
+    ) -> Result<(Self, lineage::AttestedLineage), DatabaseError> {
+        if self.attested_pg_writer.is_none() {
+            return Err(PhysicalAttestationError::Mismatch {
+                field: "attested main pool capability",
+            }
+            .into());
+        }
+        let backend = self.control_plane_backend.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let admission = self.control_plane_admission.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let capability = self
+            .control_plane_pg_writer
+            .as_deref()
+            .cloned()
+            .ok_or_else(|| PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            })?;
+        let expected = capability.attested_lineage_for_deployment(configured_deployment)?;
+
+        let mut view = self.clone();
+        view.backend = backend;
+        view.admission = admission;
+        view.ingress_admission = None;
+        view.control_plane_backend = None;
+        view.control_plane_admission = None;
+        view.control_plane_pg_writer = None;
+        view.database_url = "postgres://[attested-control-plane-pool?mode=memory".to_owned();
+        view.attested_pg_writer = Some(capability);
+        Ok((view, expected))
+    }
+
+    /// Build a private logical view over the exact attested control-plane
+    /// pool, retaining its own physical writer capability. Stores that need
+    /// to validate both sides of a split-pool contract can inspect this view
+    /// without reopening a URL or borrowing the main-pool capability.
+    pub(crate) fn attested_control_plane_pool_view(
+        &self,
+    ) -> Result<(Self, AttestedPostgresWriterCapability), DatabaseError> {
+        if self.attested_pg_writer.is_none() {
+            return Err(PhysicalAttestationError::Mismatch {
+                field: "attested main pool capability",
+            }
+            .into());
+        }
+        let backend = self.control_plane_backend.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let admission = self.control_plane_admission.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let capability = self
+            .control_plane_pg_writer
+            .as_deref()
+            .cloned()
+            .ok_or_else(|| PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            })?;
+
+        let mut view = self.clone();
+        view.backend = backend;
+        view.admission = admission;
+        view.ingress_admission = None;
+        view.control_plane_backend = None;
+        view.control_plane_admission = None;
+        view.control_plane_pg_writer = None;
+        view.database_url = "postgres://[attested-control-plane-pool?mode=memory".to_owned();
+        view.attested_pg_writer = Some(capability.clone());
+        Ok((view, capability))
+    }
+
+    /// Whether this handle owns the exact hook-bearing pool created by the
+    /// physical attestor. Child stores must share this handle or fail closed;
+    /// its `database_url()` value is deliberately not reconnectable.
+    pub(crate) fn uses_attested_postgres_pool(&self) -> bool {
+        self.attested_pg_writer.is_some()
+    }
+
+    pub(crate) fn attested_pg_writer_capability(&self) -> Option<AttestedPostgresWriterCapability> {
+        self.attested_pg_writer.clone()
+    }
+
+    pub(crate) fn verify_attested_pg_writer_capability(
+        &self,
+        capability: &AttestedPostgresWriterCapability,
+    ) -> Result<(), PhysicalAttestationError> {
+        match &self.attested_pg_writer {
+            Some(owned) if owned.belongs_to(capability) => Ok(()),
+            _ => Err(PhysicalAttestationError::WrongPool),
         }
     }
 
@@ -283,7 +579,6 @@ impl Database {
                 });
             }
         }
-
         debug!(driver = ?config.driver, "Opening database");
         let backend = connect_backend(
             config.driver,
@@ -305,6 +600,13 @@ impl Database {
             ),
             None => None,
         };
+        let control_plane_admission = config.control_plane_pool.map(|pool| {
+            PoolAdmission::new(
+                pool.size,
+                CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
+                PoolLane::ControlPlane,
+            )
+        });
 
         info!(
             name = %name,
@@ -316,15 +618,56 @@ impl Database {
 
         Ok(Self {
             backend,
+            admission: PoolAdmission::unbounded(config.acquire_timeout, PoolLane::Main),
+            ingress_admission: None,
             control_plane_backend,
+            control_plane_admission,
+            control_plane_pg_writer: None,
             name: name.to_string(),
             driver: config.driver,
             database_url: config.database_url.clone(),
+            attested_pg_writer: None,
         })
     }
 
+    /// Clone this logical database onto its reserved ingress admission lane.
+    /// Both handles retain the same private physical backend and attestation
+    /// binding, while admission permits remain disjoint.
+    pub(crate) fn ingress_lane(&self) -> Self {
+        let Some(admission) = &self.ingress_admission else {
+            return self.clone();
+        };
+        let mut ingress = self.clone();
+        ingress.admission = admission.clone();
+        ingress
+    }
+
+    pub(crate) fn is_ingress_lane(&self) -> bool {
+        self.admission.lane() == PoolLane::Ingress
+    }
+
+    pub(crate) fn is_main_lane(&self) -> bool {
+        self.admission.lane() == PoolLane::Main
+    }
+
+    /// Test whether two handles carry the very same reserved lane, without
+    /// exposing its semaphore or the underlying physical pool.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn shares_ingress_lane(&self, other: &Self) -> bool {
+        self.is_ingress_lane()
+            && other.is_ingress_lane()
+            && self.admission.same_admission(&other.admission)
+    }
+
+    pub(crate) fn ingress_pool_size(&self) -> Option<u32> {
+        self.ingress_admission.as_ref()?.limit()
+    }
+
     pub async fn guard(&self) -> Result<ConnectionGuard, DatabaseError> {
-        Ok(ConnectionGuard::new(self.backend.clone()))
+        Ok(ConnectionGuard::new(
+            self.backend.clone(),
+            self.admission.clone(),
+        ))
     }
 
     /// A `ConnectionGuard` against the dedicated control-plane pool (ADR-0017
@@ -338,7 +681,12 @@ impl Database {
     /// `Database` was opened without a control-plane pool.
     pub async fn control_plane_guard(&self) -> Result<ConnectionGuard, DatabaseError> {
         match &self.control_plane_backend {
-            Some(backend) => Ok(ConnectionGuard::new(backend.clone())),
+            Some(backend) => Ok(ConnectionGuard::new(
+                backend.clone(),
+                self.control_plane_admission
+                    .clone()
+                    .expect("control plane backend and admission are constructed together"),
+            )),
             None => Err(DatabaseError::ControlPlanePoolUnavailable),
         }
     }
@@ -352,7 +700,9 @@ impl Database {
     /// state" — to hold across multiple writes that must commit together
     /// or not at all.
     pub async fn begin(&self) -> Result<Transaction<'_>, DatabaseError> {
-        Transaction::begin(&self.backend).await
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
+        Transaction::begin(&self.backend, permit, acquisition_deadline).await
     }
 
     /// Begin a transaction that acquires the database write lock
@@ -360,7 +710,9 @@ impl Database {
     /// a read, to avoid SQLite deadlocks when two connections both
     /// start as readers and then try to upgrade to writers.
     pub async fn begin_immediate(&self) -> Result<Transaction<'_>, DatabaseError> {
-        Transaction::begin_immediate(&self.backend).await
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
+        Transaction::begin_immediate(&self.backend, permit, acquisition_deadline).await
     }
 
     pub fn name(&self) -> &str {
@@ -383,10 +735,12 @@ impl Database {
         self.control_plane_backend.is_some()
     }
 
-    /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
-    /// FIX 4). See the field's own doc comment for the redaction caveat —
-    /// this MAY carry credentials in its userinfo component; callers that
-    /// log or embed it in a user-facing error MUST redact first.
+    /// The configured DSN for URL-backed handles (ADR-0017 Phase 3 Slice 4
+    /// FIX 4). A physically attested PostgreSQL handle returns an intentionally
+    /// invalid PostgreSQL marker; externally supplied pools may return
+    /// synthetic labels. See the field's own doc comment for the redaction
+    /// caveat — this MAY carry credentials in its userinfo component; callers
+    /// that log or embed it in a user-facing error MUST redact first.
     pub fn database_url(&self) -> &str {
         &self.database_url
     }

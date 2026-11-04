@@ -103,7 +103,7 @@ impl SmEnableCommit {
         sm_state: &mut StreamManagementState,
         sm_ingress_fence: &mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         bound_jid: Option<&jid::FullJid>,
-        registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     ) {
         let registry_published = match (bound_jid, registry_owner) {
             (Some(jid), Some(owner)) => state
@@ -191,7 +191,7 @@ impl Drop for SmEnableClaimGuard {
 pub(in crate::server::routes::websocket) fn terminate_if_demoted_during_publication(
     state: &WebSocketState,
     jid: &jid::FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
 ) {
     let Some(stream_id) = stream_id.map(waddle_xmpp::pending_delivery::SmSessionId::as_str) else {
@@ -222,6 +222,7 @@ pub(in crate::server::routes::websocket) fn terminate_if_demoted_during_publicat
     let (ack, _ack_rx) = tokio::sync::oneshot::channel();
     let request = waddle_xmpp::registry::ForceDetachRequest {
         origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        target_binding: entry.binding_ref().cloned(),
         requester_bare_jid: jid.to_bare(),
         ack,
     };
@@ -324,6 +325,13 @@ pub(in crate::server::routes::websocket::stream_management) fn max_resume_secs_f
 /// Passed through `handle_sm_stanza` and its helpers so each signature stays
 /// below the clippy too-many-arguments threshold.
 pub(in crate::server::routes::websocket) struct SmCtx<'a> {
+    pub(in crate::server::routes::websocket) connection_ref:
+        &'a waddle_xmpp::ownership::ConnectionRef,
+    pub(in crate::server::routes::websocket) binding_ref:
+        &'a mut Option<waddle_xmpp::ownership::BindingRef>,
+    #[cfg(test)]
+    pub(in crate::server::routes::websocket) resume_binding_attempts:
+        &'a mut Vec<waddle_xmpp::ownership::BindingRef>,
     pub(in crate::server::routes::websocket) phase: &'a mut ConnectionPhase,
     pub(in crate::server::routes::websocket) sm_state: &'a mut StreamManagementState,
     pub(in crate::server::routes::websocket) sm_ingress_fence:
@@ -391,7 +399,16 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
                 SmAck::new(ctx.sm_state.inbound_count()).to_xml(),
             )]
         }
-        SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
+        SmStanza::Ack(ack) => {
+            apply_sm_ack_with_fence(
+                state,
+                ctx.sm_state,
+                ctx.phase,
+                ack.h,
+                ctx.sm_ingress_fence.as_ref(),
+            )
+            .await
+        }
         SmStanza::Resume(resume) => {
             handle_sm_resume(resume, state, ctx, finalized_resume_outcome).await
         }
@@ -476,11 +493,22 @@ pub(in crate::server::routes::websocket) async fn complete_acknowledged_ingress_
 /// undefined-condition stream error plus the RFC 7395 close frame
 /// (mirroring the resume path), and the connection phase is set to
 /// Closing so the loop terminates the stream.
+#[cfg(test)]
 pub(in crate::server::routes::websocket) async fn apply_sm_ack(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
     phase: &mut ConnectionPhase,
     h: u32,
+) -> Vec<ResponseFrame> {
+    apply_sm_ack_with_fence(state, sm_state, phase, h, None).await
+}
+
+pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
+    state: &WebSocketState,
+    sm_state: &mut StreamManagementState,
+    phase: &mut ConnectionPhase,
+    h: u32,
+    expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
 ) -> Vec<ResponseFrame> {
     if !sm_state.ack_regresses_last_acked(h) && !sm_state.ack_exceeds_outbound(h) {
         // Keep the old acknowledgement window on a failed custody write so a
@@ -538,14 +566,51 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack(
             ]
         }
         SmAckObservation::Duplicate { .. } => {
-            settle_pending_ack_window(state, sm_state, h, h).await;
+            if matches!(
+                settle_pending_ack_window(state, sm_state, h, h, expected_fence).await,
+                Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. })
+            ) {
+                *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+                return vec![
+                    ResponseFrame::from(Element::from(xmpp_parsers::stream_error::StreamError {
+                        condition:
+                            xmpp_parsers::stream_error::DefinedCondition::InternalServerError,
+                        texts: Default::default(),
+                        application_specific: Vec::new(),
+                    })),
+                    ResponseFrame::from(websocket_stream_close_element()),
+                ];
+            }
             vec![]
         }
         SmAckObservation::Advanced {
             acked_from_exclusive,
             ..
         } => {
-            settle_pending_ack_window(state, sm_state, acked_from_exclusive, h).await;
+            if matches!(
+                settle_pending_ack_window(
+                    state,
+                    sm_state,
+                    acked_from_exclusive,
+                    h,
+                    expected_fence,
+                )
+                .await,
+                Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner {
+                    ..
+                })
+            ) {
+                *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+                return vec![
+                    ResponseFrame::from(Element::from(xmpp_parsers::stream_error::StreamError {
+                        condition:
+                            xmpp_parsers::stream_error::DefinedCondition::InternalServerError,
+                        texts: Default::default(),
+                        application_specific: Vec::new(),
+                    })),
+                    ResponseFrame::from(websocket_stream_close_element()),
+                ];
+            }
             vec![]
         }
     }
@@ -556,14 +621,33 @@ pub(in crate::server::routes::websocket::stream_management) async fn settle_pend
     sm_state: &StreamManagementState,
     acked_from_exclusive: u32,
     h: u32,
-) -> bool {
+    expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
+) -> Result<(), waddle_xmpp::pending_delivery::storage::PendingStorageError> {
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
         match state
             .deps
             .protocol
             .pending_delivery_storage
-            .delete_acked_in_window(&session_id, acked_from_exclusive, h)
+            .delete_acked_in_window(
+                &session_id,
+                acked_from_exclusive,
+                h,
+                match expected_fence {
+                    Some(fence) => {
+                        waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(fence)
+                    }
+                    None if sm_state.enabled
+                        && sm_state.stream_id.is_some()
+                        && !sm_state.is_resumable() =>
+                    {
+                        waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+                    }
+                    None => {
+                        waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Unavailable
+                    }
+                },
+            )
             .await
         {
             Ok(removed) if removed > 0 => {
@@ -575,18 +659,19 @@ pub(in crate::server::routes::websocket::stream_management) async fn settle_pend
                 );
             }
             Ok(_) => {}
-            Err(_) => {
+            Err(error) => {
                 warn!(
                     session = %session_id,
                     h,
+                    %error,
                     failure = "storage",
                     "pending_delivery ACK deletion retained; claim release must settle it"
                 );
-                return false;
+                return Err(error);
             }
         }
     }
-    true
+    Ok(())
 }
 
 pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_enable(
@@ -837,6 +922,10 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     use waddle_xmpp::stream_management::CrossNodeResumeOutcome;
 
     let SmCtx {
+        connection_ref,
+        binding_ref,
+        #[cfg(test)]
+        resume_binding_attempts,
         phase,
         sm_state,
         sm_ingress_fence,
@@ -869,6 +958,14 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
             SmResumeOutcome::UnexpectedRequest,
         );
     }
+
+    // Capture one identity for this attempt before any asynchronous work.
+    // An early failed attempt drops it; a successful one carries it to the
+    // registration path. Neither case reuses the token on a later attempt.
+    *binding_ref = None;
+    let attempt_binding = waddle_xmpp::ownership::BindingRef::fresh(connection_ref.clone());
+    #[cfg(test)]
+    resume_binding_attempts.push(attempt_binding.clone());
 
     // Capture and retire the old transport before claiming its snapshot. The
     // connection-owned handshake retains counters, replay and occupancy and
@@ -1282,8 +1379,10 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
             &staged_sm_state,
             staged_sm_state.last_acked,
             resume.h,
+            detached.promotion_custody.captured_fence(),
         )
         .await
+        .is_ok()
         || state
             .deps
             .protocol
@@ -1349,6 +1448,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
     *pending_resume_claim = Some(claim_guard);
+    *binding_ref = Some(attempt_binding);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —

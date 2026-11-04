@@ -27,7 +27,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 /// XmppConfig for unit tests: uses in-memory SQLite for all storage backends.
 fn test_xmpp_config() -> XmppConfig {
     XmppConfig {
-        pubsub_database_url: super::config::ResolvedXmppDatabaseUrl::Resolved(
+        pubsub_database_url: super::config::ResolvedXmppDatabaseUrl::Explicit(
             "sqlite::memory:".to_string(),
         ),
         ..XmppConfig::default()

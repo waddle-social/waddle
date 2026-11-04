@@ -6,6 +6,7 @@ use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
+use crate::db::lineage::PgIdentity;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
 impl DatabasePubSubStorage {
@@ -20,6 +21,41 @@ impl DatabasePubSubStorage {
         storage.initialize().await?;
         info!(driver = ?storage.db.driver(), "PubSub storage initialized");
         Ok(storage)
+    }
+
+    /// Prepare the PubSub schema on this exact owner database handle.
+    ///
+    /// The caller must fence old writers and other privileged schema or role
+    /// changes. PostgreSQL and the exact pre-enrolled physical identity are
+    /// required; the current role must own the schema and not be a login role.
+    /// An attested runtime handle is never accepted for owner DDL.
+    /// The caller supplies the trusted identity and verifies logical lineage;
+    /// the owner role needs EXECUTE on `pg_catalog.pg_control_system()`.
+    /// A populated current store must have every expected table and is left
+    /// unchanged; restricted attachment separately checks its full shape.
+    /// Incompatible or unversioned stores are reset only when all managed
+    /// data and push watermarks are empty.
+    pub async fn initialize_owner(db: Database, identity: &PgIdentity) -> Result<(), XmppError> {
+        if db.driver() != DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+            return Err(XmppError::internal(
+                "PubSub owner initialization requires a PostgreSQL owner database handle"
+                    .to_string(),
+            ));
+        }
+        let storage = Self { db };
+        storage.initialize_guarded_owner(identity).await?;
+        info!(driver = ?storage.db.driver(), "PubSub storage initialized");
+        Ok(())
+    }
+
+    /// Attach the exact attested PostgreSQL main-lane database after a
+    /// bounded read-only verification. This never initializes or repairs it.
+    /// The application is trusted to issue its normal DML: table grants alone
+    /// cannot prevent arbitrary SQL from choosing identity values or changing
+    /// projection counters. Old writers and privileged DDL must remain fenced.
+    pub async fn attach_existing(db: Database) -> Result<Self, super::PubSubRuntimeAttachError> {
+        super::runtime_attach::verify(&db).await?;
+        Ok(Self { db })
     }
 
     pub fn database(&self) -> Database {

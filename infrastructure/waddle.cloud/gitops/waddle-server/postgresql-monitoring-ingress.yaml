@@ -29,7 +29,8 @@ data:
           'ingress_effect_intents',
           'ingress_effect_receipts',
           'ingress_archive_dispatch',
-          'ingress_effect_descendants'
+          'ingress_effect_descendants',
+          'ingress_owner_rejections'
         )
         ORDER BY relname
       primary: true
@@ -50,63 +51,78 @@ data:
     waddle_ingress_gc:
       target_databases: ["waddle"]
       query: |
-        -- Bounded by the partial retention eligibility index; `eligible` is exactly the
-        -- substrate GC candidate predicate (ingress_substrate::expired_candidates).
-        -- Uncorrelated IN (SELECT ...) lets PostgreSQL use hashed subplans
-        -- instead of per-row probes.
-        WITH cutoff AS (
-          SELECT now() - interval '8 days' AS value
-        ),
+        -- The eligible flag is the substrate candidate predicate, including
+        -- pending delivery and the complete mapped rejection pair.
+        WITH cutoff AS (SELECT now() - interval '8 days' AS value),
         expired AS (
-          SELECT
-            message.message_key,
-            message.terminal_at,
-            message.retention_eligible_at,
-            message.message_key IN (
-              SELECT ref.message_key FROM ingress_sm_refs ref
-              UNION
-              SELECT dispatch.message_key FROM ingress_archive_dispatch dispatch
-              JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
-              WHERE dispatch.pending_row_id <> ''
-            ) AS has_ref,
-            message.message_key IN (
-              SELECT descendant.message_key FROM ingress_effect_descendants descendant
-              WHERE descendant.settled_at IS NULL
-            ) AS has_descendant,
-            NOT EXISTS (
-              SELECT 1 FROM ingress_effect_intents intent
-              WHERE intent.message_key = message.message_key
-                AND NOT EXISTS (
-                  SELECT 1 FROM ingress_effect_receipts receipt
-                  WHERE receipt.message_key = intent.message_key
-                    AND receipt.kind = intent.kind
-                    AND receipt.semantic_identity_hash = intent.semantic_identity_hash
-                )
-            ) AS receipts_complete
-          FROM ingress_messages message
-          CROSS JOIN cutoff
-          WHERE message.terminal_at IS NOT NULL
-            AND (message.retention_eligible_at IS NULL OR message.retention_eligible_at <= cutoff.value)
+          SELECT m.message_key, m.terminal_at, m.retention_eligible_at,
+            (m.terminal_at IS NOT NULL
+            AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= cutoff.value)
+            AND NOT EXISTS (
+            SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+            AND NOT EXISTS (
+            SELECT 1 FROM ingress_effect_receipts r
+            WHERE r.message_key = i.message_key AND r.kind = i.kind
+            AND r.semantic_identity_hash = i.semantic_identity_hash
+            )
+            )
+            AND NOT EXISTS (
+            SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
+            UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch
+            JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
+            WHERE dispatch.message_key = m.message_key AND dispatch.pending_row_id <> ''
+            )
+            AND NOT EXISTS (
+            SELECT 1 FROM ingress_owner_rejections parent WHERE parent.child_message_key = m.message_key
+            )
+            AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS (
+            SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+            ))
+            AND NOT EXISTS (
+            SELECT 1 FROM ingress_owner_rejections pair WHERE pair.source_message_key = m.message_key
+            AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR NOT EXISTS (
+            SELECT 1 FROM ingress_messages child WHERE child.message_key = pair.child_message_key
+            AND child.terminal_at IS NOT NULL
+            AND (child.retention_eligible_at IS NULL OR child.retention_eligible_at <= cutoff.value)
+            AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = child.message_key
+            UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch
+            JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
+            WHERE dispatch.message_key = child.message_key AND dispatch.pending_row_id <> '')
+            AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = child.message_key AND d.settled_at IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections nested WHERE nested.source_message_key = child.message_key)
+            AND (child.owner_decision IS NULL OR child.owner_decision <> 2)
+            AND NOT (child.source_binding_version IS NOT NULL AND (child.owner_decision IS NULL OR child.owner_decision = 0)
+            AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = child.message_key AND owner_intent.kind = 12))
+            AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = child.message_key AND NOT EXISTS (
+            SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
+            ))
+            )
+            AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+            AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
+            AND NOT EXISTS (
+            SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
+            )) AS eligible
+          FROM ingress_messages m CROSS JOIN cutoff
+          WHERE m.terminal_at IS NOT NULL
+            AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= cutoff.value)
         )
         SELECT
-          count(*) FILTER (WHERE receipts_complete AND NOT has_ref AND NOT has_descendant) AS eligible_messages,
-          coalesce(
-            extract(epoch FROM now() - min(coalesce(retention_eligible_at, terminal_at)) FILTER (WHERE receipts_complete AND NOT has_ref AND NOT has_descendant)),
-            0
-          ) AS oldest_eligible_age_seconds,
-          count(*) FILTER (WHERE has_ref OR has_descendant OR NOT receipts_complete) AS retained_referenced_messages
+          count(*) FILTER (WHERE eligible) AS eligible_messages,
+          coalesce(extract(epoch FROM now() - min(coalesce(retention_eligible_at, terminal_at))
+            FILTER (WHERE eligible)), 0) AS oldest_eligible_age_seconds,
+          count(*) FILTER (WHERE NOT eligible) AS retained_referenced_messages
         FROM expired
       primary: true
       metrics:
         - eligible_messages:
             usage: GAUGE
-            description: Terminal ingress messages currently eligible for retention GC.
+            description: Terminal ingress candidates currently eligible for retention GC; each ready rejection pair counts once.
         - oldest_eligible_age_seconds:
             usage: GAUGE
             description: Age in seconds of the oldest ingress message eligible for retention GC.
         - retained_referenced_messages:
             usage: GAUGE
-            description: Expired terminal ingress messages retained by SM custody, archived pending delivery, scheduled descendants, or pending effect intents.
+            description: Expired terminal ingress messages retained by SM custody, archived pending delivery, scheduled descendants, owner results, or pending effect intents.
 
     waddle_ingress_messages:
       target_databases: ["waddle"]
@@ -126,6 +142,17 @@ data:
                 SELECT descendant.message_key FROM ingress_effect_descendants descendant
                 WHERE descendant.settled_at IS NULL
               )
+              OR message.message_key IN (
+                SELECT owner_child.source_message_key FROM ingress_owner_rejections owner_child
+                UNION
+                SELECT owner_child.child_message_key FROM ingress_owner_rejections owner_child
+              )
+              OR (message.source_binding_version IS NOT NULL
+                AND (message.owner_decision IS NULL OR message.owner_decision = 0)
+                AND message.message_key IN (
+                  SELECT owner_intent.message_key FROM ingress_effect_intents owner_intent
+                  WHERE owner_intent.kind = 12
+                ))
               THEN 'terminal_referenced'
             ELSE 'terminal_unreferenced'
           END AS state,
@@ -170,6 +197,17 @@ data:
                   SELECT descendant.message_key FROM ingress_effect_descendants descendant
                   WHERE descendant.settled_at IS NULL
                 )
+                OR message.message_key IN (
+                  SELECT owner_child.source_message_key FROM ingress_owner_rejections owner_child
+                  UNION
+                  SELECT owner_child.child_message_key FROM ingress_owner_rejections owner_child
+                )
+                OR (message.source_binding_version IS NOT NULL
+                  AND (message.owner_decision IS NULL OR message.owner_decision = 0)
+                  AND message.message_key IN (
+                    SELECT owner_intent.message_key FROM ingress_effect_intents owner_intent
+                    WHERE owner_intent.kind = 12
+                  ))
                 THEN 'terminal_referenced'
               ELSE 'terminal_unreferenced'
             END AS state

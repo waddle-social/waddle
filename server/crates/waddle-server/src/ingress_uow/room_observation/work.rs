@@ -347,21 +347,16 @@ async fn current_owner(
 ) -> Result<NodeIdentity, ObservationError> {
     #[cfg(feature = "clustering")]
     if let Some(identity) = tx.bound_node_identity().cloned() {
-        // Reuse this transaction's guard: acquiring another read guard behind
-        // a queued rotation writer would deadlock against our first guard.
-        if let Some(authority) = tx
-            .authority_guards
-            .iter()
-            .find(|guard| identity.owns_guard(guard))
-        {
-            return Ok(authority.identity().clone());
-        }
-        let owner = identity.current();
-        let authority = identity
-            .guard_if_current(&owner)
+        let owner = tx
+            .retained_authority()
+            .map_or_else(|| identity.current(), |guard| guard.identity().clone());
+        let authority = tx
+            .acquire_authority(&owner)
             .await
-            .ok_or(ObservationError::AuthorityStopped)?;
-        tx.retain_authority(authority);
+            .map_err(|_| ObservationError::AuthorityStopped)?;
+        if let Some(authority) = authority {
+            tx.retain_authority(authority);
+        }
         return Ok(owner);
     }
     // The transaction is only used above in clustering builds.

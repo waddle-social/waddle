@@ -390,6 +390,18 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         observe_release_result(ClaimOp::ReleaseMany, None, None, &result);
         result
     }
+
+    async fn release_many_exact(
+        &self,
+        claims: &[(Entity, ClaimEpoch)],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::ReleaseMany);
+        let result = self.inner.release_many_exact(claims, me).await;
+        guard.disarm();
+        observe_release_result(ClaimOp::ReleaseMany, None, None, &result);
+        result
+    }
 }
 
 #[cfg(test)]

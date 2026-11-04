@@ -804,6 +804,89 @@ async fn due_drain_renews_single_recipient_rows_before_the_first_send() {
     assert_eq!(summary.stale, 0);
 }
 
+#[tokio::test]
+async fn due_drain_retries_a_sealed_local_binding_from_the_original_row() {
+    use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+    use waddle_xmpp::registry::ConnectionEntry;
+
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let recipient = full_jid("sealed@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![recipient.clone()]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+
+    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(1);
+    let binding = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let entry = ConnectionEntry::new_for_binding(old_tx, binding.clone());
+    let registry = &state.deps.protocol.connection_registry;
+    let owner = registry.register_entry(recipient.clone(), entry.clone());
+    assert!(entry.seal_binding(owner, &binding));
+
+    let summary = drain_due_effects(state.as_ref(), 0, 8)
+        .await
+        .expect("drain sealed binding");
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 1);
+    assert!(old_rx.try_recv().is_err());
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find retry")
+        .expect("refusal retains original row");
+    assert!(row.lease_token.is_none());
+
+    let (new_tx, mut new_rx) = mpsc::channel::<OutboundStanza>(1);
+    registry.register(recipient, new_tx);
+    let state_for_retry = Arc::clone(&state);
+    let retry_at = row.available_at_ms;
+    let retry =
+        tokio::spawn(async move { drain_due_effects(state_for_retry.as_ref(), retry_at, 8).await });
+    let outbound = recv_outbound(&mut new_rx).await;
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("retry carries write acceptance")
+        .acknowledge();
+    assert_eq!(
+        retry
+            .await
+            .expect("retry task")
+            .expect("retry drain")
+            .drained,
+        1
+    );
+    assert!(state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find completed row")
+        .is_none());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn due_drain_times_out_a_full_local_channel_and_keeps_other_lifecycles_moving() {
     let state = create_test_websocket_state().await;

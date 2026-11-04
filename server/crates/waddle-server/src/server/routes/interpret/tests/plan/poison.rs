@@ -314,6 +314,7 @@ impl PendingDeliveryStorage for PoisonPending {
         _recipient: &BareJid,
         _session: &SmSessionId,
         _sequences: &HashSet<u32>,
+        _expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
     ) -> ReleaseRowsForOutboundSequencesOutcome {
         panic!("planning wrote PendingDeliveryStorage::release_rows_for_outbound_sequences")
     }
@@ -329,6 +330,7 @@ impl PendingDeliveryStorage for PoisonPending {
         _session: &SmSessionId,
         _from_exclusive: u32,
         _to_inclusive: u32,
+        _authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         panic!("planning wrote PendingDeliveryStorage::delete_acked_in_window")
     }

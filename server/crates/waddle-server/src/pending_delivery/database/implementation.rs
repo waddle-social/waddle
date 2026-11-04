@@ -1,6 +1,7 @@
 //! Implementation behind the parent module facade.
 
 use super::ack_windows;
+use super::ack_windows::AckWindowAuthority;
 use super::custody;
 use super::schema;
 use super::HashSet;
@@ -18,6 +19,7 @@ use super::{
     ClaimError, ClaimStore, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
 };
 use super::{PendingClaim, PendingClaimPhase, PendingClaimToken};
+use waddle_xmpp::pending_delivery::storage::PendingAckAuthority;
 
 // ---------------------------------------------------------------------------
 // Database-backed PendingDeliveryStorage (issue #209, slice (b) production
@@ -164,6 +166,60 @@ pub(in crate::pending_delivery::database) fn claim_error_to_pending_storage_erro
 }
 
 impl DatabasePendingDeliveryStorage {
+    /// Attach the supplied owner-prepared database without initializing or repairing it.
+    ///
+    /// PostgreSQL requires the main lane of a physically attested pool; SQLite
+    /// keeps using the supplied database, including a one-connection private
+    /// in-memory database. The checks describe a read-only snapshot, not future
+    /// schema state, writer readiness, deleted-row allocator high-water marks,
+    /// or quiescence of privileged DDL. SQLite temporary objects are inspected
+    /// only on the connection used for verification; its lock wait is capped
+    /// at five seconds without relaxing tighter settings. PostgreSQL lock and
+    /// statement waits are bounded as well. Neither establishes a total or
+    /// network deadline. This API is deliberately not wired into normal startup.
+    pub async fn attach_existing(
+        db: Database,
+        quota: QuotaPolicy,
+    ) -> Result<Self, super::PendingRuntimeAttachError> {
+        super::runtime_attach::verify(&db, false).await?;
+        Ok(Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        })
+    }
+
+    /// Attach the production PostgreSQL writer after checking its schema and
+    /// effective privileges in the same read-only transaction.
+    pub(crate) async fn attach_runtime_postgres(
+        db: Database,
+        quota: QuotaPolicy,
+    ) -> Result<Self, super::PendingRuntimeAttachError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(super::PendingRuntimeAttachError::AttestedPostgresPoolRequired);
+        }
+        super::runtime_attach::verify(&db, true).await?;
+        Ok(Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        })
+    }
+
+    /// Assemble a disposable fixture after owner initialization. This is not a
+    /// production schema or privilege attachment proof.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_initialized_database_for_test(db: Database, quota: QuotaPolicy) -> Self {
+        Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        }
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }
@@ -207,7 +263,7 @@ impl DatabasePendingDeliveryStorage {
             fencing: None,
             ack_windows: Default::default(),
         };
-        schema::initialize(&storage).await?;
+        schema::bootstrap_schema_owner(&storage.db).await?;
         info!(
             driver = ?storage.db.driver(),
             "pending_delivery storage initialized (XEP-0160)"
@@ -1378,18 +1434,49 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         recipient: &BareJid,
         session: &SmSessionId,
         sequences: &HashSet<u32>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
-        if sequences.is_empty() {
-            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
-                HashSet::new(),
-            );
-        }
-
         let state = self.ack_windows.for_session(session);
-        let _guard = state.operation.lock().await;
-        if let Err(error) = self.settle_ack_windows(session, &state).await {
-            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+        if sequences.is_empty() && self.fencing.is_none() {
+            match state.is_empty() {
+                Ok(true) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
+                        HashSet::new(),
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+                }
+            }
         }
+        let _guard = state.operation.lock().await;
+        let identity_guard = if let Some(fencing) = &self.fencing {
+            let Some(expected_fence) = expected_fence else {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    },
+                );
+            };
+            match fencing
+                .node_identity
+                .guard_if_current(expected_fence.owner())
+                .await
+            {
+                Some(guard) => Some(guard),
+                None => {
+                    let _ = state.discard_fence(expected_fence);
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::NotOwner {
+                            entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                        },
+                    );
+                }
+            }
+        } else {
+            None
+        };
         let sequence_placeholders = std::iter::repeat_n("?", sequences.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -1416,24 +1503,37 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 );
             }
         };
-        // Clustered fencing, identical shape to `insert_fenced`: a deposed
-        // but still-running node must not clear sequence bindings after
-        // another node acquired and hydrated the same durable SM session —
-        // the new owner would then promote the replay copies as
-        // non-row-backed while the original rows remain pending. The fence
-        // is the first statement inside this transaction; lost ownership
-        // aborts (rollback on drop) and surfaces as a failed release, which
-        // every caller already treats as retain-and-defer.
+        // Clustered fencing uses the immutable source fence captured with the
+        // detached queue. Same-node reacquisition changes claim_epoch without
+        // changing node identity, so checking only the process incarnation
+        // would let an obsolete capture release this generation's bindings.
+        // The row lock is the first statement in the transaction. ACK
+        // settlement below shares this transaction so a stale capture cannot
+        // mutate pending rows before this exact-epoch assertion.
         if let Some(fencing) = &self.fencing {
-            let identity = fencing.node_identity.current();
+            let expected_fence = expected_fence.expect("checked before transaction");
+            let identity_guard = identity_guard
+                .as_ref()
+                .expect("clustered release holds an identity guard");
+            if !fencing.node_identity.owns_guard(identity_guard)
+                || identity_guard.identity() != expected_fence.owner()
+            {
+                let _ = state.discard_fence(expected_fence);
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    },
+                );
+            }
             let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), session.as_str());
             let fence_rows = tx
                 .query(
-                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? FOR SHARE",
+                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
                     crate::db_params![
                         entity_key,
-                        identity.node_id.clone(),
-                        identity.node_epoch.clone(),
+                        expected_fence.owner().node_id.clone(),
+                        expected_fence.owner().node_epoch.clone(),
+                        expected_fence.epoch().0,
                     ],
                 )
                 .await;
@@ -1453,12 +1553,52 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 }
             };
             if !held {
+                let _ = state.discard_fence(expected_fence);
                 return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
                     PendingStorageError::NotOwner {
                         entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
                     },
                 );
             }
+        }
+        // Close ACK registration only after the exact claim row is locked.
+        // Any ACK proof published before this point is included in this
+        // transaction; subsequent registrations are deferred and merged back
+        // after release. This operation is terminal-only: the detached source
+        // has already left live ingress, and accepted ACKs have been settled
+        // or retained as proofs before promotion reaches this boundary.
+        let ack_fence = if self.fencing.is_some() {
+            expected_fence
+        } else {
+            None
+        };
+        let ack_window_release = match state.begin_release_for_fence(session, ack_fence) {
+            Ok(release) => release,
+            Err(error) => {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+            }
+        };
+        if let Err(error) = super::ack_windows::settle_ack_windows_in_transaction(
+            &mut tx,
+            session,
+            ack_window_release.pending(),
+        )
+        .await
+        {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+        }
+        if sequences.is_empty() {
+            if let Err(error) = tx.commit().await {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::Other(error.to_string()),
+                );
+            }
+            if let Err(error) = ack_window_release.committed() {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+            }
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
+                HashSet::new(),
+            );
         }
         let rows = tx.query(&select_sql, select_params).await;
         let mut rows = match rows {
@@ -1525,6 +1665,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                     PendingStorageError::Other(error.to_string()),
                 );
             }
+            if let Err(error) = ack_window_release.committed() {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+            }
             return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
                 released,
             );
@@ -1556,6 +1699,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 PendingStorageError::Other(error.to_string()),
             );
         }
+        if let Err(error) = ack_window_release.committed() {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+        }
         waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
             released,
         )
@@ -1578,11 +1724,120 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         let state = self.ack_windows.for_session(session);
-        state.retain(from_exclusive, to_inclusive)?;
+        let clustered_fence = if self.fencing.is_some() {
+            match authority {
+                PendingAckAuthority::Fenced(fence) => {
+                    state.retain(
+                        from_exclusive,
+                        to_inclusive,
+                        AckWindowAuthority::Fenced(fence.clone()),
+                    )?;
+                    Some(fence)
+                }
+                PendingAckAuthority::NonResumable => {
+                    state.retain(
+                        from_exclusive,
+                        to_inclusive,
+                        AckWindowAuthority::NonResumable,
+                    )?;
+                    None
+                }
+                PendingAckAuthority::Unavailable => {
+                    return Err(PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    });
+                }
+            }
+        } else {
+            state.retain(from_exclusive, to_inclusive, AckWindowAuthority::Portable)?;
+            None
+        };
         let _guard = state.operation.lock().await;
-        self.settle_ack_windows(session, &state).await
+        let identity_guard = if let (Some(fencing), Some(expected_fence)) =
+            (&self.fencing, clustered_fence)
+        {
+            match fencing
+                .node_identity
+                .guard_if_current(expected_fence.owner())
+                .await
+            {
+                Some(guard) => Some(guard),
+                None => {
+                    let _ = state.discard_fence(expected_fence);
+                    return Err(PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
+        if self.fencing.is_none() {
+            return self.settle_ack_windows(session, &state).await;
+        }
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let entity = Entity::new(EntityType::SmSession, session.as_str().to_string());
+        if let (Some(fencing), Some(expected_fence)) = (&self.fencing, clustered_fence) {
+            let identity_guard = identity_guard
+                .as_ref()
+                .expect("fenced clustered ACK holds an identity guard");
+            if !fencing.node_identity.owns_guard(identity_guard)
+                || identity_guard.identity() != expected_fence.owner()
+            {
+                let _ = state.discard_fence(expected_fence);
+                return Err(PendingStorageError::NotOwner { entity });
+            }
+            let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), session.as_str());
+            let mut fence_rows = tx
+                .query(
+                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                    crate::db_params![
+                        entity_key,
+                        expected_fence.owner().node_id.clone(),
+                        expected_fence.owner().node_epoch.clone(),
+                        expected_fence.epoch().0,
+                    ],
+                )
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            let held = fence_rows
+                .next()
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?
+                .is_some();
+            drop(fence_rows);
+            if !held {
+                let _ = state.discard_fence(expected_fence);
+                return Err(PendingStorageError::NotOwner { entity });
+            }
+        }
+
+        // The proof was registered synchronously before waiting for this
+        // operation lock. Its captured fence prevents a successor's release
+        // transaction from applying a stale socket ACK. The fence-free branch
+        // is limited to an explicitly non-resumable one-off SM id.
+        let ack_window_release = state.begin_release_for_fence(session, clustered_fence)?;
+        let removed = super::ack_windows::settle_ack_windows_in_transaction(
+            &mut tx,
+            session,
+            ack_window_release.pending(),
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        ack_window_release.committed()?;
+        drop(identity_guard);
+        Ok(removed)
     }
 
     async fn list_orphaned_claims(

@@ -3,6 +3,7 @@
 //! Persistence routes through `DbActor` over one shared SQLx-backed database.
 
 use super::actor::{DbActor, DbHealthCheck};
+use super::physical_attestation::AttestedPgPool;
 use super::{Database, DatabaseConfig, DatabaseError};
 use kameo::actor::{ActorRef, Spawn};
 use tracing::{info, instrument};
@@ -26,16 +27,80 @@ impl DatabasePool {
         info!(driver = ?config.driver, "Initializing database pool");
 
         let global_db = Database::from_config("global", &config).await?;
+        Ok(Self::from_database(global_db))
+    }
+
+    /// Wrap the same physically attested PostgreSQL pool with disjoint main
+    /// and ingress admission budgets. `pool` must have exactly the sum of the
+    /// two budgets as its physical maximum; neither lane can borrow from the
+    /// other. Restricted startup obtains its verified handle through
+    /// [`super::bootstrap::VerifiedGlobalAttachment`] instead.
+    pub async fn from_attested_postgres_pool(
+        name: &str,
+        pool: AttestedPgPool,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        Self::from_attested_postgres_pools(name, pool, None, main_budget, ingress_budget).await
+    }
+
+    /// Wrap physically attested main/ingress and optional control-plane pools.
+    /// The control-plane pool retains its independent capacity and admission
+    /// class; it must carry the same physical/lineage/runtime attestation as
+    /// the main pool.
+    pub async fn from_attested_postgres_pools(
+        name: &str,
+        pool: AttestedPgPool,
+        control_plane_pool: Option<(AttestedPgPool, u32)>,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        info!(
+            main_budget,
+            ingress_budget, "Wrapping attested database pool"
+        );
+        let global_db = match control_plane_pool {
+            Some(control_plane_pool) => {
+                Database::from_attested_postgres_pool_with_ingress_and_control_plane(
+                    name,
+                    pool,
+                    Some(control_plane_pool),
+                    main_budget,
+                    ingress_budget,
+                )
+                .await?
+            }
+            None => {
+                Database::from_attested_postgres_pool_with_ingress(
+                    name,
+                    pool,
+                    main_budget,
+                    ingress_budget,
+                )
+                .await?
+            }
+        };
+        Ok(Self::from_database(global_db))
+    }
+
+    pub(crate) fn from_database(global_db: Database) -> Self {
         let global_actor = DbActor::spawn(DbActor::new(global_db.clone()));
 
-        Ok(Self {
+        Self {
             global_actor,
             global_db,
-        })
+        }
     }
 
     pub fn global(&self) -> &Database {
         &self.global_db
+    }
+
+    /// Return the ingress admission lane over the same private backend as
+    /// [`Self::global`]. If no separate lane was configured, this is a clone
+    /// of the global admission class.
+    pub fn ingress(&self) -> Database {
+        self.global_db.ingress_lane()
     }
 
     pub fn global_actor(&self) -> &ActorRef<DbActor> {

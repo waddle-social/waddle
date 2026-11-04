@@ -11,6 +11,12 @@ mod reflection_dispatch;
 pub(crate) use capture::TEST_CAPTURE_LIMIT;
 pub use capture::{IngressEffectCapture, IngressEffectCaptureSnapshot};
 pub mod commit;
+#[cfg(feature = "test-support")]
+mod shared_correctness;
+#[cfg(feature = "test-support")]
+pub(crate) use shared_correctness::with_mam_rollback_gate;
+#[cfg(feature = "test-support")]
+pub(crate) use shared_correctness::{DarkSharedCorrectness, DarkSharedCorrectnessError};
 mod commit_room;
 mod commit_stream;
 pub mod decision;
@@ -41,6 +47,8 @@ pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOut
 use recovery_environment::RecoveryBinding;
 pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
+#[cfg(feature = "clustering")]
+pub mod recorded_room_archive;
 pub(crate) mod room_manifest;
 pub use recorded::{ProgressObligation, RouteProgress};
 pub use room_manifest::{
@@ -106,6 +114,9 @@ mod offline_hardening_tests;
 
 #[cfg(test)]
 mod muc_occupant_progress_tests;
+
+#[cfg(test)]
+mod relayed_origin_tests;
 
 #[cfg(test)]
 mod xep0045_room_manifest_tests;

@@ -185,23 +185,28 @@ impl PostgresFencedSmPersistence {
             node_identity,
             claim_fences: Arc::new(DashMap::new()),
         };
-        storage.ensure_schema().await?;
+        bootstrap_schema_owner(&storage.db).await?;
         tracing::info!(
             "Postgres-fenced SM persistence storage initialized (ADR-0017 Phase 3 Slice 4)"
         );
         Ok(storage)
     }
+}
 
-    pub(in crate::sm_persistence_fenced) async fn ensure_schema(
-        &self,
-    ) -> Result<(), SmPersistenceError> {
-        let conn = self
-            .db
-            .guard()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        conn.execute(
-            r#"
+/// Apply the existing fenced PostgreSQL SM schema sequence with the owner
+/// credential before a live persistence object is attached to it.
+pub(in crate::sm_persistence_fenced) async fn bootstrap_schema_owner(
+    db: &Database,
+) -> Result<(), SmPersistenceError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(SmPersistenceError::ClusterRequiresPostgres);
+    }
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    conn.execute(
+        r#"
             CREATE TABLE IF NOT EXISTS sm_sessions (
                 stream_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -229,47 +234,47 @@ impl PostgresFencedSmPersistence {
                 principal_auth_epoch BIGINT
             )
             "#,
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    // #1206: presence extension payloads (XEP-0115 caps, XEP-0319 idle,
+    // ...). ADD COLUMN IF NOT EXISTS (not folded into CREATE TABLE alone)
+    // so a table left by an earlier run of this impl gains the column —
+    // matching the sibling column-group migration below.
+    conn.execute(
+        "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS occupancy_session TEXT",
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    conn.execute(
+        "ALTER TABLE sm_sessions DROP COLUMN IF EXISTS shadow_ordinal",
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    conn.execute(
+        "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS presence_payloads TEXT",
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    for column_def in [
+        "bare_jid TEXT",
+        "auth_context_id TEXT",
+        "auth_context_version BIGINT",
+        "principal_auth_epoch BIGINT",
+    ] {
+        conn.execute(
+            &format!("ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS {column_def}"),
             (),
         )
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        // #1206: presence extension payloads (XEP-0115 caps, XEP-0319 idle,
-        // ...). ADD COLUMN IF NOT EXISTS (not folded into CREATE TABLE alone)
-        // so a table left by an earlier run of this impl gains the column —
-        // matching the sibling column-group migration below.
-        conn.execute(
-            "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS occupancy_session TEXT",
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        conn.execute(
-            "ALTER TABLE sm_sessions DROP COLUMN IF EXISTS shadow_ordinal",
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        conn.execute(
-            "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS presence_payloads TEXT",
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        for column_def in [
-            "bare_jid TEXT",
-            "auth_context_id TEXT",
-            "auth_context_version BIGINT",
-            "principal_auth_epoch BIGINT",
-        ] {
-            conn.execute(
-                &format!("ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS {column_def}"),
-                (),
-            )
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        }
-        conn.execute(
-            r#"
+    }
+    conn.execute(
+        r#"
             CREATE TABLE IF NOT EXISTS sm_unacked (
                 stream_id TEXT NOT NULL,
                 sequence BIGINT NOT NULL,
@@ -278,23 +283,23 @@ impl PostgresFencedSmPersistence {
                 PRIMARY KEY (stream_id, sequence)
             )
             "#,
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sm_acknowledged_windows (
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sm_acknowledged_windows (
                 stream_id TEXT NOT NULL,
                 from_exclusive BIGINT NOT NULL,
                 to_inclusive BIGINT NOT NULL,
                 PRIMARY KEY (stream_id, from_exclusive, to_inclusive)
             )",
-            (),
-        )
-        .await
-        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sm_ingress_appends (
+        (),
+    )
+    .await
+    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sm_ingress_appends (
                 message_key TEXT NOT NULL,
                 receipt_kind INTEGER NOT NULL,
                 semantic_identity_hash BYTEA NOT NULL,
@@ -307,57 +312,58 @@ impl PostgresFencedSmPersistence {
                 disposition INTEGER NOT NULL CHECK (disposition IN (0, 1, 2, 3)),
                 PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
             )",
-            (),
-        )
-        .await
-        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream \
+        (),
+    )
+    .await
+    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream \
              ON sm_ingress_appends (accepting_stream_id)",
-            (),
-        )
-        .await
-        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms)", ()).await.map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        (),
+    )
+    .await
+    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms)", ()).await.map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork,
+    // byte-identical to the portable impl's identical migration (see
+    // `sm_persistence/schema.rs`'s doc comment for the full rationale;
+    // nothing populates these columns yet). `ADD COLUMN IF NOT EXISTS`
+    // rather than folding into the `CREATE TABLE` text above: this
+    // impl is net-new (Slice 4), but the table may already exist from
+    // an earlier run of this exact impl before this column group
+    // landed, and `CREATE TABLE IF NOT EXISTS` is a no-op against an
+    // existing table.
+    for column_def in [
+        "ingress_receipts BYTEA",
+        "origin_stream_id TEXT",
+        "inbound_seq BIGINT",
+        "pair_sequence BIGINT",
+    ] {
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
+            &format!("ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS {column_def}"),
             (),
         )
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        // ADR-0017 Phase 3 Slice 5 / element 5 — schema-only groundwork,
-        // byte-identical to the portable impl's identical migration (see
-        // `sm_persistence/schema.rs`'s doc comment for the full rationale;
-        // nothing populates these columns yet). `ADD COLUMN IF NOT EXISTS`
-        // rather than folding into the `CREATE TABLE` text above: this
-        // impl is net-new (Slice 4), but the table may already exist from
-        // an earlier run of this exact impl before this column group
-        // landed, and `CREATE TABLE IF NOT EXISTS` is a no-op against an
-        // existing table.
-        for column_def in [
-            "ingress_receipts BYTEA",
-            "origin_stream_id TEXT",
-            "inbound_seq BIGINT",
-            "pair_sequence BIGINT",
-        ] {
-            conn.execute(
-                &format!("ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS {column_def}"),
-                (),
-            )
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        }
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_unacked_dedup \
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_unacked_dedup \
              ON sm_unacked (stream_id, origin_stream_id, inbound_seq) \
              WHERE origin_stream_id IS NOT NULL AND inbound_seq IS NOT NULL",
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        Ok(())
-    }
+        (),
+    )
+    .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    Ok(())
+}
 
+impl PostgresFencedSmPersistence {
     /// The immutable owner/epoch fence this process holds for `stream_id`,
     /// ensuring a claim on first use. The identity captured by the successful
     /// ensure is never replaced with a later `SharedNodeIdentity` value.

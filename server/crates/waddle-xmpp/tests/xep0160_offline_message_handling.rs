@@ -380,9 +380,9 @@ fn xep0160_flushed_message_preserves_sender_extensions() {
 /// covered this same property.)
 #[test]
 fn xep0160_claim_offline_flush_cas_fires_once_per_connection() {
-    use waddle_xmpp::registry::ConnectionEntry;
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let entry = ConnectionEntry::new(tx);
+    use waddle_xmpp::registry::{ConnectionEntry, SocketOutboundEndpoint};
+    let (endpoint, _rx) = SocketOutboundEndpoint::channel(8);
+    let entry = ConnectionEntry::new(endpoint);
     // First non-negative-priority presence wins; the presence
     // handler triggers a flush only when this CAS returns true.
     assert!(entry.claim_offline_flush(), "first call wins");
@@ -506,7 +506,12 @@ async fn xep0160_pending_row_survives_pre_ack_session_death_for_reflush() {
     // finally deleted.
     storage.record_pushed_at(&row_id, 2).await.unwrap();
     let removed = storage
-        .delete_acked_in_window(&session_b, 0, 2)
+        .delete_acked_in_window(
+            &session_b,
+            0,
+            2,
+            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 1);

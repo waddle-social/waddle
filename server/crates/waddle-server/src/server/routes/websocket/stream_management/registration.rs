@@ -1,6 +1,5 @@
 use jid::FullJid;
-use std::sync::Arc;
-use tracing::warn;
+use tracing::{error, warn};
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
 
@@ -12,7 +11,7 @@ use super::super::WebSocketState;
 async fn unregister_remote_user_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -31,7 +30,7 @@ async fn unregister_remote_user_resource_if_owner(
 async fn unregister_remote_user_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 
@@ -59,7 +58,7 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
@@ -88,7 +87,7 @@ async fn complete_pending_resume_claim(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: String,
 ) -> SmFinalizationReport {
     if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
@@ -142,30 +141,69 @@ async fn complete_pending_resume_claim(
                 // stranding them claimed until the claim-expiry janitor
                 // re-released them as duplicates.
                 let acked_from_exclusive = detached.last_acked;
+                let expected_fence = detached.promotion_custody.captured_fence();
                 conn.sm_state.acknowledge(h);
+                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
+                match state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .delete_acked_in_window(
+                        &session_id,
+                        acked_from_exclusive,
+                        h,
+                        match expected_fence {
+                            Some(fence) => {
+                                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(
+                                    fence,
+                                )
+                            }
+                            None => {
+                                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Unavailable
+                            }
+                        },
+                    )
+                    .await
                 {
-                    let session_id =
-                        waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
-                    if let Err(_error) = state
-                        .deps
-                        .protocol
-                        .pending_delivery_storage
-                        .delete_acked_in_window(&session_id, acked_from_exclusive, h)
-                        .await
-                    {
+                    Ok(_) => {
+                        resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
+                        SmRegistrationFinalization::ReplaceWithResumed {
+                            resumed: SmResumed::new(
+                                stream_id.clone(),
+                                conn.sm_state.inbound_count(),
+                            ),
+                            replay_after_h: h,
+                        }
+                    }
+                    Err(error) => {
                         warn!(
                             session = %session_id,
                             from = acked_from_exclusive,
                             h,
+                            %error,
                             failure = "storage",
                             "pending_delivery ACK deletion retained on resume; claim release must settle it"
                         );
+                        if matches!(
+                            &error,
+                            waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. }
+                        ) {
+                            close_registered_resume_attempt(state, conn, jid, owner).await;
+                            resume_outcome = Some(super::observe::SmResumeOutcome::Storage);
+                            SmRegistrationFinalization::ReplaceWithFailed(
+                                SmFailed::with_condition("internal-server-error"),
+                            )
+                        } else {
+                            resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
+                            SmRegistrationFinalization::ReplaceWithResumed {
+                                resumed: SmResumed::new(
+                                    stream_id.clone(),
+                                    conn.sm_state.inbound_count(),
+                                ),
+                                replay_after_h: h,
+                            }
+                        }
                     }
-                }
-                resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
-                SmRegistrationFinalization::ReplaceWithResumed {
-                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.inbound_count()),
-                    replay_after_h: h,
                 }
             }
             None => SmRegistrationFinalization::KeepExistingResponses,
@@ -178,7 +216,7 @@ async fn complete_pending_resume_claim(
                 replay_gap_through = ?detached.replay_gap_through,
                 "SM resume claim gained a replay gap before completion"
             );
-            reset_resume_attempt(state, conn, jid, Some(owner)).await;
+            reset_resume_attempt(state, conn, jid, Some(owner), Some(&stream_id)).await;
             resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
@@ -277,7 +315,7 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     }
     conn.pending_resume_stream_id = None;
     conn.pending_resume_h = None;
-    reset_resume_attempt(state, conn, jid, None).await;
+    reset_resume_attempt(state, conn, jid, None, None).await;
     conn.pending_finalized_resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
     SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
         "item-not-found",
@@ -289,23 +327,92 @@ async fn reset_resume_attempt(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
+    _failed_stream_id: Option<&str>,
 ) {
+    // This rollback runs inline while the sole live WebSocket task handles the
+    // client's inbound SM request. That task owns the only receiver for this
+    // socket queue, and it cannot concurrently dequeue or handle another
+    // outbound stanza while this function is on the stack. After sealing the
+    // exact endpoint, full sender capacity therefore proves there is no queued
+    // frame, reserved permit, or in-flight receiver handler to retarget.
+    let failed_binding = conn.binding_ref.clone();
+    conn.retire_binding_ref();
+    let mut removed_owner = false;
+    let mut recovered_endpoint = None;
+    let mut exact_binding_match = false;
     if let Some(owner) = owner {
-        let removed = state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister_if_owner(jid, owner)
-            .is_some();
-        if removed {
+        let registry = &state.deps.protocol.connection_registry;
+        let current = registry.entry_if_owner(jid, owner);
+        if let Some(entry) = current {
+            if let Some(binding) = entry.binding_ref().cloned() {
+                if entry.seal_binding(*owner, &binding) {
+                    if let Some(removed) = registry.unregister_if_owner(jid, owner) {
+                        removed_owner = true;
+                        exact_binding_match = failed_binding.as_ref() == Some(&binding);
+                        if exact_binding_match {
+                            recovered_endpoint =
+                                removed.into_socket_outbound_endpoint_if_empty(*owner, &binding);
+                        }
+                    }
+                } else {
+                    error!(
+                        jid = %jid,
+                        "failed resume could not seal its exact outbound binding"
+                    );
+                }
+            } else {
+                error!(
+                    jid = %jid,
+                    "failed resume owner has no local binding to seal"
+                );
+            }
+        }
+        if removed_owner {
+            if let Some(endpoint) = recovered_endpoint.take() {
+                if conn.recovered_pending_endpoint.is_none()
+                    && !conn.resume_endpoint_handoff_blocked
+                {
+                    conn.recovered_pending_endpoint = Some(endpoint);
+                } else {
+                    conn.resume_endpoint_handoff_blocked = true;
+                    error!(
+                        jid = %jid,
+                        "failed resume found conflicting outbound endpoint custody"
+                    );
+                }
+            } else {
+                // Accepted frames and/or reserved permits may still belong to
+                // the old binding. Keep the receiver's existing queue in place,
+                // but do not hand it to a fresh stream attempt.
+                conn.resume_endpoint_handoff_blocked = true;
+                if exact_binding_match {
+                    warn!(
+                        jid = %jid,
+                        "failed resume outbound queue was not empty; same-socket rebind is blocked"
+                    );
+                } else {
+                    warn!(
+                        jid = %jid,
+                        "failed resume binding identity changed before outbound handback"
+                    );
+                }
+            }
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 jid,
-                Some(Arc::clone(owner)),
+                Some(*owner),
             )
             .await;
             unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        } else {
+            // Ownership moved or its exact binding could not be sealed. Do not
+            // reuse any sender from this socket for a successor attempt.
+            conn.resume_endpoint_handoff_blocked = true;
+            warn!(
+                jid = %jid,
+                "failed resume lost exact registry ownership before outbound handback"
+            );
         }
     }
     conn.registry_owner = None;
@@ -314,6 +421,16 @@ async fn reset_resume_attempt(
     // fresh bind on this connection must not share it (#1703).
     if let Some(lifecycle) = conn.socket_lifecycle.take() {
         lifecycle.finish(waddle_xmpp::registry::SocketCleanupState::Detached);
+        #[cfg(feature = "test-support")]
+        if let (Some(owner), Some(stream_id)) = (owner, _failed_stream_id) {
+            super::super::characterization_seams::delay_failed_resume_cleanup(
+                state,
+                jid,
+                owner,
+                stream_id,
+                lifecycle.entry.clone(),
+            );
+        }
         state
             .deps
             .protocol
@@ -357,8 +474,9 @@ async fn close_registered_resume_attempt(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
+    conn.retire_binding_ref();
     let removed = state
         .deps
         .protocol
@@ -373,7 +491,7 @@ async fn close_registered_resume_attempt(
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             jid,
-            Some(Arc::clone(owner)),
+            Some(*owner),
         )
         .await;
         unregister_remote_user_resource_if_owner(state, jid, owner).await;
@@ -388,6 +506,7 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state_with_sm_registry_and_pending_storage, register_test_connection,
     };
+    use std::sync::Arc;
     use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
     use waddle_xmpp::pending_delivery::SmSessionId;
     use waddle_xmpp::stream_management::persistence::{
@@ -466,7 +585,7 @@ mod tests {
             registry.clone(),
             stream.as_str().to_owned(),
         ));
-        conn.registry_owner = Some(owner.clone());
+        conn.registry_owner = Some(owner);
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
         let report = finalize_sm_after_registry_registration(&state, &mut conn, &jid, &owner).await;

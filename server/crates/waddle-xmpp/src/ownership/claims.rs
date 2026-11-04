@@ -3,6 +3,7 @@
 use super::async_trait;
 use super::Duration;
 use super::ResumeIdentityProof;
+use tokio_util::sync::CancellationToken;
 
 /// Closed set of claimable entity kinds (element 4). Serialized to `TEXT`
 /// only at the SQL boundary (`entity_type` column) — never compared or
@@ -241,8 +242,56 @@ impl NodeIdentity {
 #[derive(Debug, Clone)]
 pub struct SharedNodeIdentity {
     pub(in crate::ownership) rotation_notifications: tokio::sync::watch::Sender<()>,
-    pub(in crate::ownership) identity: std::sync::Arc<std::sync::RwLock<NodeIdentity>>,
+    pub(in crate::ownership) identity: std::sync::Arc<std::sync::RwLock<NodeIdentityState>>,
     pub(in crate::ownership) rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+}
+
+#[derive(Debug)]
+pub(in crate::ownership) struct NodeIdentityState {
+    pub(in crate::ownership) identity: NodeIdentity,
+    revision: std::sync::Arc<NodeIdentityRevision>,
+}
+
+#[derive(Debug)]
+struct NodeIdentityRevision {
+    revoked: CancellationToken,
+}
+
+impl NodeIdentityRevision {
+    fn new() -> Self {
+        Self {
+            revoked: CancellationToken::new(),
+        }
+    }
+}
+
+/// Evidence of one active identity revision from one exact source.
+///
+/// The stamp is not publication authority: an effect must use
+/// [`SharedNodeIdentity::with_current_stamp`] at its synchronous boundary.
+/// A revoked stamp never becomes current again, even if the source later
+/// returns to an equal identity.
+#[derive(Debug, Clone)]
+pub struct NodeIdentityStamp {
+    identity: NodeIdentity,
+    source: std::sync::Arc<std::sync::RwLock<NodeIdentityState>>,
+    revision: std::sync::Arc<NodeIdentityRevision>,
+}
+
+impl NodeIdentityStamp {
+    pub fn identity(&self) -> &NodeIdentity {
+        &self.identity
+    }
+
+    /// Whether this revision has been permanently revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revision.revoked.is_cancelled()
+    }
+
+    /// Wait for permanent revocation, including if it already happened.
+    pub async fn revoked(&self) {
+        self.revision.revoked.cancelled().await;
+    }
 }
 
 /// Shared authority to use one node identity at a publication or commit
@@ -262,7 +311,10 @@ impl CurrentNodeIdentityGuard {
 impl SharedNodeIdentity {
     pub fn new(initial: NodeIdentity) -> Self {
         Self {
-            identity: std::sync::Arc::new(std::sync::RwLock::new(initial)),
+            identity: std::sync::Arc::new(std::sync::RwLock::new(NodeIdentityState {
+                identity: initial,
+                revision: std::sync::Arc::new(NodeIdentityRevision::new()),
+            })),
             rotation_notifications: tokio::sync::watch::channel(()).0,
             rotation_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
         }
@@ -279,6 +331,7 @@ impl SharedNodeIdentity {
         self.identity
             .read()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .identity
             .clone()
     }
 
@@ -290,7 +343,47 @@ impl SharedNodeIdentity {
             .identity
             .read()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        inspect(&identity)
+        inspect(&identity.identity)
+    }
+
+    /// Capture an active identity and its source revision together.
+    ///
+    /// The snapshot alone cannot authorize an effect; it can already have
+    /// been revoked when this method returns.
+    pub fn current_stamp(&self) -> Option<NodeIdentityStamp> {
+        let state = self
+            .identity
+            .read()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        state.identity.is_active().then(|| NodeIdentityStamp {
+            identity: state.identity.clone(),
+            source: self.identity.clone(),
+            revision: state.revision.clone(),
+        })
+    }
+
+    /// Run a short synchronous effect only if `stamp` is still current for
+    /// this exact source. Rotation and disable cannot complete during the
+    /// closure. When acquiring other in-memory locks, use source, lifecycle,
+    /// then phase order; never hold this lock across an await or backend I/O.
+    pub fn with_current_stamp<R>(
+        &self,
+        stamp: &NodeIdentityStamp,
+        effect: impl FnOnce(&NodeIdentity) -> R,
+    ) -> Option<R> {
+        if !std::sync::Arc::ptr_eq(&self.identity, &stamp.source) {
+            return None;
+        }
+
+        let state = self
+            .identity
+            .read()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if !state.identity.is_active() || !std::sync::Arc::ptr_eq(&state.revision, &stamp.revision)
+        {
+            return None;
+        }
+        Some(effect(&state.identity))
     }
 
     /// Acquire authority to use `expected`. Once returned, rotation cannot
@@ -334,10 +427,17 @@ impl SharedNodeIdentity {
     /// publication or transaction has completed.
     pub async fn rotate(&self, identity: NodeIdentity) {
         let _rotation_guard = self.rotation_gate.write().await;
-        *self
-            .identity
-            .write()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = identity;
+        {
+            let mut state = self
+                .identity
+                .write()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+            if state.identity != identity {
+                state.revision.revoked.cancel();
+                state.revision = std::sync::Arc::new(NodeIdentityRevision::new());
+                state.identity = identity;
+            }
+        }
         self.rotation_notifications.send_replace(());
     }
 
@@ -347,10 +447,12 @@ impl SharedNodeIdentity {
     /// unequal to its former active value and cannot pass a claim acquire.
     pub async fn disable(&self) {
         let _rotation_guard = self.rotation_gate.write().await;
-        self.identity
+        let mut state = self
+            .identity
             .write()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-            .authority = NodeAuthority::TerminallyDisabled;
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        state.revision.revoked.cancel();
+        state.identity.authority = NodeAuthority::TerminallyDisabled;
     }
 }
 
@@ -608,11 +710,11 @@ pub trait ClaimStore: Send + Sync {
         ))
     }
 
-    /// Batched release for graceful drain (~18k modeled claims, ADR-0017
-    /// Phase 3 Slice 10) — one round-trip, not one-at-a-time. Releases every
-    /// entity in `entities` currently held by `me`, regardless of each
-    /// entity's individual epoch (drain does not need per-entity epoch
-    /// pinning — only "still owned by me, whatever the epoch").
+    /// Legacy epoch-blind batch release for callers that intentionally want
+    /// to release every listed entity currently held by `me`, regardless of
+    /// each entity's individual epoch. This is one round-trip, but is not
+    /// safe for a graceful drain; drain code must use
+    /// [`Self::release_many_exact`].
     ///
     /// **Plan-sanctioned ABA window**: this release is blind to `entity`'s
     /// individual `claim_epoch`, matching only on `(node_id, node_epoch)` —
@@ -627,10 +729,26 @@ pub trait ClaimStore: Send + Sync {
     /// new claims once draining, narrowing but not eliminating the window)
     /// and Slice 10's batch-construction ordering (an entity enters the
     /// batch only after its final fenced write's transaction has committed,
-    /// keeping the window as short as possible) are the mitigations — not a
-    /// full closure of the race. See Slice 10's Tests paragraph for the
-    /// interleaving this implies for the drain test suite.
+    /// keeping the window as short as possible) do not close this race.
+    /// Drain code must use [`Self::release_many_exact`] with captured epochs.
     async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError>;
+
+    /// Release only claim snapshots captured before their final fenced write.
+    /// Each entry is matched by both entity and claim epoch, so a same-node
+    /// reacquire after the snapshot survives the stale batch. The default is
+    /// an exact per-item fallback for test and external stores; production
+    /// stores used by graceful drain should override this with one batch
+    /// statement to preserve the drain budget.
+    async fn release_many_exact(
+        &self,
+        claims: &[(Entity, ClaimEpoch)],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        for (entity, epoch) in claims {
+            self.release(entity, me, *epoch).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Rollout-aware claim-acquisition placement (ADR-0017 Phase 3 Slice 10,

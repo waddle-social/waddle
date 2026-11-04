@@ -433,9 +433,7 @@ impl DatabasePushServiceStore {
             .pubsub_boundary
             .as_ref()
             .map(|boundary| &boundary.service_jid);
-        let mut tx = self
-            .db
-            .begin_immediate()
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;

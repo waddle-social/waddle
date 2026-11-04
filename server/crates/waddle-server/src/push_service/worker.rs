@@ -561,9 +561,7 @@ impl DatabasePushServiceStore {
         // workers can both start as readers and then both try to
         // upgrade — SQLite returns `SQLITE_LOCKED` for the loser and
         // `busy_timeout` does not retry that case.
-        let mut tx = self
-            .db
-            .begin_immediate()
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let Some(lock_target) = get_publish_job_tx(&mut tx, job_id).await? else {
@@ -1050,9 +1048,7 @@ impl DatabasePushServiceStore {
     ) -> Result<(), XmppError> {
         // `begin_immediate` so phase 3 acquires the SQLite writer lock
         // up front; see the matching comment in `process_publish_phase1`.
-        let mut tx = self
-            .db
-            .begin_immediate()
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         super::publish_jobs::lock_notification_ancestry_tx(&mut tx, job).await?;
@@ -1445,9 +1441,7 @@ impl DatabasePushServiceStore {
         error: &str,
         now_ms: i64,
     ) -> Result<(), XmppError> {
-        let mut tx = self
-            .db
-            .begin_immediate()
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         super::publish_jobs::lock_notification_ancestry_tx(&mut tx, job).await?;

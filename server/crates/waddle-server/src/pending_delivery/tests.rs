@@ -761,7 +761,7 @@ async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
     let resource = full("alice@example.com/web");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let live_owner = registry.register(resource.clone(), tx); // the entry's real owner token
-    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // a DIFFERENT token
+    let stale_owner = waddle_xmpp::registry::LocalConnectionBindingId::fresh(); // a DIFFERENT token
     let sm_session = SmSessionId::new("sm-owner");
     let recipient = bare("alice@example.com");
 
@@ -1568,9 +1568,10 @@ impl PendingDeliveryStorage for OrderingReleaseFails {
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
     async fn list_orphaned_claims(
@@ -1656,7 +1657,12 @@ async fn ordered_pending_pump_resumes_after_ack_without_new_presence() {
         .await
         .expect("record first pending row stream position");
     storage
-        .delete_acked_in_window(&session, 0, 1)
+        .delete_acked_in_window(
+            &session,
+            0,
+            1,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .expect("delete acknowledged first pending row");
     let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -1758,7 +1764,12 @@ async fn ordered_pending_pump_retries_failed_release_without_new_presence() {
         .await
         .expect("record first pending row stream position");
     storage
-        .delete_acked_in_window(&session, 0, 1)
+        .delete_acked_in_window(
+            &session,
+            0,
+            1,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .expect("delete acknowledged first pending row");
     let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -1797,7 +1808,12 @@ async fn ordered_pending_pump_retries_failed_release_without_new_presence() {
         .expect("stamp second row");
     assert_eq!(
         storage
-            .delete_acked_in_window(&session, 1, 2)
+            .delete_acked_in_window(
+                &session,
+                1,
+                2,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+            )
             .await
             .expect("ack second row"),
         1
@@ -2518,7 +2534,12 @@ async fn pending_row_deleted_only_after_sm_ack() {
 
     // Pre-ack with h=6 (covers earlier stanzas, not this one).
     let removed = storage
-        .delete_acked_in_window(&session_id, 0, 6)
+        .delete_acked_in_window(
+            &session_id,
+            0,
+            6,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 0, "ack(h=6) does not cover h=7 row");
@@ -2526,7 +2547,12 @@ async fn pending_row_deleted_only_after_sm_ack() {
 
     // SM ack arrives covering h=7.
     let removed = storage
-        .delete_acked_in_window(&session_id, 6, 7)
+        .delete_acked_in_window(
+            &session_id,
+            6,
+            7,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -2651,7 +2677,12 @@ async fn ack_before_record_pushed_at_skips_unsequenced_row() {
     // Greptile flagged when both calls were spawned: the row
     // would persist claimed-but-never-acked until session death.
     let removed = storage
-        .delete_acked_in_window(&session, 0, 100)
+        .delete_acked_in_window(
+            &session,
+            0,
+            100,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -2666,7 +2697,12 @@ async fn ack_before_record_pushed_at_skips_unsequenced_row() {
     // after the stamp completes the cleanup.
     storage.record_pushed_at(&row_id, 50).await.unwrap();
     let removed = storage
-        .delete_acked_in_window(&session, 0, 50)
+        .delete_acked_in_window(
+            &session,
+            0,
+            50,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -3055,7 +3091,7 @@ async fn db_storage_release_rows_for_outbound_sequences_releases_exact_set() {
     storage.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     let released = storage
-        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]))
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]), None)
         .await;
     assert!(
         released.error.is_none(),
@@ -3079,6 +3115,725 @@ async fn db_storage_release_rows_for_outbound_sequences_releases_exact_set() {
     assert!(released_rows
         .iter()
         .all(|row| row.flushed_in_session.is_none() && row.outbound_sequence.is_none()));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_outbound_sequence_release_rejects_same_node_reacquired_claim_epoch() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let (schema, scoped_url) =
+        create_postgres_test_schema(&base_url, "pending_outbound_epoch_release").await;
+    let db = Database::from_config(
+        "pending-outbound-epoch-release-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open scoped postgres");
+    let claim_store = std::sync::Arc::new(PostgresClaimStore::new(db.clone()));
+    claim_store.ensure_schema().await.expect("claim schema");
+    let node = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let node_identity = SharedNodeIdentity::new(node.clone());
+    let stream_id = format!("outbound-epoch-{}", uuid::Uuid::new_v4());
+    let entity = Entity::new(EntityType::SmSession, stream_id.clone());
+    let captured_epoch = claim_store
+        .acquire(&entity, &node)
+        .await
+        .expect("initial SM claim");
+    let recipient_text = format!("outbound-epoch-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_text);
+    let session = SmSessionId::new(&stream_id);
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&scoped_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((
+            claim_store.clone() as std::sync::Arc<dyn ClaimStore>,
+            node_identity,
+        )),
+        &db,
+    )
+    .await
+    .expect("open fenced pending storage");
+    for body in ["acknowledged", "released", "stale release"] {
+        storage
+            .insert(transient_row(&recipient_text, body))
+            .await
+            .expect("insert pending row");
+    }
+    let claimed = storage
+        .claim_for_session(&recipient, &session)
+        .await
+        .expect("claim pending row");
+    assert_eq!(claimed.len(), 3);
+    for (row, sequence) in claimed.iter().zip([7, 8, 9]) {
+        storage
+            .record_pushed_at(&row.id, sequence)
+            .await
+            .expect("bind outbound sequence");
+    }
+
+    let captured_fence = SmClaimFence::new(node.clone(), captured_epoch);
+    let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), stream_id);
+    let mut claim_lock = db.begin().await.expect("begin claim lock transaction");
+    let mut locked_claim = claim_lock
+        .query(
+            "SELECT 1 FROM clustering_claims WHERE entity = ? FOR UPDATE",
+            crate::db_params![entity_key],
+        )
+        .await
+        .expect("lock current SM claim");
+    assert!(locked_claim
+        .next()
+        .await
+        .expect("read locked claim")
+        .is_some());
+    drop(locked_claim);
+
+    let release_storage = storage.clone();
+    let release_recipient = recipient.clone();
+    let release_session = session.clone();
+    let release_fence = captured_fence.clone();
+    let release_task = tokio::spawn(async move {
+        release_storage
+            .release_rows_for_outbound_sequences(
+                &release_recipient,
+                &release_session,
+                &HashSet::from([8]),
+                Some(&release_fence),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let connection = db.guard().await.expect("inspect blocked release");
+            let mut rows = connection
+                .query(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE state = 'active' AND wait_event_type = 'Lock' \
+                       AND query LIKE '%FROM clustering_claims%' \
+                       AND query LIKE '%FOR SHARE%'",
+                    (),
+                )
+                .await
+                .expect("inspect release fence waiter");
+            let count = rows
+                .next()
+                .await
+                .expect("read release fence waiter")
+                .expect("count row")
+                .get::<i64>(0)
+                .expect("waiter count");
+            drop(rows);
+            drop(connection);
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("release waits on the exact claim row");
+
+    // The ACK call records its proof synchronously before it waits for the
+    // pending-store operation lock. Poll it once while release is blocked,
+    // then cancel the waiter: its ACK proof must remain available to release.
+    {
+        let ack = storage.delete_acked_in_window(
+            &session,
+            6,
+            7,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(&captured_fence),
+        );
+        tokio::pin!(ack);
+        tokio::select! {
+            biased;
+            result = &mut ack => panic!("ACK unexpectedly bypassed the blocked release: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+
+    let connection = db.guard().await.expect("install release failure trigger");
+    connection
+        .execute(
+            "CREATE FUNCTION pending_release_test_fail_update() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected pending release failure'; END $$",
+            (),
+        )
+        .await
+        .expect("create release failure function");
+    connection
+        .execute(
+            "CREATE TRIGGER pending_release_test_fail_update \
+             BEFORE UPDATE ON pending_delivery \
+             FOR EACH ROW EXECUTE FUNCTION pending_release_test_fail_update()",
+            (),
+        )
+        .await
+        .expect("create release failure trigger");
+    drop(connection);
+    claim_lock.commit().await.expect("release claim-row lock");
+
+    let failed_release = release_task.await.expect("join release task");
+    assert!(failed_release.error.is_some(), "injected update must fail");
+    let connection = db.guard().await.expect("remove release failure trigger");
+    connection
+        .execute(
+            "DROP TRIGGER pending_release_test_fail_update ON pending_delivery",
+            (),
+        )
+        .await
+        .expect("drop release failure trigger");
+    connection
+        .execute("DROP FUNCTION pending_release_test_fail_update()", ())
+        .await
+        .expect("drop release failure function");
+    drop(connection);
+    let after_failed_release = storage
+        .list(&recipient)
+        .await
+        .expect("list failed release rows");
+    assert_eq!(after_failed_release.len(), 3);
+    assert!(after_failed_release
+        .iter()
+        .all(|row| row.outbound_sequence.is_some()));
+
+    // The failed release rolled its ACK delete back and retained the proof;
+    // retry settles sequence 7 and releases sequence 8 atomically.
+    let first_release = storage
+        .release_rows_for_outbound_sequences(
+            &recipient,
+            &session,
+            &HashSet::from([8]),
+            Some(&captured_fence),
+        )
+        .await;
+    assert!(
+        first_release.error.is_none(),
+        "retry must complete: {first_release:?}"
+    );
+    assert_eq!(first_release.released, HashSet::from([8]));
+    let after_first_release = storage.list(&recipient).await.expect("list first release");
+    assert_eq!(after_first_release.len(), 2, "ACKed sequence 7 is deleted");
+    assert!(after_first_release
+        .iter()
+        .any(|row| row.outbound_sequence == Some(9)));
+    assert!(after_first_release
+        .iter()
+        .any(|row| row.outbound_sequence.is_none()));
+
+    claim_store
+        .release(&entity, &node, captured_epoch)
+        .await
+        .expect("release original claim");
+    let reacquired_epoch = claim_store
+        .acquire(&entity, &node)
+        .await
+        .expect("reacquire with the same process identity");
+    assert!(reacquired_epoch > captured_epoch);
+
+    let sequences = HashSet::from([9]);
+    let missing_fence = storage
+        .release_rows_for_outbound_sequences(&recipient, &session, &sequences, None)
+        .await;
+    assert!(matches!(
+        missing_fence.error,
+        Some(PendingStorageError::NotOwner { .. })
+    ));
+    let stale_fence = storage
+        .release_rows_for_outbound_sequences(
+            &recipient,
+            &session,
+            &sequences,
+            Some(&captured_fence),
+        )
+        .await;
+    assert!(matches!(
+        stale_fence.error,
+        Some(PendingStorageError::NotOwner { .. })
+    ));
+    let after_stale_attempt = storage.list(&recipient).await.expect("list pending rows");
+    assert_eq!(after_stale_attempt.len(), 2);
+    assert!(after_stale_attempt
+        .iter()
+        .any(|row| row.outbound_sequence == Some(9)));
+    assert!(after_stale_attempt
+        .iter()
+        .filter(|row| row.outbound_sequence == Some(9))
+        .all(|row| row.flushed_in_session.as_ref() == Some(&session)));
+
+    let current_fence = SmClaimFence::new(node, reacquired_epoch);
+    let released = storage
+        .release_rows_for_outbound_sequences(&recipient, &session, &sequences, Some(&current_fence))
+        .await;
+    assert!(
+        released.error.is_none(),
+        "current fence must release: {released:?}"
+    );
+    assert_eq!(released.released, sequences);
+    let after_current_release = storage.list(&recipient).await.expect("list released row");
+    assert_eq!(after_current_release.len(), 2);
+    assert!(after_current_release
+        .iter()
+        .all(|row| row.outbound_sequence.is_none() && row.flushed_in_session.is_none()));
+
+    drop(storage);
+    drop(claim_store);
+    drop(db);
+    drop_postgres_test_schema(&base_url, &schema).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_live_ack_is_fenced_by_same_node_claim_epoch_and_serializes_transfer() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let (schema, scoped_url) =
+        create_postgres_test_schema(&base_url, "pending_live_ack_epoch").await;
+    let db = Database::from_config(
+        "pending-live-ack-epoch-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open scoped postgres");
+    let claim_store = std::sync::Arc::new(PostgresClaimStore::new(db.clone()));
+    claim_store.ensure_schema().await.expect("claim schema");
+    let node = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let stream_id = format!("live-ack-epoch-{}", uuid::Uuid::new_v4());
+    let entity = Entity::new(EntityType::SmSession, stream_id.clone());
+    let captured_epoch = claim_store
+        .acquire(&entity, &node)
+        .await
+        .expect("initial SM claim");
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&scoped_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((
+            claim_store.clone() as std::sync::Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(node.clone()),
+        )),
+        &db,
+    )
+    .await
+    .expect("open fenced pending storage");
+    let recipient_text = format!("live-ack-epoch-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_text);
+    let session = SmSessionId::new(&stream_id);
+    storage
+        .insert(transient_row(&recipient_text, "same-node reacquire"))
+        .await
+        .expect("insert first pending row");
+    let claimed = storage
+        .claim_for_session(&recipient, &session)
+        .await
+        .expect("claim first pending row");
+    assert_eq!(claimed.len(), 1);
+    storage
+        .record_pushed_at(&claimed[0].id, 1)
+        .await
+        .expect("bind first outbound sequence");
+
+    let stale_fence = SmClaimFence::new(node.clone(), captured_epoch);
+    claim_store
+        .release(&entity, &node, captured_epoch)
+        .await
+        .expect("release initial claim");
+    let current_epoch = claim_store
+        .acquire(&entity, &node)
+        .await
+        .expect("reacquire with same process identity");
+    assert!(current_epoch > captured_epoch);
+    assert!(matches!(
+        storage
+            .delete_acked_in_window(
+                &session,
+                0,
+                1,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(&stale_fence)
+            )
+            .await,
+        Err(PendingStorageError::NotOwner { .. })
+    ));
+    let after_stale_ack = storage.list(&recipient).await.expect("list stale ACK row");
+    assert_eq!(after_stale_ack.len(), 1, "stale ACK preserves the row");
+    assert_eq!(after_stale_ack[0].outbound_sequence, Some(1));
+
+    let current_fence = SmClaimFence::new(node.clone(), current_epoch);
+    assert_eq!(
+        storage
+            .delete_acked_in_window(
+                &session,
+                0,
+                1,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(&current_fence)
+            )
+            .await
+            .expect("current ACK deletes its claimed row"),
+        1
+    );
+    assert!(storage
+        .list(&recipient)
+        .await
+        .expect("list after ACK")
+        .is_empty());
+
+    // If the live pending DELETE fails after its synchronous proof is
+    // registered, terminal cleanup with an empty replay inventory must still
+    // settle that proof under the exact captured fence before source retirement.
+    storage
+        .insert(transient_row(
+            &recipient_text,
+            "terminal settles retained ACK",
+        ))
+        .await
+        .expect("insert terminal-settlement row");
+    let claimed = storage
+        .claim_for_session(&recipient, &session)
+        .await
+        .expect("claim terminal-settlement row");
+    assert_eq!(claimed.len(), 1);
+    storage
+        .record_pushed_at(&claimed[0].id, 2)
+        .await
+        .expect("bind terminal-settlement sequence");
+    let connection = db.guard().await.expect("install ACK failure trigger");
+    connection
+        .execute(
+            "CREATE FUNCTION pending_live_ack_fail_delete() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected ACK delete failure'; END $$",
+            (),
+        )
+        .await
+        .expect("create ACK failure function");
+    connection
+        .execute(
+            "CREATE TRIGGER pending_live_ack_fail_delete \
+             BEFORE DELETE ON pending_delivery \
+             FOR EACH ROW EXECUTE FUNCTION pending_live_ack_fail_delete()",
+            (),
+        )
+        .await
+        .expect("create ACK failure trigger");
+    drop(connection);
+    assert!(matches!(
+        storage
+            .delete_acked_in_window(
+                &session,
+                1,
+                2,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(
+                    &current_fence,
+                ),
+            )
+            .await,
+        Err(PendingStorageError::Other(_))
+    ));
+    assert_eq!(
+        storage
+            .list(&recipient)
+            .await
+            .expect("list retained ACK row")
+            .len(),
+        1
+    );
+    let connection = db.guard().await.expect("remove ACK failure trigger");
+    connection
+        .execute(
+            "DROP TRIGGER pending_live_ack_fail_delete ON pending_delivery",
+            (),
+        )
+        .await
+        .expect("drop ACK failure trigger");
+    connection
+        .execute("DROP FUNCTION pending_live_ack_fail_delete()", ())
+        .await
+        .expect("drop ACK failure function");
+    drop(connection);
+    let settled = storage
+        .release_rows_for_outbound_sequences(
+            &recipient,
+            &session,
+            &HashSet::new(),
+            Some(&current_fence),
+        )
+        .await;
+    assert!(
+        settled.error.is_none(),
+        "empty-inventory exact settlement: {settled:?}"
+    );
+    assert!(
+        storage
+            .list(&recipient)
+            .await
+            .expect("list after terminal ACK settlement")
+            .is_empty(),
+        "retained live ACK proof deletes its row before terminal source retirement"
+    );
+
+    // Nonresumable ACK authority is typed separately from a missing resumable
+    // fence. If its direct DELETE fails, orphan-row cleanup may settle only
+    // that one-off proof before releasing the claim.
+    let nonresumable = SmSessionId::new(format!("nonresumable-live-ack-{}", uuid::Uuid::new_v4()));
+    storage
+        .insert(transient_row(&recipient_text, "nonresumable retained ACK"))
+        .await
+        .expect("insert nonresumable ACK row");
+    let claimed = storage
+        .claim_for_session(&recipient, &nonresumable)
+        .await
+        .expect("claim nonresumable ACK row");
+    assert_eq!(claimed.len(), 1);
+    storage
+        .record_pushed_at(&claimed[0].id, 1)
+        .await
+        .expect("bind nonresumable sequence");
+    let connection = db
+        .guard()
+        .await
+        .expect("install nonresumable ACK failure trigger");
+    connection
+        .execute(
+            "CREATE FUNCTION pending_live_ack_fail_delete() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected ACK delete failure'; END $$",
+            (),
+        )
+        .await
+        .expect("create nonresumable ACK failure function");
+    connection
+        .execute(
+            "CREATE TRIGGER pending_live_ack_fail_delete \
+             BEFORE DELETE ON pending_delivery \
+             FOR EACH ROW EXECUTE FUNCTION pending_live_ack_fail_delete()",
+            (),
+        )
+        .await
+        .expect("create nonresumable ACK failure trigger");
+    drop(connection);
+    assert!(matches!(
+        storage
+            .delete_acked_in_window(
+                &nonresumable,
+                0,
+                1,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+            )
+            .await,
+        Err(PendingStorageError::Other(_))
+    ));
+    let connection = db
+        .guard()
+        .await
+        .expect("remove nonresumable ACK failure trigger");
+    connection
+        .execute(
+            "DROP TRIGGER pending_live_ack_fail_delete ON pending_delivery",
+            (),
+        )
+        .await
+        .expect("drop nonresumable ACK failure trigger");
+    connection
+        .execute("DROP FUNCTION pending_live_ack_fail_delete()", ())
+        .await
+        .expect("drop nonresumable ACK failure function");
+    drop(connection);
+    assert_eq!(
+        storage
+            .release_row_if_session(&claimed[0].id, &nonresumable)
+            .await
+            .expect("orphan cleanup settles a nonresumable ACK proof"),
+        0,
+        "ACK settlement deleted the row before orphan release"
+    );
+    assert!(
+        storage
+            .list(&recipient)
+            .await
+            .expect("list after nonresumable ACK settlement")
+            .is_empty(),
+        "nonresumable ACK proof is not stranded in the clustered store"
+    );
+
+    // Pause a current-fence ACK in its DELETE after the transaction has
+    // acquired `FOR SHARE` on the claim row. Releasing that claim must wait
+    // until the ACK commits, establishing ACK-before-transfer ordering.
+    storage
+        .insert(transient_row(&recipient_text, "ACK wins claim transfer"))
+        .await
+        .expect("insert transfer-order row");
+    let claimed = storage
+        .claim_for_session(&recipient, &session)
+        .await
+        .expect("claim transfer-order row");
+    assert_eq!(claimed.len(), 1);
+    storage
+        .record_pushed_at(&claimed[0].id, 3)
+        .await
+        .expect("bind transfer-order sequence");
+    let connection = db.guard().await.expect("install ACK pause trigger");
+    connection
+        .execute(
+            "CREATE FUNCTION pending_live_ack_pause_delete() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1.5); RETURN OLD; END $$",
+            (),
+        )
+        .await
+        .expect("create ACK pause function");
+    connection
+        .execute(
+            "CREATE TRIGGER pending_live_ack_pause_delete \
+             BEFORE DELETE ON pending_delivery \
+             FOR EACH ROW EXECUTE FUNCTION pending_live_ack_pause_delete()",
+            (),
+        )
+        .await
+        .expect("create ACK pause trigger");
+    drop(connection);
+
+    let ack_storage = storage.clone();
+    let ack_session = session.clone();
+    let ack_fence = current_fence.clone();
+    let ack_task = tokio::spawn(async move {
+        ack_storage
+            .delete_acked_in_window(
+                &ack_session,
+                2,
+                3,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(&ack_fence),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let connection = db.guard().await.expect("inspect ACK transaction");
+            let mut rows = connection
+                .query(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE pid <> pg_backend_pid() AND state = 'active' \
+                       AND query LIKE '%DELETE FROM pending_delivery%'",
+                    (),
+                )
+                .await
+                .expect("inspect active ACK DELETE");
+            let count = rows
+                .next()
+                .await
+                .expect("read active ACK query")
+                .expect("count row")
+                .get::<i64>(0)
+                .expect("active ACK count");
+            drop(rows);
+            drop(connection);
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("ACK DELETE reaches the pause trigger");
+
+    let transfer_store = claim_store.clone();
+    let transfer_entity = entity.clone();
+    let transfer_node = node.clone();
+    let transfer_task = tokio::spawn(async move {
+        transfer_store
+            .release(&transfer_entity, &transfer_node, current_epoch)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let connection = db.guard().await.expect("inspect transfer waiter");
+            let mut rows = connection
+                .query(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE pid <> pg_backend_pid() AND state = 'active' \
+                       AND wait_event_type = 'Lock' \
+                       AND query LIKE '%DELETE FROM clustering_claims%'",
+                    (),
+                )
+                .await
+                .expect("inspect claim transfer waiter");
+            let count = rows
+                .next()
+                .await
+                .expect("read claim transfer waiter")
+                .expect("count row")
+                .get::<i64>(0)
+                .expect("transfer waiter count");
+            drop(rows);
+            drop(connection);
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("claim transfer waits for the ACK's claim-row lock");
+
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), ack_task)
+            .await
+            .expect("ACK transaction completes")
+            .expect("join ACK task")
+            .expect("fenced ACK commits"),
+        1
+    );
+    transfer_task
+        .await
+        .expect("join transfer task")
+        .expect("release claim after ACK commits");
+    assert!(storage
+        .list(&recipient)
+        .await
+        .expect("list after ACK-first transfer")
+        .is_empty());
+
+    let connection = db.guard().await.expect("remove ACK pause trigger");
+    connection
+        .execute(
+            "DROP TRIGGER pending_live_ack_pause_delete ON pending_delivery",
+            (),
+        )
+        .await
+        .expect("drop ACK pause trigger");
+    connection
+        .execute("DROP FUNCTION pending_live_ack_pause_delete()", ())
+        .await
+        .expect("drop ACK pause function");
+    drop(connection);
+
+    drop(storage);
+    drop(claim_store);
+    drop(db);
+    drop_postgres_test_schema(&base_url, &schema).await;
 }
 
 #[tokio::test]
@@ -3512,9 +4267,10 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
             session: &waddle_xmpp::pending_delivery::SmSessionId,
             from_exclusive: u32,
             to_inclusive: u32,
+            authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
         ) -> Result<u64, PendingStorageError> {
             self.inner
-                .delete_acked_in_window(session, from_exclusive, to_inclusive)
+                .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
                 .await
         }
         async fn list_orphaned_claims(
@@ -5075,7 +5831,12 @@ async fn flush_brief_mam_outage_preserves_offline_message() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].flushed_in_session.as_ref(), Some(&sm_session));
     storage
-        .delete_acked_in_window(&sm_session, 0, u32::MAX)
+        .delete_acked_in_window(
+            &sm_session,
+            0,
+            u32::MAX,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
 }
@@ -5610,7 +6371,12 @@ async fn ordering_release_retry_preserves_replacement_and_pushed_claims() {
         assert_eq!(remaining[0].outbound_sequence, Some(7));
         assert_eq!(
             storage
-                .delete_acked_in_window(&replacement, 6, 7)
+                .delete_acked_in_window(
+                    &replacement,
+                    6,
+                    7,
+                    waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+                )
                 .await
                 .expect("preserved binding acknowledges"),
             1
@@ -5723,7 +6489,12 @@ async fn single_pass_ordering_flush_hands_off_persistent_release_failure() {
     assert!(rx.try_recv().is_err(), "no duplicate delivery");
     assert_eq!(
         storage
-            .delete_acked_in_window(&session, 0, 2)
+            .delete_acked_in_window(
+                &session,
+                0,
+                2,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+            )
             .await
             .expect("ack delivery"),
         2
@@ -5759,7 +6530,6 @@ async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
         let registry = registry.clone();
         let resource = resource.clone();
         let session = session.clone();
-        let owner = owner.clone();
         tokio::spawn(async move {
             let resolver = ordered_pending_resolver().await;
             flush_for_resource(
@@ -5862,7 +6632,12 @@ async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
     assert!(rx.try_recv().is_err(), "no duplicate delivery");
     assert_eq!(
         storage
-            .delete_acked_in_window(&session, 0, 1)
+            .delete_acked_in_window(
+                &session,
+                0,
+                1,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+            )
             .await
             .expect("ack both deliveries"),
         1
@@ -5933,7 +6708,12 @@ async fn assert_ambiguous_release_across_storage_handles(storage: DatabasePendin
         .expect("stamp successor delivery");
     assert_eq!(
         successor
-            .delete_acked_in_window(&session, 0, 1)
+            .delete_acked_in_window(
+                &session,
+                0,
+                1,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+            )
             .await
             .expect("ack preserved claim"),
         1
@@ -6117,7 +6897,12 @@ async fn ambiguous_offer_returns_custody_and_blocks_transient_suffix_until_recon
         .expect("writer stamps tail");
     assert_eq!(
         storage
-            .delete_acked_in_window(&session, 0, 2)
+            .delete_acked_in_window(
+                &session,
+                0,
+                2,
+                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable
+            )
             .await
             .expect("ack both"),
         2

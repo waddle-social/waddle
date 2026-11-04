@@ -922,71 +922,46 @@ fn gc_monitoring_predicate_matches_collector() {
     fn normalized(sql: &str) -> String {
         sql.split_whitespace().collect::<Vec<_>>().join(" ")
     }
-
-    let monitoring = std::fs::read_to_string(
-            std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR")).join(
-                "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
-            ),
-        )
-        .expect("read deployed ingress monitoring SQL");
-    let monitoring = normalized(&monitoring);
-    let eligibility = "receipts_complete AND NOT has_ref AND NOT has_descendant";
-    let receipt_predicate = "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents intent WHERE intent.message_key = message.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts receipt WHERE receipt.message_key = intent.message_key AND receipt.kind = intent.kind AND receipt.semantic_identity_hash = intent.semantic_identity_hash ) )";
-    assert!(monitoring.contains(&format!("{receipt_predicate} AS receipts_complete")));
-
-    assert!(monitoring.contains("SELECT now() - interval '8 days' AS value"));
-    assert!(monitoring.contains(
-            "WHERE message.terminal_at IS NOT NULL AND (message.retention_eligible_at IS NULL OR message.retention_eligible_at <= cutoff.value)"
-        ));
-    assert_eq!(
-        monitoring
-            .matches(&format!("FILTER (WHERE {eligibility})"))
-            .count(),
-        2,
-        "backlog and oldest-age must use the same collector eligibility"
-    );
-    assert!(
-            monitoring.contains("count(*) FILTER (WHERE has_ref OR has_descendant OR NOT receipts_complete) AS retained_referenced_messages")
-        );
-    for (sql, cutoff) in [
-        (GC_CANDIDATES_POSTGRES, "?::timestamptz"),
-        (GC_CANDIDATES_SQLITE, "?"),
-    ] {
+    fn predicate(sql: &str) -> String {
         let sql = normalized(sql)
-                .replace(
-                    "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash ) )",
-                    "receipts_complete",
-                )
-                .replace(
-                    "EXISTS ( SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key )",
-                    "has_alias",
-                )
-                .replace(
-                    "EXISTS ( SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key )",
-                    "has_delivery",
-                )
-                .replace(
-                    "EXISTS ( SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key )",
-                    "has_ref",
-                )
-                .replace(
-                    "EXISTS ( SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL )",
-                    "has_descendant",
-                );
-        let predicate = sql
-            .split_once(" WHERE ")
+            .replace("?::timestamptz", "cutoff.value")
+            .replace('?', "cutoff.value");
+        sql.split_once(" WHERE ")
             .expect("candidate WHERE")
             .1
             .split_once(" ORDER BY ")
             .expect("candidate ordering")
-            .0;
-        assert_eq!(
-                predicate,
-                format!(
-                    "m.terminal_at IS NOT NULL AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= {cutoff}) AND receipts_complete AND NOT has_ref AND NOT has_descendant"
-                )
-            );
+            .0
+            .to_owned()
     }
+    let postgres = predicate(GC_CANDIDATES_POSTGRES);
+    assert_eq!(
+        postgres,
+        predicate(GC_CANDIDATES_SQLITE),
+        "both collector dialects use the same pair predicate"
+    );
+    let mut monitored = postgres;
+    for alias in ["m", "child"] {
+        monitored = monitored.replace(
+            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key"),
+            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"),
+        );
+    }
+    let monitoring = std::fs::read_to_string(
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"))
+            .join("../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"),
+    ).expect("read deployed ingress monitoring SQL");
+    let monitoring = normalized(&monitoring);
+    assert!(
+        monitoring.contains(&format!("({monitored}) AS eligible")),
+        "CNPG must use the same complete pair predicate"
+    );
+    assert_eq!(
+        monitoring.matches("FILTER (WHERE eligible)").count(),
+        2,
+        "count and oldest age use identical candidates"
+    );
+    assert!(monitoring.contains("FILTER (WHERE NOT eligible) AS retained_referenced_messages"));
 }
 
 #[test]

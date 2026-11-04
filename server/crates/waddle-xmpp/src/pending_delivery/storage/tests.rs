@@ -409,7 +409,12 @@ async fn delete_acked_in_window_only_removes_acked_session_rows() {
 
     // SM ack with h=2 covers the first two only.
     let removed = store
-        .delete_acked_in_window(&session_a, 0, 2)
+        .delete_acked_in_window(
+            &session_a,
+            0,
+            2,
+            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 2);
@@ -454,7 +459,12 @@ async fn delete_acked_in_window_ignores_other_sessions() {
     // session_a's row.
     let session_b = SmSessionId::new("s-b");
     let removed = store
-        .delete_acked_in_window(&session_b, 0, 10)
+        .delete_acked_in_window(
+            &session_b,
+            0,
+            10,
+            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 0);
@@ -498,7 +508,12 @@ async fn delete_acked_in_window_handles_mod_2_32_wrap() {
 
     // Ack window (u32::MAX - 2, 1]: covers MAX-1, MAX, and 1 — NOT 2.
     let removed = store
-        .delete_acked_in_window(&session, u32::MAX - 2, 1)
+        .delete_acked_in_window(
+            &session,
+            u32::MAX - 2,
+            1,
+            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .unwrap();
     assert_eq!(removed, 3, "wrap-spanning window deletes across the wrap");
@@ -528,7 +543,15 @@ async fn delete_acked_in_window_non_wrapping_window() {
     store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     // Window (5, 6]: exclusive lower bound keeps 5, deletes 6, keeps 7.
-    let removed = store.delete_acked_in_window(&session, 5, 6).await.unwrap();
+    let removed = store
+        .delete_acked_in_window(
+            &session,
+            5,
+            6,
+            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
+        .await
+        .unwrap();
     assert_eq!(removed, 1);
     let mut remaining: Vec<_> = store
         .list(&recipient)
@@ -541,7 +564,15 @@ async fn delete_acked_in_window_non_wrapping_window() {
     assert_eq!(remaining, vec![Some(5), Some(7)]);
 
     // Empty window (7, 7] deletes nothing.
-    let removed = store.delete_acked_in_window(&session, 7, 7).await.unwrap();
+    let removed = store
+        .delete_acked_in_window(
+            &session,
+            7,
+            7,
+            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
+        .await
+        .unwrap();
     assert_eq!(removed, 0, "an empty (from == to) window is a no-op");
 }
 
@@ -592,7 +623,7 @@ async fn release_rows_for_outbound_sequences_releases_only_matching_rows() {
     store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     let released = store
-        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]))
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]), None)
         .await;
     assert!(released.error.is_none());
     assert_eq!(released.released, HashSet::from([5, 7]));
@@ -745,9 +776,10 @@ impl PendingDeliveryStorage for FailNthReleaseRowIfSessionStorage {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: crate::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
 
@@ -798,7 +830,7 @@ async fn default_release_rows_reports_partial_progress_before_error() {
     store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     let outcome = store
-        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 6, 7]))
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 6, 7]), None)
         .await;
     assert_eq!(outcome.released, HashSet::from([5]));
     assert!(matches!(

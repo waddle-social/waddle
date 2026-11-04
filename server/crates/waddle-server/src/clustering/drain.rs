@@ -12,7 +12,7 @@
 //! per-entity, not phase-ordered drain — mark the node draining in `nodes`
 //! (stop acquiring NEW claims, keep serving already-owned ones); for each
 //! owned entity, complete its final fenced write(s) *while still holding the
-//! claim*, then release; batched via [`ClaimStore::release_many`] (one
+//! claim*, then release; batched via [`ClaimStore::release_many_exact`] (one
 //! round-trip, not one-at-a-time, given the ~18k modeled claims a full
 //! cluster carries); **no** global "promote what remains" step after
 //! release — releasing first and completing a write second is the exact
@@ -44,7 +44,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity};
+use waddle_xmpp::ownership::{ClaimEpoch, ClaimStore, Entity, EntityType, NodeIdentity};
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
@@ -92,7 +92,7 @@ impl std::fmt::Display for DrainErrorClass {
 /// release batch (the batch-entry-only-after-commit invariant, major fix
 /// 13 in the phase plan); (3) once every eligible entity has been sealed or
 /// the budget is exhausted, release everything sealed in ONE
-/// [`ClaimStore::release_many`] call. An entity whose seal did not
+/// [`ClaimStore::release_many_exact`] call. An entity whose seal did not
 /// complete within budget is left claimed — abandoned, not lost: the claim
 /// stays fenced-safe and is reclaimed later by another node's orphan
 /// reaper, or by this node itself once its own lease naturally lapses.
@@ -110,11 +110,18 @@ pub(crate) async fn run_shutdown_drain<L>(
     mark_draining_bounded(lease, identity, MARK_DRAINING_BOUND.min(budget)).await;
 
     let deadline = start + budget;
-    let owned = local_claims.owned().await;
-    let mut to_release: Vec<Entity> = Vec::new();
+    let Some(owned_fences) = local_claims.room_claim_fences_for_drain(identity).await else {
+        tracing::error!(
+            "clustering drain: exact room-claim snapshot unavailable; leaving claims held"
+        );
+        crate::telemetry::mark_span_error("clustering drain exact claim snapshot unavailable");
+        metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
+        return;
+    };
+    let mut to_release: Vec<(Entity, ClaimEpoch)> = Vec::new();
     let mut abandoned: u64 = 0;
 
-    for entity in owned {
+    for (entity, claim_epoch) in owned_fences {
         // Only entities this generic loop owns draining for — see the
         // module doc: `SmSession` belongs to the existing Q6 drain, and
         // `UserActor` claims are handed off by identity retirement after
@@ -140,7 +147,7 @@ pub(crate) async fn run_shutdown_drain<L>(
             // entity enters `to_release` strictly after `seal_before_release`
             // — which performs/confirms the entity's final fenced write —
             // has already returned `true`, never before.
-            to_release.push(entity);
+            to_release.push((entity, claim_epoch));
         } else {
             tracing::warn!(
                 entity_id = %entity.id,
@@ -153,7 +160,7 @@ pub(crate) async fn run_shutdown_drain<L>(
 
     if !to_release.is_empty() {
         let attempted = to_release.len() as u64;
-        match claim_store.release_many(&to_release, identity).await {
+        match claim_store.release_many_exact(&to_release, identity).await {
             Ok(()) => {
                 metrics::record_claims_released_on_drain(attempted);
             }
@@ -161,7 +168,7 @@ pub(crate) async fn run_shutdown_drain<L>(
                 tracing::warn!(
                     error_class = %DrainErrorClass::Backend,
                     count = attempted,
-                    "clustering drain: release_many failed; entities remain claimed \
+                    "clustering drain: exact claim release failed; entities remain claimed \
                      (fenced-safe, reclaimed later)"
                 );
                 abandoned += attempted;
@@ -408,7 +415,7 @@ mod tests {
     }
 
     struct FakeLocalClaims {
-        owned: Vec<Entity>,
+        fences: Vec<(Entity, ClaimEpoch)>,
         outcome: SealOutcome,
         seal_calls: Arc<Mutex<Vec<String>>>,
         demote_calls: Arc<AtomicU32>,
@@ -417,7 +424,16 @@ mod tests {
     #[async_trait]
     impl LocallyClaimedEntities for FakeLocalClaims {
         async fn owned(&self) -> Vec<Entity> {
-            self.owned.clone()
+            self.fences
+                .iter()
+                .map(|(entity, _)| entity.clone())
+                .collect()
+        }
+        async fn room_claim_fences_for_drain(
+            &self,
+            _owner: &NodeIdentity,
+        ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+            Some(self.fences.clone())
         }
         async fn demote(&self, _entity: &Entity) {
             self.demote_calls.fetch_add(1, Ordering::SeqCst);
@@ -481,7 +497,11 @@ mod tests {
         let sm_c_epoch = claim_store.acquire(&sm_c, &me).await.expect("acquire sm c");
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
-            owned: vec![room_a.clone(), room_b.clone(), sm_c.clone()],
+            fences: vec![
+                (room_a.clone(), room_a_epoch),
+                (room_b.clone(), room_b_epoch),
+                (sm_c.clone(), sm_c_epoch),
+            ],
             outcome: SealOutcome::Succeed,
             seal_calls: Arc::new(Mutex::new(Vec::new())),
             demote_calls: Arc::new(AtomicU32::new(0)),
@@ -525,6 +545,88 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn drain_exact_release_preserves_same_node_reacquire_after_snapshot() {
+        struct ReacquireDuringSeal {
+            entity: Entity,
+            captured_epoch: ClaimEpoch,
+            owner: NodeIdentity,
+            store: Arc<InProcessClaimStore>,
+            reacquired_epoch: Arc<Mutex<Option<ClaimEpoch>>>,
+        }
+
+        #[async_trait]
+        impl LocallyClaimedEntities for ReacquireDuringSeal {
+            async fn owned(&self) -> Vec<Entity> {
+                vec![self.entity.clone()]
+            }
+
+            async fn room_claim_fences_for_drain(
+                &self,
+                _owner: &NodeIdentity,
+            ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+                Some(vec![(self.entity.clone(), self.captured_epoch)])
+            }
+
+            async fn demote(&self, _entity: &Entity) {}
+
+            async fn health_check(&self, _entity: &Entity) -> bool {
+                true
+            }
+
+            async fn seal_before_release(&self, entity: &Entity) -> bool {
+                self.store
+                    .release(entity, &self.owner, self.captured_epoch)
+                    .await
+                    .expect("release captured generation during seal");
+                let reacquired = self
+                    .store
+                    .acquire(entity, &self.owner)
+                    .await
+                    .expect("same node reacquires during drain seal");
+                *self.reacquired_epoch.lock().expect("lock") = Some(reacquired);
+                true
+            }
+        }
+
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let store = Arc::new(InProcessClaimStore::new());
+        let claim_store: Arc<dyn ClaimStore> = store.clone();
+        let me = identity();
+        let entity = room("room-drain-reacquire@muc.example.com");
+        let captured_epoch = store.acquire(&entity, &me).await.expect("initial claim");
+        let reacquired_epoch = Arc::new(Mutex::new(None));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(ReacquireDuringSeal {
+            entity: entity.clone(),
+            captured_epoch,
+            owner: me.clone(),
+            store: Arc::clone(&store),
+            reacquired_epoch: Arc::clone(&reacquired_epoch),
+        });
+
+        run_shutdown_drain(
+            &NoopLease,
+            &claim_store,
+            &me,
+            &local_claims,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let reacquired_epoch = reacquired_epoch
+            .lock()
+            .expect("lock")
+            .expect("seal reacquired claim");
+        assert!(reacquired_epoch > captured_epoch);
+        assert!(
+            claim_store
+                .fence(&entity, &me, reacquired_epoch)
+                .await
+                .expect("fence check"),
+            "the stale drain snapshot must not release a newer same-node claim"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn drain_abandons_a_failed_seal_and_leaves_the_claim_held() {
         let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
@@ -534,7 +636,7 @@ mod tests {
         let epoch = claim_store.acquire(&room_a, &me).await.expect("acquire");
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
-            owned: vec![room_a.clone()],
+            fences: vec![(room_a.clone(), epoch)],
             outcome: SealOutcome::Fail,
             seal_calls: Arc::new(Mutex::new(Vec::new())),
             demote_calls: Arc::new(AtomicU32::new(0)),
@@ -570,7 +672,7 @@ mod tests {
         let epoch = claim_store.acquire(&room_a, &me).await.expect("acquire");
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
-            owned: vec![room_a.clone()],
+            fences: vec![(room_a.clone(), epoch)],
             outcome: SealOutcome::Hang,
             seal_calls: Arc::new(Mutex::new(Vec::new())),
             demote_calls: Arc::new(AtomicU32::new(0)),
@@ -612,7 +714,11 @@ mod tests {
         }
         let seal_calls = Arc::new(Mutex::new(Vec::new()));
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
-            owned: entities.clone(),
+            fences: entities
+                .iter()
+                .cloned()
+                .zip(epochs.iter().copied())
+                .collect(),
             outcome: SealOutcome::Succeed,
             seal_calls: Arc::clone(&seal_calls),
             demote_calls: Arc::new(AtomicU32::new(0)),
@@ -679,7 +785,7 @@ mod tests {
     /// thousands of claimed entities; assert wall clock fits
     /// `claimReleaseBudget`." Scaled down from the ADR's ~18k-per-node
     /// model to a still-meaningfully-batched, CI-friendly count — the
-    /// property under test (ONE `release_many` round-trip, not one
+    /// property under test (ONE exact-release batch round-trip, not one
     /// statement per entity) is independent of the exact N, and this count
     /// is large enough that a naive one-at-a-time release would blow the
     /// budget while the real batched implementation does not.
@@ -705,13 +811,13 @@ mod tests {
         let claim_store: Arc<dyn ClaimStore> = Arc::new(claim_store_typed);
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
-            owned: entities.iter().map(|(entity, _)| entity.clone()).collect(),
+            fences: entities.clone(),
             outcome: SealOutcome::Succeed,
             seal_calls: Arc::new(Mutex::new(Vec::new())),
             demote_calls: Arc::new(AtomicU32::new(0)),
         });
 
-        // Generous relative to what a single `release_many` round-trip
+        // Generous relative to what a single exact-release round-trip
         // needs, but far tighter than ~2,000 individual release
         // round-trips would require — this is the budget the wall clock
         // below must fit inside.
@@ -736,21 +842,11 @@ mod tests {
         }
     }
 
-    /// ADR-0017 Phase 3 Slice 10 / Slice 3's release_many ABA forward
-    /// reference: for `RoomActor` entities specifically (the only entity
-    /// type the generic drain ever batches into `release_many` — see the
-    /// module doc), there is structurally no PRE-release reacquisition
-    /// window at all — nothing drops this node's claim before
-    /// `release_many` itself runs, and rooms have no `steal_for_resume`
-    /// -equivalent consent path (unlike SM sessions — see
-    /// `claims::tests::release_many_epoch_blind_window_deletes_a_fresh_same_node_resume`,
-    /// which reproduces that window at the raw store level via the ONE CAS
-    /// variant, `steal_for_resume`, the draining gate does not cover). What
-    /// the draining gate closes for rooms is the POST-release case: this
-    /// test proves that once `release_many` has actually dropped the
-    /// claim, the draining node that just released it cannot immediately
-    /// win it back either (no same-node "steal it right back" loop),
-    /// while a genuinely different, non-draining node can.
+    /// The draining gate closes the POST-release case: once the exact batch
+    /// has dropped the claim, this node cannot immediately win it back,
+    /// while a genuinely different, non-draining node can. The separate
+    /// same-node ABA regression proves the exact epoch also protects a
+    /// newer claim acquired before the batch runs.
     #[tokio::test]
     async fn drain_prevents_a_draining_node_from_reclaiming_its_own_just_released_room() {
         let _guard = super::super::claims::clustering_control_plane_table_lock()
@@ -766,7 +862,7 @@ mod tests {
             .await
             .expect("register");
         let entity = room("room-post-release@muc.example.com");
-        claim_store_typed
+        let claim_epoch = claim_store_typed
             .acquire(&entity, &me)
             .await
             .expect("acquire");
@@ -779,9 +875,9 @@ mod tests {
             .expect("mark draining");
         let claim_store: Arc<dyn ClaimStore> = Arc::new(claim_store_typed);
         claim_store
-            .release_many(std::slice::from_ref(&entity), &me)
+            .release_many_exact(&[(entity.clone(), claim_epoch)], &me)
             .await
-            .expect("release_many");
+            .expect("release_many_exact");
 
         // This same (still-draining) node cannot win it back.
         let reacquire = claim_store.acquire(&entity, &me).await;
@@ -806,14 +902,23 @@ mod tests {
     /// across a drain that genuinely outlives its own old heartbeat
     /// cadence.
     struct SlowSealLocalClaims {
-        owned: Vec<Entity>,
+        fences: Vec<(Entity, ClaimEpoch)>,
         seal_delay: Duration,
     }
 
     #[async_trait]
     impl LocallyClaimedEntities for SlowSealLocalClaims {
         async fn owned(&self) -> Vec<Entity> {
-            self.owned.clone()
+            self.fences
+                .iter()
+                .map(|(entity, _)| entity.clone())
+                .collect()
+        }
+        async fn room_claim_fences_for_drain(
+            &self,
+            _owner: &NodeIdentity,
+        ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+            Some(self.fences.clone())
         }
         async fn demote(&self, _entity: &Entity) {}
         async fn health_check(&self, _entity: &Entity) -> bool {
@@ -864,7 +969,7 @@ mod tests {
             .await
             .expect("register");
         let entity = room("room-outlives-heartbeat@muc.example.com");
-        claim_store_typed
+        let claim_epoch = claim_store_typed
             .acquire(&entity, &me)
             .await
             .expect("acquire");
@@ -874,7 +979,7 @@ mod tests {
         let claim_release_budget = seal_delay * 3;
 
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(SlowSealLocalClaims {
-            owned: vec![entity.clone()],
+            fences: vec![(entity.clone(), claim_epoch)],
             seal_delay,
         });
         // A second `ClaimStore` view onto the SAME underlying database

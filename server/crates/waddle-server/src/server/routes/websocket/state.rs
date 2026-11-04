@@ -24,6 +24,7 @@ use crate::server::extension_bot_avatar::BotAvatars;
 use crate::server::extension_host_adapter::BotRoomLocks;
 use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
 use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
+use crate::server::routes::interpret::effects::ClientRoomOrigin;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::collections::HashMap;
@@ -1716,13 +1717,43 @@ impl std::ops::Deref for ResolvedPrincipal<'_> {
     }
 }
 
+/// Capture the authenticated connection binding, not a stanza-supplied JID or
+/// a fresh lookup in a JID-indexed registry.
+pub(super) fn authenticated_client_room_origin(
+    phase: &ConnectionPhase,
+    session: Option<&Session>,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Option<ClientRoomOrigin> {
+    let full_jid = phase.bound_jid()?;
+    let principal = session?.authenticated_principal_ref().ok()?;
+    if principal.bare_jid() != &full_jid.to_bare() {
+        return None;
+    }
+    Some(ClientRoomOrigin {
+        full_jid: full_jid.clone(),
+        occupancy_session,
+    })
+}
+
 pub(super) struct WsConnState {
     pub(super) ingress_generation: waddle_xmpp::ingress::ConnectionGeneration,
+    /// Physical transport identity, retained across bind/resume attempts on
+    /// this WebSocket and kept separate from ingress and durable SM generations.
+    pub(super) connection_ref: waddle_xmpp::ownership::ConnectionRef,
+    /// Read-only local I/O evidence shared by every binding on this socket.
+    /// Synthetic state has no physical transport and therefore no witness.
+    pub(super) local_io_relinquishment: Option<waddle_xmpp::registry::LocalIoRelinquishment>,
+    /// The current bind or resume attempt, separate from registry ownership.
+    pub(super) binding_ref: Option<waddle_xmpp::ownership::BindingRef>,
+    #[cfg(test)]
+    pub(super) resume_binding_attempts: Vec<waddle_xmpp::ownership::BindingRef>,
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
     /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
     /// restart, independently from lifecycle revocation.
     pub(super) stream_open_handled: bool,
+    /// Untrusted `from` hint from this stream's RFC 7395 open frame.
+    pub(super) stream_open_from: Option<BareJid>,
     /// Conservative transport state for the current server `<open/>` response.
     /// `Committed` is reached only after its entire authority-aware batch
     /// returns `Continue`; lifecycle close uses this state to decide whether a
@@ -1787,9 +1818,17 @@ pub(super) struct WsConnState {
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
-    pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
-    pub(super) write_interruption: tokio_util::sync::CancellationToken,
+    /// Same-queue endpoint recovered from an empty, sealed binding after a
+    /// published resume attempt failed. Registration consumes this only when
+    /// its original `pending_tx` slot is empty.
+    pub(super) recovered_pending_endpoint: Option<waddle_xmpp::registry::SocketOutboundEndpoint>,
+    /// A published resume rollback could not safely hand back its endpoint
+    /// because the exact owner disappeared or accepted work remains queued.
+    /// The physical socket must not publish a fresh binding in that state.
+    pub(super) resume_endpoint_handoff_blocked: bool,
+    pub(super) write_interruption: waddle_xmpp::registry::SocketWriteInterruption,
     /// Resume preflight is serviced only by this connection's owning task,
     /// including while transport readiness or flushing is blocked.
     pub(super) live_resume_control: Arc<waddle_xmpp::registry::LiveResumeControl>,
@@ -1879,11 +1918,25 @@ pub(super) struct WsConnState {
 }
 
 impl WsConnState {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::new_for_node_lease(waddle_xmpp::ownership::NodeLeaseIdentity::local_process())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn new_for_node_lease(
+        node_lease: waddle_xmpp::ownership::NodeLeaseIdentity,
+    ) -> Self {
+        Self::new_for_connection_ref(waddle_xmpp::ownership::ConnectionRef::fresh(node_lease))
+    }
+
+    pub(super) fn new_for_connection_ref(
+        connection_ref: waddle_xmpp::ownership::ConnectionRef,
+    ) -> Self {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let sm_state = StreamManagementState::new();
-        let write_interruption = tokio_util::sync::CancellationToken::new();
+        let write_interruption = waddle_xmpp::registry::SocketWriteInterruption::new();
         let live_resume_control = waddle_xmpp::registry::LiveResumeControl::new(
             sm_state.resume_checkpoint(),
             write_interruption.clone(),
@@ -1892,8 +1945,14 @@ impl WsConnState {
             ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ),
+            connection_ref,
+            local_io_relinquishment: None,
+            binding_ref: None,
+            #[cfg(test)]
+            resume_binding_attempts: Vec::new(),
             phase: ConnectionPhase::new(),
             stream_open_handled: false,
+            stream_open_from: None,
             stream_open_wire_state: StreamOpenWireState::NotCommitted,
             authenticated_session: None,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
@@ -1921,6 +1980,8 @@ impl WsConnState {
             post_sm_finalization_test_hook: None,
             registry_owner: None,
             socket_lifecycle: None,
+            recovered_pending_endpoint: None,
+            resume_endpoint_handoff_blocked: false,
             write_interruption,
             live_resume_control,
             suppress_sm_record_next_batch: false,
@@ -1935,6 +1996,19 @@ impl WsConnState {
             send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
+        }
+    }
+
+    /// Exact identity of this physical WebSocket, shared by every binding
+    /// attempt made on the same socket.
+    #[cfg(feature = "test-support")]
+    pub(super) fn connection_ref(&self) -> &waddle_xmpp::ownership::ConnectionRef {
+        &self.connection_ref
+    }
+
+    pub(super) fn retire_binding_ref(&mut self) {
+        if let Some(binding) = self.binding_ref.take() {
+            self.write_interruption.retire_binding(&binding);
         }
     }
 
@@ -2033,6 +2107,7 @@ impl WsConnState {
     /// remains eligible for the best-effort system-shutdown error.
     pub(super) fn reset_stream_open_for_xmpp_lifecycle(&mut self) {
         self.stream_open_handled = false;
+        self.stream_open_from = None;
         self.stream_open_wire_state = StreamOpenWireState::NotCommitted;
     }
 

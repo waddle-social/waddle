@@ -52,6 +52,8 @@ pub(crate) struct TestStateOverrides {
     pub(crate) db_pool: Option<Arc<DatabasePool>>,
     /// Explicit production-backed dependencies for native characterization.
     pub(crate) app_state: Option<Arc<AppState>>,
+    #[cfg(feature = "test-support")]
+    pub(crate) websocket_admission: Option<crate::test_support::WebSocketAdmissionTestConfig>,
     pub(crate) database_pubsub_storage: Option<Arc<DatabasePubSubStorage>>,
     pub(crate) call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
     pub(crate) clustering: Option<ClusteringHandles>,
@@ -112,6 +114,8 @@ where
     let TestStateOverrides {
         db_pool: db_pool_override,
         app_state: app_state_override,
+        #[cfg(feature = "test-support")]
+        websocket_admission,
         database_pubsub_storage: database_pubsub_storage_override,
         call_sfu,
         clustering: clustering_override,
@@ -167,6 +171,17 @@ where
         }
         None => {
             let mut state = AppState::new(db_pool);
+            #[cfg(feature = "test-support")]
+            if let Some(config) = websocket_admission {
+                state.websocket_inventory =
+                    crate::websocket_transport::IoCustodianInventory::new(config.capacity.get())
+                        .expect("test capacity is nonzero");
+                state.clustering_enabled = config.clustered_identity.is_some();
+                if let Some(identity) = config.clustered_identity {
+                    state.clustering_claims.node_identity = identity;
+                }
+                state.websocket_admission_test_barriers = config.barriers;
+            }
             if let Some(clustering) = clustering_override {
                 state.clustering_claims = clustering;
             }
@@ -489,7 +504,7 @@ pub async fn register_test_connection(
     state: &WebSocketState,
     jid: &jid::FullJid,
     sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
-) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+) -> waddle_xmpp::registry::LocalConnectionBindingId {
     let owner = state
         .deps
         .protocol

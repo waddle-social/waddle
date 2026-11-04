@@ -4,7 +4,10 @@ use jid::BareJid;
 
 use crate::space_identity::SpaceNode;
 
-use super::{ChannelSpaceLink, ChannelSpaceLinkStore, DatabaseChannelSpaceLinkStore};
+use super::{
+    ChannelSpaceLink, ChannelSpaceLinkAttachError, ChannelSpaceLinkStore,
+    DatabaseChannelSpaceLinkStore,
+};
 
 fn channel_jid(local: &str) -> BareJid {
     format!("{local}@muc.localhost")
@@ -177,4 +180,46 @@ async fn list_all_on_empty_store_returns_empty_vec() {
     let store = fresh_store().await;
     let rows = store.list_all().await.expect("list_all empty");
     assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn initialize_owner_uses_the_supplied_database() {
+    let database = crate::db::Database::in_memory("channel-space-links-owner-test")
+        .await
+        .expect("create owner database");
+    let store = DatabaseChannelSpaceLinkStore::initialize_owner(database)
+        .await
+        .expect("initialize exact owner database");
+
+    assert_eq!(store.database().name(), "channel-space-links-owner-test");
+    let row = link(channel_jid("general"), space_jid("eng"), 1_700_000_000);
+    store.set(&row).await.expect("write owner-prepared table");
+    assert_eq!(
+        store.get(&row.channel_jid).await.expect("read row"),
+        Some(row)
+    );
+}
+
+#[tokio::test]
+async fn attach_existing_rejects_sqlite_without_creating_schema() {
+    let database = crate::db::Database::in_memory("channel-space-links-attach-test")
+        .await
+        .expect("create database");
+
+    assert!(matches!(
+        DatabaseChannelSpaceLinkStore::attach_existing(database.clone()).await,
+        Err(ChannelSpaceLinkAttachError::PostgresRequired)
+    ));
+
+    let mut rows = database
+        .guard()
+        .await
+        .expect("acquire database")
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'channel_space_links'",
+            (),
+        )
+        .await
+        .expect("inspect schema");
+    assert!(rows.next().await.expect("read schema").is_none());
 }

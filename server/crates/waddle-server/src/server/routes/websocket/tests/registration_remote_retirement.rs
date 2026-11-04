@@ -20,7 +20,9 @@ use std::time::Duration;
 use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
 use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
-use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, SocketCleanupState};
+use waddle_xmpp::registry::{
+    ForceDetachOrigin, ForceDetachOutcome, LocalSocketIo, SocketCleanupState,
+};
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 #[tokio::test]
@@ -44,7 +46,7 @@ where
     assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
     incumbent.authenticated_session = Some(create_test_session(&state, "alice").await);
     let lifecycle = incumbent.socket_lifecycle.clone().unwrap();
-    let old_owner = incumbent.registry_owner.clone().unwrap();
+    let old_owner = incumbent.registry_owner.unwrap();
     let mut force_detach_rx = Some(lifecycle.entry.take_force_detach_rx().unwrap());
     let stream_id = "cross-node-stalled-stream";
     incumbent
@@ -95,7 +97,7 @@ where
         SharedNodeIdentity::new(NodeIdentity::new("socket-node", "socket-epoch")),
     )
     .await;
-    let registration_id = track_remote_socket_for_test(&bridge, &jid, old_owner.clone()).await;
+    let registration_id = track_remote_socket_for_test(&bridge, &jid, &lifecycle.entry).await;
     let request = RelayForceDetachRemoteUserResource {
         jid: jid.clone(),
         registration_id,
@@ -149,12 +151,13 @@ where
     );
     let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
     let mut pending = Vec::new();
+    let (socket_io, _) = LocalSocketIo::new(sink, reader);
     let (_, reply) = tokio::time::timeout(Duration::from_secs(1), async {
         tokio::join!(
             finish_connection(
                 &state,
                 &mut incumbent,
-                sink.uninterrupted(),
+                socket_io,
                 FrameAuthority {
                     permit: &permit,
                     shutdown: &shutdown,

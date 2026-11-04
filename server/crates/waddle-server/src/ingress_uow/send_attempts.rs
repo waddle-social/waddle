@@ -59,6 +59,25 @@ pub(crate) enum SendAttemptStatus {
 /// Bound uncertainty independently of the short pre-invocation reservation.
 const STARTED_GRACE_MS: i64 = 60_000;
 
+#[cfg(feature = "test-support")]
+impl SendLease {
+    pub(crate) fn obligation(&self) -> &SendObligation {
+        &self.obligation
+    }
+
+    pub(crate) fn owner(&self) -> &NodeIdentity {
+        &self.owner
+    }
+
+    pub(crate) fn token(&self) -> Uuid {
+        self.token
+    }
+
+    pub(crate) fn never_started(&self) -> bool {
+        !self.previously_started
+    }
+}
+
 /// SQL shared by custody and fanout boundaries. Completion never expires;
 /// either in-flight phase excludes competing sinks only until its deadline.
 pub(crate) fn send_attempt_blocks_delivery(driver: DatabaseDriver) -> String {
@@ -117,7 +136,8 @@ impl SendAttemptRepository {
             recovered,
             previously_started,
         };
-        let sql = format!("INSERT INTO ingress_send_attempts (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
+        let attempts = attempt_relation(tx);
+        let sql = format!("INSERT INTO {attempts} (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
         tx.transaction_mut()
             .execute(
                 &sql,
@@ -145,9 +165,13 @@ impl SendAttemptRepository {
     ) -> Result<Option<SendAttemptStatus>, IngressUowError> {
         lock(tx, obligation).await?;
         let (key, clock) = dialect(tx);
-        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
-        let mut rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let attempts = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::SendAttempts,
+        );
+        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM {attempts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = transaction
             .query(
                 &sql,
                 crate::db_params![
@@ -240,10 +264,23 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
         lock(tx, obligation).await?;
-        let mut rows = tx.transaction_mut().query(
-            "SELECT 1 FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
-            crate::db_params![obligation.message.to_storage().to_string(), obligation.receipt.kind.to_storage(), obligation.receipt.semantic_identity_hash.to_vec(), obligation.recipient.to_string()]
-        ).await?;
+        let (transaction, prepared) = tx.prepared_parts();
+        let appends = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::SmAppends,
+        );
+        let sql = format!("SELECT 1 FROM {appends} WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?");
+        let mut rows = transaction
+            .query(
+                &sql,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
         Ok(rows.next().await?.is_some())
     }
 
@@ -252,9 +289,13 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
         let (key, _) = dialect(tx);
-        let sql = format!("SELECT 1 FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
-        let mut rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let receipts = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::CarbonReceipts,
+        );
+        let sql = format!("SELECT 1 FROM {receipts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = transaction
             .query(
                 &sql,
                 crate::db_params![
@@ -274,14 +315,15 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
-        let (_, clock) = dialect(tx);
-        transition(
-            tx,
-            lease,
-            &format!("UPDATE ingress_send_attempts SET state = 1, expires_at_ms = {clock} + {STARTED_GRACE_MS}"),
-            &format!("state = 0 AND expires_at_ms > {clock}"),
-        )
-        .await
+        lock(tx, &lease.obligation).await?;
+        let driver = tx.transaction_mut().driver();
+        let attempts = attempt_relation(tx);
+        let sql = start_sql(driver, &attempts, false);
+        Ok(tx
+            .transaction_mut()
+            .execute(&sql, lease_params(lease))
+            .await?
+            == 1)
     }
 
     /// Record observed enqueue success while this token still owns the row.
@@ -290,10 +332,11 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
+        let attempts = attempt_relation(tx);
         transition(
             tx,
             lease,
-            "UPDATE ingress_send_attempts SET state = 2",
+            &format!("UPDATE {attempts} SET state = 2"),
             "state = 1",
         )
         .await
@@ -305,24 +348,28 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
-        transition(
-            tx,
-            lease,
-            if lease.recovered && lease.previously_started {
-                // A definite failure of THIS retry does not prove the older
-                // unknown attempt failed. Retain the earlier start evidence.
-                "UPDATE ingress_send_attempts SET state = 1, expires_at_ms = 0"
-            } else if lease.recovered {
-                // Even a known uninvoked reservation must remain eligible for
-                // offline handoff if its socket disappeared before the retry.
-                "UPDATE ingress_send_attempts SET state = 0, expires_at_ms = 0"
-            } else {
-                "DELETE FROM ingress_send_attempts"
-            },
-            "state IN (0, 1)",
-        )
-        .await
+        let attempts = attempt_relation(tx);
+        let action = if lease.recovered && lease.previously_started {
+            // A definite failure of THIS retry does not prove the older
+            // unknown attempt failed. Retain the earlier start evidence.
+            format!("UPDATE {attempts} SET state = 1, expires_at_ms = 0")
+        } else if lease.recovered {
+            // Even a known uninvoked reservation must remain eligible for
+            // offline handoff if its socket disappeared before the retry.
+            format!("UPDATE {attempts} SET state = 0, expires_at_ms = 0")
+        } else {
+            format!("DELETE FROM {attempts}")
+        };
+        transition(tx, lease, &action, "state IN (0, 1)").await
     }
+}
+
+fn attempt_relation(tx: &mut IngressUowTransaction<'_>) -> String {
+    let (_, prepared) = tx.prepared_parts();
+    crate::ingress_substrate::prepared_ingress_relation(
+        prepared,
+        crate::ingress_substrate::PreparedIngressRelation::SendAttempts,
+    )
 }
 
 fn dialect(tx: &mut IngressUowTransaction<'_>) -> (&'static str, &'static str) {
@@ -356,24 +403,81 @@ async fn transition(
     condition: &str,
 ) -> Result<bool, IngressUowError> {
     lock(tx, &lease.obligation).await?;
-    let (key, _) = dialect(tx);
-    let sql = format!("{action} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND node_id = ? AND node_incarnation = ? AND lease_token = ? AND {condition}");
+    let sql = transition_sql(tx.transaction_mut().driver(), action, condition);
     Ok(tx
         .transaction_mut()
-        .execute(
-            &sql,
-            crate::db_params![
-                lease.obligation.message.to_storage().to_string(),
-                lease.obligation.receipt.kind.to_storage(),
-                lease.obligation.receipt.semantic_identity_hash.to_vec(),
-                lease.obligation.recipient.to_string(),
-                lease.owner.node_id.clone(),
-                lease.owner.node_epoch.clone(),
-                lease.token.to_string()
-            ],
-        )
+        .execute(&sql, lease_params(lease))
         .await?
         == 1)
+}
+
+fn transition_sql(driver: DatabaseDriver, action: &str, condition: &str) -> String {
+    let key = if driver == DatabaseDriver::Postgres {
+        "?::uuid"
+    } else {
+        "?"
+    };
+    format!("{action} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND node_id = ? AND node_incarnation = ? AND lease_token = ? AND {condition}")
+}
+
+fn start_sql(driver: DatabaseDriver, attempts: &str, fresh: bool) -> String {
+    let clock = database_clock(driver);
+    let action =
+        format!("UPDATE {attempts} SET state = 1, expires_at_ms = {clock} + {STARTED_GRACE_MS}");
+    let fresh_condition = if fresh { " AND recovered = 0" } else { "" };
+    transition_sql(
+        driver,
+        &action,
+        &format!("state = 0 AND expires_at_ms > {clock}{fresh_condition}"),
+    )
+}
+
+fn lease_params(lease: &SendLease) -> Vec<crate::db::Value> {
+    crate::db_params![
+        lease.obligation.message.to_storage().to_string(),
+        lease.obligation.receipt.kind.to_storage(),
+        lease.obligation.receipt.semantic_identity_hash.to_vec(),
+        lease.obligation.recipient.to_string(),
+        lease.owner.node_id.clone(),
+        lease.owner.node_epoch.clone(),
+        lease.token.to_string()
+    ]
+}
+
+// These adapters are private to the laboratory. The caller must already hold
+// the epoch, canonical and exact attempt locks, in that order. They share the
+// production transition and only add the never-started condition.
+#[cfg(feature = "test-support")]
+pub(crate) async fn start_fresh_postgres(
+    connection: &mut sqlx::PgConnection,
+    qualified_attempts: &str,
+    lease: &SendLease,
+) -> Result<bool, sqlx::Error> {
+    if !lease.never_started() {
+        return Ok(false);
+    }
+    let sql = crate::db::rewrite_positional_for_postgres(&start_sql(
+        DatabaseDriver::Postgres,
+        qualified_attempts,
+        true,
+    ));
+    let mut query = sqlx::query(&sql);
+    for value in lease_params(lease) {
+        query = crate::db::bind_postgres(query, value);
+    }
+    Ok(query.execute(connection).await?.rows_affected() == 1)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn start_fresh_sqlite(
+    tx: &mut crate::db::Transaction<'_>,
+    lease: &SendLease,
+) -> Result<bool, crate::db::DatabaseError> {
+    if !lease.never_started() {
+        return Ok(false);
+    }
+    let sql = start_sql(DatabaseDriver::Sqlite, "main.ingress_send_attempts", true);
+    Ok(tx.execute(&sql, lease_params(lease)).await? == 1)
 }
 
 #[cfg(test)]
