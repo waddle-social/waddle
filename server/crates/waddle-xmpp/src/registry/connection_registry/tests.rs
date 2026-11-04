@@ -28,11 +28,9 @@ fn test_registry_creation() {
     assert_eq!(registry.connection_count(), 0);
 }
 
-#[test]
-fn stale_binding_can_still_interrupt_a_later_binding_on_the_same_socket() {
-    // Characterizes the existing physical-socket scope. A later cutover must
-    // fence this operation against the current BindingRef before treating it
-    // as exact binding retirement.
+#[tokio::test]
+async fn retired_binding_cannot_interrupt_a_later_binding_on_the_same_socket() {
+    let _metrics = crate::telemetry::test_support::acquire().await;
     let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
     let old_binding = BindingRef::fresh(connection.clone());
     let new_binding = BindingRef::fresh(connection);
@@ -43,17 +41,117 @@ fn stale_binding_can_still_interrupt_a_later_binding_on_the_same_socket() {
     // Production registration shares the owning WsConnState's interruption
     // across successive entries made on that physical socket.
     new.write_interruption = old.write_interruption.clone();
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+    registry
+        .register_socket_entry(jid.clone(), old.clone())
+        .expect("publish old binding");
+    old.write_interruption.retire_binding(&old_binding);
+    registry
+        .register_socket_entry(jid.clone(), new.clone())
+        .expect("publish fresh binding");
     let mut old_control = old.take_force_detach_rx().expect("old control receiver");
     let (ack, _receiver) = tokio::sync::oneshot::channel();
-    old.try_force_detach_and_interrupt(super::ForceDetachRequest {
-        origin: super::ForceDetachOrigin::FreshBindReplacement,
-        requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
-        ack,
-    })
-    .expect("stale entry can still offer its control request");
+    let outcome = old
+        .try_force_detach_and_interrupt(super::ForceDetachRequest {
+            origin: super::ForceDetachOrigin::FreshBindReplacement,
+            target_binding: None,
+            requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
+            ack,
+        })
+        .expect("stale entry can still offer its control request");
+    assert_eq!(
+        outcome,
+        super::ForceDetachInterruption::QueuedAfterRetirement
+    );
     assert_ne!(old_binding, new_binding);
-    assert!(old_control.try_recv().is_ok());
-    assert!(new.write_interruption.is_cancelled());
+    let request = old_control.try_recv().expect("queued old request");
+    assert!(!request.targets_binding(Some(&new_binding)));
+    assert!(!new.write_interruption.is_cancelled());
+    registry.unregister(&jid);
+}
+
+#[tokio::test]
+async fn binding_replacement_between_offer_and_stop_preserves_the_successor() {
+    let _metrics = crate::telemetry::test_support::acquire().await;
+    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let old_binding = BindingRef::fresh(connection.clone());
+    let new_binding = BindingRef::fresh(connection);
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = ConnectionEntry::new_for_binding(old_tx, old_binding.clone());
+    let mut new = ConnectionEntry::new_for_binding(new_tx, new_binding.clone());
+    new.write_interruption = old.write_interruption.clone();
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+    registry
+        .register_socket_entry(jid.clone(), old.clone())
+        .expect("publish old binding");
+    let mut old_control = old.take_force_detach_rx().expect("old receiver");
+    let (offered, offer_seen) = std::sync::mpsc::channel();
+    let (resume, continue_stop) = std::sync::mpsc::channel();
+    let target = old.clone();
+    let (ack, reply) = tokio::sync::oneshot::channel();
+    let detach = std::thread::spawn(move || {
+        target.try_force_detach_and_interrupt_after_offer_for_test(
+            super::ForceDetachRequest {
+                origin: super::ForceDetachOrigin::FreshBindReplacement,
+                target_binding: None,
+                requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
+                ack,
+            },
+            || {
+                offered.send(()).expect("signal queued request");
+                continue_stop.recv().expect("release stop check");
+            },
+        )
+    });
+    offer_seen.recv().expect("offer completed");
+    old.write_interruption.retire_binding(&old_binding);
+    registry
+        .register_socket_entry(jid.clone(), new.clone())
+        .expect("publish successor before old stop");
+    resume.send(()).expect("release old stop check");
+    assert_eq!(
+        detach.join().expect("detach thread").expect("queued"),
+        super::ForceDetachInterruption::QueuedAfterRetirement
+    );
+    let stale_request = old_control.try_recv().expect("stale request was queued");
+    assert!(!stale_request.targets_binding(Some(&new_binding)));
+    drop(stale_request);
+    assert!(reply.await.is_err());
+    assert!(!new.write_interruption.is_cancelled());
+    registry.unregister(&jid);
+}
+
+#[tokio::test]
+async fn socket_stop_before_publication_refuses_a_successor() {
+    let _metrics = crate::telemetry::test_support::acquire().await;
+    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = ConnectionEntry::new_for_binding(old_tx, BindingRef::fresh(connection.clone()));
+    let mut new = ConnectionEntry::new_for_binding(new_tx, BindingRef::fresh(connection));
+    new.write_interruption = old.write_interruption.clone();
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+    registry
+        .register_socket_entry(jid.clone(), old.clone())
+        .expect("old binding");
+    let _old_control = old.take_force_detach_rx().expect("old receiver");
+    let (ack, _reply) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        old.try_force_detach_and_interrupt(super::ForceDetachRequest {
+            origin: super::ForceDetachOrigin::FreshBindReplacement,
+            target_binding: None,
+            requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
+            ack,
+        })
+        .expect("stop old socket"),
+        super::ForceDetachInterruption::Stopped
+    );
+    assert!(registry.register_socket_entry(jid.clone(), new).is_none());
+    registry.unregister(&jid);
 }
 
 #[test]

@@ -192,6 +192,7 @@ impl SmSessionLocalClaims {
                 let (ack, ack_rx) = tokio::sync::oneshot::channel();
                 let request = ForceDetachRequest {
                     origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                    target_binding: entry.binding_ref().cloned(),
                     requester_bare_jid: jid.to_bare(),
                     ack,
                 };
@@ -833,6 +834,7 @@ impl UserLocalClaims {
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
                 origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                target_binding: entry.binding_ref().cloned(),
                 requester_bare_jid: bare_jid.clone(),
                 ack,
             };
@@ -1562,6 +1564,7 @@ mod tests {
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let filler = ForceDetachRequest {
                 origin: ForceDetachOrigin::OwnerManagedRetirement,
+                target_binding: None,
                 requester_bare_jid: jid.to_bare(),
                 ack,
             };

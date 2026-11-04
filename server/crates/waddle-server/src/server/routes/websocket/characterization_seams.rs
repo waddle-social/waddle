@@ -281,6 +281,7 @@ pub(in crate::server::routes::websocket) fn delay_failed_resume_cleanup(
     jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: &str,
+    entry: waddle_xmpp::registry::ConnectionEntry,
 ) {
     let Some(seam) = FAILED_RESUME_SEAM.as_ref() else {
         return;
@@ -311,6 +312,22 @@ pub(in crate::server::routes::websocket) fn delay_failed_resume_cleanup(
             &jid,
             &format!("removed={removed} replacement={replacement_is_current}"),
         );
+        let (ack, _reply) = tokio::sync::oneshot::channel();
+        let outcome =
+            entry.try_force_detach_and_interrupt(waddle_xmpp::registry::ForceDetachRequest {
+                origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+                target_binding: None,
+                requester_bare_jid: jid.to_bare(),
+                ack,
+            });
+        let status = match outcome {
+            Ok(waddle_xmpp::registry::ForceDetachInterruption::Stopped) => "stopped",
+            Ok(waddle_xmpp::registry::ForceDetachInterruption::QueuedAfterRetirement) => {
+                "queued-after-retirement"
+            }
+            Err(_) => "not-enqueued",
+        };
+        seam.record("stale-interrupt", &stream_id, &jid, status);
     });
 }
 

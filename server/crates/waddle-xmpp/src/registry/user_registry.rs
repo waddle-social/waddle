@@ -784,6 +784,7 @@ impl UserRegistryActor {
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
                 origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+                target_binding: resource.binding_ref().cloned(),
                 requester_bare_jid: bare_jid.clone(),
                 ack,
             };

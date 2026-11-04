@@ -418,17 +418,28 @@ fn force_detach_request() -> waddle_xmpp::registry::ForceDetachRequest {
     let (ack, _receiver) = tokio::sync::oneshot::channel();
     waddle_xmpp::registry::ForceDetachRequest {
         origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+        target_binding: None,
         requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
         ack,
     }
 }
 
+fn force_detach_entry(
+    endpoint: impl Into<waddle_xmpp::registry::SocketOutboundEndpoint>,
+) -> waddle_xmpp::registry::ConnectionEntry {
+    let connection_ref = waddle_xmpp::ownership::ConnectionRef::fresh(
+        waddle_xmpp::ownership::NodeLeaseIdentity::local_process(),
+    );
+    waddle_xmpp::registry::ConnectionEntry::new_for_binding(
+        endpoint,
+        waddle_xmpp::ownership::BindingRef::fresh(connection_ref),
+    )
+}
+
 #[tokio::test]
 async fn interrupting_detach_offer_is_not_a_stop_until_its_gate_transition() {
-    use waddle_xmpp::registry::ConnectionEntry;
-
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = force_detach_entry(tx);
     let mut requests = entry.take_force_detach_rx().expect("detach receiver");
     let (offered_tx, offered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -467,7 +478,7 @@ async fn interrupting_detach_offer_is_not_a_stop_until_its_gate_transition() {
     assert_eq!(sink.uninterrupted().sent.len(), 1);
 
     let (successor_tx, _successor_rx) = tokio::sync::mpsc::channel(1);
-    let successor = ConnectionEntry::new(successor_tx);
+    let successor = force_detach_entry(successor_tx);
     assert_ne!(entry.connection_ref(), successor.connection_ref());
     let mut successor_requests = successor
         .take_force_detach_rx()
@@ -503,10 +514,8 @@ async fn interrupting_detach_offer_is_not_a_stop_until_its_gate_transition() {
 
 #[tokio::test]
 async fn failed_interrupting_detach_offer_keeps_ordinary_writes_open() {
-    use waddle_xmpp::registry::ConnectionEntry;
-
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = force_detach_entry(tx);
     let requests = entry.take_force_detach_rx().expect("detach receiver");
     let sender = entry.force_detach_sender();
     for _ in 0..sender.max_capacity() {
@@ -516,13 +525,13 @@ async fn failed_interrupting_detach_offer_keeps_ordinary_writes_open() {
     }
     assert!(matches!(
         entry.try_force_detach_and_interrupt(force_detach_request()),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        Err(waddle_xmpp::registry::ForceDetachOfferError::Full(_))
     ));
     assert!(!entry.write_interruption.is_cancelled());
     drop(requests);
     assert!(matches!(
         entry.try_force_detach_and_interrupt(force_detach_request()),
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        Err(waddle_xmpp::registry::ForceDetachOfferError::Closed(_))
     ));
     assert!(!entry.write_interruption.is_cancelled());
     let mut sink = InterruptibleSink::new(TestSink::succeeds(), entry.write_interruption.clone());
@@ -536,7 +545,6 @@ async fn ordinary_write_started_before_interrupting_stop_finishes_admission_firs
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
     use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
-    use waddle_xmpp::registry::ConnectionEntry;
 
     struct BlockingStart {
         entered: Option<tokio::sync::oneshot::Sender<()>>,
@@ -593,7 +601,7 @@ async fn ordinary_write_started_before_interrupting_stop_finishes_admission_firs
     .expect("socket admission")
     .into_legacy();
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = force_detach_entry(tx);
     let mut requests = entry.take_force_detach_rx().expect("detach receiver");
     let admitted = Arc::new(AtomicUsize::new(0));
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -660,7 +668,16 @@ where
     let stream_id = SmSessionId::try_from_wire("owner-serviced-resume").expect("valid stream ID");
     let owner: jid::FullJid = "alice@example.test/old".parse().expect("full JID");
     let (outbound, _outbound_rx) = tokio::sync::mpsc::channel(1);
-    let entry = ConnectionEntry::new(outbound);
+    let binding_ref =
+        waddle_xmpp::ownership::BindingRef::fresh(waddle_xmpp::ownership::ConnectionRef::fresh(
+            waddle_xmpp::ownership::NodeLeaseIdentity::local_process(),
+        ));
+    let entry = ConnectionEntry::new_for_binding(outbound, binding_ref.clone());
+    conn.write_interruption = entry.write_interruption.clone();
+    conn.live_resume_control = waddle_xmpp::registry::LiveResumeControl::new(
+        conn.sm_state.resume_checkpoint(),
+        conn.write_interruption.clone(),
+    );
     entry.set_sm_stream_id(Some(stream_id.clone()));
     assert!(entry.wire_resume_control(owner.clone(), conn.live_resume_control.clone()));
     let mut force_detach_rx = entry.take_force_detach_rx().expect("owner receiver");
@@ -672,9 +689,12 @@ where
 
     // Only the sink's owner-side polling can inspect the current SM frontier;
     // the request itself must neither cancel I/O nor enqueue a destructive close.
-    let invalid = conn
-        .live_resume_control
-        .request(stream_id.clone(), owner.to_bare(), 1);
+    let invalid = conn.live_resume_control.request(
+        binding_ref.clone(),
+        stream_id.clone(),
+        owner.to_bare(),
+        1,
+    );
     tokio::pin!(invalid);
     assert!(futures::poll!(invalid.as_mut()).is_pending());
     assert!(!conn.write_interruption.is_cancelled());
@@ -693,7 +713,7 @@ where
     // waking an owner whose socket never becomes ready or finishes flushing.
     let valid = conn
         .live_resume_control
-        .request(stream_id, owner.to_bare(), 0);
+        .request(binding_ref, stream_id, owner.to_bare(), 0);
     tokio::pin!(valid);
     assert!(futures::poll!(valid.as_mut()).is_pending());
     assert!(

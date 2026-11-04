@@ -87,13 +87,21 @@ async fn prepare_socket_bind(
                 } else {
                     ForceDetachOrigin::FreshBindReplacement
                 },
+                target_binding: incumbent.entry.binding_ref().cloned(),
                 requester_bare_jid: jid.to_bare(),
                 ack,
             };
             let _ = if resumed {
-                incumbent.entry.force_detach_sender().try_send(request)
+                incumbent
+                    .entry
+                    .force_detach_sender()
+                    .try_send(request)
+                    .is_ok()
             } else {
-                incumbent.entry.try_force_detach_and_interrupt(request)
+                incumbent
+                    .entry
+                    .try_force_detach_and_interrupt(request)
+                    .is_ok()
             };
             // Neither a closed channel nor a missing route proves cleanup.
             incumbent.wait_stopped().await;
@@ -237,6 +245,7 @@ async fn rollback_registered_connection(
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     conn: &mut WsConnState,
 ) {
+    conn.retire_binding_ref();
     state
         .deps
         .protocol
@@ -250,7 +259,6 @@ async fn rollback_registered_connection(
     .await;
     unregister_remote_clustered_resource_if_owner(state, jid, owner).await;
     conn.registry_owner = None;
-    conn.retire_binding_ref();
 }
 
 #[cfg(feature = "clustering")]
@@ -632,11 +640,15 @@ where
         conn.blocklist_interested,
         std::sync::atomic::Ordering::Relaxed,
     );
-    let owner = state
+    let Some(owner) = state
         .deps
         .protocol
         .connection_registry
-        .register_entry(jid.clone(), entry);
+        .register_socket_entry(jid.clone(), entry)
+    else {
+        conn.retire_binding_ref();
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    };
     conn.registry_owner = Some(owner);
     if let Some(entry) = state
         .deps
@@ -759,6 +771,7 @@ where
         if registration_outcome == MirrorRegisterOutcome::Registered {
             bind_guard.complete_actor_retirements_after_registration();
         } else {
+            conn.retire_binding_ref();
             // Rollback also clears the presence_states published above.
             state
                 .deps
@@ -778,7 +791,6 @@ where
             )
             .await;
             conn.registry_owner = None;
-            conn.retire_binding_ref();
             // This was the server-silent path from #1454: the rollback ran
             // and the client got a stream error with no server-side trace.
             record_session_init_failure(

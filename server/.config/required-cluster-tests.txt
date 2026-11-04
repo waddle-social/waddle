@@ -406,6 +406,11 @@ waddle-server server::routes::websocket::tests::send::interrupting_detach_offer_
 waddle-server server::routes::websocket::tests::send::failed_interrupting_detach_offer_keeps_ordinary_writes_open
 waddle-server server::routes::websocket::tests::send::ordinary_write_started_before_interrupting_stop_finishes_admission_first
 
+# An old binding cannot stop a newer binding on the same physical socket.
+waddle-xmpp registry::connection_registry::tests::binding_replacement_between_offer_and_stop_preserves_the_successor
+waddle-xmpp registry::connection_registry::tests::socket_stop_before_publication_refuses_a_successor
+waddle-server server::routes::websocket::connection::tests::stale_binding_requests_do_not_enter_initial_or_late_cleanup
+
 # Owner-prepared notification stores attach with restricted PostgreSQL grants.
 waddle-server notification_activity::runtime_attach_tests::postgres_attached_notification_stores_validate_shape_and_runtime_grants
 waddle-server::pubsub_runtime_attach restricted_pubsub_attachment_and_guarded_owner_bootstrap

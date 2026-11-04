@@ -1395,7 +1395,8 @@ async fn assert_fresh_bind_resume_control_tracks_new_stream(
     assert!(Arc::ptr_eq(&control, &conn.live_resume_control));
     let mut detach = entry.take_force_detach_rx().expect("fresh owner receiver");
 
-    let invalid = control.request(stream_id.clone(), jid.to_bare(), 3);
+    let binding_ref = entry.binding_ref().cloned().expect("bound entry");
+    let invalid = control.request(binding_ref.clone(), stream_id.clone(), jid.to_bare(), 3);
     tokio::pin!(invalid);
     assert!(futures::poll!(invalid.as_mut()).is_pending());
     assert!(futures::poll!(std::future::poll_fn(|cx| control.poll(cx))).is_ready());
@@ -1409,7 +1410,7 @@ async fn assert_fresh_bind_resume_control_tracks_new_stream(
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
-    let valid = control.request(stream_id, jid.to_bare(), 2);
+    let valid = control.request(binding_ref, stream_id, jid.to_bare(), 2);
     tokio::pin!(valid);
     assert!(futures::poll!(valid.as_mut()).is_pending());
     assert!(futures::poll!(std::future::poll_fn(|cx| control.poll(cx))).is_ready());

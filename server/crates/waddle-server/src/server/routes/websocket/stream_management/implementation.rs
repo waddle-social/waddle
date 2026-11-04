@@ -222,6 +222,7 @@ pub(in crate::server::routes::websocket) fn terminate_if_demoted_during_publicat
     let (ack, _ack_rx) = tokio::sync::oneshot::channel();
     let request = waddle_xmpp::registry::ForceDetachRequest {
         origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        target_binding: entry.binding_ref().cloned(),
         requester_bare_jid: jid.to_bare(),
         ack,
     };

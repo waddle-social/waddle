@@ -317,6 +317,7 @@ mod tests {
                     &socket_node,
                     ForceDetachRequest {
                         origin: ForceDetachOrigin::OwnerManagedRetirement,
+                        target_binding: None,
                         requester_bare_jid: jid.to_bare(),
                         ack,
                     },

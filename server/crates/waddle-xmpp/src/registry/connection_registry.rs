@@ -34,9 +34,10 @@ pub use endpoint::{BindingAdmissionState, SocketOutboundEndpoint};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};
 pub use outbound::{
-    BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
-    ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,
-    ProvisionalConnectionEntry, SendResult, TerminalOrderingRetryLease,
+    BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachInterruption,
+    ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+    LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance, ProvisionalConnectionEntry,
+    SendResult, TerminalOrderingRetryLease,
 };
 pub use sending::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,
