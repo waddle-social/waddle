@@ -1414,15 +1414,19 @@ impl ClaimStore for PostgresClaimStore {
         if expected.is_empty() {
             return Ok(());
         }
+        if self.db.driver() != crate::db::DatabaseDriver::Postgres {
+            return Err(ClaimError::Backend(
+                "exact clustered claim release requires PostgreSQL".to_string(),
+            ));
+        }
         let payload = serde_json::to_string(&expected)
             .map_err(|error| ClaimError::Backend(error.to_string()))?;
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // Keep the full drain in one statement even at the ~18k modeled
         // entity scale. A JSON recordset avoids PostgreSQL's bind-parameter
         // ceiling while matching each row against its captured epoch.
-        let (sql, params) = match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => (
-                r#"
+        conn.execute(
+            r#"
                     DELETE FROM clustering_claims AS claim
                     USING jsonb_to_recordset(?::jsonb) AS expected(entity TEXT, claim_epoch BIGINT)
                     WHERE claim.node_id = ?
@@ -1430,23 +1434,10 @@ impl ClaimStore for PostgresClaimStore {
                       AND claim.entity = expected.entity
                       AND claim.claim_epoch = expected.claim_epoch
                     "#,
-                crate::db_params![payload, me.node_id.clone(), me.node_epoch.clone()],
-            ),
-            crate::db::DatabaseDriver::Sqlite => (
-                r#"
-                    DELETE FROM clustering_claims
-                    WHERE node_id = ?
-                      AND node_epoch = ?
-                      AND EXISTS (
-                        SELECT 1 FROM json_each(?) AS expected
-                        WHERE json_extract(expected.value, '$.entity') = clustering_claims.entity
-                          AND CAST(json_extract(expected.value, '$.claim_epoch') AS INTEGER) = clustering_claims.claim_epoch
-                      )
-                    "#,
-                crate::db_params![me.node_id.clone(), me.node_epoch.clone(), payload],
-            ),
-        };
-        conn.execute(sql, params).await.map_err(db_err)?;
+            crate::db_params![payload, me.node_id.clone(), me.node_epoch.clone()],
+        )
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 }
