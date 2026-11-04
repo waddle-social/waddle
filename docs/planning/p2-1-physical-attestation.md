@@ -2,6 +2,10 @@
 
 This is the first implementation slice of [#2116](https://github.com/waddle-social/waddle/issues/2116) under [#2046](https://github.com/waddle-social/waddle/issues/2046). It establishes a capability that can reject a physical PostgreSQL connection whose authenticated login or durable database identity differs from the expected installation. It does not change startup pools, transaction authority, SQLite, or production admission.
 
+Later work wires an explicit operator-identity handoff into restricted startup;
+see [the runtime startup record](p2-1-runtime-startup.md). That path still
+refuses to serve while its remaining store and role/epoch gates are incomplete.
+
 ## Contract for this slice
 
 - The installer owns a fresh administrative connection. It creates a trusted-schema function with a restricted `NOLOGIN` definer, checks the effective function and schema grants before committing, and grants only the required runtime access. A separate fresh session reads the committed function and grants. A failed COMMIT has an unknown outcome; a failed readback leaves a committed but unverified installation. Both require inspection before retry.

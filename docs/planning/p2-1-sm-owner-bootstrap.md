@@ -28,3 +28,20 @@ a check of row contents or runtime DML grants, or proof of operational writer
 readiness. It does not attach fenced SM, apply a migration or version policy,
 change normal startup, or activate production. Runtime role privileges,
 concurrent schema changes, and ownership fences need separate controls.
+
+## Shared-pool startup selection
+
+When startup receives an attested PostgreSQL global handle, the single-node SM
+factory accepts only an inherited global storage selection and attaches that
+same main lane. It checks the required writer privileges and restricted role
+attributes in the same bounded snapshot as the schema checks. It rejects table
+ownership, role membership, schema creation, TEMP, replication-role override,
+PUBLIC table or column grants, grant options, trigger and truncate privileges,
+and PostgreSQL 17's MAINTAIN privilege. The existing snapshot-only attachment
+remains available for tests that intentionally grant read access alone.
+
+Clustered SM has no corresponding fenced attachment yet and returns a typed
+startup error; it never falls back to portable SM. These checks do not stop a
+privileged actor changing roles, grants or DDL afterward. The server still needs
+the global restricted-runtime handoff and the remaining store attachments;
+this change alone does not provide a serving cutover.

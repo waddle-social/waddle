@@ -1,8 +1,8 @@
-//! Global database bootstrap and dark read-only attachment boundaries.
+//! Global owner bootstrap and read-only runtime attachment boundaries.
 //!
-//! The owner operation retains the existing startup sequence. The runtime
-//! verifier is not wired into normal startup until the remaining store DDL,
-//! role topology and physical attestation gates are resolved.
+//! The legacy owner operation retains the existing startup sequence. The
+//! explicit restricted mode uses the runtime verifier, but refuses to serve
+//! while other store DDL, role and epoch gates remain unresolved.
 
 use std::time::Duration;
 
@@ -57,6 +57,8 @@ pub enum RuntimeAttachmentError {
     MissingExpectedPostgresIdentity,
     #[error("runtime attachment identity differs from the expected committed installation")]
     ExpectedIdentityMismatch,
+    #[error("restricted global runtime role or privileges are unsafe at {component}")]
+    UnsafeGlobalRuntime { component: &'static str },
     #[error("could not verify the PostgreSQL {setting} bound for runtime attachment")]
     InvalidTimeoutSetting { setting: &'static str },
     #[cfg(feature = "test-support")]
@@ -97,10 +99,18 @@ pub struct ControlPlanePoolLimits {
 
 /// An attested global database whose lineage and migration ledger were
 /// verified before this handle was created. The ledger verification describes
-/// that transaction's snapshot. The database remains private until startup,
-/// store and runtime-authority boundaries are closed in a later slice.
+/// that transaction's snapshot.
 pub struct VerifiedGlobalAttachment {
     _database: Database,
+}
+
+impl VerifiedGlobalAttachment {
+    /// Consume this verified attachment into the server pool without reopening
+    /// a DSN or detaching its physical-attestation and admission capabilities.
+    /// Call within a running Tokio runtime: the pool owns a database actor.
+    pub fn into_pool(self) -> super::DatabasePool {
+        super::DatabasePool::from_database(self._database)
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -137,8 +147,8 @@ pub async fn attach_verified_global_runtime(
 /// is returned; a failed checkout cannot fall back to an ordinary pool or
 /// reopen a DSN.
 ///
-/// This dark constructor does not wire startup, perform owner DDL, audit all
-/// runtime grants, drain existing sessions, or fence a PostgreSQL primary.
+/// This constructor performs no owner DDL and does not audit all runtime
+/// grants, drain existing sessions, or fence a PostgreSQL primary.
 pub async fn attach_verified_global_runtime_with_control_plane(
     options: PgConnectOptions,
     control_plane_options: PgConnectOptions,
@@ -352,7 +362,7 @@ pub async fn verify_global_runtime(
     expected: &AttestedLineage,
 ) -> Result<AttestedLineage, RuntimeAttachmentError> {
     let (mut tx, driver, lineage_table, ledger_table) =
-        begin_runtime_lineage_check(db, config, expected).await?;
+        begin_runtime_lineage_check(db, config, expected, true).await?;
     let attested =
         verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
@@ -361,6 +371,18 @@ pub async fn verify_global_runtime(
     MigrationRunner::single()
         .verify_complete_in_transaction(&mut tx, driver, &ledger_table)
         .await?;
+    if db.attested_pg_writer_capability().is_some() {
+        let schema = &expected
+            .postgres_identity
+            .as_ref()
+            .ok_or(RuntimeAttachmentError::MissingExpectedPostgresIdentity)?
+            .schema
+            .name
+            .0;
+        if let Some(component) = super::runtime_store_acl::verify_global(&mut tx, schema).await? {
+            return Err(RuntimeAttachmentError::UnsafeGlobalRuntime { component });
+        }
+    }
     tx.commit().await?;
     Ok(attested)
 }
@@ -391,7 +413,7 @@ pub(crate) async fn verify_mam_runtime_attachment(
         action: None,
     };
     let (mut tx, driver, lineage_table, ledger_table) =
-        begin_runtime_lineage_check(db, &config, expected).await?;
+        begin_runtime_lineage_check(db, &config, expected, true).await?;
     let schema = &expected
         .postgres_identity
         .as_ref()
@@ -539,7 +561,7 @@ pub async fn verify_store_lineage_runtime(
     expected: &AttestedLineage,
 ) -> Result<AttestedLineage, RuntimeAttachmentError> {
     let (mut tx, driver, lineage_table, _) =
-        begin_runtime_lineage_check(db, config, expected).await?;
+        begin_runtime_lineage_check(db, config, expected, false).await?;
     let attested =
         verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
@@ -582,6 +604,7 @@ async fn begin_runtime_lineage_check<'a>(
     db: &'a Database,
     config: &LineageConfig,
     expected: &AttestedLineage,
+    require_ledger: bool,
 ) -> Result<(Transaction<'a>, DatabaseDriver, String, String), RuntimeAttachmentError> {
     if config.action.is_some() {
         return Err(RuntimeAttachmentError::OperatorActionConfigured);
@@ -628,6 +651,21 @@ async fn begin_runtime_lineage_check<'a>(
             .schema
             .name
             .0;
+        let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
+        // Lock before any SELECT fixes the repeatable-read snapshot. The
+        // store-only verifier does not require a global migration ledger.
+        tx.execute(
+            &format!("LOCK TABLE {quoted_schema}._lineage IN ACCESS SHARE MODE"),
+            (),
+        )
+        .await?;
+        if require_ledger {
+            tx.execute(
+                &format!("LOCK TABLE {quoted_schema}._migrations IN ACCESS SHARE MODE"),
+                (),
+            )
+            .await?;
+        }
         {
             let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
             let row = rows
@@ -643,7 +681,6 @@ async fn begin_runtime_lineage_check<'a>(
         // Omit pg_catalog so PostgreSQL searches it implicitly first for
         // built-ins, while the trusted schema remains current_schema().
         // pg_temp is explicitly last for relation lookup.
-        let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
         let safe_path = format!("{quoted_schema}, pg_temp");
         tx.execute(
             "SELECT pg_catalog.set_config('search_path', ?, true)",

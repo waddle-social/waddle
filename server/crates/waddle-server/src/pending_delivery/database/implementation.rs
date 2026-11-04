@@ -179,7 +179,25 @@ impl DatabasePendingDeliveryStorage {
         db: Database,
         quota: QuotaPolicy,
     ) -> Result<Self, super::PendingRuntimeAttachError> {
-        super::runtime_attach::verify(&db).await?;
+        super::runtime_attach::verify(&db, false).await?;
+        Ok(Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        })
+    }
+
+    /// Attach the production PostgreSQL writer after checking its schema and
+    /// effective privileges in the same read-only transaction.
+    pub(crate) async fn attach_runtime_postgres(
+        db: Database,
+        quota: QuotaPolicy,
+    ) -> Result<Self, super::PendingRuntimeAttachError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(super::PendingRuntimeAttachError::AttestedPostgresPoolRequired);
+        }
+        super::runtime_attach::verify(&db, true).await?;
         Ok(Self {
             db,
             quota,

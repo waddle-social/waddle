@@ -33,8 +33,8 @@ impl DatabasePool {
     /// Wrap the same physically attested PostgreSQL pool with disjoint main
     /// and ingress admission budgets. `pool` must have exactly the sum of the
     /// two budgets as its physical maximum; neither lane can borrow from the
-    /// other. Runtime startup keeps using [`Self::try_new`] until trusted
-    /// owner-to-runtime identity configuration is available.
+    /// other. Restricted startup obtains its verified handle through
+    /// [`super::bootstrap::VerifiedGlobalAttachment`] instead.
     pub async fn from_attested_postgres_pool(
         name: &str,
         pool: AttestedPgPool,

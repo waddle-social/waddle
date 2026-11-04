@@ -82,6 +82,35 @@ use crate::ingress_uow::{
 #[cfg(feature = "test-support")]
 use sqlx::postgres::PgPool;
 
+/// Exercise the production SM store selection and attachment path.
+#[cfg(feature = "test-support")]
+pub async fn attach_sm_startup(
+    selection: &crate::server::ResolvedXmppDatabaseUrl,
+    global: &Database,
+    clustering_enabled: bool,
+) -> anyhow::Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
+    crate::server::attach_sm_startup_for_test(selection, global, clustering_enabled).await
+}
+
+/// Exercise the production pending-delivery store selection and attachment path.
+#[cfg(feature = "test-support")]
+pub async fn attach_pending_startup(
+    selection: &crate::server::ResolvedXmppDatabaseUrl,
+    global: &Database,
+) -> anyhow::Result<DatabasePendingDeliveryStorage> {
+    crate::server::attach_pending_startup_for_test(selection, global).await
+}
+
+/// Exercise production ingress authority selection without starting HTTP.
+#[cfg(feature = "test-support")]
+pub async fn create_ingress_authority_at_startup(
+    config: &crate::config::IngressConfig,
+    pool: &DatabasePool,
+    lineage: &LineageConfig,
+) -> Result<IngressAuthority, crate::ingress::IngressStartupError> {
+    crate::server::create_ingress_authority_for_test(config, pool, lineage).await
+}
+
 pub use crate::server::routes::websocket::muc_invites::{
     claim_invite, list_invites, record_invite_at, InviteStorageError, OutstandingInvite,
     RecordOutcome,

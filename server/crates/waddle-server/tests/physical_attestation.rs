@@ -1426,6 +1426,233 @@ async fn prepare_attested_writer_fixture(fixture: &Fixture) -> (String, Physical
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn restricted_runtime_attaches_prepared_muc_destroy_outbox() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
+    let owner = Database::from_config(
+        "MUC destroy outbox owner",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url),
+    )
+    .await
+    .expect("owner database");
+    MigrationRunner::single()
+        .run(&owner)
+        .await
+        .expect("prepare application migrations before restricted handoff");
+    waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(owner)
+        .await
+        .expect("prepare owner outbox");
+    // The schema/table owner is a distinct NOLOGIN role. A separate migrator
+    // retains SET membership; the physical attestor installer and definer do
+    // not inherit it, matching the provisioned owner handoff.
+    let owner_role = format!("waddle_muc_owner_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE ROLE {owner_role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("provision distinct NOLOGIN owner");
+    sqlx::query(&format!(
+        "GRANT {owner_role} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
+        fixture.outsider
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("provision separate restricted migrator membership");
+    for statement in [
+        format!("ALTER SCHEMA {} OWNER TO {}", fixture.target, owner_role),
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox OWNER TO {}",
+            fixture.target, owner_role
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.clustering_muc_destroy_outbox TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("prepare NOLOGIN outbox owner and restricted runtime grants");
+    }
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestor after the distinct owner/migrator handoff");
+
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("restricted attested pool");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "restricted MUC destroy outbox",
+        pool,
+    );
+    let mut write = runtime.begin().await.expect("restricted write transaction");
+    write
+        .execute(
+            "INSERT INTO clustering_muc_destroy_outbox \
+             (attempt_id, payload_json, available_at_ms) VALUES ('attach-test', '{}', 0)",
+            (),
+        )
+        .await
+        .expect("restricted runtime can write the owner-prepared outbox");
+    write.rollback().await.expect("discard test row");
+    waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(
+        runtime,
+    )
+    .await
+    .expect("attach existing outbox without runtime DDL");
+
+    sqlx::query(&format!(
+        "REVOKE INSERT ON {}.clustering_muc_destroy_outbox FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("owner removes required runtime write grant");
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested pool after grant removal");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MUC destroy outbox missing write grant",
+        pool,
+    );
+    let error = waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(runtime)
+        .await
+        .err()
+        .expect("missing INSERT grant must fail closed");
+    assert!(matches!(
+        error,
+        waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::UnsafeRuntimeRole
+    ));
+    sqlx::query(&format!(
+        "GRANT INSERT ON {}.clustering_muc_destroy_outbox TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore required runtime write grant");
+
+    for statement in [
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             DROP CONSTRAINT clustering_muc_destroy_outbox_pkey",
+            fixture.target
+        ),
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             ADD CONSTRAINT clustering_muc_destroy_outbox_pkey \
+             PRIMARY KEY (attempt_id) DEFERRABLE INITIALLY DEFERRED",
+            fixture.target
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("owner installs a deferrable conflict arbiter");
+    }
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested pool after arbiter change");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MUC destroy outbox deferrable arbiter",
+        pool,
+    );
+    let error = waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(runtime)
+        .await
+        .err()
+        .expect("deferrable conflict arbiter must fail closed");
+    assert!(matches!(
+        error,
+        waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::InvalidSchema
+    ));
+    for statement in [
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             DROP CONSTRAINT clustering_muc_destroy_outbox_pkey",
+            fixture.target
+        ),
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             ADD CONSTRAINT clustering_muc_destroy_outbox_pkey \
+             PRIMARY KEY (attempt_id)",
+            fixture.target
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("owner restores immediate conflict arbiter");
+    }
+
+    sqlx::query(&format!(
+        "DROP INDEX {}.clustering_muc_destroy_outbox_due_idx",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("owner removes required index");
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested pool after owner DDL");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MUC destroy outbox missing index",
+        pool,
+    );
+    let error = waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(runtime)
+        .await
+        .err()
+        .expect("missing due index must fail closed");
+    assert!(matches!(
+        error,
+        waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::InvalidSchema
+    ));
+    for statement in [
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox OWNER TO CURRENT_USER",
+            fixture.target
+        ),
+        format!("ALTER SCHEMA {} OWNER TO CURRENT_USER", fixture.target),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("release disposable owner before dropping the role");
+    }
+    sqlx::query(&format!("REVOKE {owner_role} FROM {}", fixture.outsider))
+        .execute(&fixture.cluster_admin)
+        .await
+        .expect("remove disposable migrator membership");
+    sqlx::query(&format!("DROP ROLE {owner_role}"))
+        .execute(&fixture.cluster_admin)
+        .await
+        .expect("remove disposable owner");
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn restricted_attested_runtime_verifies_lineage_without_control_system_grant() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
@@ -2114,12 +2341,202 @@ async fn verified_global_attachment_checks_identity_ledger_grants_and_shared_cap
 
     assert_verified_pool_capacity(&fixture, &installed, limits).await;
     assert_verified_control_plane_pool(&fixture, &installed, limits).await;
+    assert_operator_runtime_handoff(&fixture, limits).await;
     assert_attested_pool_pair_refusals(&fixture, &installed).await;
     assert_verified_expected_identity(&fixture, &installed, limits).await;
     assert_verified_budget_validation(&fixture, &installed, limits).await;
     assert_verified_revoked_grants(&fixture, &installed, limits).await;
     assert_verified_ledger(&fixture, &installed, limits).await;
     fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolLimits) {
+    use waddle_server::db::runtime_startup::{RuntimeStartupError, RuntimeStartupIdentity};
+
+    let physical = fixture
+        .lineage
+        .postgres_identity
+        .as_ref()
+        .expect("physical identity");
+    let mut document = serde_json::json!({
+        "version": 1,
+        "operator_asserts_direct_fenced_primary": true,
+        "deployment_uuid": fixture.lineage.deployment_uuid.to_string(),
+        "lineage_uuid": fixture.lineage.lineage_uuid.to_string(),
+        "system_identifier": physical.system_identifier.to_string(),
+        "database_oid": physical.database.oid,
+        "database_name": physical.database.name.0,
+        "schema_oid": physical.schema.oid,
+        "schema_name": physical.schema.name.0,
+        "installer_login": fixture.installer,
+        "runtime_login": fixture.runtime,
+        "definer_role": fixture.definer,
+        "trusted_schema": fixture.trusted,
+    });
+    let lineage = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let identity = RuntimeStartupIdentity::from_json(&document.to_string(), &lineage)
+        .expect("operator identity document");
+    document["operator_asserts_direct_fenced_primary"] = false.into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&document.to_string(), &lineage),
+        Err(RuntimeStartupError::DirectPrimaryAssertionRequired)
+    ));
+    document["operator_asserts_direct_fenced_primary"] = true.into();
+    let mut wrong_deployment = lineage.clone();
+    wrong_deployment.deployment_uuid = Some(DeploymentUuid(uuid::Uuid::new_v4()));
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&document.to_string(), &wrong_deployment),
+        Err(RuntimeStartupError::DeploymentMismatch)
+    ));
+    let mut owner_action = lineage.clone();
+    owner_action.action = Some(lineage::LineageAction::Enroll);
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&document.to_string(), &owner_action),
+        Err(RuntimeStartupError::OperatorActionConfigured)
+    ));
+    assert!(matches!(
+        identity
+            .attach(
+                "postgres://example.test/other?sslmode=disable",
+                limits,
+                None
+            )
+            .await,
+        Err(RuntimeStartupError::DatabaseNameMismatch)
+    ));
+    let insecure = format!(
+        "postgres://example.test/{}?sslmode=disable",
+        fixture.database_name
+    );
+    assert!(matches!(
+        identity.attach(&insecure, limits, None).await,
+        Err(RuntimeStartupError::UnauthenticatedTcp)
+    ));
+
+    let mut runtime_url =
+        url::Url::parse(&url_with_schema(&fixture.base_url, &fixture.target)).expect("runtime URL");
+    let retained: Vec<_> = runtime_url
+        .query_pairs()
+        .filter(|(key, _)| key != "user")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    runtime_url
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("user", &fixture.runtime);
+    let control = ControlPlanePoolLimits {
+        connections: 1,
+        acquire_timeout: Duration::from_secs(3),
+    };
+    let pool = identity
+        .attach(runtime_url.as_str(), limits, Some(control))
+        .await
+        .expect("verified runtime handoff");
+    assert!(pool.global().has_control_plane_pool());
+    let main = pool.global().begin().await.expect("main checkout");
+    let ingress = pool.ingress();
+    let ingress_tx = ingress.begin().await.expect("reserved ingress checkout");
+    let control = pool
+        .global()
+        .control_plane_guard()
+        .await
+        .expect("control-plane checkout");
+    let mut rows = control
+        .query("SELECT current_user::text", ())
+        .await
+        .expect("identity query");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("identity")
+            .get::<String>(0)
+            .expect("login"),
+        fixture.runtime
+    );
+    drop(rows);
+    drop(control);
+    ingress_tx.rollback().await.expect("close ingress");
+    main.rollback().await.expect("close main");
+    drop(ingress);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+
+    let temp = tempfile::tempdir().expect("startup gate directory");
+    let port_file = temp.path().join("port");
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_waddle-server"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("WADDLE_")
+            || key.to_string_lossy().starts_with("OTEL_")
+        {
+            server.env_remove(key);
+        }
+    }
+    server
+        .env(
+            "WADDLE_SESSION_KEY",
+            "integration-test-session-key-32-bytes-long",
+        )
+        .env(
+            "WADDLE_OCCUPANT_ID_SECRET",
+            "integration-test-occupant-id-secret-32-bytes-long",
+        )
+        .env("WADDLE_DB_DRIVER", "postgres")
+        .env("WADDLE_DATABASE_URL", runtime_url.as_str())
+        .env(
+            "WADDLE_DEPLOYMENT_UUID",
+            fixture.lineage.deployment_uuid.to_string(),
+        )
+        .env("WADDLE_DB_RUNTIME_ATTESTATION", document.to_string())
+        .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
+        .env("WADDLE_HTTP_PORT_FILE", &port_file)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(20), server.output())
+        .await
+        .expect("restricted startup finishes")
+        .expect("start server binary");
+    assert!(
+        !output.status.success(),
+        "unconverted stores must refuse before serving"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("restricted runtime cannot serve until all startup stores"),
+        "unexpected startup refusal: {stderr}"
+    );
+    assert!(
+        !port_file.exists(),
+        "the HTTP listener must not be published"
+    );
+
+    sqlx::query(&format!(
+        "GRANT INSERT ON {}._migrations TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant unsafe ledger write");
+    assert!(matches!(
+        identity.attach(runtime_url.as_str(), limits, None).await,
+        Err(RuntimeStartupError::Attachment(
+            RuntimeAttachmentError::UnsafeGlobalRuntime {
+                component: "_migrations"
+            }
+        ))
+    ));
+    sqlx::query(&format!(
+        "REVOKE INSERT ON {}._migrations FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore restricted ledger");
 }
 
 #[cfg(feature = "test-support")]
@@ -4460,6 +4877,23 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         .await
         .expect("release the ingress lane while main remains saturated");
 
+    let startup_authority = waddle_server::test_support::create_ingress_authority_at_startup(
+        &waddle_server::config::IngressConfig {
+            pool_size: 1,
+            retry_attempts: 1,
+        },
+        &database_pool,
+        &lineage,
+    )
+    .await
+    .expect("startup uses the reserved ingress lane while the main lane is full");
+    assert!(
+        startup_authority
+            .drain_and_join(Duration::from_secs(1))
+            .await
+    );
+    drop(startup_authority);
+
     let legacy_authority = waddle_server::ingress::IngressAuthority::try_new(
         waddle_server::config::IngressConfig {
             pool_size: 1,
@@ -6189,3 +6623,7 @@ mod sm_attach;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/inbox_startup.rs"]
 mod inbox_startup;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/mam_read.rs"]
+mod mam_read;

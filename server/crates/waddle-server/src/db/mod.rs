@@ -14,6 +14,8 @@ pub mod physical_attestation;
 mod pool;
 pub(crate) mod read_only_timeout;
 pub mod roster;
+pub mod runtime_startup;
+pub(crate) mod runtime_store_acl;
 mod schema;
 mod value;
 
@@ -26,10 +28,9 @@ use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
-use backend::CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT;
-pub use backend::MAIN_POOL_ACQUIRE_TIMEOUT;
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
+pub use backend::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
 pub use migrations::{
     bootstrap_dark_postgres_mam_owner, grant_dark_owner_rejection_runtime_access,
     inspect_dark_owner_rejection_runtime_access, inspect_dark_postgres_epoch_acl,

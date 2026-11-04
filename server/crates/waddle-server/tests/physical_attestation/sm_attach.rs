@@ -6,12 +6,228 @@ use super::{
     CATALOG_GRANT_LOCK,
 };
 use waddle_server::db::DatabasePool;
+use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::sm_persistence::{
     bootstrap_portable_sm_owner_schema, DatabaseSmPersistence, SmRuntimeAttachError,
 };
 
 async fn attach(db: &Database) -> Result<DatabaseSmPersistence, SmRuntimeAttachError> {
     DatabaseSmPersistence::attach_existing_postgres(db.clone()).await
+}
+
+#[tokio::test]
+async fn sm_startup_uses_attested_shared_pool_and_refuses_unsupported_paths() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (owner, pool, _) = setup(&fixture).await;
+    let runtime = pool.global();
+    let inherited = ResolvedXmppDatabaseUrl::InheritedGlobal("not a reconnect URL".into());
+
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("missing owner schema must fail"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::Relation {
+            relation: "sm_sessions",
+            ..
+        })
+    ));
+    for selection in [
+        ResolvedXmppDatabaseUrl::Explicit("not a reconnect URL".into()),
+        ResolvedXmppDatabaseUrl::EphemeralFallback,
+    ] {
+        let error = match waddle_server::test_support::attach_sm_startup(&selection, runtime, false)
+            .await
+        {
+            Ok(_) => panic!("non-inherited SM store must fail"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("must inherit WADDLE_DATABASE_URL"));
+    }
+
+    bootstrap_portable_sm_owner_schema(&owner)
+        .await
+        .expect("owner prepares SM schema");
+    grant_reads(&fixture).await;
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("a read-only role cannot run SM persistence"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "sm_sessions"
+        })
+    ));
+    for table in [
+        "sm_sessions",
+        "sm_unacked",
+        "sm_acknowledged_windows",
+        "sm_ingress_appends",
+    ] {
+        admin(
+            &fixture,
+            &format!(
+                "GRANT INSERT, UPDATE, DELETE ON {}.{table} TO {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+    }
+    admin(&fixture, &format!("INSERT INTO {}.sm_sessions (stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, presence_available, presence_priority) VALUES ('sentinel', 'alice', 'alice@example.test/phone', 3, 4, 2, 1000, 60000, 0, 1, 1, 0)", fixture.target)).await;
+    let before = snapshot(&fixture).await;
+    let storage = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+        .await
+        .expect("read-only shared-pool startup attachment");
+    assert_eq!(storage.list_all_sessions().await.expect("SM read").len(), 1);
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, true).await {
+            Ok(_) => panic!("clustered attachment must not fall back to portable SM"),
+            Err(error) => error,
+        };
+    assert!(error.to_string().contains("clustered SM cannot yet attach"));
+    assert_eq!(
+        snapshot(&fixture).await,
+        before,
+        "startup must not change schema or rows"
+    );
+    admin(
+        &fixture,
+        &format!(
+            "CREATE FUNCTION {}.suppress_sm_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+            fixture.target
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "CREATE TRIGGER suppress_sm_write BEFORE INSERT ON {}.sm_sessions FOR EACH ROW EXECUTE FUNCTION {}.suppress_sm_write()",
+            fixture.target, fixture.target
+        ),
+    )
+    .await;
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("a trigger suppressing SM writes must be refused"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnexpectedExecutableSchema {
+            component: "sm_sessions"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "DROP TRIGGER suppress_sm_write ON {}.sm_sessions",
+            fixture.target
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!("DROP FUNCTION {}.suppress_sm_write()", fixture.target),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT CREATE ON SCHEMA {} TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("runtime schema creation must be refused"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "runtime role"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE CREATE ON SCHEMA {} FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!("GRANT {} TO {}", fixture.runtime, fixture.outsider),
+    )
+    .await;
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("another role must not inherit runtime authority"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "runtime role"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!("REVOKE {} FROM {}", fixture.runtime, fixture.outsider),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT TRUNCATE ON {}.sm_sessions TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("unsafe owner-like privilege must be refused"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "sm_sessions"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE TRUNCATE ON {}.sm_sessions FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    storage
+        .delete_session(&waddle_xmpp::pending_delivery::SmSessionId::new("sentinel"))
+        .await
+        .expect("restricted runtime deletes an SM session");
+    assert!(storage
+        .list_all_sessions()
+        .await
+        .expect("SM read")
+        .is_empty());
+    drop(storage);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+    drop(owner);
+    fixture.cleanup().await;
 }
 
 async fn admin(fixture: &Fixture, sql: &str) {

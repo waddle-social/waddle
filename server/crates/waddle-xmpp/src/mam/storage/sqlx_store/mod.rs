@@ -3,6 +3,7 @@ mod decode;
 mod impls;
 mod lookup;
 mod query;
+mod query_connection;
 mod schema;
 mod schema_verify;
 mod tx_write;

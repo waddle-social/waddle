@@ -103,7 +103,19 @@ impl DatabaseInboxStorage {
     /// Attested PostgreSQL inbox startup uses this verifier after the owner
     /// has prepared the shared global schema.
     pub async fn attach_existing(db: Database) -> Result<Self, super::InboxRuntimeAttachError> {
-        super::runtime_attach::verify(&db).await?;
+        super::runtime_attach::verify(&db, false).await?;
+        Ok(Self { db })
+    }
+
+    /// Attach the production PostgreSQL writer after checking its schema and
+    /// effective privileges in the same read-only transaction.
+    pub(crate) async fn attach_runtime_postgres(
+        db: Database,
+    ) -> Result<Self, super::InboxRuntimeAttachError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(super::InboxRuntimeAttachError::AttestedPostgresPoolRequired);
+        }
+        super::runtime_attach::verify(&db, true).await?;
         Ok(Self { db })
     }
 

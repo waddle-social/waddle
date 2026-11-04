@@ -8,8 +8,9 @@ use waddle_server::pending_delivery::{
     bootstrap_pending_delivery_owner_schema, DatabasePendingDeliveryStorage,
     PendingRuntimeAttachError,
 };
+use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pending_delivery::QuotaPolicy;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 
 async fn attach(
     db: &Database,
@@ -23,6 +24,230 @@ async fn attach(
 
 async fn admin(fixture: &Fixture, sql: &str) {
     sqlx::query(sql).execute(&fixture.admin).await.expect(sql);
+}
+
+#[tokio::test]
+async fn pending_startup_uses_attested_shared_pool_without_owner_repairs() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let owner = Database::from_config(
+        "pending startup owner",
+        &DatabaseConfig::new(
+            DatabaseDriver::Postgres,
+            url_with_schema(&fixture.base_url, &fixture.target),
+        ),
+    )
+    .await
+    .expect("owner database");
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestor");
+    let pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "pending startup runtime",
+        attested_pool(
+            fixture.runtime_options.clone(),
+            config,
+            2,
+            Duration::from_secs(8),
+        )
+        .expect("attested pool"),
+        1,
+        1,
+    )
+    .await
+    .expect("main and ingress lanes");
+    let runtime = pool.global();
+    let inherited = ResolvedXmppDatabaseUrl::InheritedGlobal("not a reconnect URL".into());
+    let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
+    {
+        Ok(_) => panic!("missing owner schema must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::Relation {
+            relation: "pending_delivery",
+            ..
+        })
+    ));
+    for selection in [
+        ResolvedXmppDatabaseUrl::Explicit("not a reconnect URL".into()),
+        ResolvedXmppDatabaseUrl::EphemeralFallback,
+    ] {
+        let error =
+            match waddle_server::test_support::attach_pending_startup(&selection, runtime).await {
+                Ok(_) => panic!("non-inherited pending store must fail"),
+                Err(error) => error,
+            };
+        assert!(error
+            .to_string()
+            .contains("must inherit WADDLE_DATABASE_URL"));
+    }
+
+    bootstrap_pending_delivery_owner_schema(&owner)
+        .await
+        .expect("owner prepares pending store");
+    for table in [
+        "pending_delivery",
+        "pending_delivery_sm_promotions",
+        "pending_delivery_startup_migrations",
+    ] {
+        admin(
+            &fixture,
+            &format!(
+                "GRANT SELECT ON {}.{table} TO {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+    }
+    let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
+    {
+        Ok(_) => panic!("a read-only role cannot run pending delivery"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "pending_delivery"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "GRANT INSERT, UPDATE, DELETE ON {}.pending_delivery TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT INSERT, DELETE ON {}.pending_delivery_sm_promotions TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let sequence: String = sqlx::query_scalar("SELECT pg_catalog.pg_get_serial_sequence(pg_catalog.format('%I.%I', $1, 'pending_delivery'), 'notification_recovery_ordinal')")
+        .bind(&fixture.target).fetch_one(&fixture.admin).await.expect("identity sequence");
+    admin(
+        &fixture,
+        &format!("GRANT USAGE ON SEQUENCE {sequence} TO {}", fixture.runtime),
+    )
+    .await;
+    let storage = waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+        .await
+        .expect("read-only shared-pool startup attachment");
+    let recipient: jid::BareJid = "alice@example.test".parse().expect("recipient");
+    assert_eq!(storage.count(&recipient).await.expect("pending read"), 0);
+    let row_id = PendingRowId::new("runtime-row");
+    storage
+        .insert(PendingRow {
+            id: row_id.clone(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Archived(waddle_xmpp_core::xep0359::StanzaId::new(
+                "runtime-stanza",
+                recipient.clone().into(),
+            )),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("restricted runtime inserts a pending row");
+    assert_eq!(storage.count(&recipient).await.expect("pending read"), 1);
+    assert_eq!(
+        storage
+            .delete_row(&row_id)
+            .await
+            .expect("restricted runtime deletes a pending row"),
+        1
+    );
+    drop(storage);
+    admin(
+        &fixture,
+        &format!(
+            "CREATE TRIGGER extra_pending_trigger BEFORE UPDATE ON {}.pending_delivery FOR EACH ROW EXECUTE FUNCTION {}.pending_notification_recovery_ordinal_immutable()",
+            fixture.target, fixture.target
+        ),
+    )
+    .await;
+    let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
+    {
+        Ok(_) => panic!("an unexpected pending trigger must be refused"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::UnexpectedExecutableSchema {
+            component: "pending_delivery"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "DROP TRIGGER extra_pending_trigger ON {}.pending_delivery",
+            fixture.target
+        ),
+    )
+    .await;
+    waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+        .await
+        .expect("the verified immutable trigger remains permitted");
+    admin(
+        &fixture,
+        &format!(
+            "GRANT INSERT ON {}.pending_delivery_startup_migrations TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
+    {
+        Ok(_) => panic!("runtime must not mutate owner migration markers"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "pending_delivery_startup_migrations"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE INSERT ON {}.pending_delivery_startup_migrations FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    admin(&fixture, &format!("DELETE FROM {}.pending_delivery_startup_migrations WHERE name = 'legacy_mam_query_frames_v1'", fixture.target)).await;
+    let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
+    {
+        Ok(_) => panic!("missing migration marker must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::MissingMarker { .. })
+    ));
+    let remaining: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.pending_delivery_startup_migrations WHERE name = 'legacy_mam_query_frames_v1'", fixture.target))
+        .fetch_one(&fixture.admin).await.expect("marker count");
+    assert_eq!(
+        remaining, 0,
+        "runtime attachment must not repair the marker"
+    );
+
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+    drop(owner);
+    fixture.cleanup().await;
 }
 
 #[tokio::test]

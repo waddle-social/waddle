@@ -9,3 +9,16 @@ This is a dark [#2116](https://github.com/waddle-social/waddle/issues/2116) slic
 3. Keep HTTP's pre-open and post-open colocation checks, its SQLite shared handle, and existing startup order. Test fresh/repeated/reopened SQLite, legacy migrations, and PostgreSQL owner versus restricted runtime; run existing inbox regressions, formatting, strict Clippy, and PostgreSQL test inventory.
 
 The constructor still calls owner bootstrap with its existing startup credential. This slice does not introduce read-only attachment, change credentials, collapse correctness pools, or authorize production activation.
+
+## Shared-pool startup selection
+
+The attested PostgreSQL startup factory attaches the exact inherited global
+main lane. It locks the qualified inbox tables before establishing its
+repeatable-read snapshot, then checks schema, role separation and required
+writer grants in that snapshot. A SELECT-only role, a PUBLIC grant or an
+owner-like privilege is refused. SQLite and the standalone snapshot-only
+attachment keep their existing interfaces.
+
+The checks do not fence later owner DDL or role changes, audit unrelated
+tables, or prove that the complete server can serve. The global attested
+startup still has an explicit refusal until its other stores are converted.

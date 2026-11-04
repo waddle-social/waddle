@@ -75,6 +75,10 @@ mod lifecycle;
 #[cfg(feature = "test-support")]
 pub(crate) use config::resolve_xmpp_database_url_values;
 #[cfg(feature = "test-support")]
+pub(crate) use http::{
+    attach_pending_startup_for_test, attach_sm_startup_for_test, create_ingress_authority_for_test,
+};
+#[cfg(feature = "test-support")]
 pub(crate) use http::{create_ingress_inbox_storage, InboxStartup};
 use lifecycle::bootstrap_and_register_store_lineage;
 use lifecycle::bootstrap_mam_lineage;
@@ -83,3 +87,4 @@ pub(crate) use lifecycle::bootstrap_store_lineage;
 pub(crate) use lifecycle::register_inbox_lineage;
 pub use lifecycle::start;
 pub use lifecycle::start_with_config;
+pub use lifecycle::RestrictedStartupError;

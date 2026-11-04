@@ -27,6 +27,7 @@ use tracing::{info, instrument};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 use crate::space_identity::SpaceNode;
 
+pub(crate) mod runtime_attach;
 mod schema;
 pub mod storage;
 #[cfg(test)]
@@ -46,3 +47,4 @@ pub use metadata::SpaceMetadata;
 pub use metadata::SpacesMetadataError;
 pub use metadata::SpacesMetadataStore;
 use metadata::SELECT_COLS;
+pub use runtime_attach::SpaceStoreAttachError;

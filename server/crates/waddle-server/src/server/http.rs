@@ -280,6 +280,15 @@ enum IngressColocationError {
         "an attested PostgreSQL inbox must inherit WADDLE_DATABASE_URL without an explicit inbox override"
     )]
     AttestedInboxRequiresInheritedGlobal,
+    #[error(
+        "an attested PostgreSQL {store} store must inherit WADDLE_DATABASE_URL without an explicit override"
+    )]
+    AttestedStoreRequiresInheritedGlobal { store: &'static str },
+    #[error("clustered SM cannot yet attach to an attested PostgreSQL runtime database")]
+    AttestedClusteredSmUnsupported,
+    #[cfg(feature = "clustering")]
+    #[error("clustered pending delivery requires live claim handles")]
+    AttestedPendingClaimsUnavailable,
 }
 
 async fn ensure_postgres_ingress_colocation(
@@ -339,7 +348,7 @@ pub(crate) async fn create_ingress_inbox_storage(
                 if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
                     return Err(IngressColocationError::AttestedInboxRequiresInheritedGlobal.into());
                 }
-                let storage = DatabaseInboxStorage::attach_existing(global.clone()).await?;
+                let storage = DatabaseInboxStorage::attach_runtime_postgres(global.clone()).await?;
                 return Ok(InboxStartup::AttachedGlobal(Arc::new(storage)));
             }
             let database_url = database_url.unwrap_or_else(|| global.database_url());
@@ -728,15 +737,59 @@ async fn open_ingress_authority(
         None
     };
     Ok(Arc::new(
-        IngressAuthority::try_new(
-            config.ingress.clone(),
-            state.db_pool.global().clone(),
-            state.lineage_config.clone(),
+        create_ingress_authority(
+            &config.ingress,
+            &state.db_pool,
+            &state.lineage_config,
             #[cfg(feature = "clustering")]
             node_identity,
         )
         .await?,
     ))
+}
+
+async fn create_ingress_authority(
+    config: &crate::config::IngressConfig,
+    pool: &crate::db::DatabasePool,
+    lineage: &crate::config::LineageConfig,
+    #[cfg(feature = "clustering")] node_identity: Option<
+        waddle_xmpp::ownership::SharedNodeIdentity,
+    >,
+) -> Result<IngressAuthority, crate::ingress::IngressStartupError> {
+    if pool.global().uses_attested_postgres_pool() {
+        return IngressAuthority::try_new_with_attested_database(
+            config.clone(),
+            pool.ingress(),
+            lineage.clone(),
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await;
+    }
+    IngressAuthority::try_new(
+        config.clone(),
+        pool.global().clone(),
+        lineage.clone(),
+        #[cfg(feature = "clustering")]
+        node_identity,
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn create_ingress_authority_for_test(
+    config: &crate::config::IngressConfig,
+    pool: &crate::db::DatabasePool,
+    lineage: &crate::config::LineageConfig,
+) -> Result<IngressAuthority, crate::ingress::IngressStartupError> {
+    create_ingress_authority(
+        config,
+        pool,
+        lineage,
+        #[cfg(feature = "clustering")]
+        None,
+    )
+    .await
 }
 
 async fn create_websocket_state(
@@ -1729,7 +1782,7 @@ async fn create_sm_session_registry(
         );
     }
     let sm_persistence = create_ingress_sm_storage(
-        sm_database_url.as_deref(),
+        ingress_store_url(&sm_database_url, global_db, "SM")?,
         server_config.clustering.enabled,
         clustering.claim_pair(),
         global_db,
@@ -1794,6 +1847,52 @@ async fn create_sm_session_registry(
     Ok(sm_session_registry)
 }
 
+/// Preserve whether the URL was inherited before passing an override to a
+/// shared-pool store. An attested pool cannot safely reopen an explicit URL,
+/// even when its text happens to match the global DSN.
+fn ingress_store_url<'a>(
+    selection: &'a ResolvedXmppDatabaseUrl,
+    global: &Database,
+    store: &'static str,
+) -> Result<Option<&'a str>> {
+    if global.uses_attested_postgres_pool() {
+        return match selection {
+            ResolvedXmppDatabaseUrl::InheritedGlobal(_) => Ok(None),
+            ResolvedXmppDatabaseUrl::Explicit(_) | ResolvedXmppDatabaseUrl::EphemeralFallback => {
+                Err(IngressColocationError::AttestedStoreRequiresInheritedGlobal { store }.into())
+            }
+        };
+    }
+    Ok(selection.as_deref())
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn attach_sm_startup_for_test(
+    selection: &ResolvedXmppDatabaseUrl,
+    global: &Database,
+    clustering_enabled: bool,
+) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
+    create_ingress_sm_storage(
+        ingress_store_url(selection, global, "SM")?,
+        clustering_enabled,
+        None,
+        global,
+    )
+    .await
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn attach_pending_startup_for_test(
+    selection: &ResolvedXmppDatabaseUrl,
+    global: &Database,
+) -> Result<DatabasePendingDeliveryStorage> {
+    create_ingress_pending_storage(
+        ingress_store_url(selection, global, "pending delivery")?,
+        global,
+    )
+    .await
+}
+
 /// Reject split stores before initializing schemas or hydrating retained sessions.
 async fn ensure_ingress_storage_colocation(
     database_url: Option<&str>,
@@ -1842,6 +1941,18 @@ async fn create_ingress_sm_storage(
     global: &Database,
 ) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
     ensure_ingress_storage_colocation(database_url, global).await?;
+    if global.uses_attested_postgres_pool() {
+        // The fenced implementation does not yet have a restricted runtime
+        // attachment. Do not fall back to portable persistence or invoke its
+        // owner initializer under the runtime credential.
+        if clustering_enabled {
+            return Err(IngressColocationError::AttestedClusteredSmUnsupported.into());
+        }
+        return Ok(Arc::new(
+            crate::sm_persistence::DatabaseSmPersistence::attach_runtime_postgres(global.clone())
+                .await?,
+        ));
+    }
     Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
         clustering_enabled,
         claim_pair,
@@ -1857,6 +1968,13 @@ async fn create_ingress_pending_storage(
     global: &Database,
 ) -> Result<DatabasePendingDeliveryStorage> {
     ensure_ingress_storage_colocation(database_url, global).await?;
+    if global.uses_attested_postgres_pool() {
+        return Ok(DatabasePendingDeliveryStorage::attach_runtime_postgres(
+            global.clone(),
+            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        )
+        .await?);
+    }
     // Sharing the pool also preserves private in-memory SQLite identity.
     Ok(DatabasePendingDeliveryStorage::from_database(
         global.clone(),
@@ -1882,13 +2000,18 @@ async fn create_pending_delivery_storage(
              for durable offline delivery (issue #209)."
         );
     }
-    let storage =
-        create_ingress_pending_storage(pending_delivery_url.as_deref(), global_db).await?;
+    let storage = create_ingress_pending_storage(
+        ingress_store_url(&pending_delivery_url, global_db, "pending delivery")?,
+        global_db,
+    )
+    .await?;
     #[cfg(feature = "clustering")]
     let storage =
         if server_config.clustering.enabled && global_db.driver() == DatabaseDriver::Postgres {
             if let Some((claim_store, node_identity)) = clustering.claim_pair() {
                 storage.with_cluster_fencing(claim_store, node_identity)
+            } else if global_db.uses_attested_postgres_pool() {
+                return Err(IngressColocationError::AttestedPendingClaimsUnavailable.into());
             } else {
                 warn!(
                 "clustered pending delivery has no claim handles; using unfenced promotion inserts"
@@ -1901,7 +2024,11 @@ async fn create_pending_delivery_storage(
     #[cfg(not(feature = "clustering"))]
     let _ = (server_config, clustering);
     let database = storage.database();
-    if database.is_in_memory_sqlite() {
+    if database.uses_attested_postgres_pool() {
+        // `create_ingress_pending_storage` attached the exact global handle;
+        // re-running the owner lineage bootstrap here would perform runtime DDL.
+        state.register_lineage_alias(DurableStore::PendingDelivery, DurableStore::Global);
+    } else if database.is_in_memory_sqlite() {
         state.register_lineage_ephemeral(DurableStore::PendingDelivery);
     } else {
         crate::server::bootstrap_store_lineage(
