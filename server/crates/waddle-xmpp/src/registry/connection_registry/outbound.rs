@@ -560,6 +560,24 @@ impl ConnectionEntry {
         self.endpoint.seal(owner, binding_ref)
     }
 
+    /// Recover this local socket's original outbound queue after its exact
+    /// binding has been sealed, but only when no accepted frames or reserved
+    /// permits remain. The returned endpoint shares the same queue and is
+    /// intended for a new binding attempt on the same physical socket.
+    pub fn into_socket_outbound_endpoint_if_empty(
+        self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> Option<SocketOutboundEndpoint> {
+        if self.binding_id != owner || self.binding_ref.as_ref() != Some(binding_ref) {
+            return None;
+        }
+        let Self { endpoint, .. } = self;
+        endpoint
+            .into_socket_endpoint_if_empty(owner, binding_ref)
+            .ok()
+    }
+
     /// Immutable physical transport identity carried by this registry entry.
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.connection_ref

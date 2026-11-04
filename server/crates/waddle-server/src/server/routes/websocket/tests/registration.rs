@@ -1707,6 +1707,15 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 
 #[tokio::test]
 async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control() {
+    assert_replay_gap_rollback_endpoint_custody(false).await;
+}
+
+#[tokio::test]
+async fn replay_gap_with_queued_outbound_refuses_same_socket_endpoint_handoff() {
+    assert_replay_gap_rollback_endpoint_custody(true).await;
+}
+
+async fn assert_replay_gap_rollback_endpoint_custody(queue_before_rollback: bool) {
     use super::super::connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority};
     use super::super::send::InterruptibleSink;
     use waddle_xmpp::registry::LocalSocketIo;
@@ -1791,7 +1800,7 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
     }
 
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
-    let mut pending_tx = Some(tx.clone());
+    let mut pending_tx = Some(tx);
     let adopted_generation = conn.occupancy_session;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1815,6 +1824,25 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
             .local_io_relinquishment()
             .expect("local witness")
             .is_relinquished());
+        if queue_before_rollback {
+            let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+            message.id = Some(xmpp_parsers::message::Id(
+                "accepted-before-replay-gap-finalization".to_owned(),
+            ));
+            assert_eq!(
+                state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_outbound_if_owner(
+                        &jid,
+                        &entry.binding_id(),
+                        OutboundStanza::new(Stanza::Message(message)),
+                    ),
+                waddle_xmpp::registry::BroadcastOutcome::Delivered,
+                "test frame is accepted before the old binding is sealed"
+            );
+        }
         release.notify_one();
         entry
     };
@@ -1864,52 +1892,165 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
         .local_io_relinquishment()
         .expect("failed binding witness")
         .is_relinquished());
-    conn.phase = ConnectionPhase::ready(jid.clone(), false);
-    pending_tx = Some(tx);
-    let fresh = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        register_bound_connection_after_frame(
+    let fresh_entry = if queue_before_rollback {
+        assert!(conn.recovered_pending_endpoint.is_none());
+        assert!(conn.resume_endpoint_handoff_blocked);
+        assert!(pending_tx.is_none());
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(&jid)
+            .is_none());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_outbound_if_owner(
+                    &jid,
+                    &failed_entry.binding_id(),
+                    OutboundStanza::new(Stanza::Message(xmpp_parsers::message::Message::new(None))),
+                ),
+            waddle_xmpp::registry::BroadcastOutcome::NotConnected,
+            "the removed old owner cannot route new work"
+        );
+        assert_eq!(
+            rx.len(),
+            1,
+            "fresh bind arrives before the old frame drains"
+        );
+
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        let fresh = register_bound_connection_after_frame(
             state.as_ref(),
             "example.com",
             &mut conn,
             &mut pending_tx,
-        ),
-    )
-    .await
-    .expect("fresh bind must not wait on its rolled-back resume lifecycle");
-    assert!(matches!(fresh, RegistrationAfterFrame::Registered(_)));
-    assert!(pending_tx.is_none());
-    assert_eq!(
-        state
+        )
+        .await;
+        assert!(matches!(fresh, RegistrationAfterFrame::Unchanged));
+        assert_eq!(
+            rx.len(),
+            1,
+            "refusing the handoff leaves the old receiver and queued frame alive"
+        );
+        assert!(state
             .deps
             .protocol
             .connection_registry
-            .occupancy_session_of(&jid),
-        Some(conn.occupancy_session)
-    );
-    assert!(state
-        .deps
-        .protocol
-        .connection_registry
-        .is_owned_by(&jid, conn.registry_owner.as_ref().unwrap()));
-    assert!(!conn.blocklist_interested);
-    assert_fresh_bind_resume_control_tracks_new_stream(&state, &mut conn, &jid).await;
+            .entry(&jid)
+            .is_none());
+        let accepted = rx
+            .try_recv()
+            .expect("accepted old frame remains with its original receiver");
+        let Stanza::Message(message) = accepted.stanza else {
+            panic!("accepted test frame remains a message");
+        };
+        assert_eq!(
+            message.id.as_ref().map(|id| id.0.as_str()),
+            Some("accepted-before-replay-gap-finalization")
+        );
+        assert!(rx.try_recv().is_err(), "accepted old frame is present once");
+        None
+    } else {
+        assert!(conn.recovered_pending_endpoint.is_some());
+        assert!(!conn.resume_endpoint_handoff_blocked);
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        let fresh = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            register_bound_connection_after_frame(
+                state.as_ref(),
+                "example.com",
+                &mut conn,
+                &mut pending_tx,
+            ),
+        )
+        .await
+        .expect("fresh bind must not wait on its rolled-back resume lifecycle");
+        assert!(matches!(fresh, RegistrationAfterFrame::Registered(_)));
+        assert!(pending_tx.is_none());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .occupancy_session_of(&jid),
+            Some(conn.occupancy_session)
+        );
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .is_owned_by(&jid, conn.registry_owner.as_ref().unwrap()));
+        assert!(!conn.blocklist_interested);
 
-    let fresh_entry = state
-        .deps
-        .protocol
-        .connection_registry
-        .entry(&jid)
-        .expect("fresh binding entry");
-    assert_eq!(failed_entry.connection_ref(), fresh_entry.connection_ref());
-    assert_ne!(
-        failed_entry.binding_ref().expect("failed binding identity"),
-        fresh_entry.binding_ref().expect("fresh binding identity")
-    );
-    assert!(!fresh_entry
-        .local_io_relinquishment()
-        .expect("fresh binding witness")
-        .is_relinquished());
+        let fresh_entry = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(&jid)
+            .expect("fresh binding entry");
+        assert_eq!(failed_entry.connection_ref(), fresh_entry.connection_ref());
+        assert_ne!(failed_entry.binding_id(), fresh_entry.binding_id());
+        assert_ne!(
+            failed_entry.binding_ref().expect("failed binding identity"),
+            fresh_entry.binding_ref().expect("fresh binding identity")
+        );
+        assert!(!fresh_entry
+            .local_io_relinquishment()
+            .expect("fresh binding witness")
+            .is_relinquished());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_outbound_if_owner(
+                    &jid,
+                    &fresh_entry.binding_id(),
+                    OutboundStanza::new(Stanza::Message(xmpp_parsers::message::Message::new(None))),
+                ),
+            waddle_xmpp::registry::BroadcastOutcome::Delivered,
+            "successor entry sends through the original socket queue"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "successor output reaches original receiver"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the socket queue does not duplicate frames"
+        );
+
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            failed_entry
+                .try_force_detach_and_interrupt(waddle_xmpp::registry::ForceDetachRequest {
+                    origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+                    target_binding: None,
+                    requester_bare_jid: jid.to_bare(),
+                    ack,
+                })
+                .expect("stale cleanup offer"),
+            waddle_xmpp::registry::ForceDetachInterruption::QueuedAfterRetirement
+        );
+        assert!(!conn.write_interruption.is_cancelled());
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(&jid, &failed_entry.binding_id())
+            .is_none());
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .is_owned_by(&jid, &fresh_entry.binding_id()));
+        assert_fresh_bind_resume_control_tracks_new_stream(&state, &mut conn, &jid).await;
+        Some(fresh_entry)
+    };
+
     let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
     let shutdown = tokio_util::sync::CancellationToken::new();
     let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
@@ -1936,10 +2077,12 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
         .local_io_relinquishment()
         .expect("failed binding witness")
         .is_relinquished());
-    assert!(fresh_entry
-        .local_io_relinquishment()
-        .expect("fresh binding witness")
-        .is_relinquished());
+    if let Some(fresh_entry) = fresh_entry {
+        assert!(fresh_entry
+            .local_io_relinquishment()
+            .expect("fresh binding witness")
+            .is_relinquished());
+    }
 }
 
 #[tokio::test]
