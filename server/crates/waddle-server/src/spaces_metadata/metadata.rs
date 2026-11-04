@@ -1,6 +1,7 @@
 //! Implementation behind the parent module facade.
 
 use super::async_trait;
+use super::runtime_attach::{ColumnContract, ColumnKind, IndexContract, TableContract};
 use super::schema;
 use super::Arc;
 use super::BareJid;
@@ -80,6 +81,69 @@ pub struct DatabaseSpacesMetadataStore {
     pub(in crate::spaces_metadata) db: Database,
 }
 
+const SPACES_METADATA_COLUMNS: &[ColumnContract] = &[
+    ColumnContract {
+        name: "space_node",
+        kind: ColumnKind::Text,
+        not_null: true,
+    },
+    ColumnContract {
+        name: "space_jid",
+        kind: ColumnKind::Text,
+        not_null: true,
+    },
+    ColumnContract {
+        name: "name",
+        kind: ColumnKind::Text,
+        not_null: true,
+    },
+    ColumnContract {
+        name: "description",
+        kind: ColumnKind::Text,
+        not_null: false,
+    },
+    ColumnContract {
+        name: "icon_url",
+        kind: ColumnKind::Text,
+        not_null: false,
+    },
+    ColumnContract {
+        name: "created_at",
+        kind: ColumnKind::Bigint,
+        not_null: true,
+    },
+    ColumnContract {
+        name: "updated_at",
+        kind: ColumnKind::Bigint,
+        not_null: true,
+    },
+];
+
+const SPACES_METADATA_INDEXES: &[IndexContract] = &[
+    IndexContract {
+        name: "idx_spaces_metadata_space_node",
+        unique: true,
+        columns: &["space_node"],
+    },
+    IndexContract {
+        name: "idx_spaces_metadata_created_at",
+        unique: false,
+        columns: &["created_at", "space_node"],
+    },
+    IndexContract {
+        name: "idx_spaces_metadata_space_jid",
+        unique: false,
+        columns: &["space_jid"],
+    },
+];
+
+const SPACES_METADATA_CONTRACT: TableContract = TableContract {
+    name: "spaces_metadata",
+    columns: SPACES_METADATA_COLUMNS,
+    primary_key: &["space_node"],
+    indexes: SPACES_METADATA_INDEXES,
+};
+
 impl DatabaseSpacesMetadataStore {
     pub fn database(&self) -> Database {
         self.db.clone()
@@ -95,10 +159,25 @@ impl DatabaseSpacesMetadataStore {
                 .await
                 .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?,
         };
+        Self::initialize_owner(db).await
+    }
+
+    /// Initialize the spaces-metadata schema using this exact owner database
+    /// handle. This avoids reopening a URL when several owner-prepared stores
+    /// share one database.
+    pub async fn initialize_owner(db: Database) -> Result<Self, SpacesMetadataError> {
         let store = Self { db };
         schema::initialize(&store).await?;
         info!(driver = ?store.db.driver(), "Spaces metadata storage initialized");
         Ok(store)
+    }
+
+    /// Attach to an owner-prepared store through the exact physically
+    /// attested PostgreSQL main-pool handle. This path is read-only and never
+    /// opens a URL or applies schema DDL.
+    pub async fn attach_existing(db: Database) -> Result<Self, super::SpaceStoreAttachError> {
+        super::runtime_attach::verify_attested_store(&db, &SPACES_METADATA_CONTRACT).await?;
+        Ok(Self { db })
     }
 
     pub(crate) async fn execute(

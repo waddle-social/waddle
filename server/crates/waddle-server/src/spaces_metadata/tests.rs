@@ -4,7 +4,9 @@ use jid::BareJid;
 
 use crate::space_identity::SpaceNode;
 
-use super::{DatabaseSpacesMetadataStore, SpaceMetadata, SpacesMetadataStore};
+use super::{
+    DatabaseSpacesMetadataStore, SpaceMetadata, SpaceStoreAttachError, SpacesMetadataStore,
+};
 
 fn space_jid(local: &str) -> BareJid {
     format!("{local}@spaces.localhost")
@@ -213,4 +215,56 @@ async fn list_all_on_empty_store_returns_empty_vec() {
     let store = fresh_store().await;
     let rows = store.list_all().await.expect("list_all empty");
     assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn initialize_owner_uses_the_supplied_database() {
+    let database = crate::db::Database::in_memory("spaces-metadata-owner-test")
+        .await
+        .expect("create owner database");
+    let store = DatabaseSpacesMetadataStore::initialize_owner(database)
+        .await
+        .expect("initialize exact owner database");
+
+    assert_eq!(store.database().name(), "spaces-metadata-owner-test");
+    let row = metadata(
+        space_jid("design"),
+        "Design",
+        None,
+        None,
+        1_700_000_000,
+        1_700_000_000,
+    );
+    store
+        .upsert(&row)
+        .await
+        .expect("write owner-prepared table");
+    assert_eq!(
+        store.get(&row.space_jid).await.expect("read row"),
+        Some(row)
+    );
+}
+
+#[tokio::test]
+async fn attach_existing_rejects_sqlite_without_creating_schema() {
+    let database = crate::db::Database::in_memory("spaces-metadata-attach-test")
+        .await
+        .expect("create database");
+
+    assert!(matches!(
+        DatabaseSpacesMetadataStore::attach_existing(database.clone()).await,
+        Err(SpaceStoreAttachError::PostgresRequired)
+    ));
+
+    let mut rows = database
+        .guard()
+        .await
+        .expect("acquire database")
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spaces_metadata'",
+            (),
+        )
+        .await
+        .expect("inspect schema");
+    assert!(rows.next().await.expect("read schema").is_none());
 }
