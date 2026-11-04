@@ -85,26 +85,10 @@ pub struct DatabaseChannelSpaceLinkStore {
 }
 
 const CHANNEL_SPACE_LINK_COLUMNS: &[ColumnContract] = &[
-    ColumnContract {
-        name: "channel_jid",
-        kind: ColumnKind::Text,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "space_jid",
-        kind: ColumnKind::Text,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "space_node",
-        kind: ColumnKind::Text,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "created_at",
-        kind: ColumnKind::Bigint,
-        not_null: true,
-    },
+    ColumnContract::plain("channel_jid", ColumnKind::Text, true),
+    ColumnContract::plain("space_jid", ColumnKind::Text, true),
+    ColumnContract::optional_empty_text_default("space_node", ColumnKind::Text, true),
+    ColumnContract::plain("created_at", ColumnKind::Bigint, true),
 ];
 
 const CHANNEL_SPACE_LINK_INDEXES: &[IndexContract] = &[

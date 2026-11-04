@@ -54,10 +54,50 @@ pub(crate) enum ColumnKind {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) enum ColumnDefault {
+    None,
+    /// A legacy owner bootstrap adds `space_node TEXT NOT NULL DEFAULT ''`
+    /// before backfilling it. Fresh schemas have no default, so both shapes
+    /// are part of the supported owner contract for that column.
+    OptionalEmptyText,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct ColumnContract {
     pub(crate) name: &'static str,
     pub(crate) kind: ColumnKind,
     pub(crate) not_null: bool,
+    pub(crate) generated: bool,
+    pub(crate) identity: bool,
+    pub(crate) default: ColumnDefault,
+}
+
+impl ColumnContract {
+    pub(crate) const fn plain(name: &'static str, kind: ColumnKind, not_null: bool) -> Self {
+        Self {
+            name,
+            kind,
+            not_null,
+            generated: false,
+            identity: false,
+            default: ColumnDefault::None,
+        }
+    }
+
+    pub(crate) const fn optional_empty_text_default(
+        name: &'static str,
+        kind: ColumnKind,
+        not_null: bool,
+    ) -> Self {
+        Self {
+            name,
+            kind,
+            not_null,
+            generated: false,
+            identity: false,
+            default: ColumnDefault::OptionalEmptyText,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -215,10 +255,13 @@ async fn verify_columns(
     let mut rows = tx
         .query(
             "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod), \
-                    a.attnotnull \
+                    a.attnotnull, a.attgenerated::text, a.attidentity::text, \
+                    pg_catalog.pg_get_expr(d.adbin, d.adrelid) \
              FROM pg_catalog.pg_attribute a \
              JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_catalog.pg_attrdef d \
+               ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r' \
                AND a.attnum > 0 AND NOT a.attisdropped",
             crate::db_params![schema, contract.name],
@@ -232,7 +275,13 @@ async fn verify_columns(
     while let Some(row) = rows.next().await? {
         actual.insert(
             row.get::<String>(0)?,
-            (row.get::<String>(1)?, row.get::<bool>(2)?),
+            (
+                row.get::<String>(1)?,
+                row.get::<bool>(2)?,
+                row.get::<String>(3)?,
+                row.get::<String>(4)?,
+                row.get::<Option<String>>(5)?,
+            ),
         );
     }
     if actual.len() != contract.columns.len() {
@@ -241,7 +290,7 @@ async fn verify_columns(
         });
     }
     for column in contract.columns {
-        let Some((kind, not_null)) = actual.get(column.name) else {
+        let Some((kind, not_null, generated, identity, default)) = actual.get(column.name) else {
             return Err(SpaceStoreAttachError::InvalidColumn {
                 table: contract.name,
                 column: column.name,
@@ -251,7 +300,18 @@ async fn verify_columns(
             ColumnKind::Text => "text",
             ColumnKind::Bigint => "bigint",
         };
-        if kind != expected_kind || *not_null != column.not_null {
+        let default_matches = match column.default {
+            ColumnDefault::None => default.is_none(),
+            ColumnDefault::OptionalEmptyText => default
+                .as_deref()
+                .is_none_or(|expression| expression == "''::text"),
+        };
+        if kind != expected_kind
+            || *not_null != column.not_null
+            || !generated.is_empty() != column.generated
+            || !identity.is_empty() != column.identity
+            || !default_matches
+        {
             return Err(SpaceStoreAttachError::InvalidColumn {
                 table: contract.name,
                 column: column.name,

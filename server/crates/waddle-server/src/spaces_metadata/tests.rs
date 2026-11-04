@@ -541,11 +541,42 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 bail!("attested runtime could not delete channel-space link");
             }
 
+            for table in ["spaces_metadata", "channel_space_links"] {
+                sqlx::query(&format!(
+                    "ALTER TABLE {}.{table} ALTER COLUMN space_node SET DEFAULT ''",
+                    self.target
+                ))
+                .execute(&self.admin)
+                .await?;
+            }
+            DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await?;
+            DatabaseChannelSpaceLinkStore::attach_existing(runtime_database.clone()).await?;
+
             drop(owner_spaces);
             drop(owner_links);
-            drop(owner_database);
             drop(attached_spaces);
             drop(attached_links);
+
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata ALTER COLUMN name SET DEFAULT 'unexpected'",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::InvalidColumn {
+                    table: "spaces_metadata",
+                    column: "name",
+                }) => {}
+                Err(error) => bail!("unapproved name default had wrong error: {error}"),
+                Ok(_) => bail!("unapproved name default was accepted"),
+            }
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata ALTER COLUMN name DROP DEFAULT",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
 
             sqlx::query(&format!(
                 "DROP INDEX {}.idx_spaces_metadata_created_at",
@@ -573,6 +604,59 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 Ok(_) => bail!("unsafe channel_space_links grant was accepted"),
             }
 
+            sqlx::query(&format!(
+                "CREATE INDEX idx_spaces_metadata_created_at \
+                 ON {}.spaces_metadata (created_at ASC, space_node ASC)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+
+            let owner_guard = owner_database.guard().await?;
+            owner_guard
+                .execute("DROP TABLE spaces_metadata", ())
+                .await?;
+            owner_guard
+                .execute(
+                    "CREATE TABLE spaces_metadata (\
+                       space_node TEXT PRIMARY KEY, \
+                       space_jid TEXT NOT NULL, \
+                       name TEXT GENERATED ALWAYS AS (space_jid) STORED NOT NULL, \
+                       description TEXT, \
+                       icon_url TEXT, \
+                       created_at BIGINT NOT NULL, \
+                       updated_at BIGINT NOT NULL\
+                     )",
+                    (),
+                )
+                .await?;
+            for statement in [
+                "CREATE UNIQUE INDEX idx_spaces_metadata_space_node \
+                 ON spaces_metadata (space_node)",
+                "CREATE INDEX idx_spaces_metadata_created_at \
+                 ON spaces_metadata (created_at ASC, space_node ASC)",
+                "CREATE INDEX idx_spaces_metadata_space_jid \
+                 ON spaces_metadata (space_jid)",
+            ] {
+                owner_guard.execute(statement, ()).await?;
+            }
+            sqlx::query(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.spaces_metadata TO {}",
+                self.target, self.runtime
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::InvalidColumn {
+                    table: "spaces_metadata",
+                    column: "name",
+                }) => {}
+                Err(error) => bail!("generated name column had wrong error: {error}"),
+                Ok(_) => bail!("generated name column was accepted"),
+            }
+
+            drop(owner_guard);
+            drop(owner_database);
             drop(runtime_database);
             Ok(())
         }

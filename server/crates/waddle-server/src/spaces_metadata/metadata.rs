@@ -82,41 +82,13 @@ pub struct DatabaseSpacesMetadataStore {
 }
 
 const SPACES_METADATA_COLUMNS: &[ColumnContract] = &[
-    ColumnContract {
-        name: "space_node",
-        kind: ColumnKind::Text,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "space_jid",
-        kind: ColumnKind::Text,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "name",
-        kind: ColumnKind::Text,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "description",
-        kind: ColumnKind::Text,
-        not_null: false,
-    },
-    ColumnContract {
-        name: "icon_url",
-        kind: ColumnKind::Text,
-        not_null: false,
-    },
-    ColumnContract {
-        name: "created_at",
-        kind: ColumnKind::Bigint,
-        not_null: true,
-    },
-    ColumnContract {
-        name: "updated_at",
-        kind: ColumnKind::Bigint,
-        not_null: true,
-    },
+    ColumnContract::optional_empty_text_default("space_node", ColumnKind::Text, true),
+    ColumnContract::plain("space_jid", ColumnKind::Text, true),
+    ColumnContract::plain("name", ColumnKind::Text, true),
+    ColumnContract::plain("description", ColumnKind::Text, false),
+    ColumnContract::plain("icon_url", ColumnKind::Text, false),
+    ColumnContract::plain("created_at", ColumnKind::Bigint, true),
+    ColumnContract::plain("updated_at", ColumnKind::Bigint, true),
 ];
 
 const SPACES_METADATA_INDEXES: &[IndexContract] = &[
