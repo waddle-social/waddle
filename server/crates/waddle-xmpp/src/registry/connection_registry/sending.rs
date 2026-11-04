@@ -52,6 +52,54 @@ pub enum PendingFlushCommitRejection {
     ChannelClosed,
 }
 
+/// Outcome of one write-acceptance enqueue attempt against a captured binding.
+///
+/// A refusal returns the original frame and its acceptance callback. Queue
+/// acceptance is not evidence that the socket wrote or recovered the frame.
+#[derive(Debug)]
+#[must_use]
+pub enum WriteAcceptanceEnqueueOutcome {
+    AcceptedOrUnknown,
+    NotEnqueued {
+        reason: WriteAcceptanceEnqueueRejection,
+        outbound: Box<OutboundStanza>,
+    },
+}
+
+/// A pre-enqueue refusal of a write-acceptance attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteAcceptanceEnqueueRejection {
+    /// No entry was present when the attempt began. This is only a snapshot.
+    NotConnected,
+    /// The captured entry was removed or replaced before its permit committed.
+    BindingMismatch,
+    Provisional,
+    Sealed,
+    Full,
+    ChannelClosed,
+}
+
+impl WriteAcceptanceEnqueueOutcome {
+    fn not_enqueued(reason: WriteAcceptanceEnqueueRejection, outbound: OutboundStanza) -> Self {
+        Self::NotEnqueued {
+            reason,
+            outbound: Box::new(outbound),
+        }
+    }
+}
+
+impl From<EndpointEnqueueRejection> for WriteAcceptanceEnqueueRejection {
+    fn from(reason: EndpointEnqueueRejection) -> Self {
+        match reason {
+            EndpointEnqueueRejection::Provisional => Self::Provisional,
+            EndpointEnqueueRejection::Sealed => Self::Sealed,
+            EndpointEnqueueRejection::Full => Self::Full,
+            EndpointEnqueueRejection::ChannelClosed => Self::ChannelClosed,
+            EndpointEnqueueRejection::BindingMismatch => Self::BindingMismatch,
+        }
+    }
+}
+
 impl ConnectionEntry {
     /// Called with the registry entry guard held. No await may separate the
     /// exact-binding check and permit commit, or occur under the admission
@@ -193,47 +241,65 @@ impl ConnectionRegistry {
 
     /// Enqueue a server-generated direct frame with a completion notifier that
     /// the destination connection resolves only after accepting the frame into
-    /// its write/recovery-owning path.
+    /// its write/recovery-owning path. A single attempt is bound to the entry
+    /// captured before waiting for capacity; it never retargets a replacement.
+    /// Cancelling this future drops its envelope, so callers must retain an
+    /// independent source if cancellation should be retryable.
     pub async fn send_to_with_write_acceptance(
         &self,
         jid: &FullJid,
         stanza: Stanza,
         acceptance: OutboundWriteAcceptance,
-    ) -> SendResult {
+    ) -> WriteAcceptanceEnqueueOutcome {
+        let outbound = OutboundStanza::with_write_acceptance(stanza, acceptance);
         let endpoint = match self.connections.get(jid) {
             Some(entry) => entry.value().endpoint.clone(),
-            None => return SendResult::NotConnected,
-        };
-        let outbound = OutboundStanza::with_write_acceptance(stanza, acceptance);
-        match endpoint.send(outbound).await {
-            EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-            EndpointEnqueueOutcome::ProvenNotEnqueued {
-                reason: EndpointEnqueueRejection::ChannelClosed,
-                outbound,
-            } => {
-                self.remove_if_sender_closed_owner(jid, &endpoint);
-                if let Some(entry) = self.connections.get(jid) {
-                    let current = entry.value().endpoint.clone();
-                    drop(entry);
-                    if !current.same_binding(&endpoint) {
-                        return match current.send(*outbound).await {
-                            EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-                            EndpointEnqueueOutcome::ProvenNotEnqueued {
-                                reason: EndpointEnqueueRejection::ChannelClosed,
-                                ..
-                            } => {
-                                self.remove_if_sender_closed_owner(jid, &current);
-                                SendResult::ChannelClosed
-                            }
-                            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => {
-                                SendResult::NotConnected
-                            }
-                        };
-                    }
-                }
-                SendResult::ChannelClosed
+            None => {
+                return WriteAcceptanceEnqueueOutcome::not_enqueued(
+                    WriteAcceptanceEnqueueRejection::NotConnected,
+                    outbound,
+                )
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => SendResult::NotConnected,
+        };
+        // Never hold a registry guard while waiting for capacity. Once a
+        // permit is reserved, revalidate the binding and commit synchronously
+        // under the registry guard so replacement cannot interleave.
+        let permit = match endpoint.reserve_owned().await {
+            Ok(permit) => permit,
+            Err(reason) => {
+                if reason == EndpointEnqueueRejection::ChannelClosed {
+                    self.remove_if_sender_closed_owner(jid, &endpoint);
+                }
+                return WriteAcceptanceEnqueueOutcome::not_enqueued(reason.into(), outbound);
+            }
+        };
+        let Some(entry) = self.connections.get(jid) else {
+            return WriteAcceptanceEnqueueOutcome::not_enqueued(
+                WriteAcceptanceEnqueueRejection::BindingMismatch,
+                outbound,
+            );
+        };
+        if !entry.endpoint.same_binding(&endpoint) {
+            return WriteAcceptanceEnqueueOutcome::not_enqueued(
+                WriteAcceptanceEnqueueRejection::BindingMismatch,
+                outbound,
+            );
+        }
+        let result = endpoint.commit_reserved(permit, outbound);
+        drop(entry);
+        match result {
+            EndpointEnqueueOutcome::AcceptedOrUnknown => {
+                WriteAcceptanceEnqueueOutcome::AcceptedOrUnknown
+            }
+            EndpointEnqueueOutcome::ProvenNotEnqueued { reason, outbound } => {
+                if reason == EndpointEnqueueRejection::ChannelClosed {
+                    self.remove_if_sender_closed_owner(jid, &endpoint);
+                }
+                WriteAcceptanceEnqueueOutcome::NotEnqueued {
+                    reason: reason.into(),
+                    outbound,
+                }
+            }
         }
     }
 

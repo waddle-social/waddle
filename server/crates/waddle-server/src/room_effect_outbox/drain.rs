@@ -19,7 +19,9 @@ use tokio::sync::oneshot;
 use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::muc::RoomEffectReservation;
 use waddle_xmpp::ownership::{Entity, EntityType};
-use waddle_xmpp::registry::{OutboundWriteAcceptance, SendResult};
+use waddle_xmpp::registry::{
+    OutboundWriteAcceptance, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
+};
 use waddle_xmpp::Stanza;
 
 use super::render::{effect_removed_sessions, effect_voice_changes, rebuild_effect};
@@ -359,7 +361,7 @@ enum ClaimDisposition {
 enum LocalQueueResult {
     Accepted(oneshot::Receiver<()>),
     NotConnected,
-    TimedOut,
+    Retryable,
 }
 
 async fn drain_claimed(
@@ -516,7 +518,7 @@ async fn drain_claimed(
         // preserving the lost-lease abort checkpoint above.
         remote.push((recipient, stanza));
     }
-    let (accepted_acks, remote_retry_needed, local_timed_out, lease_lost) =
+    let (accepted_acks, remote_retry_needed, local_retry, lease_lost) =
         deliver_recipients_concurrently(
             state,
             &claimed.row.key,
@@ -537,7 +539,7 @@ async fn drain_claimed(
             .await?;
         return Ok(ClaimDisposition::Stale);
     }
-    if local_timed_out {
+    if local_retry {
         local_retry_needed = true;
     }
     if remote_retry_needed || local_retry_needed {
@@ -597,7 +599,7 @@ async fn queue_local(
 ) -> LocalQueueResult {
     let (acceptance, receiver) = OutboundWriteAcceptance::new();
     let Some(timeout) = remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) else {
-        return LocalQueueResult::TimedOut;
+        return LocalQueueResult::Retryable;
     };
     match tokio::time::timeout(
         timeout,
@@ -609,9 +611,18 @@ async fn queue_local(
     )
     .await
     {
-        Ok(SendResult::Sent) => LocalQueueResult::Accepted(receiver),
-        Ok(SendResult::NotConnected | SendResult::ChannelClosed) => LocalQueueResult::NotConnected,
-        Err(_) => LocalQueueResult::TimedOut,
+        Ok(WriteAcceptanceEnqueueOutcome::AcceptedOrUnknown) => {
+            LocalQueueResult::Accepted(receiver)
+        }
+        Ok(WriteAcceptanceEnqueueOutcome::NotEnqueued {
+            reason: WriteAcceptanceEnqueueRejection::NotConnected,
+            ..
+        }) => LocalQueueResult::NotConnected,
+        // A refusal by a captured binding is not evidence that the JID is
+        // absent. The row remains the durable source for a later attempt.
+        Ok(WriteAcceptanceEnqueueOutcome::NotEnqueued { .. }) | Err(_) => {
+            LocalQueueResult::Retryable
+        }
     }
 }
 
@@ -709,12 +720,12 @@ async fn deliver_recipients_concurrently(
         for stanza in stanzas {
             match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
                 LocalQueueResult::Accepted(ack) => recipient_acks.push(ack),
-                LocalQueueResult::TimedOut => {
+                LocalQueueResult::Retryable => {
                     tracing::warn!(
                         recipient = %recipient,
-                        "room effect outbox local enqueue timed out; releasing after the pass"
+                        "room effect outbox local enqueue requires retry; releasing after the pass"
                     );
-                    return RecipientDeliveryOutcome::LocalTimedOut;
+                    return RecipientDeliveryOutcome::LocalRetryable;
                 }
                 LocalQueueResult::NotConnected => {
                     match registered_remote_resource_write_accepted_delivery(
@@ -740,7 +751,7 @@ async fn deliver_recipients_concurrently(
     }
     let mut acks = Vec::new();
     let mut remote_retry = false;
-    let mut local_timed_out = false;
+    let mut local_retry = false;
     let mut lease_lost = false;
     let mut renewal_errored = false;
     let drive = async {
@@ -776,7 +787,7 @@ async fn deliver_recipients_concurrently(
                 RecipientDeliveryOutcome::RecipientDone(recipient_acks) => {
                     acks.extend(recipient_acks)
                 }
-                RecipientDeliveryOutcome::LocalTimedOut => local_timed_out = true,
+                RecipientDeliveryOutcome::LocalRetryable => local_retry = true,
                 #[cfg(feature = "clustering")]
                 RecipientDeliveryOutcome::RemoteRetryable => remote_retry = true,
             }
@@ -811,12 +822,12 @@ async fn deliver_recipients_concurrently(
     if renewal_errored {
         remote_retry = true;
     }
-    (acks, remote_retry, local_timed_out, lease_lost)
+    (acks, remote_retry, local_retry, lease_lost)
 }
 
 enum RecipientDeliveryOutcome {
     RecipientDone(Vec<oneshot::Receiver<()>>),
-    LocalTimedOut,
+    LocalRetryable,
     #[cfg(feature = "clustering")]
     RemoteRetryable,
 }

@@ -4,6 +4,7 @@ use super::{
     ConnectionRegistry, DeliveryKind, FullJid, Instant, LocalConnectionBindingId, Ordering,
     OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
     PendingFlushCommitRejection, PendingFlushReserveError, SendResult, Stanza,
+    WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
@@ -171,14 +172,16 @@ async fn send_to_with_write_acceptance_attaches_token_without_acknowledging_enqu
     registry.register(jid.clone(), tx);
     let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
 
-    assert!(registry
-        .send_to_with_write_acceptance(
-            &jid,
-            Stanza::Message(make_test_message("write-accepted@example.com")),
-            acceptance,
-        )
-        .await
-        .is_sent());
+    assert!(matches!(
+        registry
+            .send_to_with_write_acceptance(
+                &jid,
+                Stanza::Message(make_test_message("write-accepted@example.com")),
+                acceptance,
+            )
+            .await,
+        WriteAcceptanceEnqueueOutcome::AcceptedOrUnknown
+    ));
     assert!(matches!(
         accepted.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -208,20 +211,27 @@ async fn send_to_with_write_acceptance_not_connected_never_acknowledges() {
     let jid = test_jid("absent");
     let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
 
-    assert!(matches!(
-        registry
-            .send_to_with_write_acceptance(
-                &jid,
-                Stanza::Message(make_test_message("absent@example.com")),
-                acceptance,
-            )
-            .await,
-        SendResult::NotConnected
-    ));
+    let outcome = registry
+        .send_to_with_write_acceptance(
+            &jid,
+            Stanza::Message(make_test_message("absent@example.com")),
+            acceptance,
+        )
+        .await;
+    let WriteAcceptanceEnqueueOutcome::NotEnqueued { reason, outbound } = outcome else {
+        panic!("absent binding must return the frame");
+    };
+    assert_eq!(reason, WriteAcceptanceEnqueueRejection::NotConnected);
     assert!(matches!(
         accepted.try_recv(),
-        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("the original callback is returned")
+        .acknowledge();
+    assert_eq!(accepted.try_recv(), Ok(()));
 }
 
 #[tokio::test]
@@ -566,7 +576,7 @@ async fn test_send_to_closed_channel_does_not_remove_replacement() {
 }
 
 #[tokio::test]
-async fn write_acceptance_survives_closed_send_retry_to_same_jid_replacement() {
+async fn write_acceptance_closed_old_binding_returns_frame_without_retargeting() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("retry-write-acceptance");
     let (old_tx, old_rx) = mpsc::channel(1);
@@ -588,18 +598,136 @@ async fn write_acceptance_survives_closed_send_retry_to_same_jid_replacement() {
     assert!(futures::poll!(send.as_mut()).is_pending());
     registry.register(jid.clone(), new_tx);
     drop(old_rx);
-    assert!(send.await.is_sent());
+    let WriteAcceptanceEnqueueOutcome::NotEnqueued { reason, outbound } = send.await else {
+        panic!("closed captured binding must return the frame");
+    };
+    assert_eq!(reason, WriteAcceptanceEnqueueRejection::ChannelClosed);
+    assert!(new_rx.try_recv().is_err());
     assert!(matches!(
         accepted.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    let queued = new_rx.recv().await.expect("replacement received frame");
-    assert_eq!(queued.stanza.to_element(), expected);
-    assert_eq!(queued.kind, DeliveryKind::DirectFrame);
-    queued
+    assert_eq!(outbound.stanza.to_element(), expected);
+    assert_eq!(outbound.kind, DeliveryKind::DirectFrame);
+    outbound
         .write_acceptance
         .as_ref()
-        .expect("acceptance transferred to replacement")
+        .expect("the original callback is returned")
+        .acknowledge();
+    assert_eq!(accepted.try_recv(), Ok(()));
+}
+
+#[tokio::test]
+async fn write_acceptance_waiter_cannot_commit_to_a_replaced_open_binding() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("displaced-write-acceptance");
+    let (old_tx, mut old_rx) = mpsc::channel(1);
+    let (new_tx, mut new_rx) = mpsc::channel(1);
+    registry.register(jid.clone(), old_tx);
+    assert!(registry
+        .send_to(
+            &jid,
+            Stanza::Message(make_test_message("first@example.com"))
+        )
+        .await
+        .is_sent());
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+    let stanza = Stanza::Message(make_test_message("held@example.com"));
+    let expected = stanza.to_element();
+    let send = registry.send_to_with_write_acceptance(&jid, stanza, acceptance);
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    registry.register(jid.clone(), new_tx);
+    old_rx.try_recv().expect("free old queue capacity");
+    let WriteAcceptanceEnqueueOutcome::NotEnqueued { reason, outbound } = send.await else {
+        panic!("replaced binding must return the waiting frame");
+    };
+    assert_eq!(reason, WriteAcceptanceEnqueueRejection::BindingMismatch);
+    assert_eq!(outbound.stanza.to_element(), expected);
+    assert!(old_rx.try_recv().is_err());
+    assert!(new_rx.try_recv().is_err());
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("the original callback is returned")
+        .acknowledge();
+    assert_eq!(accepted.try_recv(), Ok(()));
+}
+
+#[tokio::test]
+async fn write_acceptance_seal_winning_capacity_wait_returns_frame() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("sealed-write-acceptance");
+    let (tx, mut rx) = mpsc::channel(1);
+    let binding = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let entry = ConnectionEntry::new_for_binding(tx, binding.clone());
+    let owner = registry.register_entry(jid.clone(), entry.clone());
+    assert!(registry
+        .send_to(
+            &jid,
+            Stanza::Message(make_test_message("first@example.com"))
+        )
+        .await
+        .is_sent());
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+    let stanza = Stanza::Message(make_test_message("held@example.com"));
+    let expected = stanza.to_element();
+    let send = registry.send_to_with_write_acceptance(&jid, stanza, acceptance);
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    assert!(entry.seal_binding(owner, &binding));
+    rx.try_recv().expect("free queue capacity after seal");
+    let WriteAcceptanceEnqueueOutcome::NotEnqueued { reason, outbound } = send.await else {
+        panic!("sealed binding must return the waiting frame");
+    };
+    assert_eq!(reason, WriteAcceptanceEnqueueRejection::Sealed);
+    assert_eq!(outbound.stanza.to_element(), expected);
+    assert!(rx.try_recv().is_err());
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("the original callback is returned")
+        .acknowledge();
+    assert_eq!(accepted.try_recv(), Ok(()));
+}
+
+#[tokio::test]
+async fn write_acceptance_committed_before_seal_remains_queued() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("write-before-seal");
+    let (tx, mut rx) = mpsc::channel(1);
+    let binding = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let entry = ConnectionEntry::new_for_binding(tx, binding.clone());
+    let owner = registry.register_entry(jid.clone(), entry.clone());
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+    assert!(matches!(
+        registry
+            .send_to_with_write_acceptance(
+                &jid,
+                Stanza::Message(make_test_message("sent@example.com")),
+                acceptance,
+            )
+            .await,
+        WriteAcceptanceEnqueueOutcome::AcceptedOrUnknown
+    ));
+    assert!(entry.seal_binding(owner, &binding));
+    let outbound = rx.try_recv().expect("frame committed before seal");
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("receiver owns callback")
         .acknowledge();
     assert_eq!(accepted.try_recv(), Ok(()));
 }

@@ -29,7 +29,7 @@ pub use connection_registry::{
     OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
     PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,
     SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
-    TerminalOrderingRetryLease,
+    TerminalOrderingRetryLease, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 pub use selection::{
     available_resources_for_user, get_resources_for_user, routing_resources_for_user,
