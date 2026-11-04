@@ -439,3 +439,8 @@ waddle-server::supervised_io kameo_control::full_256_entry_kameo_mailbox_require
 # Pending delivery releases an outbound binding only under the detached
 # stream's captured SM claim epoch, including same-process reacquisition.
 waddle-server pending_delivery::tests::postgres_outbound_sequence_release_rejects_same_node_reacquired_claim_epoch
+
+# Waddle issue 2046: live XEP-0198 ACK deletion locks the exact claim epoch;
+# terminal settlement drains retained proofs, and a lost owner closes the socket.
+waddle-server pending_delivery::tests::postgres_live_ack_is_fenced_by_same_node_claim_epoch_and_serializes_transfer
+waddle-server server::routes::websocket::tests::stream_management::sm_live_ack_with_lost_claim_closes_stream_without_purging_pending_rows

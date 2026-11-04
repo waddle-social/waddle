@@ -331,6 +331,40 @@ pub(crate) struct RowBackedReleaseOutcome {
     pub(crate) ownership_unknown: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TerminalAckSettlementError {
+    #[error("durable SM ACK journal settlement failed: {0}")]
+    Journal(#[from] waddle_xmpp::stream_management::SmRegistryError),
+    #[error("live pending-delivery ACK settlement failed: {0}")]
+    Pending(#[from] waddle_xmpp::pending_delivery::storage::PendingStorageError),
+}
+
+/// Settle durable and cancellation-safe live ACK proofs under the detached
+/// session's captured claim fence before confirming its terminal source.
+pub(crate) async fn settle_terminal_ack_proofs(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    pending_storage: &dyn PendingDeliveryStorage,
+    session: &DetachedSession,
+) -> Result<(), TerminalAckSettlementError> {
+    sm_registry
+        .settle_session_acknowledgements(session, pending_storage)
+        .await?;
+    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(&session.stream_id);
+    let empty = HashSet::new();
+    let outcome = pending_storage
+        .release_rows_for_outbound_sequences(
+            &session.jid.to_bare(),
+            &session_id,
+            &empty,
+            session.promotion_custody.captured_fence(),
+        )
+        .await;
+    if let Some(error) = outcome.error {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 /// Discover which of `detached`'s replay entries are copies of durable
 /// sequence-bound `pending_delivery` rows, release those rows back to
 /// ordinary redelivery, and strip the released copies from the queue.
@@ -364,11 +398,31 @@ pub(crate) async fn release_row_backed_replay_copies(
         .iter()
         .map(|entry| entry.sequence)
         .collect();
-    if sequences.is_empty() {
-        return RowBackedReleaseOutcome::default();
-    }
     let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone());
     let recipient = detached.jid.to_bare();
+    if sequences.is_empty() {
+        let outcome = pending_storage
+            .release_rows_for_outbound_sequences(
+                &recipient,
+                &session_id,
+                &sequences,
+                detached.promotion_custody.captured_fence(),
+            )
+            .await;
+        if let Some(error) = outcome.error {
+            tracing::warn!(
+                stream_id = %detached.stream_id,
+                jid = %detached.jid,
+                %error,
+                "empty row-backed replay inventory could not settle pending ACK proofs"
+            );
+            return RowBackedReleaseOutcome {
+                ownership_unknown: true,
+                ..RowBackedReleaseOutcome::default()
+            };
+        }
+        return RowBackedReleaseOutcome::default();
+    }
     let preflight = match pending_storage.list(&recipient).await {
         Ok(rows) => Some(
             rows.into_iter()
@@ -982,6 +1036,24 @@ pub(crate) async fn promote_guarded_sessions(
                 reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await
             };
             if retained {
+                outcome.retrying_stream_ids.insert(session.stream_id);
+            }
+            continue;
+        }
+        if let Err(error) = settle_terminal_ack_proofs(
+            deps.sm_registry,
+            deps.pending_storage.as_ref(),
+            promotion_guard.session(),
+        )
+        .await
+        {
+            tracing::warn!(
+                stream_id = %promotion_guard.session().stream_id,
+                %error,
+                "displaced promotion could not settle terminal ACK proofs; retaining for retry"
+            );
+            let session = promotion_guard.session().clone();
+            if promotion_guard.retain_for_retry() {
                 outcome.retrying_stream_ids.insert(session.stream_id);
             }
             continue;

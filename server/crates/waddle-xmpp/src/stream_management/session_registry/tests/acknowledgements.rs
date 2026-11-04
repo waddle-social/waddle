@@ -401,6 +401,7 @@ impl PendingDeliveryStorage for GatedAckPending {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: crate::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, crate::pending_delivery::storage::PendingStorageError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(
@@ -412,7 +413,7 @@ impl PendingDeliveryStorage for GatedAckPending {
         let commit_first = self.commit_before_gate.load(Ordering::SeqCst);
         let deleted = if commit_first {
             self.inner
-                .delete_acked_in_window(session, from_exclusive, to_inclusive)
+                .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
                 .await?
         } else {
             0
@@ -425,7 +426,7 @@ impl PendingDeliveryStorage for GatedAckPending {
             Ok(deleted)
         } else {
             self.inner
-                .delete_acked_in_window(session, from_exclusive, to_inclusive)
+                .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
                 .await
         }
     }

@@ -15,7 +15,7 @@
 use super::frame::ResponseFrame;
 use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
 use super::state::WsConnState;
-use super::stream_management::{apply_sm_ack, is_countable_stanza};
+use super::stream_management::{apply_sm_ack_with_fence, is_countable_stanza};
 use super::{
     debug, error, info, warn, Message, Sink, SmStanza, StreamExt, WebSocketState, MAX_FRAME_SIZE,
 };
@@ -645,8 +645,14 @@ where
                         "Dropping oversized inbound frame during send-window pause"
                     );
                 } else if let Some(h) = parse_sm_ack_h(text.as_str()) {
-                    let responses =
-                        apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    let responses = apply_sm_ack_with_fence(
+                        state,
+                        &mut conn.sm_state,
+                        &mut conn.phase,
+                        h,
+                        conn.sm_ingress_fence.as_ref(),
+                    )
+                    .await;
                     if !batch_authoritative(authority) {
                         return SendWindowOutcome::AuthorityRevoked;
                     }
@@ -1005,8 +1011,14 @@ where
                     // frames and flip the phase to Closing instead of
                     // purging the replay queue. Write them and end the
                     // batch — the connection is terminating.
-                    let responses =
-                        apply_sm_ack(state, &mut conn.sm_state, &mut conn.phase, h).await;
+                    let responses = apply_sm_ack_with_fence(
+                        state,
+                        &mut conn.sm_state,
+                        &mut conn.phase,
+                        h,
+                        conn.sm_ingress_fence.as_ref(),
+                    )
+                    .await;
                     if !batch_authoritative(authority) {
                         return DrainSignal::AuthorityRevoked;
                     }

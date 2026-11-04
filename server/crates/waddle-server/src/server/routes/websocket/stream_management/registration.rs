@@ -141,30 +141,69 @@ async fn complete_pending_resume_claim(
                 // stranding them claimed until the claim-expiry janitor
                 // re-released them as duplicates.
                 let acked_from_exclusive = detached.last_acked;
+                let expected_fence = detached.promotion_custody.captured_fence();
                 conn.sm_state.acknowledge(h);
+                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
+                match state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .delete_acked_in_window(
+                        &session_id,
+                        acked_from_exclusive,
+                        h,
+                        match expected_fence {
+                            Some(fence) => {
+                                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Fenced(
+                                    fence,
+                                )
+                            }
+                            None => {
+                                waddle_xmpp::pending_delivery::storage::PendingAckAuthority::Unavailable
+                            }
+                        },
+                    )
+                    .await
                 {
-                    let session_id =
-                        waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
-                    if let Err(_error) = state
-                        .deps
-                        .protocol
-                        .pending_delivery_storage
-                        .delete_acked_in_window(&session_id, acked_from_exclusive, h)
-                        .await
-                    {
+                    Ok(_) => {
+                        resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
+                        SmRegistrationFinalization::ReplaceWithResumed {
+                            resumed: SmResumed::new(
+                                stream_id.clone(),
+                                conn.sm_state.inbound_count(),
+                            ),
+                            replay_after_h: h,
+                        }
+                    }
+                    Err(error) => {
                         warn!(
                             session = %session_id,
                             from = acked_from_exclusive,
                             h,
+                            %error,
                             failure = "storage",
                             "pending_delivery ACK deletion retained on resume; claim release must settle it"
                         );
+                        if matches!(
+                            &error,
+                            waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. }
+                        ) {
+                            close_registered_resume_attempt(state, conn, jid, owner).await;
+                            resume_outcome = Some(super::observe::SmResumeOutcome::Storage);
+                            SmRegistrationFinalization::ReplaceWithFailed(
+                                SmFailed::with_condition("internal-server-error"),
+                            )
+                        } else {
+                            resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
+                            SmRegistrationFinalization::ReplaceWithResumed {
+                                resumed: SmResumed::new(
+                                    stream_id.clone(),
+                                    conn.sm_state.inbound_count(),
+                                ),
+                                replay_after_h: h,
+                            }
+                        }
                     }
-                }
-                resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
-                SmRegistrationFinalization::ReplaceWithResumed {
-                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.inbound_count()),
-                    replay_after_h: h,
                 }
             }
             None => SmRegistrationFinalization::KeepExistingResponses,

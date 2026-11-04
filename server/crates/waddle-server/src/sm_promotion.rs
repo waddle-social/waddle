@@ -72,6 +72,7 @@ pub use implementation::recent_tombstones_for_promotion;
 pub use implementation::reinsert_failed_session_for_retry;
 pub(crate) use implementation::release_row_backed_replay_copies;
 pub use implementation::scrub_pending_for_tombstones_recorded_during_promotion;
+pub(crate) use implementation::settle_terminal_ack_proofs;
 pub use implementation::DisplacedPromotionDeps;
 pub(crate) use implementation::DisplacedPromotionOutcome;
 pub(crate) use implementation::PromotionBatchGuard;
