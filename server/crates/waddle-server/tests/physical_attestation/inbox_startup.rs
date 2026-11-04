@@ -221,6 +221,31 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
         .expect("restricted runtime updates inbox")
         .is_some());
 
+    sqlx::query(&format!(
+        "CREATE RULE suppress_inbox_updates AS ON UPDATE TO {}.inbox_entries DO INSTEAD NOTHING",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("install unexpected owner rule");
+    let error = create_inbox_startup_for_test(&inherited, &runtime)
+        .await
+        .err()
+        .expect("a rule suppressing inbox writes must be refused");
+    assert!(matches!(
+        error.downcast_ref::<InboxRuntimeAttachError>(),
+        Some(InboxRuntimeAttachError::UnexpectedExecutableSchema {
+            component: "inbox_entries"
+        })
+    ));
+    sqlx::query(&format!(
+        "DROP RULE suppress_inbox_updates ON {}.inbox_entries",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove unexpected rule");
+
     // Commit owner DDL while attachment waits for its pre-snapshot table
     // lock. The attachment must inspect the new shape, not an earlier RR
     // snapshot fixed by the physical attestor.

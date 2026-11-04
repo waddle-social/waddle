@@ -130,6 +130,59 @@ pub(crate) async fn verify_pending(
     verify(tx, schema, PENDING_RELATIONS, true).await
 }
 
+/// Check executable relation objects while the caller holds each table lock.
+/// The pending-delivery verifier separately checks the one permitted trigger's
+/// exact function and trigger definition. Epoch guards require their own
+/// verified allowlist before they can be enabled for these stores.
+pub(crate) async fn unexpected_inbox_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, INBOX_RELATIONS).await
+}
+
+pub(crate) async fn unexpected_sm_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, SM_RELATIONS).await
+}
+
+pub(crate) async fn unexpected_pending_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, PENDING_RELATIONS).await
+}
+
+async fn unexpected_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    relations: &[Relation],
+) -> Result<Option<&'static str>, DatabaseError> {
+    for relation in relations {
+        let mut rows = tx.query(
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class = c.oid) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
+               WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal \
+                 AND NOT (c.relname = 'pending_delivery' \
+                   AND tr.tgname = 'pending_notification_recovery_ordinal_immutable')) \
+             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r'",
+            crate::db_params![schema, relation.name],
+        ).await?;
+        let safe = match rows.next().await? {
+            Some(row) => row.get::<bool>(0)?,
+            None => false,
+        };
+        drop(rows);
+        if !safe {
+            return Ok(Some(relation.name));
+        }
+    }
+    Ok(None)
+}
+
 async fn verify(
     tx: &mut Transaction<'_>,
     schema: &str,

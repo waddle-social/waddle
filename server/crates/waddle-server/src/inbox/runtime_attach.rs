@@ -50,6 +50,8 @@ pub enum InboxRuntimeAttachError {
     },
     #[error("inbox runtime role or privileges are unsafe at {component}")]
     UnsafeRuntimePrivileges { component: &'static str },
+    #[error("inbox relation {component} contains unexpected triggers or rules")]
+    UnexpectedExecutableSchema { component: &'static str },
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -189,6 +191,14 @@ pub(super) async fn verify(
     verify_critical_columns(&mut tx, db.driver(), &schema).await?;
     if require_runtime_writes && db.driver() != DatabaseDriver::Postgres {
         return Err(InboxRuntimeAttachError::AttestedPostgresPoolRequired);
+    }
+    let unexpected_schema = if require_runtime_writes {
+        crate::db::runtime_store_acl::unexpected_inbox_executable_schema(&mut tx, &schema).await?
+    } else {
+        None
+    };
+    if let Some(component) = unexpected_schema {
+        return Err(InboxRuntimeAttachError::UnexpectedExecutableSchema { component });
     }
     let privilege_failure = if require_runtime_writes {
         crate::db::runtime_store_acl::verify_inbox(&mut tx, &schema).await?

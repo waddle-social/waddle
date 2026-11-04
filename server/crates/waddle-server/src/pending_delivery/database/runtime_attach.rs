@@ -43,6 +43,8 @@ pub enum PendingRuntimeAttachError {
     InvalidRecovery { component: &'static str },
     #[error("pending-delivery runtime role or privileges are unsafe at {component}")]
     UnsafeRuntimePrivileges { component: &'static str },
+    #[error("pending-delivery relation {component} contains unexpected triggers or rules")]
+    UnexpectedExecutableSchema { component: &'static str },
     #[error("SQLite pending-delivery verification task failed: {0}")]
     VerificationTask(#[source] tokio::task::JoinError),
     #[error(transparent)]
@@ -264,6 +266,14 @@ async fn verify_transaction(
     }
     if require_runtime_writes && db.driver() != DatabaseDriver::Postgres {
         return Err(PendingRuntimeAttachError::AttestedPostgresPoolRequired);
+    }
+    let unexpected_schema = if require_runtime_writes {
+        crate::db::runtime_store_acl::unexpected_pending_executable_schema(tx, &schema_name).await?
+    } else {
+        None
+    };
+    if let Some(component) = unexpected_schema {
+        return Err(PendingRuntimeAttachError::UnexpectedExecutableSchema { component });
     }
     let privilege_failure = if require_runtime_writes {
         crate::db::runtime_store_acl::verify_pending(tx, &schema_name).await?

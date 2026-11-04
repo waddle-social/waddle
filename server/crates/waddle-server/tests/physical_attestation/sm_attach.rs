@@ -101,6 +101,46 @@ async fn sm_startup_uses_attested_shared_pool_and_refuses_unsupported_paths() {
     admin(
         &fixture,
         &format!(
+            "CREATE FUNCTION {}.suppress_sm_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+            fixture.target
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "CREATE TRIGGER suppress_sm_write BEFORE INSERT ON {}.sm_sessions FOR EACH ROW EXECUTE FUNCTION {}.suppress_sm_write()",
+            fixture.target, fixture.target
+        ),
+    )
+    .await;
+    let error =
+        match waddle_server::test_support::attach_sm_startup(&inherited, runtime, false).await {
+            Ok(_) => panic!("a trigger suppressing SM writes must be refused"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnexpectedExecutableSchema {
+            component: "sm_sessions"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "DROP TRIGGER suppress_sm_write ON {}.sm_sessions",
+            fixture.target
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!("DROP FUNCTION {}.suppress_sm_write()", fixture.target),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
             "GRANT CREATE ON SCHEMA {} TO {}",
             fixture.target, fixture.runtime
         ),

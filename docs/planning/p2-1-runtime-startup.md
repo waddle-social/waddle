@@ -41,6 +41,14 @@ a separately budgeted attested control-plane pool. Attachment cannot reopen a
 DSN or fall back to owner bootstrap after a refusal. The checks are snapshots;
 privileged DDL, ownership and grant changes must remain quiescent.
 
+The production attachment checks for unexpected triggers and rewrite rules on
+inbox, portable SM and pending-delivery relations. The only currently allowed
+user trigger is pending delivery's separately verified immutable-ordinal
+trigger. An epoch guard cannot be added to this allowlist until its definition,
+owner and installation are verified. These checks do not establish an exact
+schema, an independently attested relation owner, or a complete other-writer
+ACL policy.
+
 **This is not yet a serving cutover.** The server currently refuses an
 attested pool before binding a listener or running store constructors. MAM,
 PubSub, clustered SM, clustering claim/lease/MUC stores, push, observation and

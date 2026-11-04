@@ -37,6 +37,8 @@ pub enum SmRuntimeAttachError {
     InvalidIndex { index: &'static str },
     #[error("SM runtime role or privileges are unsafe at {component}")]
     UnsafeRuntimePrivileges { component: &'static str },
+    #[error("SM relation {component} contains unexpected triggers or rules")]
+    UnexpectedExecutableSchema { component: &'static str },
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -261,6 +263,14 @@ pub(super) async fn verify(
     }
     verify_disposition(&mut tx, schema).await?;
     verify_indexes(&mut tx, schema).await?;
+    let unexpected_schema = if require_runtime_writes {
+        crate::db::runtime_store_acl::unexpected_sm_executable_schema(&mut tx, schema).await?
+    } else {
+        None
+    };
+    if let Some(component) = unexpected_schema {
+        return Err(SmRuntimeAttachError::UnexpectedExecutableSchema { component });
+    }
     let privilege_failure = if require_runtime_writes {
         crate::db::runtime_store_acl::verify_sm(&mut tx, schema).await?
     } else {

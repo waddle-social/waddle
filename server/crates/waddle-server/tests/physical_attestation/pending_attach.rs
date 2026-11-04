@@ -172,6 +172,36 @@ async fn pending_startup_uses_attested_shared_pool_without_owner_repairs() {
     admin(
         &fixture,
         &format!(
+            "CREATE TRIGGER extra_pending_trigger BEFORE UPDATE ON {}.pending_delivery FOR EACH ROW EXECUTE FUNCTION {}.pending_notification_recovery_ordinal_immutable()",
+            fixture.target, fixture.target
+        ),
+    )
+    .await;
+    let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
+    {
+        Ok(_) => panic!("an unexpected pending trigger must be refused"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::UnexpectedExecutableSchema {
+            component: "pending_delivery"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "DROP TRIGGER extra_pending_trigger ON {}.pending_delivery",
+            fixture.target
+        ),
+    )
+    .await;
+    waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+        .await
+        .expect("the verified immutable trigger remains permitted");
+    admin(
+        &fixture,
+        &format!(
             "GRANT INSERT ON {}.pending_delivery_startup_migrations TO {}",
             fixture.target, fixture.runtime
         ),
