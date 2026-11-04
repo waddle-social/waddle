@@ -26,6 +26,7 @@ use super::{DateTime, Utc};
 use super::{SessionBinding, SessionPhase, SessionSnapshot};
 use super::{SmAcknowledgementClockAction, SmResume, SmResumeState, SmState};
 use super::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
+use crate::bootstrap::{Sasl2Success, SaslChallenge};
 
 /// High-level lifecycle of the scaffolded runtime wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,10 +83,19 @@ pub(in crate::runtime) enum SmNegotiationState {
 pub(in crate::runtime) enum BootstrapState {
     Idle,
     AwaitingTransport,
-    AwaitingStreamOpen { authenticated: bool },
-    AwaitingFeatures { authenticated: bool },
-    AwaitingAuthenticationOutcome,
-    AwaitingBindResult { stanza_id: StanzaId },
+    AwaitingStreamOpen {
+        authenticated: bool,
+    },
+    AwaitingFeatures {
+        authenticated: bool,
+    },
+    AwaitingAuthenticationOutcome {
+        sasl2: bool,
+        oauthbearer_error_challenge_seen: bool,
+    },
+    AwaitingBindResult {
+        stanza_id: StanzaId,
+    },
     AwaitingResume,
     Ready,
 }
@@ -508,16 +518,44 @@ impl XmppRuntime {
         let Some(parsed) = BootstrapElement::parse(&element) else {
             return Ok(());
         };
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                if matches!(
+                    self.bootstrap,
+                    BootstrapState::AwaitingAuthenticationOutcome { .. }
+                ) && matches!(
+                    element.name(),
+                    "success" | "failure" | "challenge" | "continue"
+                ) {
+                    self.bootstrap = BootstrapState::Idle;
+                    self.set_phase(SessionPhase::Disconnecting)?;
+                }
+                return Err(error);
+            }
+        };
 
-        match parsed? {
+        match parsed {
             BootstrapElement::StreamFeatures(features) => {
                 self.handle_stream_features(features, events)?;
             }
             BootstrapElement::SaslSuccess => {
                 self.handle_auth_success(events)?;
             }
+            BootstrapElement::Sasl2Success(success) => {
+                self.handle_sasl2_auth_success(success, events)?;
+            }
+            BootstrapElement::Sasl2Continue => {
+                self.handle_sasl2_continue()?;
+            }
+            BootstrapElement::SaslChallenge(challenge) => {
+                self.handle_auth_challenge(challenge, events)?;
+            }
             BootstrapElement::SaslFailure(failure) => {
-                self.handle_auth_failure(failure, events)?;
+                self.handle_auth_failure(failure, false, events)?;
+            }
+            BootstrapElement::Sasl2Failure(failure) => {
+                self.handle_auth_failure(failure, true, events)?;
             }
             BootstrapElement::ResourceBindingResult(result) => {
                 self.handle_bind_result(result, events)?;
@@ -540,14 +578,23 @@ impl XmppRuntime {
             BootstrapState::AwaitingFeatures {
                 authenticated: false,
             } => {
-                if !features.supports(AuthMechanism::OAuthBearer) {
+                let sasl2 = self.config.transport.endpoint.scheme() == "wss"
+                    && features.supports_sasl2(AuthMechanism::OAuthBearer);
+                if !sasl2 && !features.supports(AuthMechanism::OAuthBearer) {
                     return Err(ClientError::MissingStreamFeature {
                         feature: RequiredStreamFeature::Authentication(AuthMechanism::OAuthBearer),
                     });
                 }
 
-                let request = AuthenticationRequest::from_config(self.oauth_config());
-                self.bootstrap = BootstrapState::AwaitingAuthenticationOutcome;
+                let request = if sasl2 {
+                    AuthenticationRequest::sasl2_oauthbearer_from_config(self.oauth_config())
+                } else {
+                    AuthenticationRequest::from_config(self.oauth_config())
+                };
+                self.bootstrap = BootstrapState::AwaitingAuthenticationOutcome {
+                    sasl2,
+                    oauthbearer_error_challenge_seen: false,
+                };
                 self.set_phase(SessionPhase::Authenticating)?;
                 events.push(ClientEvent::Connection(
                     ConnectionEvent::AuthenticationRequested(request.clone()),
@@ -630,39 +677,149 @@ impl XmppRuntime {
         Ok(())
     }
 
+    fn terminate_authentication(&mut self, error: ClientError) -> ClientResult<()> {
+        self.bootstrap = BootstrapState::Idle;
+        self.set_phase(SessionPhase::Disconnecting)?;
+        Err(error)
+    }
+
     pub(in crate::runtime) fn handle_auth_success(
         &mut self,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
-        if matches!(
-            self.bootstrap,
-            BootstrapState::AwaitingAuthenticationOutcome
-        ) {
-            events.push(ClientEvent::Connection(
-                ConnectionEvent::AuthenticationSucceeded,
-            ));
-            self.begin_stream_open(true, events)?;
+        match self.bootstrap {
+            BootstrapState::AwaitingAuthenticationOutcome {
+                sasl2: false,
+                oauthbearer_error_challenge_seen: true,
+            } => {
+                return self
+                    .terminate_authentication(ClientError::UnexpectedSaslSuccessAfterOAuthError);
+            }
+            BootstrapState::AwaitingAuthenticationOutcome { sasl2: false, .. } => {}
+            BootstrapState::AwaitingAuthenticationOutcome { sasl2: true, .. } => {
+                return self
+                    .terminate_authentication(ClientError::UnexpectedSaslAuthenticationProfile);
+            }
+            _ => return Ok(()),
         }
 
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::AuthenticationSucceeded,
+        ));
+        self.begin_stream_open(true, events)?;
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_sasl2_auth_success(
+        &mut self,
+        success: Sasl2Success,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        match self.bootstrap {
+            BootstrapState::AwaitingAuthenticationOutcome {
+                sasl2: true,
+                oauthbearer_error_challenge_seen: true,
+            } => {
+                return self
+                    .terminate_authentication(ClientError::UnexpectedSaslSuccessAfterOAuthError);
+            }
+            BootstrapState::AwaitingAuthenticationOutcome { sasl2: true, .. } => {}
+            BootstrapState::AwaitingAuthenticationOutcome { sasl2: false, .. } => {
+                return self
+                    .terminate_authentication(ClientError::UnexpectedSaslAuthenticationProfile);
+            }
+            _ => return Ok(()),
+        }
+
+        if !success.inline_results.is_empty() {
+            return self.terminate_authentication(ClientError::UnexpectedSasl2InlineResult);
+        }
+
+        if success.additional_data.is_some() {
+            return self.terminate_authentication(ClientError::UnexpectedOAuthBearerSuccessData);
+        }
+
+        let expected = &self.oauth_config().account;
+        if success.authorization_identifier.resource().is_some()
+            || success.authorization_identifier.to_bare() != *expected
+        {
+            return self.terminate_authentication(ClientError::Sasl2AuthorizationIdentityMismatch);
+        }
+
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::AuthenticationSucceeded,
+        ));
+        // XEP-0388 continues on the existing stream. The next stanza is
+        // stream features; emitting a second stream `<open/>` would violate
+        // the SASL2 success sequence.
+        self.bootstrap = BootstrapState::AwaitingFeatures {
+            authenticated: true,
+        };
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_sasl2_continue(&mut self) -> ClientResult<()> {
+        match self.bootstrap {
+            BootstrapState::AwaitingAuthenticationOutcome { sasl2: true, .. } => {
+                self.terminate_authentication(ClientError::UnsupportedSasl2AuthenticationTask)
+            }
+            BootstrapState::AwaitingAuthenticationOutcome { sasl2: false, .. } => {
+                self.terminate_authentication(ClientError::UnexpectedSaslAuthenticationProfile)
+            }
+            _ => self.terminate_authentication(ClientError::UnexpectedSaslAuthenticationProfile),
+        }
+    }
+
+    pub(in crate::runtime) fn handle_auth_challenge(
+        &mut self,
+        challenge: SaslChallenge,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        let BootstrapState::AwaitingAuthenticationOutcome {
+            sasl2,
+            oauthbearer_error_challenge_seen,
+        } = self.bootstrap
+        else {
+            return Ok(());
+        };
+
+        if sasl2 != challenge.sasl2 || oauthbearer_error_challenge_seen {
+            return self.terminate_authentication(ClientError::InvalidSaslChallenge);
+        }
+
+        self.bootstrap = BootstrapState::AwaitingAuthenticationOutcome {
+            sasl2,
+            oauthbearer_error_challenge_seen: true,
+        };
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(challenge.oauthbearer_error_response_element()),
+        )));
         Ok(())
     }
 
     pub(in crate::runtime) fn handle_auth_failure(
         &mut self,
         failure: SaslFailure,
+        sasl2: bool,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
-        if matches!(
-            self.bootstrap,
-            BootstrapState::AwaitingAuthenticationOutcome
-        ) {
-            self.bootstrap = BootstrapState::Idle;
-            self.set_phase(SessionPhase::Disconnecting)?;
-            events.push(ClientEvent::Connection(
-                ConnectionEvent::AuthenticationFailed(failure),
-            ));
+        match self.bootstrap {
+            BootstrapState::AwaitingAuthenticationOutcome {
+                sasl2: expected_sasl2,
+                ..
+            } if expected_sasl2 == sasl2 => {}
+            BootstrapState::AwaitingAuthenticationOutcome { .. } => {
+                return self
+                    .terminate_authentication(ClientError::UnexpectedSaslAuthenticationProfile);
+            }
+            _ => return Ok(()),
         }
 
+        self.bootstrap = BootstrapState::Idle;
+        self.set_phase(SessionPhase::Disconnecting)?;
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::AuthenticationFailed(failure),
+        ));
         Ok(())
     }
 

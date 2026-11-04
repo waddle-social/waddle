@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Shared typed core primitives for Waddle's native XMPP client stack"
 
 [dependencies]
+base64 = { workspace = true }
 chrono = { workspace = true }
 jid = { workspace = true }
 minidom = { workspace = true }
