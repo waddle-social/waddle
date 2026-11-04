@@ -1426,6 +1426,188 @@ async fn prepare_attested_writer_fixture(fixture: &Fixture) -> (String, Physical
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn restricted_runtime_attaches_prepared_muc_destroy_outbox() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+    let owner = Database::from_config(
+        "MUC destroy outbox owner",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url),
+    )
+    .await
+    .expect("owner database");
+    waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(owner)
+        .await
+        .expect("prepare owner outbox");
+    for statement in [
+        format!(
+            "ALTER SCHEMA {} OWNER TO {}",
+            fixture.target, fixture.definer
+        ),
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox OWNER TO {}",
+            fixture.target, fixture.definer
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.clustering_muc_destroy_outbox TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("prepare NOLOGIN outbox owner and restricted runtime grants");
+    }
+
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("restricted attested pool");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "restricted MUC destroy outbox",
+        pool,
+    );
+    let mut write = runtime.begin().await.expect("restricted write transaction");
+    write
+        .execute(
+            "INSERT INTO clustering_muc_destroy_outbox \
+             (attempt_id, payload_json, available_at_ms) VALUES ('attach-test', '{}', 0)",
+            (),
+        )
+        .await
+        .expect("restricted runtime can write the owner-prepared outbox");
+    write.rollback().await.expect("discard test row");
+    waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(
+        runtime,
+    )
+    .await
+    .expect("attach existing outbox without runtime DDL");
+
+    sqlx::query(&format!(
+        "REVOKE INSERT ON {}.clustering_muc_destroy_outbox FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("owner removes required runtime write grant");
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested pool after grant removal");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MUC destroy outbox missing write grant",
+        pool,
+    );
+    let error = waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(runtime)
+        .await
+        .err()
+        .expect("missing INSERT grant must fail closed");
+    assert!(matches!(
+        error,
+        waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::UnsafeRuntimeRole
+    ));
+    sqlx::query(&format!(
+        "GRANT INSERT ON {}.clustering_muc_destroy_outbox TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore required runtime write grant");
+
+    for statement in [
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             DROP CONSTRAINT clustering_muc_destroy_outbox_pkey",
+            fixture.target
+        ),
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             ADD CONSTRAINT clustering_muc_destroy_outbox_pkey \
+             PRIMARY KEY (attempt_id) DEFERRABLE INITIALLY DEFERRED",
+            fixture.target
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("owner installs a deferrable conflict arbiter");
+    }
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested pool after arbiter change");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MUC destroy outbox deferrable arbiter",
+        pool,
+    );
+    let error = waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(runtime)
+        .await
+        .err()
+        .expect("deferrable conflict arbiter must fail closed");
+    assert!(matches!(
+        error,
+        waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::InvalidSchema
+    ));
+    for statement in [
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             DROP CONSTRAINT clustering_muc_destroy_outbox_pkey",
+            fixture.target
+        ),
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox \
+             ADD CONSTRAINT clustering_muc_destroy_outbox_pkey \
+             PRIMARY KEY (attempt_id)",
+            fixture.target
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("owner restores immediate conflict arbiter");
+    }
+
+    sqlx::query(&format!(
+        "DROP INDEX {}.clustering_muc_destroy_outbox_due_idx",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("owner removes required index");
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested pool after owner DDL");
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MUC destroy outbox missing index",
+        pool,
+    );
+    let error = waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(runtime)
+        .await
+        .err()
+        .expect("missing due index must fail closed");
+    assert!(matches!(
+        error,
+        waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::InvalidSchema
+    ));
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn restricted_attested_runtime_verifies_lineage_without_control_system_grant() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };

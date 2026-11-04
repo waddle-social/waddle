@@ -102,13 +102,23 @@ pub async fn start_with_config(
 
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
-        db_pool.global().clone(),
-    )
-    .await
-    .map_err(|error| {
-        anyhow::anyhow!("failed to initialize MUC destroy completion outbox: {error}")
-    })?;
+    if db_pool.global().uses_attested_postgres_pool() {
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(
+            db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to attach MUC destroy completion outbox: {error}")
+        })?;
+    } else {
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
+            db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to initialize MUC destroy completion outbox: {error}")
+        })?;
+    }
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
     let permission_actor_impl = if server_config.spicedb.is_none() && fixed_test_account_enabled() {
