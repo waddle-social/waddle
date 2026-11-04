@@ -41,6 +41,8 @@ pub enum PendingRuntimeAttachError {
     MissingMarker { marker: &'static str },
     #[error("pending-delivery recovery metadata is missing or invalid: {component}")]
     InvalidRecovery { component: &'static str },
+    #[error("pending-delivery runtime role or privileges are unsafe at {component}")]
+    UnsafeRuntimePrivileges { component: &'static str },
     #[error("SQLite pending-delivery verification task failed: {0}")]
     VerificationTask(#[source] tokio::task::JoinError),
     #[error(transparent)]
@@ -50,18 +52,24 @@ pub enum PendingRuntimeAttachError {
 /// The owned SQLite task finishes even if its caller is cancelled. In
 /// particular, an interrupted SQLx pool acquisition/transaction must not
 /// discard the only physical connection holding a private memory database.
-pub(super) async fn verify(db: &Database) -> Result<(), PendingRuntimeAttachError> {
+pub(super) async fn verify(
+    db: &Database,
+    require_runtime_writes: bool,
+) -> Result<(), PendingRuntimeAttachError> {
     if db.driver() == DatabaseDriver::Sqlite {
         let db = db.clone();
-        tokio::spawn(async move { verify_snapshot(&db).await })
+        tokio::spawn(async move { verify_snapshot(&db, require_runtime_writes).await })
             .await
             .map_err(PendingRuntimeAttachError::VerificationTask)?
     } else {
-        verify_snapshot(db).await
+        verify_snapshot(db, require_runtime_writes).await
     }
 }
 
-async fn verify_snapshot(db: &Database) -> Result<(), PendingRuntimeAttachError> {
+async fn verify_snapshot(
+    db: &Database,
+    require_runtime_writes: bool,
+) -> Result<(), PendingRuntimeAttachError> {
     if db.driver() == DatabaseDriver::Postgres && !db.is_main_lane() {
         return Err(PendingRuntimeAttachError::MainLaneRequired);
     }
@@ -97,7 +105,7 @@ async fn verify_snapshot(db: &Database) -> Result<(), PendingRuntimeAttachError>
     } else {
         None
     };
-    let result = verify_transaction(db, &mut tx, capability).await;
+    let result = verify_transaction(db, &mut tx, capability, require_runtime_writes).await;
     if let Some(original) = sqlite_timeout {
         tx.execute(&format!("PRAGMA busy_timeout = {original}"), ())
             .await?;
@@ -111,6 +119,7 @@ async fn verify_transaction(
     db: &Database,
     tx: &mut Transaction<'_>,
     capability: Option<crate::db::physical_attestation::AttestedPostgresWriterCapability>,
+    require_runtime_writes: bool,
 ) -> Result<(), PendingRuntimeAttachError> {
     let schema_name = if let Some(capability) = capability {
         // Refuse an inherited snapshot, then open a capability-bound snapshot.
@@ -252,6 +261,17 @@ async fn verify_transaction(
     match db.driver() {
         DatabaseDriver::Postgres => verify_postgres_recovery(tx, &schema_name).await?,
         DatabaseDriver::Sqlite => verify_sqlite_recovery(tx).await?,
+    }
+    if require_runtime_writes && db.driver() != DatabaseDriver::Postgres {
+        return Err(PendingRuntimeAttachError::AttestedPostgresPoolRequired);
+    }
+    let privilege_failure = if require_runtime_writes {
+        crate::db::runtime_store_acl::verify_pending(tx, &schema_name).await?
+    } else {
+        None
+    };
+    if let Some(component) = privilege_failure {
+        return Err(PendingRuntimeAttachError::UnsafeRuntimePrivileges { component });
     }
     Ok(())
 }

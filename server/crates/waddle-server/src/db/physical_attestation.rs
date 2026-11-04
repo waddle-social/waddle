@@ -532,7 +532,7 @@ async fn normalize_search_path(
     Ok(())
 }
 
-/// A dark pool constructor: no production caller currently invokes it.
+/// Construct a hook-bearing pool for a physically attested PostgreSQL runtime.
 ///
 /// The endpoint must preserve a PostgreSQL server session across the
 /// before-acquire hook and transaction start. Transaction- and

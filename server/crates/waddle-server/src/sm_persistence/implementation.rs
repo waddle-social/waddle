@@ -90,7 +90,19 @@ impl DatabaseSmPersistence {
     pub async fn attach_existing_postgres(
         db: Database,
     ) -> Result<Self, super::SmRuntimeAttachError> {
-        super::runtime_attach::verify(&db).await?;
+        super::runtime_attach::verify(&db, false).await?;
+        Ok(Self {
+            db,
+            stream_locks: Arc::new(StreamLockMap::new()),
+        })
+    }
+
+    /// Attach the production writer only after the schema and effective
+    /// runtime privileges have been checked in one read-only snapshot.
+    pub(crate) async fn attach_runtime_postgres(
+        db: Database,
+    ) -> Result<Self, super::SmRuntimeAttachError> {
+        super::runtime_attach::verify(&db, true).await?;
         Ok(Self {
             db,
             stream_locks: Arc::new(StreamLockMap::new()),

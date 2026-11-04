@@ -35,6 +35,8 @@ pub enum SmRuntimeAttachError {
     InvalidDispositionConstraint,
     #[error("SM index {index} is missing or has an invalid definition")]
     InvalidIndex { index: &'static str },
+    #[error("SM runtime role or privileges are unsafe at {component}")]
+    UnsafeRuntimePrivileges { component: &'static str },
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -165,7 +167,10 @@ const INDEXES: &[Index] = &[
     Index { table: "sm_ingress_appends", name: "idx_sm_ingress_appends_pending", unique: false, definition: "USING btree (disposition, appended_at_ms)" },
 ];
 
-pub(super) async fn verify(db: &Database) -> Result<(), SmRuntimeAttachError> {
+pub(super) async fn verify(
+    db: &Database,
+    require_runtime_writes: bool,
+) -> Result<(), SmRuntimeAttachError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(SmRuntimeAttachError::PostgresRequired);
     }
@@ -256,6 +261,14 @@ pub(super) async fn verify(db: &Database) -> Result<(), SmRuntimeAttachError> {
     }
     verify_disposition(&mut tx, schema).await?;
     verify_indexes(&mut tx, schema).await?;
+    let privilege_failure = if require_runtime_writes {
+        crate::db::runtime_store_acl::verify_sm(&mut tx, schema).await?
+    } else {
+        None
+    };
+    if let Some(component) = privilege_failure {
+        return Err(SmRuntimeAttachError::UnsafeRuntimePrivileges { component });
+    }
     tx.commit().await?;
     Ok(())
 }

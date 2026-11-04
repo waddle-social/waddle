@@ -349,12 +349,14 @@ waddle-server ingress::relayed_origin_tests::postgres_relayed_alias_lock_orders_
 waddle-server::physical_attestation sm_attach::portable_sm_attach_checks_restricted_snapshot_and_schema_drift
 waddle-server::physical_attestation sm_attach::portable_sm_attach_accepts_owner_upgrade_and_migration_profiles
 waddle-server::physical_attestation sm_attach::portable_sm_attach_observes_owner_ddl_before_snapshot
+waddle-server::physical_attestation sm_attach::sm_startup_uses_attested_shared_pool_and_refuses_unsupported_paths
 # The closed room-archive writer must run its restricted-role PostgreSQL fixture.
 waddle-server::recorded_room_archive recorded_room_archive_owns_its_transaction
 
 # P2.1 pending attachment must inspect a restricted PostgreSQL snapshot.
 waddle-server::physical_attestation pending_attach::pending_runtime_attach_checks_owner_preparation_and_restricted_snapshot
 waddle-server::physical_attestation pending_attach::pending_runtime_attach_observes_owner_ddl_before_snapshot
+waddle-server::physical_attestation pending_attach::pending_startup_uses_attested_shared_pool_without_owner_repairs
 waddle-server::physical_attestation inbox_startup::attested_inbox_factory_and_lineage_use_only_the_shared_main_lane
 waddle-server::physical_attestation inbox_startup::ordinary_postgres_inbox_startup_preserves_colocation_check
 # W1.3 / P3.2 precursor (#2046): same-JID replacement must not inherit a

@@ -175,6 +175,30 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
         .await
         .expect("grant restricted runtime reads");
     }
+    let error = create_inbox_startup_for_test(&inherited, &runtime)
+        .await
+        .err()
+        .expect("a read-only role cannot run inbox persistence");
+    assert!(matches!(
+        error.downcast_ref::<InboxRuntimeAttachError>(),
+        Some(InboxRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "inbox_entries"
+        })
+    ));
+    sqlx::query(&format!(
+        "GRANT INSERT, UPDATE ON {}.inbox_entries TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant inbox writes");
+    sqlx::query(&format!(
+        "GRANT INSERT, UPDATE, DELETE ON {}.groupchat_notification_recovery TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant recovery writes");
     sqlx::query(&format!(
         "INSERT INTO {}.inbox_entries (user_jid, partner_jid, kind, last_stanza_id, last_updated) VALUES ('alice@example.test', 'bob@example.test', 'direct', 'message-1', 1)",
         fixture.target
@@ -189,6 +213,70 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     let entries = startup.storage().list(&user).await.expect("runtime read");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].partner.to_string(), "bob@example.test");
+    let partner = "bob@example.test".parse().expect("partner JID");
+    assert!(startup
+        .storage()
+        .mark_read(&user, &partner, None)
+        .await
+        .expect("restricted runtime updates inbox")
+        .is_some());
+
+    // Commit owner DDL while attachment waits for its pre-snapshot table
+    // lock. The attachment must inspect the new shape, not an earlier RR
+    // snapshot fixed by the physical attestor.
+    let mut ddl = fixture.admin.begin().await.expect("owner DDL transaction");
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated DROP NOT NULL",
+        fixture.target
+    ))
+    .execute(&mut *ddl)
+    .await
+    .expect("hold inbox schema change");
+    let pending = {
+        let selection = inherited.clone();
+        let runtime = runtime.clone();
+        tokio::spawn(async move { create_inbox_startup_for_test(&selection, &runtime).await })
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE datname = $1 AND usename = $2 AND wait_event_type = 'Lock' \
+                 AND query LIKE '%inbox_entries%')",
+            )
+            .bind(&fixture.database_name)
+            .bind(&fixture.runtime)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observe inbox lock wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("inbox attachment waits before its snapshot");
+    ddl.commit().await.expect("commit changed schema");
+    let error = match pending.await.expect("join inbox attachment") {
+        Ok(_) => panic!("committed schema drift must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<InboxRuntimeAttachError>(),
+        Some(InboxRuntimeAttachError::InvalidColumn {
+            table: "inbox_entries",
+            column: "last_updated",
+            ..
+        })
+    ));
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated SET NOT NULL",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore inbox schema");
 
     let held = runtime.begin().await.expect("occupy main capacity");
     let ingress_db = pool.ingress();

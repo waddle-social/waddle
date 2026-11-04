@@ -48,11 +48,16 @@ pub enum InboxRuntimeAttachError {
         column: &'static str,
         requirement: &'static str,
     },
+    #[error("inbox runtime role or privileges are unsafe at {component}")]
+    UnsafeRuntimePrivileges { component: &'static str },
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
 
-pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError> {
+pub(super) async fn verify(
+    db: &Database,
+    require_runtime_writes: bool,
+) -> Result<(), InboxRuntimeAttachError> {
     if db.is_ingress_lane() {
         return Err(InboxRuntimeAttachError::MainLaneRequired);
     }
@@ -90,8 +95,23 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
                     InboxRuntimeAttachError::Database(error)
                 }
             })?;
-        capability.attest_transaction(&mut tx).await?;
         let expected = &capability.identity().schema.name.0;
+        let quoted = crate::db::physical_attestation::quote_identifier(expected);
+        // Take table locks before the first snapshot-forming query. Otherwise
+        // an owner could commit DDL after attestation fixed the RR snapshot
+        // and before these tables are locked for catalog inspection.
+        for table in ["inbox_entries", "groupchat_notification_recovery"] {
+            tx.execute(
+                &format!("LOCK TABLE {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
+                (),
+            )
+            .await
+            .map_err(|source| InboxRuntimeAttachError::Relation {
+                relation: table,
+                source,
+            })?;
+        }
+        capability.attest_transaction(&mut tx).await?;
         let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
         let active: Option<String> = rows
             .next()
@@ -167,6 +187,17 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
     )
     .await?;
     verify_critical_columns(&mut tx, db.driver(), &schema).await?;
+    if require_runtime_writes && db.driver() != DatabaseDriver::Postgres {
+        return Err(InboxRuntimeAttachError::AttestedPostgresPoolRequired);
+    }
+    let privilege_failure = if require_runtime_writes {
+        crate::db::runtime_store_acl::verify_inbox(&mut tx, &schema).await?
+    } else {
+        None
+    };
+    if let Some(component) = privilege_failure {
+        return Err(InboxRuntimeAttachError::UnsafeRuntimePrivileges { component });
+    }
     tx.commit().await?;
     Ok(())
 }

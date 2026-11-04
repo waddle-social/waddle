@@ -304,7 +304,7 @@ pub const MAIN_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// deadline and retried only on the next heartbeat tick, so a short acquire
 /// bound would abandon a renewal that could still land inside the lease when
 /// Postgres returns, turning a survivable failover into a self-fence.
-pub(crate) const CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Retry horizon for a pool's first connection: sqlx's 30 s default, so a pod
 /// booting during a short database failover keeps retrying refused connections

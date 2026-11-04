@@ -26,3 +26,18 @@ schema maintenance quiescent while it runs and for as long as its result is
 relied upon, or provide a separate coordination mechanism. The snapshot is not
 a durable DDL fence or proof of runtime write permissions or operational writer
 readiness.
+
+## Shared-pool startup selection
+
+For an attested PostgreSQL global handle, startup accepts only an inherited
+global store selection and attaches the exact main lane without owner schema or
+lineage bootstrap. The resulting boundary is registered as an alias of global.
+It validates the runtime role and required DML grants in the same bounded
+snapshot as the schema, including read-only startup markers and the identity
+sequence. It rejects owner-like table privileges, PUBLIC grants and grant
+options. Clustered operation additionally requires live claim handles; it
+cannot fall back to unfenced pending delivery on this path.
+
+The check is a snapshot, not continuous role/DDL enforcement or proof of a
+fenced primary. Other production startup stores and the global runtime handoff
+are still required before an attested server can serve.
