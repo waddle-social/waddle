@@ -751,7 +751,9 @@ schema.#Project & {
 			inputs: list.Concat([
 				_nixInputs,
 				["scripts/build-nextest-archive.sh", "scripts/test_build_nextest_archive.py",
-					"scripts/run-nextest-shards.sh", "scripts/test_run_nextest_shards.py",
+					"scripts/run-nextest-shards.sh", "scripts/run_nextest_shards.py",
+					"scripts/qualification-shards.nix", "scripts/test_run_nextest_shards.py",
+					"scripts/verify_candidate_snapshot.py",
 					"scripts/pin-nextest-shard.py", "scripts/test_pin_nextest_shard.py",
 					"scripts/plan_nextest_binary_shards.py", "scripts/test_plan_nextest_binary_shards.py",
 					"scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",

@@ -16,12 +16,36 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ElementTree
 
 NOT_EXECUTED = "skipped"
 FAILED = ("failure", "error", "flakyFailure", "flakyError", "rerunFailure", "rerunError")
+LANE_ID = "server.required-postgres-multiprocess-websocket-nextest"
+
+# These anchors keep the release-evidence lane tied to its real service and
+# transport boundaries. The full required list remains the source of test
+# outcomes; these IDs make an accidental removal of one of those boundaries a
+# hard error rather than a smaller passing inventory.
+PREREQUISITE_ANCHORS = {
+    "postgres": (
+        "waddle-server::sqlx_cancelled_begin "
+        "cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction",
+    ),
+    "multiprocess": (
+        "waddle-server::db_lineage_multiprocess two_replicas_same_database_both_ready",
+    ),
+    "cross_node_resume_websocket": (
+        "waddle-server::clustering_cluster_e2e cross_node_resume_live_steal_handshake",
+    ),
+    "relay_websocket": (
+        "waddle-server::clustering_cluster_e2e muc_join_routes_to_foreign_room_owner",
+        "waddle-server::clustering_cluster_e2e "
+        "groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes",
+    ),
+}
 
 
 @dataclass(frozen=True, order=True)
@@ -37,10 +61,15 @@ class InputError(Exception):
     pass
 
 
-def parse_required(path: Path) -> list[TestId]:
+def parse_required(path: Path) -> tuple[list[TestId], str]:
     required: list[TestId] = []
     seen: set[TestId] = set()
-    for number, raw in enumerate(path.read_text().splitlines(), start=1):
+    try:
+        contents = path.read_bytes()
+        lines = contents.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        raise InputError(f"{path}: cannot read required-test list") from error
+    for number, raw in enumerate(lines, start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
@@ -54,29 +83,46 @@ def parse_required(path: Path) -> list[TestId]:
         required.append(test)
     if not required:
         raise InputError(f"{path}: the required test list is empty")
-    return required
+    return required, hashlib.sha256(contents).hexdigest()
 
 
-def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId]]:
-    """Return (executed, failed) test ids across JUnit reports."""
+def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[TestId], dict[Path, str]]:
+    """Return (executed, failed, skipped) test ids across JUnit reports."""
     executed: set[TestId] = set()
     failed: set[TestId] = set()
+    skipped: set[TestId] = set()
+    report_digests: dict[Path, str] = {}
     for report in reports:
         try:
-            root = ElementTree.parse(report).getroot()
+            contents = report.read_bytes()
+            root = ElementTree.fromstring(contents)
         except (ElementTree.ParseError, OSError) as error:
             raise InputError(f"{report}: unreadable JUnit report: {error}") from error
+        report_digests[report.resolve()] = hashlib.sha256(contents).hexdigest()
+        if root.tag not in {"testsuites", "testsuite"}:
+            raise InputError(f"{report}: expected a JUnit <testsuites> or <testsuite> document")
+        for parent in root.iter():
+            for child in parent:
+                if child.tag == "testsuites":
+                    raise InputError(f"{report}: testsuites must be the root element")
+                if child.tag == "testcase" and parent.tag != "testsuite":
+                    raise InputError(f"{report}: testcase must be a direct child of testsuite")
+                if child.tag == "testsuite" and parent.tag not in {"testsuites", "testsuite"}:
+                    raise InputError(f"{report}: testsuite must be inside testsuites or testsuite")
+                if child.tag in (NOT_EXECUTED, *FAILED) and parent.tag != "testcase":
+                    raise InputError(f"{report}: test outcome must be a direct child of testcase")
         for case in root.iter("testcase"):
             binary, name = case.get("classname"), case.get("name")
             if not binary or not name:
                 raise InputError(f"{report}: testcase without classname or name")
             test = TestId(binary, name)
             if case.find(NOT_EXECUTED) is not None:
+                skipped.add(test)
                 continue
             executed.add(test)
             if any(case.find(tag) is not None for tag in FAILED):
                 failed.add(test)
-    return executed, failed
+    return executed, failed, skipped, report_digests
 
 
 EXECUTED_PER_BINARY_LIMIT = 500
@@ -97,6 +143,39 @@ def report_failure(missing: list[TestId], failing: list[TestId], executed: set[T
             print(f"  ... {len(names) - EXECUTED_PER_BINARY_LIMIT} more", file=sys.stderr)
 
 
+def parse_test_id(value: str) -> TestId:
+    binary, separator, name = value.partition(" ")
+    if not separator:
+        raise InputError("invalid required-test prerequisite anchor")
+    return TestId(binary, name)
+
+
+def validate_anchor_inventory(required: list[TestId]) -> None:
+    required_set = set(required)
+    for name, anchor_ids in PREREQUISITE_ANCHORS.items():
+        for anchor_id in anchor_ids:
+            test = parse_test_id(anchor_id)
+            if test not in required_set:
+                raise InputError(f"required test inventory is missing {name} prerequisite anchor: {test}")
+
+
+def required_test_outcomes(
+    required: list[TestId], executed: set[TestId], failed: set[TestId], skipped: set[TestId]
+) -> list[dict[str, str]]:
+    outcomes = []
+    for test in sorted(required):
+        if test in skipped:
+            outcome = "skipped"
+        elif test in failed:
+            outcome = "failed"
+        elif test in executed:
+            outcome = "passed"
+        else:
+            outcome = "missing"
+        outcomes.append({"test": str(test), "outcome": outcome})
+    return outcomes
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--required", type=Path, required=True, help="committed required-test list")
@@ -104,14 +183,14 @@ def main() -> int:
     parser.add_argument("reports", type=Path, nargs="+", help="nextest JUnit reports")
     args = parser.parse_args()
     try:
-        required = parse_required(args.required)
-        executed, failed = executed_tests(args.reports)
+        required, _ = parse_required(args.required)
+        executed, failed, skipped, _ = executed_tests(args.reports)
     except InputError as error:
         print(error, file=sys.stderr)
         return 2
     if args.executed_out:
         args.executed_out.write_text("".join(f"{test}\n" for test in sorted(executed)))
-    missing = [test for test in required if test not in executed]
+    missing = [test for test in required if test not in executed or test in skipped]
     failing = [test for test in required if test in failed]
     if missing or failing:
         # On main the diagnostics artifact is uploaded only when the lane

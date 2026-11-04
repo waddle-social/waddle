@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 
+
 SCRIPT = Path(__file__).with_name("check_required_tests.py")
 REQUIRED_LIST = Path(__file__).parent.parent / ".config/required-cluster-tests.txt"
 
@@ -21,6 +22,20 @@ REPORT = """<?xml version="1.0" encoding="UTF-8"?>
     </testsuite>
 </testsuites>
 """
+
+
+def junit_cases(test_names, *, failures=frozenset(), skipped=frozenset()):
+    cases = []
+    for test in test_names:
+        binary, name = test.split(" ", 1)
+        if test in failures:
+            result = '<failure type="test failure">fixture failure</failure>'
+        elif test in skipped:
+            result = "<skipped/>"
+        else:
+            result = ""
+        cases.append(f'<testcase name="{name}" classname="{binary}">{result}</testcase>')
+    return "<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>"
 
 
 class RequiredTestTests(unittest.TestCase):
@@ -112,6 +127,8 @@ class RequiredTestTests(unittest.TestCase):
         self.required.write_text("bin test\n")
         self.report.write_text("<testsuites><testsuite>")
         self.assertEqual(self.run_check().returncode, 2)
+        self.report.write_text("<not-junit/>")
+        self.assertEqual(self.run_check().returncode, 2)
 
     def test_committed_list_parses(self):
         result = subprocess.run(
@@ -120,6 +137,27 @@ class RequiredTestTests(unittest.TestCase):
         # The fixture report lacks most required tests; only parsing must succeed.
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("required test did not run", result.stderr)
+
+    def test_standalone_checker_cannot_write_evidence(self):
+        self.required.write_text("waddle-server ingress::tests::postgres_case\n")
+        sidecar = self.root / "qualification-evidence.json"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--required", str(self.required),
+             "--evidence-out", str(sidecar), "--candidate-sha", "0" * 40, str(self.report)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(sidecar.exists())
+
+    def test_nested_failure_and_invalid_hierarchy_are_rejected(self):
+        self.required.write_text("waddle-server ingress::tests::postgres_case\n")
+        for report in (
+            '<testsuites><testcase classname="waddle-server" name="x"/></testsuites>',
+            '<testsuites><extra><testsuites/></extra></testsuites>',
+            '<testsuite><testcase classname="waddle-server" name="x"><extra><failure/></extra></testcase></testsuite>',
+        ):
+            self.report.write_text(report)
+            self.assertEqual(self.run_check().returncode, 2)
 
 
 if __name__ == "__main__":
