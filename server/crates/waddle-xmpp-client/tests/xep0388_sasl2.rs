@@ -5,7 +5,7 @@ use minidom::Element;
 use waddle_xmpp_client::AccessToken;
 use waddle_xmpp_client::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, OAuthBearerRequest, SaslChallenge,
-    SaslFailureCondition, StreamFeatures, NS_SASL, NS_SASL2, NS_STREAMS,
+    SaslFailureCondition, SaslPayload, StreamFeatures, NS_SASL, NS_SASL2, NS_STREAMS,
 };
 
 #[test]
@@ -47,6 +47,29 @@ fn xep0388_authenticate_has_initial_response_and_omits_inline_requests() {
     assert_eq!(element.attr("mechanism"), Some("OAUTHBEARER"));
     assert!(element.get_child("initial-response", NS_SASL2).is_some());
     assert!(element.get_child("inline", NS_SASL2).is_none());
+}
+
+#[test]
+fn xep0388_oauthbearer_escapes_gs2_authzid_for_legacy_and_sasl2() {
+    let request = OAuthBearerRequest {
+        account: "a,=b@example.com".parse::<BareJid>().unwrap(),
+        access_token: AccessToken::new("test-token"),
+    };
+
+    let legacy_payload = SaslPayload::from_element_text(&request.to_element().text()).unwrap();
+    let sasl2 = request.to_sasl2_element();
+    let sasl2_payload = SaslPayload::from_element_text(
+        &sasl2
+            .get_child("initial-response", NS_SASL2)
+            .unwrap()
+            .text(),
+    )
+    .unwrap();
+    let expected = b"n,a=a=2C=3Db@example.com,\x01auth=Bearer test-token\x01\x01";
+
+    assert_eq!(legacy_payload.as_bytes(), expected);
+    assert_eq!(sasl2_payload.as_bytes(), expected);
+    assert_eq!(legacy_payload, sasl2_payload);
 }
 
 #[test]

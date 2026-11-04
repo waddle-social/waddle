@@ -356,7 +356,9 @@ impl OAuthBearerRequest {
     }
 
     fn initial_response_payload(&self) -> Vec<u8> {
-        let mut payload = format!("n,a={},", self.account).into_bytes();
+        let mut payload = b"n,a=".to_vec();
+        payload.extend_from_slice(encode_gs2_authzid(&self.account).as_bytes());
+        payload.push(b',');
         payload.push(0x01);
         payload.extend_from_slice(b"auth=Bearer ");
         payload.extend_from_slice(self.access_token.as_str().as_bytes());
@@ -364,6 +366,18 @@ impl OAuthBearerRequest {
         payload.push(0x01);
         payload
     }
+}
+
+fn encode_gs2_authzid(identity: &BareJid) -> String {
+    let mut encoded = String::new();
+    for character in identity.to_string().chars() {
+        match character {
+            ',' => encoded.push_str("=2C"),
+            '=' => encoded.push_str("=3D"),
+            _ => encoded.push(character),
+        }
+    }
+    encoded
 }
 
 impl fmt::Debug for OAuthBearerRequest {

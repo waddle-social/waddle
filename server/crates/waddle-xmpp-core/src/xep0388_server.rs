@@ -103,7 +103,6 @@ pub enum Sasl2ServerError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     AwaitAuthenticate,
-    AwaitInitialResponse,
     AwaitVerification,
     AwaitErrorAcknowledgement,
     Succeeded,
@@ -146,10 +145,6 @@ impl Sasl2ServerExchange {
             (Stage::AwaitAuthenticate, Sasl2ServerInput::Authenticate(request)) => {
                 Ok(self.start(request))
             }
-            (Stage::AwaitInitialResponse, Sasl2ServerInput::Response(response)) => {
-                self.stage = Stage::AwaitVerification;
-                Ok(Sasl2ServerAction::VerifyOAuthBearer(response.data))
-            }
             (Stage::AwaitErrorAcknowledgement, Sasl2ServerInput::Response(response)) => {
                 let condition = if response.data.as_bytes() == [0x01] {
                     Sasl2FailureCondition::NotAuthorized
@@ -159,9 +154,7 @@ impl Sasl2ServerExchange {
                 Ok(self.failure(condition))
             }
             (
-                Stage::AwaitInitialResponse
-                | Stage::AwaitVerification
-                | Stage::AwaitErrorAcknowledgement,
+                Stage::AwaitVerification | Stage::AwaitErrorAcknowledgement,
                 Sasl2ServerInput::Abort,
             ) => Ok(self.failure(Sasl2FailureCondition::Aborted)),
             (Stage::Succeeded, Sasl2ServerInput::Authenticate(_)) => {
@@ -238,10 +231,7 @@ impl Sasl2ServerExchange {
             self.stage = Stage::AwaitVerification;
             Sasl2ServerAction::VerifyOAuthBearer(initial_response)
         } else {
-            self.stage = Stage::AwaitInitialResponse;
-            Sasl2ServerAction::Send(Sasl2ServerFrame::Challenge(Sasl2Challenge {
-                data: Sasl2Data::new([]),
-            }))
+            self.failure(Sasl2FailureCondition::MalformedRequest)
         }
     }
 

@@ -94,20 +94,15 @@ fn success_requires_verifier_assertion_and_is_a_single_bare_wire_result() {
 }
 
 #[test]
-fn absent_initial_response_gets_empty_challenge_but_present_empty_is_verified() {
+fn absent_initial_response_fails_but_present_empty_is_verified() {
     let mut absent = Sasl2ServerExchange::new();
-    let Sasl2ServerAction::Send(Sasl2ServerFrame::Challenge(challenge)) =
-        absent.on_input(request(None)).unwrap()
-    else {
-        panic!("expected empty challenge");
-    };
-    assert!(challenge.data.as_bytes().is_empty());
-    assert!(challenge.to_element().is("challenge", NS_SASL2));
+    expect_failure(
+        absent.on_input(request(None)).unwrap(),
+        Sasl2FailureCondition::MalformedRequest,
+    );
     assert_eq!(
         absent.on_input(response(b"credential")),
-        Ok(Sasl2ServerAction::VerifyOAuthBearer(Sasl2Data::new(
-            b"credential"
-        )))
+        Err(Sasl2ServerError::AlreadyFinished)
     );
 
     let mut empty = Sasl2ServerExchange::new();
@@ -220,15 +215,20 @@ fn non_inline_exchange_rejects_extension_requests_and_unoffered_mechanisms() {
 
 #[test]
 fn user_agent_is_permitted_but_unexpected_traffic_disconnects_pending_exchange() {
-    let mut request = Sasl2Authenticate::new(Sasl2Mechanism::OAuthBearer, None);
+    let mut request = Sasl2Authenticate::new(
+        Sasl2Mechanism::OAuthBearer,
+        Some(Sasl2Data::new(b"credential")),
+    );
     request
         .push_additional_child(Element::builder("user-agent", NS_SASL2).build())
         .unwrap();
     let mut exchange = Sasl2ServerExchange::new();
-    assert!(matches!(
+    assert_eq!(
         exchange.on_input(Sasl2ServerInput::Authenticate(request)),
-        Ok(Sasl2ServerAction::Send(Sasl2ServerFrame::Challenge(_)))
-    ));
+        Ok(Sasl2ServerAction::VerifyOAuthBearer(Sasl2Data::new(
+            b"credential"
+        )))
+    );
     assert_eq!(
         exchange.on_input(Sasl2ServerInput::Other),
         Ok(Sasl2ServerAction::Disconnect)
