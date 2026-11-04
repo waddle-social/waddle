@@ -1430,24 +1430,42 @@ async fn restricted_runtime_attaches_prepared_muc_destroy_outbox() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
-    let (boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
     let owner = Database::from_config(
         "MUC destroy outbox owner",
         &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url),
     )
     .await
     .expect("owner database");
+    MigrationRunner::single()
+        .run(&owner)
+        .await
+        .expect("prepare application migrations before restricted handoff");
     waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(owner)
         .await
         .expect("prepare owner outbox");
+    // The schema/table owner is a distinct NOLOGIN role. A separate migrator
+    // retains SET membership; the physical attestor installer and definer do
+    // not inherit it, matching the provisioned owner handoff.
+    let owner_role = format!("waddle_muc_owner_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE ROLE {owner_role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("provision distinct NOLOGIN owner");
+    sqlx::query(&format!(
+        "GRANT {owner_role} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
+        fixture.outsider
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("provision separate restricted migrator membership");
     for statement in [
-        format!(
-            "ALTER SCHEMA {} OWNER TO {}",
-            fixture.target, fixture.definer
-        ),
+        format!("ALTER SCHEMA {} OWNER TO {}", fixture.target, owner_role),
         format!(
             "ALTER TABLE {}.clustering_muc_destroy_outbox OWNER TO {}",
-            fixture.target, fixture.definer
+            fixture.target, owner_role
         ),
         format!(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.clustering_muc_destroy_outbox TO {}",
@@ -1459,6 +1477,13 @@ async fn restricted_runtime_attaches_prepared_muc_destroy_outbox() {
             .await
             .expect("prepare NOLOGIN outbox owner and restricted runtime grants");
     }
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestor after the distinct owner/migrator handoff");
 
     let pool = attested_pool(
         fixture.runtime_options.clone(),
@@ -1603,6 +1628,26 @@ async fn restricted_runtime_attaches_prepared_muc_destroy_outbox() {
         error,
         waddle_server::muc_destroy_completion_outbox::MucDestroyRuntimeAttachError::InvalidSchema
     ));
+    for statement in [
+        format!(
+            "ALTER TABLE {}.clustering_muc_destroy_outbox OWNER TO CURRENT_USER",
+            fixture.target
+        ),
+        format!("ALTER SCHEMA {} OWNER TO CURRENT_USER", fixture.target),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("release disposable owner before dropping the role");
+    }
+    sqlx::query(&format!("REVOKE {owner_role} FROM {}", fixture.outsider))
+        .execute(&fixture.cluster_admin)
+        .await
+        .expect("remove disposable migrator membership");
+    sqlx::query(&format!("DROP ROLE {owner_role}"))
+        .execute(&fixture.cluster_admin)
+        .await
+        .expect("remove disposable owner");
     fixture.cleanup().await;
 }
 

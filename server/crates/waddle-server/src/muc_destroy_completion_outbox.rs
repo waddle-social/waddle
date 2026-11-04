@@ -51,7 +51,8 @@ impl MucDestroyCompletionOutboxStore {
 
     /// Attach the exact restricted main-pool handle without owner DDL or a
     /// reconnectable URL. This structural snapshot does not grant the runtime
-    /// writer privileges or fence later privileged schema changes.
+    /// writer privileges or fence later privileged schema changes. Owner and
+    /// migrator membership is provisioned by the separate owner handoff.
     pub async fn attach_existing(db: Database) -> Result<Self, MucDestroyRuntimeAttachError> {
         if db.driver() != DatabaseDriver::Postgres {
             return Err(MucDestroyRuntimeAttachError::PostgresRequired);
@@ -295,10 +296,6 @@ impl MucDestroyCompletionOutboxStore {
                    AND pg_catalog.current_setting('session_replication_role') = 'origin' \
                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m \
                                    WHERE m.member = runtime.oid OR m.roleid = runtime.oid) \
-                   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles candidate \
-                                   WHERE NOT candidate.rolsuper AND candidate.oid <> owner.oid \
-                                     AND candidate.rolname <> ? \
-                                     AND pg_catalog.pg_has_role(candidate.oid, owner.oid, 'MEMBER')) \
                    AND pg_catalog.has_schema_privilege(runtime.oid, ns.oid, 'USAGE') \
                    AND NOT pg_catalog.has_schema_privilege(runtime.oid, ns.oid, 'CREATE') \
                    AND ns.nspowner = owner.oid AND relation.relowner = owner.oid \
@@ -344,7 +341,7 @@ impl MucDestroyCompletionOutboxStore {
                  JOIN pg_catalog.pg_class relation ON relation.relnamespace = ns.oid \
                    AND relation.relname = 'clustering_muc_destroy_outbox' AND relation.relkind = 'r' \
                  WHERE runtime.rolname = current_user",
-                crate::db_params![capability.installer_login(), schema.clone()],
+                crate::db_params![schema.clone()],
             )
             .await?;
         let safe = match rows.next().await? {

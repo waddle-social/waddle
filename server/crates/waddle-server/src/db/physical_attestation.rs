@@ -142,10 +142,6 @@ impl AttestedPostgresWriterCapability {
         self.config.postgres()
     }
 
-    pub(crate) fn installer_login(&self) -> &str {
-        self.config.installer_login.as_str()
-    }
-
     pub(crate) fn belongs_to(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.binding, &other.binding)
     }
