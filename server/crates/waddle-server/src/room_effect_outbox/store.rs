@@ -67,10 +67,41 @@ pub struct RoomEffectEnqueue<'a> {
 pub struct RoomEffectOutboxStore {
     db: Database,
 }
+
+/// Evidence that an outbox relation was verified on one attested main pool.
+/// This does not confer lifecycle, node, claim, or delivery authority and does
+/// not expose mutation, drain, or unbranded transaction methods.
+pub struct VerifiedRoomEffectOutbox {
+    _db: Database,
+}
+
 impl RoomEffectOutboxStore {
     pub async fn try_new(db: Database) -> Result<Self, RoomEffectOutboxError> {
+        if db.uses_attested_postgres_pool() {
+            return Err(RoomEffectOutboxError::OwnerPreparationRequired);
+        }
         schema::initialize(&db).await?;
         Ok(Self { db })
+    }
+
+    /// Prepare a fresh outbox or verify an already prepared one without
+    /// rewriting retained effects. The caller supplies a trusted physical
+    /// identity and fences old writers and privileged schema changes.
+    /// The NOLOGIN schema owner requires `pg_control_system()` EXECUTE.
+    pub async fn initialize_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), RoomEffectOutboxError> {
+        schema::initialize_owner(db, identity).await
+    }
+
+    /// Verify a prepared outbox through the exact attested main-lane handle.
+    /// This alone does not authorize queue mutation or effect delivery.
+    pub async fn attach_existing(
+        db: Database,
+    ) -> Result<VerifiedRoomEffectOutbox, super::RoomEffectRuntimeAttachError> {
+        super::runtime_attach::verify(&db).await?;
+        Ok(VerifiedRoomEffectOutbox { _db: db })
     }
     pub fn database(&self) -> &Database {
         &self.db

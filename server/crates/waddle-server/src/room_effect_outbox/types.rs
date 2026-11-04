@@ -119,6 +119,10 @@ pub enum RoomEffectReleaseOutcome {
 
 #[derive(Debug, Error)]
 pub enum RoomEffectOutboxError {
+    #[error("room-effect schema preparation requires a PostgreSQL owner handle")]
+    OwnerPreparationRequired,
+    #[error("room-effect owner identity or existing schema is incompatible")]
+    UnsafeOwnerBoundary,
     #[error(transparent)]
     Database(#[from] DatabaseError),
     #[error("could not encode room effect payload")]

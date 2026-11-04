@@ -278,6 +278,20 @@ pub(in crate::muc_durable) fn affiliation_from_db_str(value: &str) -> Option<Aff
     }
 }
 
+/// Owner preparation refuses an ambiguous existing room schema rather than
+/// mutating retained room state without a verified migration contract.
+#[derive(Debug, thiserror::Error)]
+pub enum MucOwnerPreparationError {
+    #[error("MUC owner preparation requires a non-runtime PostgreSQL owner handle")]
+    OwnerHandleRequired,
+    #[error("MUC owner identity or role does not match the provisioned schema")]
+    UnsafeOwnerBoundary,
+    #[error("MUC owner preparation requires a fresh room schema")]
+    ExistingRoomSchema,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
 /// Postgres-backed [`MucDurableStore`] (ADR-0017 Phase 3 Slice 7). See the
 /// module doc for the schema and fencing design.
 pub struct PostgresMucRoomStore {
@@ -309,6 +323,81 @@ pub(in crate::muc_durable) fn remove_room_claim_fence_if(
 }
 
 impl PostgresMucRoomStore {
+    /// Prepare fresh room tables on the trusted physical owner identity. This
+    /// leaves existing room schemas untouched and does not initialize claims,
+    /// occupancy authority, or either outbox. The caller must fence previous
+    /// writers and privileged schema/role changes, and independently prove
+    /// the logical lineage is fresh. The NOLOGIN schema owner needs `pg_control_system()`
+    /// EXECUTE. Room runtime attachment remains separately gated.
+    pub async fn initialize_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), MucOwnerPreparationError> {
+        if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+            return Err(MucOwnerPreparationError::OwnerHandleRequired);
+        }
+        let mut tx = db.begin().await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
+            (),
+        )
+        .await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+            (),
+        )
+        .await?;
+        tx.query(
+            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+            crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+        crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+            .await
+            .map_err(|_| MucOwnerPreparationError::UnsafeOwnerBoundary)?;
+        let mut rows = tx.query(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname IN ('clustering_muc_rooms', 'clustering_muc_room_affiliations', \
+             'clustering_muc_room_lifecycles', 'clustering_muc_admin_receipts', \
+             'clustering_claims', 'clustering_claim_epoch_seq', 'clustering_nodes', \
+             'clustering_steal_intents', 'clustering_muc_room_effects', \
+             'clustering_muc_destroy_outbox'))",
+            crate::db_params![&identity.schema.name.0],
+        ).await?;
+        let exists = matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?);
+        if exists {
+            return Err(MucOwnerPreparationError::ExistingRoomSchema);
+        }
+        // The global migration may already have installed occupancy authority.
+        // It must be an inert owner table with no retained generations before
+        // the room schema can be treated as a fresh logical deployment.
+        let mut occupancy = tx.query(
+            "SELECT c.relkind = 'r' AND c.relpersistence = 'p' AND c.relowner = n.nspowner \
+             AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
+             AND c.relam = (SELECT oid FROM pg_catalog.pg_am WHERE amname = 'heap') \
+             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = 'xmpp_occupancy_authority'",
+            crate::db_params![&identity.schema.name.0],
+        ).await?;
+        if let Some(row) = occupancy.next().await? {
+            if !row.get::<bool>(0)? {
+                return Err(MucOwnerPreparationError::ExistingRoomSchema);
+            }
+            let mut generations = tx
+                .query("SELECT EXISTS (SELECT 1 FROM xmpp_occupancy_authority)", ())
+                .await?;
+            if matches!(generations.next().await?, Some(row) if row.get::<bool>(0)?) {
+                return Err(MucOwnerPreparationError::ExistingRoomSchema);
+            }
+        }
+        Self::ensure_schema_in_tx(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Open against an already-opened Postgres [`Database`] handle — the
     /// SAME global handle `clustering::start_if_enabled` gives the claims
     /// store, never a second, independently-resolved database (the fencing
@@ -319,6 +408,11 @@ impl PostgresMucRoomStore {
         stop_token: CancellationToken,
         node_identity: SharedNodeIdentity,
     ) -> Result<Self, XmppError> {
+        if db.uses_attested_postgres_pool() {
+            return Err(XmppError::internal(
+                "MUC runtime attachment requires a verified shared claim and occupancy authority",
+            ));
+        }
         Self::ensure_schema(&db).await.map_err(db_err)?;
         MucDestroyCompletionOutboxStore::try_new(db.clone())
             .await
@@ -352,6 +446,12 @@ impl PostgresMucRoomStore {
             crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
         )
         .await?;
+        Self::ensure_schema_in_tx(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn ensure_schema_in_tx(tx: &mut Transaction<'_>) -> Result<(), DatabaseError> {
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_rooms (
@@ -505,7 +605,7 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
-        admin_receipts::ensure_schema(&mut tx).await?;
+        admin_receipts::ensure_schema(tx).await?;
         // Upgrade the closed state vocabulary only when this deployment
         // predates the durable preparing phase. The catalog probe avoids an
         // ACCESS EXCLUSIVE lock on every steady-state startup.
@@ -663,7 +763,6 @@ impl PostgresMucRoomStore {
             (),
         )
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 

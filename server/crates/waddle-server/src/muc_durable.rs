@@ -5671,6 +5671,6 @@ use implementation::room_entity_key;
 #[cfg(test)]
 use implementation::CommitReconciliation;
 
-pub use implementation::PostgresMucRoomStore;
 #[cfg(test)]
 use implementation::MUC_SCHEMA_ADVISORY_LOCK_KEY;
+pub use implementation::{MucOwnerPreparationError, PostgresMucRoomStore};
