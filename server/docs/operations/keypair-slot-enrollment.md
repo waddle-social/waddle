@@ -73,3 +73,19 @@ deployment automation, or wire the attach check into swarm startup. Those are
 deployment and later integration requirements. The generated allowlist SQL is
 also separate from the owner keypair mapping; do not assume it enrolls this
 generation.
+
+Before wiring swarm startup, keep the exact key material verified by
+`attach_existing` coupled to the acquired slot. An attachment can currently be
+called with one ordered vector while a separate caller later indexes another
+vector of the same length. The active swarm path must consume an immutable
+verified keypool capability or recheck the selected PeerId before using the
+private key. Every participant must also use one compatible lease TTL and
+expiry policy; enrollment currently does not pin that value.
+
+The database guards the generation, ordered map, and rejection of legacy SQL
+shapes. The runtime role still has direct lease-row INSERT and UPDATE grants;
+the trigger does not enforce all acquire, heartbeat, and release CAS predicates
+against arbitrary SQL using that role. Activation must either make those
+transitions database-enforced through owner-controlled functions or explicitly
+retain trusted application DML as a reviewed deployment assumption. None of
+these conditions is established by this dark owner/attach path.
