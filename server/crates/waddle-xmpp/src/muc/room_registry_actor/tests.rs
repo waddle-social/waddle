@@ -9,15 +9,16 @@ use super::{
     GetSingleNodeRoomRetirementAuthority, GuardedDestroyOutcome, HashMap, HashSet,
     InProcessClaimStore, IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease,
     IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids,
-    ListRooms, ListRoomsOwnedBy, LiveRoomRestore, LocalRoomJids, MarkHandoffPendingForTest,
-    MarkRegistryProgress, MucRoom, NodeIdentity, OccupantIdSecret, PendingReclaimedRoom,
-    PendingReclaimedRoomBacklog, PendingReclaimedState, PendingRoomOwnershipResponsibility,
-    PendingRoomReleaseState, ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom,
-    RegisterDestroyCompletion, RememberPendingReclaimedRoom, RequeueDestroyCompletion,
-    ReservePendingReclaimedRoom, RetainedDestroyAttempt, RetireUnresponsiveRoomIfExactActor,
-    RetryPendingRoomReleases, RetryUnpublishedPreparationDestroy, RoomAcquisition, RoomActor,
-    RoomConfig, RoomCount, RoomCreation, RoomCreationSpec, RoomDurableMutation, RoomEntry,
-    RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, RoomSealState,
+    ListRoomClaimFencesOwnedBy, ListRooms, ListRoomsOwnedBy, LiveRoomRestore, LocalRoomJids,
+    MarkHandoffPendingForTest, MarkRegistryProgress, MucRoom, NodeIdentity, OccupantIdSecret,
+    PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingReclaimedState,
+    PendingRoomOwnershipResponsibility, PendingRoomReleaseState, ReapSealedRoom,
+    ReclaimedRoomOutcome, ReconcileReclaimedRoom, RegisterDestroyCompletion,
+    RememberPendingReclaimedRoom, RequeueDestroyCompletion, ReservePendingReclaimedRoom,
+    RetainedDestroyAttempt, RetireUnresponsiveRoomIfExactActor, RetryPendingRoomReleases,
+    RetryUnpublishedPreparationDestroy, RoomAcquisition, RoomActor, RoomConfig, RoomCount,
+    RoomCreation, RoomCreationSpec, RoomDurableMutation, RoomEntry, RoomExists,
+    RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, RoomSealState,
     RunAbsentRoomGuardedAsync, SealForDestroy, SealGuard, SealRoomForDestroySnapshot,
     SharedNodeIdentity, TakeDestroyCompletionAttempt, TakeDestroyCompletions,
     UnpublishedDestroyPhase, UnpublishedPreparationDestroyOutcome, UnsealDestroy, WaddleId,
@@ -791,18 +792,56 @@ async fn list_rooms_owned_by_excludes_fresh_post_rotation_rooms() {
 
     assert_eq!(
         registry
-            .ask(ListRoomsOwnedBy { owner: old })
+            .ask(ListRoomsOwnedBy { owner: old.clone() })
             .await
             .expect("old owner rooms"),
         vec![test_room_jid("old-owner")]
     );
     assert_eq!(
         registry
-            .ask(ListRoomsOwnedBy { owner: fresh })
+            .ask(ListRoomsOwnedBy {
+                owner: fresh.clone()
+            })
             .await
             .expect("fresh owner rooms"),
         vec![test_room_jid("fresh-owner")]
     );
+
+    let old_fences = registry
+        .ask(ListRoomClaimFencesOwnedBy { owner: old.clone() })
+        .await
+        .expect("old owner claim fences");
+    assert_eq!(old_fences.len(), 1);
+    assert_eq!(old_fences[0].owner(), old.clone());
+    assert_eq!(
+        old_fences[0].entity.id,
+        test_room_jid("old-owner").to_string()
+    );
+    let old_claim = claim_store
+        .current_claim(&old_fences[0].entity)
+        .await
+        .expect("old owner current claim")
+        .expect("old owner claim exists");
+    assert_eq!(old_fences[0].epoch, old_claim.claim_epoch);
+
+    let fresh_fences = registry
+        .ask(ListRoomClaimFencesOwnedBy {
+            owner: fresh.clone(),
+        })
+        .await
+        .expect("fresh owner claim fences");
+    assert_eq!(fresh_fences.len(), 1);
+    assert_eq!(fresh_fences[0].owner(), fresh.clone());
+    assert_eq!(
+        fresh_fences[0].entity.id,
+        test_room_jid("fresh-owner").to_string()
+    );
+    let fresh_claim = claim_store
+        .current_claim(&fresh_fences[0].entity)
+        .await
+        .expect("fresh owner current claim")
+        .expect("fresh owner claim exists");
+    assert_eq!(fresh_fences[0].epoch, fresh_claim.claim_epoch);
 }
 
 #[tokio::test]

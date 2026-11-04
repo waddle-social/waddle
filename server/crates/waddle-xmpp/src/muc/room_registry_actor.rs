@@ -148,6 +148,7 @@ pub use implementation::IsMucJid;
 pub use implementation::IsPendingRoomReleaseOnly;
 pub use implementation::ListPendingReclaimedRooms;
 pub use implementation::ListPendingRoomReleaseJids;
+pub use implementation::ListRoomClaimFencesOwnedBy;
 pub use implementation::ListRooms;
 pub use implementation::ListRoomsOwnedBy;
 pub use implementation::LocalRoomJids;

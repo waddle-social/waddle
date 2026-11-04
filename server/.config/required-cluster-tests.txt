@@ -413,6 +413,11 @@ waddle-server::room_effect_runtime_attach restricted_room_effect_outbox_preserve
 waddle-server::claim_occupancy_runtime_attach claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs
 waddle-server clustering::lease::runtime_attach_tests::postgres_attached_keypair_lease_validates_both_pools_and_contract
 
+# Graceful room drain releases only its captured claim epoch; same-node
+# reacquisition after the final-write snapshot must survive the batch.
+waddle-server clustering::drain::tests::drain_exact_release_preserves_same_node_reacquire_after_snapshot
+waddle-server clustering::claims::tests::release_many_exact_preserves_a_fresh_same_node_resume
+
 # P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes
 # native loopback, bounded overload, exact completion and both-pump joins.
 waddle-server::supervised_io pumps::outbound_count_and_byte_overload_stops_before_retirement

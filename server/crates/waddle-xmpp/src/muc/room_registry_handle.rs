@@ -44,12 +44,12 @@ use super::room_registry_actor::{
     GetOrCreateRoom, GetOrCreateRoomWithInitialAffiliations, GetPendingReclaimedRoomBacklog,
     GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
     IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
-    ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
-    PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
-    ReconcileReclaimedRoom, RegisterDestroyCompletion, RememberPendingReclaimedRoom,
-    RequeueDestroyCompletion, ReservePendingReclaimedRoom, RetryPendingRoomReleases,
-    RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor,
-    RoomRegistryError, SealRoomForDestroySnapshot, TakeDestroyCompletionAttempt,
+    ListPendingRoomReleaseJids, ListRoomClaimFencesOwnedBy, ListRooms, ListRoomsOwnedBy,
+    PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom,
+    ReclaimedRoomOutcome, ReconcileReclaimedRoom, RegisterDestroyCompletion,
+    RememberPendingReclaimedRoom, RequeueDestroyCompletion, ReservePendingReclaimedRoom,
+    RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome,
+    RoomRegistryActor, RoomRegistryError, SealRoomForDestroySnapshot, TakeDestroyCompletionAttempt,
     TakeDestroyCompletions, WireClusteringClaims,
 };
 use super::RoomConfig;
@@ -553,6 +553,16 @@ impl RoomRegistry {
         list_rooms_owned_by(owner: NodeIdentity) -> Vec<BareJid>,
         "list_rooms_owned_by",
         ListRoomsOwnedBy { owner }
+    );
+
+    registry_method!(
+        /// Snapshot exact claim fences for rooms and pending room work owned
+        /// by one node identity.
+        list_room_claim_fences_owned_by(
+            owner: NodeIdentity
+        ) -> Vec<super::durable::RoomClaimFenceContext>,
+        "list_room_claim_fences_owned_by",
+        ListRoomClaimFencesOwnedBy { owner }
     );
 
     registry_method!(

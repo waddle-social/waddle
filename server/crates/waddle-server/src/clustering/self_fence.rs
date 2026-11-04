@@ -120,6 +120,18 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// Postgres round-trip.
     async fn owned(&self) -> Vec<Entity>;
 
+    /// Exact room-claim fences captured from local ownership bookkeeping for
+    /// the terminal room drain. `owned()` intentionally exposes entity IDs
+    /// only and cannot safely drive a claim release: the same node can lose
+    /// and reacquire an entity between enumeration and release. Implementors
+    /// that cannot provide epochs fail closed with `None`.
+    async fn room_claim_fences_for_drain(
+        &self,
+        _owner: &NodeIdentity,
+    ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+        None
+    }
+
     /// Every entity whose LOCAL state should be torn down when this node
     /// stops serving — the terminal self-fence / shutdown sweep. Broader
     /// than [`Self::owned`]: implementors may include best-effort
@@ -279,6 +291,13 @@ pub struct NoLocallyClaimedEntities;
 impl LocallyClaimedEntities for NoLocallyClaimedEntities {
     async fn owned(&self) -> Vec<Entity> {
         Vec::new()
+    }
+
+    async fn room_claim_fences_for_drain(
+        &self,
+        _owner: &NodeIdentity,
+    ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+        Some(Vec::new())
     }
 
     async fn demote(&self, _entity: &Entity) {}

@@ -710,11 +710,11 @@ pub trait ClaimStore: Send + Sync {
         ))
     }
 
-    /// Batched release for graceful drain (~18k modeled claims, ADR-0017
-    /// Phase 3 Slice 10) — one round-trip, not one-at-a-time. Releases every
-    /// entity in `entities` currently held by `me`, regardless of each
-    /// entity's individual epoch (drain does not need per-entity epoch
-    /// pinning — only "still owned by me, whatever the epoch").
+    /// Legacy epoch-blind batch release for callers that intentionally want
+    /// to release every listed entity currently held by `me`, regardless of
+    /// each entity's individual epoch. This is one round-trip, but is not
+    /// safe for a graceful drain; drain code must use
+    /// [`Self::release_many_exact`].
     ///
     /// **Plan-sanctioned ABA window**: this release is blind to `entity`'s
     /// individual `claim_epoch`, matching only on `(node_id, node_epoch)` —
@@ -729,10 +729,26 @@ pub trait ClaimStore: Send + Sync {
     /// new claims once draining, narrowing but not eliminating the window)
     /// and Slice 10's batch-construction ordering (an entity enters the
     /// batch only after its final fenced write's transaction has committed,
-    /// keeping the window as short as possible) are the mitigations — not a
-    /// full closure of the race. See Slice 10's Tests paragraph for the
-    /// interleaving this implies for the drain test suite.
+    /// keeping the window as short as possible) do not close this race.
+    /// Drain code must use [`Self::release_many_exact`] with captured epochs.
     async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError>;
+
+    /// Release only claim snapshots captured before their final fenced write.
+    /// Each entry is matched by both entity and claim epoch, so a same-node
+    /// reacquire after the snapshot survives the stale batch. The default is
+    /// an exact per-item fallback for test and external stores; production
+    /// stores used by graceful drain should override this with one batch
+    /// statement to preserve the drain budget.
+    async fn release_many_exact(
+        &self,
+        claims: &[(Entity, ClaimEpoch)],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        for (entity, epoch) in claims {
+            self.release(entity, me, *epoch).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Rollout-aware claim-acquisition placement (ADR-0017 Phase 3 Slice 10,
