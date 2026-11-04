@@ -27,6 +27,7 @@ mod resources;
 mod sending;
 mod state;
 mod subscriptions;
+mod write_interruption;
 
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
 pub use endpoint::{BindingAdmissionState, SocketOutboundEndpoint};
@@ -42,6 +43,7 @@ pub use sending::{
     PendingFlushReserveError, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 pub use state::{LastActivityState, PresenceState};
+pub use write_interruption::SocketWriteInterruption;
 
 /// Registry for tracking active XMPP connections.
 ///

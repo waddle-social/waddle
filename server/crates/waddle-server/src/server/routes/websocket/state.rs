@@ -1820,7 +1820,7 @@ pub(super) struct WsConnState {
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
-    pub(super) write_interruption: tokio_util::sync::CancellationToken,
+    pub(super) write_interruption: waddle_xmpp::registry::SocketWriteInterruption,
     /// Resume preflight is serviced only by this connection's owning task,
     /// including while transport readiness or flushing is blocked.
     pub(super) live_resume_control: Arc<waddle_xmpp::registry::LiveResumeControl>,
@@ -1928,7 +1928,7 @@ impl WsConnState {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let sm_state = StreamManagementState::new();
-        let write_interruption = tokio_util::sync::CancellationToken::new();
+        let write_interruption = waddle_xmpp::registry::SocketWriteInterruption::new();
         let live_resume_control = waddle_xmpp::registry::LiveResumeControl::new(
             sm_state.resume_checkpoint(),
             write_interruption.clone(),

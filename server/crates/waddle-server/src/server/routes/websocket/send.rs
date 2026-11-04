@@ -1,17 +1,18 @@
 use super::{debug, error, Arc, Message, Sink, SinkExt};
 use crate::clustering::NodeAdmissionPermit;
 
-/// Interrupt only socket I/O when a verified resume targets this exact live
-/// connection. Protocol handlers finish their current durable work normally.
+/// Interrupt ordinary writes when a verified detach targets this physical
+/// connection. Protocol handlers finish their current durable work normally;
+/// bounded conflict/close writes may explicitly bypass this wrapper.
 pub(super) struct InterruptibleSink<S> {
     inner: S,
-    interrupt: tokio_util::sync::CancellationToken,
+    interrupt: waddle_xmpp::registry::SocketWriteInterruption,
     cancelled: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     resume_control: Option<Arc<waddle_xmpp::registry::LiveResumeControl>>,
 }
 
 impl<S> InterruptibleSink<S> {
-    pub(super) fn new(inner: S, interrupt: tokio_util::sync::CancellationToken) -> Self {
+    pub(super) fn new(inner: S, interrupt: waddle_xmpp::registry::SocketWriteInterruption) -> Self {
         let cancelled = Box::pin(interrupt.clone().cancelled_owned());
         Self {
             inner,
@@ -100,11 +101,9 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
         let this = self.get_mut();
-        if this.interrupt.is_cancelled() {
-            return Err(InterruptedWrite::Detached);
-        }
-        std::pin::Pin::new(&mut this.inner)
-            .start_send(item)
+        this.interrupt
+            .with_uninterrupted(|| std::pin::Pin::new(&mut this.inner).start_send(item))
+            .ok_or(InterruptedWrite::Detached)?
             .map_err(InterruptedWrite::Transport)
     }
 

@@ -8,9 +8,8 @@ use std::task::{Context, Poll};
 use futures::task::AtomicWaker;
 use jid::{BareJid, FullJid};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 
-use super::{ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest};
+use super::{ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest, SocketWriteInterruption};
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::{SmResumeCheckpointHandle, SmResumeRejection};
 
@@ -61,7 +60,7 @@ struct Requests {
 #[derive(Debug)]
 pub struct LiveResumeControl {
     checkpoint: SmResumeCheckpointHandle,
-    interruption: CancellationToken,
+    interruption: SocketWriteInterruption,
     binding: Mutex<Option<Binding>>,
     requests: Mutex<Requests>,
     outstanding: Arc<AtomicUsize>,
@@ -69,7 +68,10 @@ pub struct LiveResumeControl {
 }
 
 impl LiveResumeControl {
-    pub fn new(checkpoint: SmResumeCheckpointHandle, interruption: CancellationToken) -> Arc<Self> {
+    pub fn new(
+        checkpoint: SmResumeCheckpointHandle,
+        interruption: SocketWriteInterruption,
+    ) -> Arc<Self> {
         Arc::new(Self {
             checkpoint,
             interruption,
@@ -200,8 +202,9 @@ impl LiveResumeControl {
                 let _ = request.response.send(LocalResumeReply::NotPersisted);
                 continue;
             }
-            // The detach is queued before cancellation, so the owner can always
-            // recover the typed request after the interrupted write yields.
+            // The detach is queued before the stop transition, so the owner can
+            // recover the typed request after the interrupted write yields. The
+            // queue offer alone does not fence a concurrent ordinary write.
             self.interruption.cancel();
             tokio::spawn(async move {
                 let _permit = request.permit;
@@ -252,7 +255,8 @@ mod tests {
         let mut state = StreamManagementState::new();
         state.enable("live-resume".into(), true, None);
         state.increment_outbound();
-        let control = LiveResumeControl::new(state.resume_checkpoint(), CancellationToken::new());
+        let control =
+            LiveResumeControl::new(state.resume_checkpoint(), SocketWriteInterruption::new());
         let (sender, _receiver) = mpsc::channel(1);
         let entry = ConnectionEntry::new(sender);
         entry.set_sm_stream_id(Some(SmSessionId::new("live-resume")));
@@ -436,7 +440,8 @@ mod tests {
     async fn live_resume_gap_created_while_busy_is_rejected_by_owner() {
         let mut state = StreamManagementState::with_config(1, 1);
         state.enable("live-resume".into(), true, None);
-        let control = LiveResumeControl::new(state.resume_checkpoint(), CancellationToken::new());
+        let control =
+            LiveResumeControl::new(state.resume_checkpoint(), SocketWriteInterruption::new());
         let (sender, _receiver) = mpsc::channel(1);
         let entry = ConnectionEntry::new(sender);
         entry.set_sm_stream_id(Some(SmSessionId::new("live-resume")));

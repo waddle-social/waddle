@@ -360,7 +360,7 @@ pub struct ConnectionEntry {
     /// Per-generation socket I/O interruption, shared only with its owning
     /// transport. Cancel after successfully queueing an identity-verified
     /// force detach so blocked writes yield to connection-owned cleanup.
-    pub write_interruption: tokio_util::sync::CancellationToken,
+    pub write_interruption: super::SocketWriteInterruption,
 }
 
 /// See [`ConnectionEntry::force_detach_tx`]'s doc comment for why this is
@@ -461,7 +461,7 @@ impl ConnectionEntry {
             occupancy_session: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
-            write_interruption: tokio_util::sync::CancellationToken::new(),
+            write_interruption: super::SocketWriteInterruption::new(),
         }
     }
 
@@ -582,13 +582,34 @@ impl ConnectionEntry {
     /// applicable stream or occupancy generation. Cleanup and acknowledgement
     /// remain the owning task's responsibility. A failed enqueue leaves I/O
     /// uninterrupted; callers that must preserve I/O use the ordinary sender.
+    /// The queue offer is not itself a write fence: interruption takes effect
+    /// at the subsequent stop transition, before this method returns.
     pub fn try_force_detach_and_interrupt(
         &self,
         request: ForceDetachRequest,
     ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
+        self.try_force_detach_and_interrupt_after_offer(request, || {})
+    }
+
+    fn try_force_detach_and_interrupt_after_offer(
+        &self,
+        request: ForceDetachRequest,
+        after_offer: impl FnOnce(),
+    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
         self.force_detach_tx.try_send(request)?;
+        after_offer();
         self.write_interruption.cancel();
         Ok(())
+    }
+
+    /// Pause the real interrupting path after its offer but before its stop.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn try_force_detach_and_interrupt_after_offer_for_test(
+        &self,
+        request: ForceDetachRequest,
+        after_offer: impl FnOnce(),
+    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
+        self.try_force_detach_and_interrupt_after_offer(request, after_offer)
     }
 
     /// Take this connection's force-detach receiver, wiring it into the
