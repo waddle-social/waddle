@@ -39,7 +39,7 @@ pub use outbound::{
 };
 pub use sending::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,
-    PendingFlushReserveError,
+    PendingFlushReserveError, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 pub use state::{LastActivityState, PresenceState};
 

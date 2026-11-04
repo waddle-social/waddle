@@ -392,6 +392,14 @@ waddle-xmpp ownership::endpoint_transition::tests::cancelled_prepare_stays_seale
 # Carbon opt-out settles an archive obligation only after exact binding admission.
 waddle-xmpp registry::connection_registry::outbound::tests::carbon_opt_out_requires_the_exact_binding_to_be_active
 
+# Captured write-acceptance attempts return the frame on refusal; the durable
+# room-effect row retries instead of treating a sealed/replaced binding as absent.
+waddle-xmpp registry::connection_registry::tests::write_acceptance_closed_old_binding_returns_frame_without_retargeting
+waddle-xmpp registry::connection_registry::tests::write_acceptance_waiter_cannot_commit_to_a_replaced_open_binding
+waddle-xmpp registry::connection_registry::tests::write_acceptance_seal_winning_capacity_wait_returns_frame
+waddle-xmpp registry::connection_registry::tests::write_acceptance_committed_before_seal_remains_queued
+waddle-server room_effect_outbox::tests::drain::due_drain_retries_a_sealed_local_binding_from_the_original_row
+
 # Owner-prepared notification stores attach with restricted PostgreSQL grants.
 waddle-server notification_activity::runtime_attach_tests::postgres_attached_notification_stores_validate_shape_and_runtime_grants
 waddle-server::pubsub_runtime_attach restricted_pubsub_attachment_and_guarded_owner_bootstrap

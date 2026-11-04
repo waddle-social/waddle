@@ -1,6 +1,6 @@
 use super::*;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
@@ -135,8 +135,10 @@ impl Fixture {
         &self,
     ) -> Result<(
         Database,
-        PostgresKeypairSlotLease,
         crate::db::physical_attestation::PhysicalAttestationConfig,
+        crate::db::lineage::PgIdentity,
+        Vec<String>,
+        uuid::Uuid,
     )> {
         use crate::config::LineageConfig;
         use crate::db::lineage::{self, DeploymentUuid};
@@ -158,8 +160,38 @@ impl Fixture {
             },
         )
         .await?;
-        let owner_store =
-            PostgresKeypairSlotLease::initialize_owner(owner_database.clone()).await?;
+        let identity = lineage
+            .postgres_identity
+            .as_ref()
+            .context("enrolled owner lineage lacks PostgreSQL identity")?;
+        let owner_identity = identity.clone();
+        use base64::Engine;
+        let keys = (0..2)
+            .map(|_| {
+                let keypair = libp2p::identity::ed25519::Keypair::generate();
+                let seed =
+                    base64::engine::general_purpose::STANDARD.encode(keypair.secret().as_ref());
+                let peer_id = libp2p::identity::Keypair::from(keypair)
+                    .public()
+                    .to_peer_id();
+                (seed, peer_id)
+            })
+            .collect::<Vec<_>>();
+        let configured_pool = keys
+            .iter()
+            .map(|(seed, _)| seed.clone())
+            .collect::<Vec<_>>();
+        let peer_ids = keys.iter().map(|(_, peer_id)| *peer_id).collect::<Vec<_>>();
+        let generation = uuid::Uuid::new_v4();
+        PostgresKeypairSlotLease::initialize_keypool_owner(
+            &owner_database,
+            identity,
+            generation,
+            &peer_ids,
+            &self.runtime,
+            Duration::ZERO,
+        )
+        .await?;
 
         let attestation_config = PhysicalAttestationConfig::new(
             lineage,
@@ -171,8 +203,8 @@ impl Fixture {
         for statement in [
             "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC".to_owned(),
             format!(
-                "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {}",
-                self.definer
+                "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {}, {}",
+                self.owner, self.definer
             ),
             format!(
                 "GRANT SELECT ON {}._lineage TO {}",
@@ -195,13 +227,13 @@ impl Fixture {
         )
         .await?;
 
-        sqlx::query(&format!(
-            "GRANT SELECT, INSERT, UPDATE ON {}.clustering_keypair_slots TO {}",
-            self.target, self.runtime
+        Ok((
+            owner_database,
+            attestation_config,
+            owner_identity,
+            configured_pool,
+            generation,
         ))
-        .execute(&self.admin)
-        .await?;
-        Ok((owner_database, owner_store, attestation_config))
     }
 
     async fn runtime_database(
@@ -245,8 +277,8 @@ impl Fixture {
     async fn cleanup(self) {
         self.admin.close().await;
         sqlx::query(&format!(
-            "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM {}",
-            self.definer
+            "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM {}, {}",
+            self.owner, self.definer
         ))
         .execute(&self.cluster_admin)
         .await
@@ -292,7 +324,8 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
     };
     let fixture = Fixture::new(url).await;
     let result = async {
-        let (owner_database, _owner_store, config) = fixture.owner_prepare().await?;
+        let (owner_database, config, owner_identity, configured_pool, generation) =
+            fixture.owner_prepare().await?;
         let database = fixture
             .runtime_database(config.clone(), &fixture.target)
             .await?;
@@ -310,16 +343,126 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
             Ok(_) => bail!("unverified runtime operation unexpectedly succeeded"),
         }
 
-        let lease = PostgresKeypairSlotLease::attach_existing(database.clone()).await?;
+        match PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await {
+            Err(LeaseAttachError::KeypoolGenerationPending) => {}
+            Err(error) => bail!("pending generation had wrong error: {error}"),
+            Ok(_) => bail!("pending keypool generation unexpectedly attached"),
+        }
+        PostgresKeypairSlotLease::activate_keypool_owner(
+            &owner_database,
+            &owner_identity,
+            generation,
+        )
+        .await?;
+
+        let immutable_map = sqlx::query(&format!(
+            "UPDATE {}.clustering_keypool_slots SET peer_id = peer_id \
+             WHERE generation = '{}' AND slot_index = 0",
+            fixture.target, generation
+        ))
+        .execute(&fixture.admin)
+        .await;
+        if immutable_map.is_ok() {
+            bail!("active owner-seeded keypair mapping was mutable");
+        }
+        let generation_rewind = sqlx::query(&format!(
+            "UPDATE {}.clustering_keypool SET state = 'pending' \
+             WHERE singleton AND generation = '{}'",
+            fixture.target, generation
+        ))
+        .execute(&fixture.admin)
+        .await;
+        if generation_rewind.is_ok() {
+            bail!("active keypair generation could return to pending");
+        }
+        let truncate_map = sqlx::query(&format!(
+            "TRUNCATE {}.clustering_keypool_slots",
+            fixture.target
+        ))
+        .execute(&fixture.admin)
+        .await;
+        if truncate_map.is_ok() {
+            bail!("active owner-seeded keypair mapping could be truncated");
+        }
+
+        let mut reverse = configured_pool.clone();
+        reverse.reverse();
+        let second_node_database = fixture
+            .runtime_database(config.clone(), &fixture.target)
+            .await?;
+        match PostgresKeypairSlotLease::attach_existing(second_node_database, &reverse).await {
+            Err(LeaseAttachError::KeypairPoolOrderMismatch) => {}
+            Err(error) => bail!("reversed keypool order had wrong error: {error}"),
+            Ok(_) => bail!("reversed keypool order unexpectedly attached"),
+        }
+        let no_rows: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {}.clustering_keypair_slots",
+            fixture.target
+        ))
+        .fetch_one(&fixture.admin)
+        .await?;
+        if no_rows != 0 {
+            bail!("configuration refusal happened after slot acquisition");
+        }
+
+        let lease =
+            PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await?;
+        let runtime_sql = PgPool::connect_with(
+            PgConnectOptions::from_str(&keypair_attach_url(
+                &fixture.base_url,
+                &fixture.database,
+                &format!("-c search_path={}", fixture.target),
+            ))?
+            .username(&fixture.runtime),
+        )
+        .await?;
+        let legacy_insert = sqlx::query(&format!(
+            "INSERT INTO {}.clustering_keypair_slots \
+             (slot_index, holder_node, holder_epoch, heartbeat, expired) \
+             VALUES (0, 'old-node', 'old-epoch', now(), false)",
+            fixture.target
+        ))
+        .execute(&runtime_sql)
+        .await;
+        if legacy_insert.is_ok() {
+            bail!("legacy writer insert unexpectedly succeeded");
+        }
+
         let identity = ident();
-        let slot = lease.acquire(&identity, 1, Duration::from_secs(30)).await?;
+        match lease.acquire(&identity, 1, Duration::from_secs(30)).await {
+            Err(LeaseError::InvalidKeypairPool) => {}
+            Err(error) => bail!("wrong keypool size had wrong error: {error}"),
+            Ok(_) => bail!("wrong keypool size unexpectedly acquired a slot"),
+        }
+        let slot = lease.acquire(&identity, 2, Duration::from_secs(30)).await?;
+        let legacy_heartbeat = sqlx::query(&format!(
+            "UPDATE {}.clustering_keypair_slots SET heartbeat = now() WHERE slot_index = $1",
+            fixture.target
+        ))
+        .bind(i64::from(slot.slot_index))
+        .execute(&runtime_sql)
+        .await;
+        if legacy_heartbeat.is_ok() {
+            bail!("legacy heartbeat SQL unexpectedly bypassed the enrollment revision guard");
+        }
         lease
             .heartbeat(&identity, slot, Duration::from_secs(30))
             .await?;
         lease.release(&identity, slot).await?;
+        let delete_slot = sqlx::query(&format!(
+            "DELETE FROM {}.clustering_keypair_slots WHERE slot_index = $1",
+            fixture.target
+        ))
+        .bind(i64::from(slot.slot_index))
+        .execute(&fixture.admin)
+        .await;
+        if delete_slot.is_ok() {
+            bail!("durable keypair slot row could be deleted while active");
+        }
+        runtime_sql.close().await;
 
         let invalid_control = fixture.runtime_database(config.clone(), "public").await?;
-        if PostgresKeypairSlotLease::attach_existing(invalid_control)
+        if PostgresKeypairSlotLease::attach_existing(invalid_control, &configured_pool)
             .await
             .is_ok()
         {
@@ -332,7 +475,7 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
         ))
         .execute(&fixture.admin)
         .await?;
-        match PostgresKeypairSlotLease::attach_existing(database.clone()).await {
+        match PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await {
             Err(LeaseAttachError::UnsafeRuntimeRole) => {}
             Err(error) => bail!("unsafe runtime DELETE grant had wrong error: {error}"),
             Ok(_) => bail!("runtime DELETE grant was accepted"),
@@ -351,7 +494,7 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
         ))
         .execute(&fixture.admin)
         .await?;
-        match PostgresKeypairSlotLease::attach_existing(database.clone()).await {
+        match PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await {
             Err(LeaseAttachError::InvalidSchemaShape) => {}
             Err(error) => bail!("missing keypair-slot PK had wrong error: {error}"),
             Ok(_) => bail!("missing keypair-slot PK was accepted"),
@@ -359,6 +502,27 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
         sqlx::query(&format!(
             "ALTER TABLE {}.clustering_keypair_slots \
              ADD CONSTRAINT clustering_keypair_slots_pkey PRIMARY KEY (slot_index)",
+            fixture.target
+        ))
+        .execute(&fixture.admin)
+        .await?;
+
+        sqlx::query(&format!(
+            "ALTER TABLE {}.clustering_keypool_slots \
+             DROP CONSTRAINT clustering_keypool_slots_generation_peer_id_key",
+            fixture.target
+        ))
+        .execute(&fixture.admin)
+        .await?;
+        match PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await {
+            Err(LeaseAttachError::InvalidKeypairPoolShape) => {}
+            Err(error) => bail!("missing keypool uniqueness index had wrong error: {error}"),
+            Ok(_) => bail!("missing keypool uniqueness index was accepted"),
+        }
+        sqlx::query(&format!(
+            "ALTER TABLE {}.clustering_keypool_slots \
+             ADD CONSTRAINT clustering_keypool_slots_generation_peer_id_key \
+             UNIQUE (generation, peer_id)",
             fixture.target
         ))
         .execute(&fixture.admin)
