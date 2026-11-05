@@ -168,6 +168,22 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Build a test-only WebSocket fixture that advertises and dispatches the
+/// dark SASL2 OAuthBearer path. This fixture does not assert TLS termination
+/// or prove that a request arrived without early data.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_sasl2() -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            sasl2_test_capability: true,
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// Resolve store URL provenance with the same normalization used by startup.
 #[cfg(feature = "test-support")]
 pub fn resolve_xmpp_database_url_for_test(

@@ -54,6 +54,8 @@ pub(crate) struct TestStateOverrides {
     pub(crate) app_state: Option<Arc<AppState>>,
     #[cfg(feature = "test-support")]
     pub(crate) websocket_admission: Option<crate::test_support::WebSocketAdmissionTestConfig>,
+    #[cfg(feature = "test-support")]
+    pub(crate) sasl2_test_capability: bool,
     pub(crate) database_pubsub_storage: Option<Arc<DatabasePubSubStorage>>,
     pub(crate) call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
     pub(crate) clustering: Option<ClusteringHandles>,
@@ -116,6 +118,8 @@ where
         app_state: app_state_override,
         #[cfg(feature = "test-support")]
         websocket_admission,
+        #[cfg(feature = "test-support")]
+        sasl2_test_capability,
         database_pubsub_storage: database_pubsub_storage_override,
         call_sfu,
         clustering: clustering_override,
@@ -307,6 +311,8 @@ where
     );
 
     Arc::new(WebSocketState {
+            #[cfg(feature = "test-support")]
+            sasl2_test_capability,
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
                 auth_state,
