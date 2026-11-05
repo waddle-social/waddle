@@ -21,6 +21,7 @@ use crate::db::{Database, IntoParams};
 
 use super::apns_dispatch::ApnsProvider;
 use super::fcm_dispatch::FcmProvider;
+use super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY;
 use super::secrets::PushSecretCipher;
 
 #[derive(Clone)]
@@ -107,17 +108,7 @@ impl DatabasePushServiceStore {
     }
 
     pub async fn new_with_secret_key(db: Database, secret_key: &[u8]) -> Result<Self, XmppError> {
-        let store = Self {
-            db,
-            inbox_storage: None,
-            secrets: Arc::new(PushSecretCipher::new(secret_key)),
-            pubsub_boundary: None,
-            vapid_signer: None,
-            web_push_sender: None,
-            vapid_sub: None,
-            apns: None,
-            fcm: None,
-        };
+        let store = Self::uninitialized(db, secret_key, None);
         store.initialize().await?;
         Ok(store)
     }
@@ -128,22 +119,100 @@ impl DatabasePushServiceStore {
         service_jid: BareJid,
         pubsub_storage: Arc<dyn PubSubStorage>,
     ) -> Result<Self, XmppError> {
-        let store = Self {
+        let store = Self::uninitialized(
             db,
-            inbox_storage: None,
-            secrets: Arc::new(PushSecretCipher::new(secret_key)),
-            pubsub_boundary: Some(PushServicePubSubBoundary {
+            secret_key,
+            Some(PushServicePubSubBoundary {
                 service_jid,
                 storage: pubsub_storage,
             }),
+        );
+        store.initialize().await?;
+        Ok(store)
+    }
+
+    fn uninitialized(
+        db: Database,
+        secret_key: &[u8],
+        pubsub_boundary: Option<PushServicePubSubBoundary>,
+    ) -> Self {
+        Self {
+            db,
+            inbox_storage: None,
+            secrets: Arc::new(PushSecretCipher::new(secret_key)),
+            pubsub_boundary,
             vapid_signer: None,
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
             fcm: None,
-        };
-        store.initialize().await?;
-        Ok(store)
+        }
+    }
+
+    /// Prepare the PostgreSQL Push Service schema through its trusted owner
+    /// handle. This performs all local schema and data migrations atomically;
+    /// canonical notification ancestry adoption is a separate owner phase
+    /// that must run after notification outbox preparation.
+    pub async fn initialize_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), super::PushServiceOwnerError> {
+        super::owner::initialize_owner(db, identity).await
+    }
+
+    /// Adopt trusted cross-store notification ancestry through the owner
+    /// handle after notification outbox preparation. Runtime attachment never
+    /// performs this data migration.
+    pub async fn adopt_notification_ancestry_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), super::PushServiceOwnerError> {
+        super::owner::adopt_notification_ancestry_owner(db, identity).await
+    }
+
+    /// Attach the functional Push Service store to an owner-prepared schema
+    /// through the exact physically attested main pool. This path is
+    /// PostgreSQL-only, read-only during verification, and performs no DDL or
+    /// ancestry migration. It certifies the local Push Service marker only;
+    /// restricted startup must attach the notification outbox separately
+    /// before serving, and legacy raw startup must not run concurrently with
+    /// restricted serving.
+    pub async fn attach_existing(
+        db: Database,
+        secret_key: &[u8],
+        service_jid: BareJid,
+        pubsub_storage: Arc<dyn PubSubStorage>,
+    ) -> Result<Self, super::PushServiceAttachError> {
+        Self::attach_existing_inner(
+            db,
+            secret_key,
+            Some(PushServicePubSubBoundary {
+                service_jid,
+                storage: pubsub_storage,
+            }),
+        )
+        .await
+    }
+
+    /// Attach without the PubSub server boundary for administrative and
+    /// focused storage callers that do not dispatch XEP-0060 publications.
+    /// This certifies the local Push Service marker only; restricted startup
+    /// must attach the notification outbox separately before serving, and
+    /// legacy raw startup must not run concurrently with restricted serving.
+    pub async fn attach_existing_without_pubsub(
+        db: Database,
+        secret_key: &[u8],
+    ) -> Result<Self, super::PushServiceAttachError> {
+        Self::attach_existing_inner(db, secret_key, None).await
+    }
+
+    async fn attach_existing_inner(
+        db: Database,
+        secret_key: &[u8],
+        pubsub_boundary: Option<PushServicePubSubBoundary>,
+    ) -> Result<Self, super::PushServiceAttachError> {
+        super::runtime_attach::verify(&db).await?;
+        Ok(Self::uninitialized(db, secret_key, pubsub_boundary))
     }
 
     /// Install the shared XMPP inbox projection used to calculate the
@@ -220,8 +289,66 @@ impl DatabasePushServiceStore {
     }
 
     async fn initialize(&self) -> Result<(), XmppError> {
-        let i64_type = crate::db::i64_sql_type(self.db.driver());
-        self.execute(
+        if self.db.uses_attested_postgres_pool() {
+            return Err(XmppError::internal(
+                "attested Push Service databases must use attach_existing",
+            ));
+        }
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        if tx.driver() == DatabaseDriver::Postgres {
+            tx.query(
+                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+                crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            let mut rows = tx
+                .query("SELECT pg_catalog.current_schema()::text", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let schema = rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+                .and_then(|row| row.get::<Option<String>>(0).ok().flatten())
+                .ok_or_else(|| {
+                    XmppError::internal("PostgreSQL Push Service schema is unavailable")
+                })?;
+            drop(rows);
+            super::owner::verify_no_temp_push_relations_tx(&mut tx)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            super::owner::lock_existing_push_relations_tx(&mut tx, &schema)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            // A legacy raw writer can still mutate the schema and local
+            // migration rows. Invalidate any prior owner completion before
+            // the first such mutation; this path never restores readiness.
+            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+        }
+        Self::initialize_schema_tx(self.db.driver(), &mut tx).await?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        // Preserve the historical raw-store startup behavior. The trusted
+        // owner initializer deliberately keeps this cross-store mutation out
+        // of its schema transaction so it can run after outbox preparation.
+        self.adopt_notification_ancestry().await?;
+        Ok(())
+    }
+
+    pub(super) async fn initialize_schema_tx(
+        driver: DatabaseDriver,
+        tx: &mut Transaction<'_>,
+    ) -> Result<(), XmppError> {
+        let i64_type = crate::db::i64_sql_type(driver);
+        tx.execute(
             &format!(
                 r#"
                 CREATE TABLE IF NOT EXISTS push_owner_locks (
@@ -232,8 +359,9 @@ impl DatabasePushServiceStore {
             ),
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             &format!(
                 r#"
                 CREATE TABLE IF NOT EXISTS push_nodes (
@@ -249,8 +377,9 @@ impl DatabasePushServiceStore {
             ),
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             &format!(
                 r#"
                 CREATE TABLE IF NOT EXISTS push_node_locks (
@@ -262,14 +391,16 @@ impl DatabasePushServiceStore {
             ),
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_nodes_owner \
              ON push_nodes (owner_bare_jid, status)",
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             &format!(
                 r#"
                 CREATE TABLE IF NOT EXISTS push_devices (
@@ -292,20 +423,21 @@ impl DatabasePushServiceStore {
             ),
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_devices_node_status \
              ON push_devices (node, status)",
             (),
         )
-        .await?;
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
         // FCM (#530): the RFC 8291 `auth` secret of the Android client's
         // envelope-encryption keys, sealed like every provider secret.
         // The registration token lives in `provider_token` and the
         // `p256dh` key in `provider_key_material`.
-        self.add_column_if_missing("push_devices", "provider_auth TEXT")
-            .await?;
-        self.execute(
+        Self::add_column_if_missing_tx(tx, "push_devices", "provider_auth TEXT").await?;
+        tx.execute(
             &format!(
                 r#"
                 CREATE TABLE IF NOT EXISTS push_delivery_attempts (
@@ -324,102 +456,106 @@ impl DatabasePushServiceStore {
             ),
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_node_created \
              ON push_delivery_attempts (node, created_at_ms)",
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_device_created \
              ON push_delivery_attempts (device_id, created_at_ms)",
             (),
         )
-        .await?;
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
         // #1123 retry-path idempotency lookup:
         // `delivery_attempts_for_node` retains this legacy wire-item index.
         // Retry dedup uses the scoped acceptance index installed below.
-        self.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_item_status \
              ON push_delivery_attempts (node, item_id, status, device_id)",
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             &push_publish_jobs_table_sql(i64_type, "push_publish_jobs", true),
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_status_created \
              ON push_publish_jobs (status, created_at_ms)",
             (),
         )
-        .await?;
-        self.execute(
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_node_status \
              ON push_publish_jobs (node, status)",
             (),
         )
-        .await?;
-        self.add_column_if_missing("push_publish_jobs", "publish_options_xml TEXT")
-            .await?;
-        self.add_column_if_missing("push_publish_jobs", "push_service_jid TEXT")
-            .await?;
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        Self::add_column_if_missing_tx(tx, "push_publish_jobs", "publish_options_xml TEXT").await?;
+        Self::add_column_if_missing_tx(tx, "push_publish_jobs", "push_service_jid TEXT").await?;
         // `claim_token` is the at-most-once delivery interlock: phase 1
         // writes a fresh UUID; phase 3's UPDATE checks `claim_token = ?`
         // so a recovered-and-re-claimed job (which holds a different
         // token) cannot persist attempts from the original worker.
-        self.add_column_if_missing("push_publish_jobs", "claim_token TEXT")
-            .await?;
-        self.add_column_if_missing("push_publish_jobs", "ancestry_job_id TEXT")
-            .await?;
-        self.add_column_if_missing(
+        Self::add_column_if_missing_tx(tx, "push_publish_jobs", "claim_token TEXT").await?;
+        Self::add_column_if_missing_tx(tx, "push_publish_jobs", "ancestry_job_id TEXT").await?;
+        Self::add_column_if_missing_tx(
+            tx,
             "push_publish_jobs",
             "acceptance_scope TEXT NOT NULL DEFAULT 'legacy'",
         )
         .await?;
-        self.add_column_if_missing(
+        Self::add_column_if_missing_tx(
+            tx,
             "push_publish_jobs",
             &format!("backing_published_at_ms {i64_type}"),
         )
         .await?;
-        self.add_column_if_missing(
+        Self::add_column_if_missing_tx(
+            tx,
             "push_publish_jobs",
             &format!("publication_order {i64_type} NOT NULL DEFAULT 0"),
         )
         .await?;
-        self.add_column_if_missing(
+        Self::add_column_if_missing_tx(
+            tx,
             "push_publish_jobs",
             "backing_state TEXT NOT NULL DEFAULT 'pending'",
         )
         .await?;
-        self.execute(&format!("CREATE TABLE IF NOT EXISTS push_publication_orders (node TEXT PRIMARY KEY, next_order {i64_type} NOT NULL)"), ()).await?;
-        self.add_column_if_missing("push_delivery_attempts", "publish_job_id TEXT")
-            .await?;
-        self.add_column_if_missing(
+        tx.execute(&format!("CREATE TABLE IF NOT EXISTS push_publication_orders (node TEXT PRIMARY KEY, next_order {i64_type} NOT NULL)"), ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        Self::add_column_if_missing_tx(tx, "push_delivery_attempts", "publish_job_id TEXT").await?;
+        Self::add_column_if_missing_tx(
+            tx,
             "push_publish_jobs",
             "uncertain_send INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
-        self.add_column_if_missing("push_publish_jobs", "terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked')").await?;
-        self.add_column_if_missing(
+        Self::add_column_if_missing_tx(tx, "push_publish_jobs", "terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked')").await?;
+        Self::add_column_if_missing_tx(
+            tx,
             "push_publish_jobs",
             "upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1))",
         )
         .await?;
-        self.migrate_publish_acceptance_scope().await?;
-        self.adopt_notification_ancestry().await?;
+        Self::migrate_publish_acceptance_scope_tx(tx).await?;
         Ok(())
     }
 
-    async fn migrate_publish_acceptance_scope(&self) -> Result<(), XmppError> {
-        let mut tx = self
-            .db
-            .begin_immediate()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+    pub(super) async fn migrate_publish_acceptance_scope_tx(
+        tx: &mut Transaction<'_>,
+    ) -> Result<(), XmppError> {
         // The old unique node/item pair proves which pending acceptance owns
         // legacy attempts. Preserve it before removing that uniqueness.
         tx.execute("UPDATE push_delivery_attempts SET publish_job_id = (SELECT job_id FROM push_publish_jobs WHERE push_publish_jobs.node = push_delivery_attempts.node AND push_publish_jobs.item_id = push_delivery_attempts.item_id AND push_publish_jobs.acceptance_scope = 'legacy' LIMIT 1) WHERE publish_job_id IS NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
@@ -476,8 +612,7 @@ impl DatabasePushServiceStore {
                 break;
             }
             for (job, node) in pending {
-                let order =
-                    super::publish_jobs::allocate_publication_order_tx(&mut tx, &node).await?;
+                let order = super::publish_jobs::allocate_publication_order_tx(tx, &node).await?;
                 tx.execute("UPDATE push_publish_jobs SET publication_order = ?, backing_state = CASE WHEN acceptance_scope = 'legacy' THEN 'published' ELSE backing_state END, backing_published_at_ms = CASE WHEN acceptance_scope = 'legacy' THEN created_at_ms ELSE backing_published_at_ms END WHERE job_id = ? AND publication_order = 0",
                     crate::db_params![order, job]).await.map_err(|error| XmppError::internal(error.to_string()))?;
             }
@@ -486,13 +621,15 @@ impl DatabasePushServiceStore {
         tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_status_created ON push_publish_jobs (status, created_at_ms)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
         tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_node_status ON push_publish_jobs (node, status)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
         tx.execute("CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_acceptance_status ON push_delivery_attempts (publish_job_id, status, device_id)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
-        tx.commit()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))
+        Ok(())
     }
 
-    async fn add_column_if_missing(&self, table: &str, column_def: &str) -> Result<(), XmppError> {
-        let alter_sql = match self.db.driver() {
+    async fn add_column_if_missing_tx(
+        tx: &mut Transaction<'_>,
+        table: &str,
+        column_def: &str,
+    ) -> Result<(), XmppError> {
+        let alter_sql = match tx.driver() {
             DatabaseDriver::Postgres => {
                 format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
             }
@@ -500,12 +637,12 @@ impl DatabasePushServiceStore {
                 format!("ALTER TABLE {table} ADD COLUMN {column_def}")
             }
         };
-        if let Err(error) = self.execute(&alter_sql, ()).await {
+        if let Err(error) = tx.execute(&alter_sql, ()).await {
             let msg = error.to_string().to_lowercase();
             if msg.contains("duplicate column") || msg.contains("already exists") {
                 return Ok(());
             }
-            return Err(error);
+            return Err(XmppError::internal(error.to_string()));
         }
         Ok(())
     }
