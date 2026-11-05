@@ -54,6 +54,59 @@ BEGIN
 END
 $$;
 
+CREATE OR REPLACE FUNCTION __SCHEMA__.waddle_ingress_definer_prepare()
+RETURNS BIGINT
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    live_epoch BIGINT;
+BEGIN
+    IF SESSION_USER <> '__RUNTIME_ROLE_LITERAL__' THEN
+        RAISE EXCEPTION 'waddle: ingress function is restricted to the runtime login'
+            USING ERRCODE = '42501';
+    END IF;
+    IF CURRENT_USER <> '__API_OWNER_LITERAL__' THEN
+        RAISE EXCEPTION 'waddle: ingress function requires its dedicated API owner'
+            USING ERRCODE = '42501';
+    END IF;
+    IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'waddle: ingress function requires READ COMMITTED';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_locks
+        WHERE locktype = 'relation'
+          AND relation = pg_catalog.to_regclass('__SCHEMA_PATH__.ingress_protocol_epoch')
+          AND pid = pg_catalog.pg_backend_pid()
+          AND mode = 'AccessShareLock'
+          AND granted
+    ) THEN
+        RAISE EXCEPTION 'waddle: ingress function requires an epoch ACCESS SHARE prelock';
+    END IF;
+
+    -- The owning UOW acquired this table lock as its first lock, before any
+    -- principal, claim, room, canonical-message, or child-row lock.
+    LOCK TABLE ONLY __SCHEMA__.ingress_protocol_epoch IN ACCESS SHARE MODE;
+    SELECT epoch INTO live_epoch
+    FROM __SCHEMA__.ingress_protocol_epoch
+    WHERE id = 1;
+    IF live_epoch IS NULL THEN
+        RAISE EXCEPTION 'waddle: ingress_protocol_epoch row is missing';
+    END IF;
+    PERFORM pg_catalog.set_config('waddle.protocol_epoch', live_epoch::TEXT, true);
+    PERFORM pg_catalog.set_config(
+        'waddle.protocol_epoch_xid', pg_catalog.pg_current_xact_id()::TEXT, true
+    );
+    RETURN live_epoch;
+END
+$$;
+
+ALTER FUNCTION __SCHEMA__.waddle_ingress_definer_prepare() OWNER TO __API_OWNER_IDENT__;
+REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_definer_prepare() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION __SCHEMA__.waddle_ingress_resolve_origin(
     p_message_key UUID,
     p_digest_version INTEGER,
@@ -65,8 +118,8 @@ CREATE OR REPLACE FUNCTION __SCHEMA__.waddle_ingress_resolve_origin(
     p_origin_id TEXT,
     p_source_bare_jid TEXT,
     p_source_auth_context_id UUID,
-    p_source_auth_context_version BIGINT,
-    p_source_auth_epoch BIGINT,
+    p_source_auth_context_version NUMERIC,
+    p_source_auth_epoch NUMERIC,
     p_source_sm_ingress_id UUID,
     p_source_ingress_ordinal NUMERIC
 )
@@ -82,7 +135,6 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-    live_epoch BIGINT;
     expires_at_text TEXT;
     alias_rows INTEGER;
     message_rows INTEGER;
@@ -97,14 +149,8 @@ DECLARE
     stored_source_context_version NUMERIC;
     stored_source_auth_epoch NUMERIC;
 BEGIN
-    IF SESSION_USER <> '__RUNTIME_ROLE_LITERAL__' THEN
-        RAISE EXCEPTION 'waddle: ingress function is restricted to the runtime login'
-            USING ERRCODE = '42501';
-    END IF;
-    IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-        RAISE EXCEPTION 'waddle: canonical ingress writes require READ COMMITTED';
-    END IF;
-    IF p_message_key IS NULL OR p_digest_version IS DISTINCT FROM 1
+    PERFORM __SCHEMA__.waddle_ingress_definer_prepare();
+    IF p_digest_version IS DISTINCT FROM 1
        OR p_digest IS NULL OR pg_catalog.octet_length(p_digest) <> 32
        OR p_alias_key_hash IS NULL OR pg_catalog.octet_length(p_alias_key_hash) <> 32 THEN
         RAISE EXCEPTION 'waddle: malformed canonical ingress identity'
@@ -136,51 +182,6 @@ BEGIN
         RETURN;
     END IF;
 
-    -- The prepared UOW must have acquired this relation before other locks.
-    -- The function can attest current possession, not reconstruct past order.
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_locks
-        WHERE locktype = 'relation'
-          AND relation = pg_catalog.to_regclass('__SCHEMA_PATH__.ingress_protocol_epoch')
-          AND pid = pg_catalog.pg_backend_pid()
-          AND mode = 'AccessShareLock'
-          AND granted
-    ) THEN
-        RAISE EXCEPTION 'waddle: canonical ingress function requires an epoch ACCESS SHARE prelock';
-    END IF;
-    LOCK TABLE ONLY __SCHEMA__.ingress_protocol_epoch IN ACCESS SHARE MODE;
-    SELECT epoch INTO live_epoch
-    FROM __SCHEMA__.ingress_protocol_epoch
-    WHERE id = 1;
-    IF live_epoch IS NULL THEN
-        RAISE EXCEPTION 'waddle: ingress_protocol_epoch row is missing';
-    END IF;
-    PERFORM pg_catalog.set_config('waddle.protocol_epoch', live_epoch::TEXT, true);
-    PERFORM pg_catalog.set_config(
-        'waddle.protocol_epoch_xid', pg_catalog.pg_current_xact_id()::TEXT, true
-    );
-
-    -- This is the durable principal assertion which the UOW currently makes
-    -- before storing a source binding. Keep the session row locked through the
-    -- caller's outer transaction, matching PrincipalRepository::assert_principal.
-    IF p_source_bare_jid IS NOT NULL THEN
-        SELECT s.expires_at INTO expires_at_text
-        FROM __SCHEMA__.sessions AS s
-        WHERE s.user_jid = p_source_bare_jid
-          AND s.auth_context_id = p_source_auth_context_id::TEXT
-          AND s.auth_context_version = p_source_auth_context_version
-          AND s.principal_auth_epoch = p_source_auth_epoch
-        FOR SHARE OF s;
-        IF NOT FOUND OR (
-            expires_at_text IS NOT NULL
-            AND expires_at_text::TIMESTAMPTZ <= pg_catalog.statement_timestamp()
-        ) THEN
-            RETURN QUERY SELECT NULL::UUID, 'principal_assertion_failed'::TEXT, NULL::INTEGER, NULL::BYTEA;
-            RETURN;
-        END IF;
-    END IF;
-
     -- Lock only the canonical parent, preserving the existing GC lock order.
     SELECT a.message_key, m.digest_version, m.digest,
            a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id,
@@ -196,6 +197,35 @@ BEGIN
     FOR UPDATE OF m;
 
     IF NOT FOUND THEN
+        -- A null candidate key is a read-only probe used to preserve the
+        -- caller's lazy key-minting contract. The caller mints only after this
+        -- function confirms the alias is absent, then calls again in the same
+        -- outer transaction; this function rechecks for a concurrent winner.
+        IF p_message_key IS NULL THEN
+            RETURN QUERY SELECT NULL::UUID, 'missing'::TEXT, NULL::INTEGER, NULL::BYTEA;
+            RETURN;
+        END IF;
+
+        -- Assert the durable source principal only when inserting a source
+        -- binding. A replay of a legacy alias must remain grandfathered just
+        -- as it is in the existing repository path. Keep the session row lock
+        -- before any canonical child write, matching principal -> child order.
+        IF p_source_bare_jid IS NOT NULL THEN
+            SELECT s.expires_at INTO expires_at_text
+            FROM __SCHEMA__.sessions AS s
+            WHERE s.user_jid = p_source_bare_jid
+              AND s.auth_context_id = p_source_auth_context_id::TEXT
+              AND s.auth_context_version = p_source_auth_context_version
+              AND s.principal_auth_epoch = p_source_auth_epoch
+            FOR SHARE OF s;
+            IF NOT FOUND OR (
+                expires_at_text IS NOT NULL
+                AND expires_at_text::TIMESTAMPTZ <= pg_catalog.statement_timestamp()
+            ) THEN
+                RETURN QUERY SELECT NULL::UUID, 'principal_assertion_failed'::TEXT, NULL::INTEGER, NULL::BYTEA;
+                RETURN;
+            END IF;
+        END IF;
         INSERT INTO __SCHEMA__.ingress_messages (
             message_key, digest_version, digest,
             source_binding_version, source_bare_jid,
@@ -281,26 +311,28 @@ $$;
 
 ALTER FUNCTION __SCHEMA__.waddle_ingress_resolve_origin(
     UUID, INTEGER, BYTEA, BYTEA, TEXT, INTEGER, TEXT, TEXT,
-    TEXT, UUID, BIGINT, BIGINT, UUID, NUMERIC
+    TEXT, UUID, NUMERIC, NUMERIC, UUID, NUMERIC
 ) OWNER TO __API_OWNER_IDENT__;
+
+REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard() FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_resolve_origin(
     UUID, INTEGER, BYTEA, BYTEA, TEXT, INTEGER, TEXT, TEXT,
-    TEXT, UUID, BIGINT, BIGINT, UUID, NUMERIC
+    TEXT, UUID, NUMERIC, NUMERIC, UUID, NUMERIC
 ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION __SCHEMA__.waddle_ingress_resolve_origin(
     UUID, INTEGER, BYTEA, BYTEA, TEXT, INTEGER, TEXT, TEXT,
-    TEXT, UUID, BIGINT, BIGINT, UUID, NUMERIC
+    TEXT, UUID, NUMERIC, NUMERIC, UUID, NUMERIC
 ) TO __RUNTIME_ROLE_IDENT__;
 
-DROP TRIGGER IF EXISTS ingress_messages_epoch_guard_dml ON __SCHEMA__.ingress_messages;
-CREATE TRIGGER ingress_messages_epoch_guard_dml
+DROP TRIGGER IF EXISTS ingress_messages_definer_api_guard_dml ON __SCHEMA__.ingress_messages;
+CREATE TRIGGER ingress_messages_definer_api_guard_dml
 BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_messages
 FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
-ALTER TABLE __SCHEMA__.ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml;
+ALTER TABLE __SCHEMA__.ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_definer_api_guard_dml;
 
-DROP TRIGGER IF EXISTS ingress_origin_aliases_epoch_guard_dml ON __SCHEMA__.ingress_origin_aliases;
-CREATE TRIGGER ingress_origin_aliases_epoch_guard_dml
+DROP TRIGGER IF EXISTS ingress_origin_aliases_definer_api_guard_dml ON __SCHEMA__.ingress_origin_aliases;
+CREATE TRIGGER ingress_origin_aliases_definer_api_guard_dml
 BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_origin_aliases
 FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
-ALTER TABLE __SCHEMA__.ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_dml;
+ALTER TABLE __SCHEMA__.ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_definer_api_guard_dml;

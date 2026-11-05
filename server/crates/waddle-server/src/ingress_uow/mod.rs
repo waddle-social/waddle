@@ -581,6 +581,23 @@ impl<'a> IngressUowTransaction<'a> {
             .map(PreparedAttestedReceiptWriter::schema)
     }
 
+    /// Select the unregistered function-owner API only in its disposable
+    /// candidate fixture. This flag belongs to this already-prepared UOW and
+    /// cannot create a second connection or transaction.
+    #[cfg(feature = "test-support")]
+    pub fn enable_definer_api_candidate_for_test(&mut self) -> Result<(), IngressUowError> {
+        if self.transaction.driver() != DatabaseDriver::Postgres {
+            return Err(IngressUowError::PostgresRequired);
+        }
+        let prepared = self
+            .prepared_receipt_writer
+            .as_mut()
+            .filter(|prepared| prepared.uses_relation_guard())
+            .ok_or(IngressUowError::AttestedPoolRequired)?;
+        prepared.enable_definer_api_candidate_for_test();
+        Ok(())
+    }
+
     /// Test-only source-alias fixture access; not a runtime repository API.
     #[cfg(test)]
     pub(crate) fn source_alias_parts_for_fixture(
