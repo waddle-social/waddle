@@ -27,3 +27,13 @@ The implementation scope depends on the architecture gate. If functional
 attachment cannot yet preserve the existing authority contract, keep this
 slice at a non-serving preparation boundary and identify the prerequisite
 under the existing P2/P3 roadmap.
+
+## Architecture outcome
+
+The functional attachment gate remains closed. The current claim and lease
+handoff does not yet prove exclusive custody, recover unknown completion, or
+exclude the old writer across owner transfer. This slice therefore adds only
+an exact, read-only verifier for the MUC room, lifecycle, admin receipt,
+destroy completion, and room-effect tables on the physically attested main
+pool. Its opaque proof cannot enqueue or drain effects. Startup continues to
+fail closed under `RestrictedStartupError::UnconvertedStores`.

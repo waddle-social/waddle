@@ -72,7 +72,37 @@ pub struct RoomEffectOutboxStore {
 /// This does not confer lifecycle, node, claim, or delivery authority and does
 /// not expose mutation, drain, or unbranded transaction methods.
 pub struct VerifiedRoomEffectOutbox {
+    capability: crate::db::physical_attestation::AttestedPostgresWriterCapability,
     _db: Database,
+}
+
+impl VerifiedRoomEffectOutbox {
+    /// Test that this evidence belongs to the exact attested main pool.
+    pub fn belongs_to_main_pool(&self, candidate: &Database) -> bool {
+        candidate.is_main_lane()
+            && candidate
+                .verify_attested_pg_writer_capability(&self.capability)
+                .is_ok()
+    }
+}
+
+/// Read-only evidence that the exact attested main schema contains the
+/// owner-prepared room, lifecycle, admin receipt, destroy, and effect tables.
+/// It exposes no store, transaction, enqueue, claim, drain, or delivery API.
+pub struct VerifiedMucRoomRuntime {
+    effect_outbox: VerifiedRoomEffectOutbox,
+}
+
+impl VerifiedMucRoomRuntime {
+    pub fn belongs_to_main_pool(&self, candidate: &Database) -> bool {
+        self.effect_outbox.belongs_to_main_pool(candidate)
+    }
+
+    /// The room-runtime proof includes the effect relation in the same
+    /// read-only catalog snapshot.
+    pub fn effect_outbox(&self) -> &VerifiedRoomEffectOutbox {
+        &self.effect_outbox
+    }
 }
 
 impl RoomEffectOutboxStore {
@@ -101,7 +131,29 @@ impl RoomEffectOutboxStore {
         db: Database,
     ) -> Result<VerifiedRoomEffectOutbox, super::RoomEffectRuntimeAttachError> {
         super::runtime_attach::verify(&db).await?;
-        Ok(VerifiedRoomEffectOutbox { _db: db })
+        let capability = db
+            .attested_pg_writer_capability()
+            .ok_or(super::RoomEffectRuntimeAttachError::AttestedPostgresRequired)?;
+        Ok(VerifiedRoomEffectOutbox {
+            capability,
+            _db: db,
+        })
+    }
+
+    /// Verify the complete owner-prepared MUC room runtime schema through one
+    /// bounded, read-only transaction on the exact attested main pool. This is
+    /// structural evidence only; it does not select a startup store or grant
+    /// mutation, claim, or delivery authority.
+    pub async fn verify_muc_room_runtime(
+        db: Database,
+    ) -> Result<VerifiedMucRoomRuntime, super::RoomEffectRuntimeAttachError> {
+        let capability = super::runtime_attach::verify_muc_room_runtime(&db).await?;
+        Ok(VerifiedMucRoomRuntime {
+            effect_outbox: VerifiedRoomEffectOutbox {
+                capability,
+                _db: db,
+            },
+        })
     }
     pub fn database(&self) -> &Database {
         &self.db
