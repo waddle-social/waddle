@@ -487,12 +487,13 @@ impl NotificationOutboxStore {
     async fn capture_owner_gate_schema(
         &self,
         connection: &mut sqlx::PgConnection,
-    ) -> Result<(i64, String, String), NotificationOutboxError> {
+    ) -> Result<super::OwnerSchemaIdentity, NotificationOutboxError> {
         use sqlx::Row as SqlxRow;
 
         let row = sqlx::query(
             "SELECT n.oid::bigint, n.nspname::text, \
-                    pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text \
+                    pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text, \
+                    pg_catalog.pg_my_temp_schema()::bigint \
              FROM pg_catalog.pg_namespace n \
              WHERE n.nspname = pg_catalog.current_schema()",
         )
@@ -502,22 +503,28 @@ impl NotificationOutboxStore {
         let Some(row) = row else {
             return Err(NotificationOutboxError::UnsafeOwnerBoundary);
         };
-        Ok((
-            row.try_get(0).map_err(DatabaseError::from)?,
-            row.try_get(1).map_err(DatabaseError::from)?,
-            row.try_get(2).map_err(DatabaseError::from)?,
-        ))
+        let identity = super::OwnerSchemaIdentity {
+            oid: row.try_get(0).map_err(DatabaseError::from)?,
+            name: row.try_get(1).map_err(DatabaseError::from)?,
+            search_path_json: row.try_get(2).map_err(DatabaseError::from)?,
+            temp_schema_oid: row.try_get(3).map_err(DatabaseError::from)?,
+        };
+        if identity.temp_schema_oid != 0 {
+            return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+        }
+        Ok(identity)
     }
 
     async fn verify_owner_transaction_schema(
         &self,
         tx: &mut Transaction<'_>,
-        expected: &(i64, String, String),
+        expected: &super::OwnerSchemaIdentity,
     ) -> Result<(), DatabaseError> {
         let mut rows = tx
             .query(
                 "SELECT n.oid::bigint, n.nspname::text, \
-                        pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text \
+                        pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text, \
+                        pg_catalog.pg_my_temp_schema()::bigint \
                  FROM pg_catalog.pg_namespace n \
                  WHERE n.nspname = pg_catalog.current_schema()",
                 (),
@@ -525,9 +532,10 @@ impl NotificationOutboxStore {
             .await?;
         let valid = match rows.next().await? {
             Some(row) => {
-                row.get::<i64>(0)? == expected.0
-                    && row.get::<String>(1)? == expected.1
-                    && row.get::<String>(2)? == expected.2
+                row.get::<i64>(0)? == expected.oid
+                    && row.get::<String>(1)? == expected.name
+                    && row.get::<String>(2)? == expected.search_path_json
+                    && row.get::<i64>(3)? == expected.temp_schema_oid
             }
             None => false,
         };

@@ -1,6 +1,6 @@
 use super::{
     schema::{OUTBOX_OWNER_PREPARED_REVISION, OUTBOX_OWNER_STATE_TABLE, OUTBOX_SCHEMA_GATE},
-    NotificationOutboxRuntimeAttachError, NotificationOutboxStore,
+    NotificationOutboxRuntimeAttachError, NotificationOutboxStore, OwnerPreparationProof,
 };
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 use anyhow::{anyhow, bail, Result};
@@ -321,6 +321,105 @@ impl Fixture {
         let before = custody_snapshot(&owner_database).await?;
         drop(owner_conn);
 
+        let legacy_url = outbox_attach_url_with_schema(&self.base_url, &self.target);
+        let mut legacy_config = DatabaseConfig::new(DatabaseDriver::Postgres, legacy_url);
+        legacy_config.pool_size = 1;
+        let legacy_database =
+            Database::from_config("notification outbox legacy owner", &legacy_config).await?;
+        let temp_shadow = legacy_database.guard().await?;
+        let mut schema_rows = temp_shadow
+            .query(
+                "SELECT n.oid::bigint, n.nspname::text, \
+                        pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text, \
+                        pg_catalog.pg_my_temp_schema()::bigint, \
+                        pg_catalog.pg_backend_pid()::integer \
+                 FROM pg_catalog.pg_namespace n \
+                 WHERE n.nspname = pg_catalog.current_schema()",
+                (),
+            )
+            .await?;
+        let schema_row = schema_rows
+            .next()
+            .await?
+            .ok_or_else(|| anyhow!("temp-shadow connection has no active schema"))?;
+        let gate_schema_identity = super::OwnerSchemaIdentity {
+            oid: schema_row.get(0)?,
+            name: schema_row.get(1)?,
+            search_path_json: schema_row.get(2)?,
+            temp_schema_oid: schema_row.get(3)?,
+        };
+        let temp_backend_pid: i32 = schema_row.get(4)?;
+        drop(schema_rows);
+        if gate_schema_identity.temp_schema_oid != 0 {
+            bail!("fresh temp-shadow connection unexpectedly has a temp schema");
+        }
+        temp_shadow
+            .execute(
+                "CREATE TEMP TABLE notification_outbox_owner_state (\
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                    prepared_revision BIGINT NOT NULL CHECK (prepared_revision >= 0)\
+                 )",
+                (),
+            )
+            .await?;
+        drop(temp_shadow);
+
+        let probe_key = super::fresh_owner_probe_key();
+        let mut probe_gate = self.admin.begin().await?;
+        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1::integer, $2::integer)")
+            .bind(probe_key.0)
+            .bind(probe_key.1)
+            .execute(&mut *probe_gate)
+            .await?;
+        let mut pooled_tx = legacy_database.begin().await?;
+        let mut backend_rows = pooled_tx
+            .query("SELECT pg_catalog.pg_backend_pid()::integer", ())
+            .await?;
+        let pooled_backend_pid = backend_rows
+            .next()
+            .await?
+            .ok_or_else(|| anyhow!("temp-shadow transaction has no backend PID"))?
+            .get::<i32>(0)?;
+        drop(backend_rows);
+        if pooled_backend_pid != temp_backend_pid {
+            bail!("temp-shadow setup and owner transaction used different backends");
+        }
+        let pooled_store = NotificationOutboxStore {
+            db: legacy_database.clone(),
+            owner_preparation: Some(OwnerPreparationProof {
+                identity: None,
+                probe_key,
+                schema_identity: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                    gate_schema_identity,
+                ))),
+            }),
+        };
+        let pooled_schema_check = pooled_store.verify_owner_transaction(&mut pooled_tx).await;
+        pooled_tx.rollback().await?;
+        probe_gate.rollback().await?;
+        match pooled_schema_check {
+            Err(error) if error.to_string().contains("changed its gate schema") => {}
+            Err(error) => {
+                bail!("temp-shadowed pooled transaction returned the wrong error: {error}")
+            }
+            Ok(()) => bail!("owner transaction accepted a temp marker shadow"),
+        }
+
+        match NotificationOutboxStore::try_new(legacy_database.clone()).await {
+            Err(super::NotificationOutboxError::UnsafeOwnerBoundary) => {}
+            Err(error) => bail!("temp-shadowed legacy startup returned the wrong error: {error}"),
+            Ok(_) => bail!("legacy startup accepted a temp marker that shadowed durable state"),
+        }
+        if self.marker_revision().await? != OUTBOX_OWNER_PREPARED_REVISION {
+            bail!("temp-shadowed legacy startup invalidated the durable marker");
+        }
+        if custody_snapshot(&owner_database).await? != before {
+            bail!("temp-shadowed legacy startup changed persisted rows or ancestry");
+        }
+        let _after_temp_shadow =
+            NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
+        drop(legacy_database);
+
         let mut held = self.admin.begin().await?;
         let candidate_lock_sql = format!(
             "LOCK TABLE {}.notification_candidates IN ACCESS EXCLUSIVE MODE",
@@ -350,6 +449,37 @@ impl Fixture {
         attached_after_owner?;
         if self.marker_revision().await? != OUTBOX_OWNER_PREPARED_REVISION {
             bail!("durable owner marker was not completed after detached work");
+        }
+        let mut owner_marker_check = owner_database.begin().await?;
+        NotificationOutboxStore::verify_owner_preparation_complete_tx(
+            &mut owner_marker_check,
+            &identity,
+        )
+        .await?;
+        let mut competing_outbox_gate = self.admin.begin().await?;
+        let competing_lock: bool = sqlx::query_scalar(
+            "SELECT pg_catalog.pg_try_advisory_xact_lock($1::integer, $2::integer)",
+        )
+        .bind(OUTBOX_SCHEMA_GATE.0)
+        .bind(OUTBOX_SCHEMA_GATE.1)
+        .fetch_one(&mut *competing_outbox_gate)
+        .await?;
+        competing_outbox_gate.rollback().await?;
+        if competing_lock {
+            bail!("owner marker validation released its gate before transaction end");
+        }
+        owner_marker_check.rollback().await?;
+        let mut released_outbox_gate = self.admin.begin().await?;
+        let released_lock: bool = sqlx::query_scalar(
+            "SELECT pg_catalog.pg_try_advisory_xact_lock($1::integer, $2::integer)",
+        )
+        .bind(OUTBOX_SCHEMA_GATE.0)
+        .bind(OUTBOX_SCHEMA_GATE.1)
+        .fetch_one(&mut *released_outbox_gate)
+        .await?;
+        released_outbox_gate.rollback().await?;
+        if !released_lock {
+            bail!("owner marker transaction did not release its outbox gate");
         }
         let after = custody_snapshot(&owner_database).await?;
         if after.0.is_none() {
@@ -383,6 +513,19 @@ impl Fixture {
             Ok(_) => bail!("incomplete owner marker unexpectedly attached"),
         }
         drop(marker_owner);
+        let mut incomplete_marker_check = owner_database.begin().await?;
+        let incomplete_marker_result =
+            NotificationOutboxStore::verify_owner_preparation_complete_tx(
+                &mut incomplete_marker_check,
+                &identity,
+            )
+            .await;
+        incomplete_marker_check.rollback().await?;
+        match incomplete_marker_result {
+            Err(NotificationOutboxRuntimeAttachError::OwnerPreparationIncomplete) => {}
+            Err(error) => bail!("owner marker check returned an unexpected error: {error}"),
+            Ok(()) => bail!("owner marker check accepted an incomplete preparation"),
+        }
         let _reprepared =
             NotificationOutboxStore::prepare_owner(&owner_database, &identity).await?;
 

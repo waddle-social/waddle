@@ -32,6 +32,8 @@ pub enum NotificationOutboxRuntimeAttachError {
     ActiveSchemaMismatch,
     #[error("notification outbox owner preparation is missing or incomplete")]
     OwnerPreparationIncomplete,
+    #[error("notification outbox owner transaction does not match the expected physical identity")]
+    OwnerIdentityMismatch,
     #[error("notification outbox relation {table} is missing or has an invalid shape")]
     InvalidRelation { table: &'static str },
     #[error("notification outbox relation {table} has an invalid column contract")]
@@ -281,6 +283,118 @@ pub(super) async fn attach_existing(
         db,
         owner_preparation: None,
     })
+}
+
+/// Check a completed outbox marker from an existing PostgreSQL owner
+/// transaction. The shared advisory xact lock remains held until the caller
+/// ends `tx`, so dependent owner writes stay serialized against outbox startup
+/// invalidation and preparation.
+pub(super) async fn verify_owner_preparation_complete_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), NotificationOutboxRuntimeAttachError> {
+    if tx.driver() != DatabaseDriver::Postgres {
+        return Err(NotificationOutboxRuntimeAttachError::PostgresRequired);
+    }
+    let schema = identity.schema.name.0.as_str();
+    crate::db::physical_attestation::validate_identifier(schema, "notification outbox schema")
+        .map_err(|_| NotificationOutboxRuntimeAttachError::InvalidSchema)?;
+
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?::integer, ?::integer)",
+        crate::db_params![OUTBOX_SCHEMA_GATE.0, OUTBOX_SCHEMA_GATE.1],
+    )
+    .await?;
+
+    let mut rows = tx
+        .query(
+            "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+             db.oid::bigint, db.datname::text, n.oid::bigint, n.nspname::text, \
+             n.nspname = pg_catalog.current_schema() AND NOT pg_catalog.pg_is_in_recovery() \
+             FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_database db ON db.datname = pg_catalog.current_database() \
+             WHERE n.nspname = ?",
+            crate::db_params![schema],
+        )
+        .await?;
+    let identity_matches = match rows.next().await? {
+        Some(row) => {
+            let system: String = row.get(0)?;
+            system
+                .parse::<crate::db::lineage::PgSystemIdentifier>()
+                .ok()
+                == Some(identity.system_identifier)
+                && row.get::<i64>(1)? == i64::from(identity.database.oid)
+                && row.get::<String>(2)? == identity.database.name.0
+                && row.get::<i64>(3)? == i64::from(identity.schema.oid)
+                && row.get::<String>(4)? == *schema
+                && row.get::<bool>(5)?
+        }
+        None => false,
+    };
+    drop(rows);
+    if !identity_matches {
+        return Err(NotificationOutboxRuntimeAttachError::OwnerIdentityMismatch);
+    }
+
+    let mut rows = tx
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r')",
+            crate::db_params![schema, OUTBOX_OWNER_STATE_TABLE],
+        )
+        .await?;
+    let marker_exists = rows
+        .next()
+        .await?
+        .map(|row| row.get::<bool>(0))
+        .transpose()?
+        .unwrap_or(false);
+    drop(rows);
+    if !marker_exists {
+        return Err(NotificationOutboxRuntimeAttachError::OwnerPreparationIncomplete);
+    }
+
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let lock =
+        format!("LOCK TABLE {quoted_schema}.\"{OUTBOX_OWNER_STATE_TABLE}\" IN ACCESS SHARE MODE");
+    tx.execute(&lock, ()).await?;
+    verify_relation(tx, schema, OUTBOX_OWNER_STATE_TABLE, 2).await?;
+    verify_columns(tx, schema, OUTBOX_OWNER_STATE_TABLE, OWNER_STATE_COLUMNS).await?;
+    for (name, expression) in [
+        (
+            "notification_outbox_owner_state_singleton_check",
+            "singleton=1",
+        ),
+        (
+            "notification_outbox_owner_state_prepared_revision_check",
+            "prepared_revision>=0",
+        ),
+    ] {
+        if !verify_raw_check(tx, schema, OUTBOX_OWNER_STATE_TABLE, name, expression).await? {
+            return Err(NotificationOutboxRuntimeAttachError::InvalidConstraints {
+                table: OUTBOX_OWNER_STATE_TABLE,
+            });
+        }
+    }
+    verify_primary_key(tx, schema, OUTBOX_OWNER_STATE_TABLE, OWNER_STATE_PK).await?;
+
+    let marker_sql = format!(
+        "SELECT prepared_revision FROM {quoted_schema}.\"{OUTBOX_OWNER_STATE_TABLE}\" \
+         WHERE singleton = 1"
+    );
+    let mut rows = tx.query(&marker_sql, ()).await?;
+    let revision = rows
+        .next()
+        .await?
+        .map(|row| row.get::<i64>(0))
+        .transpose()?;
+    drop(rows);
+    if revision != Some(OUTBOX_OWNER_PREPARED_REVISION) {
+        return Err(NotificationOutboxRuntimeAttachError::OwnerPreparationIncomplete);
+    }
+    Ok(())
 }
 
 async fn verify_active_schema(

@@ -87,10 +87,18 @@ pub struct NotificationOutboxStore {
 }
 
 #[derive(Clone)]
+struct OwnerSchemaIdentity {
+    oid: i64,
+    name: String,
+    search_path_json: String,
+    temp_schema_oid: i64,
+}
+
+#[derive(Clone)]
 struct OwnerPreparationProof {
     identity: Option<crate::db::lineage::PgIdentity>,
     probe_key: (i32, i32),
-    schema_identity: std::sync::Arc<tokio::sync::Mutex<Option<(i64, String, String)>>>,
+    schema_identity: std::sync::Arc<tokio::sync::Mutex<Option<OwnerSchemaIdentity>>>,
 }
 
 impl NotificationOutboxStore {
@@ -146,6 +154,17 @@ impl NotificationOutboxStore {
         db: Database,
     ) -> Result<Self, NotificationOutboxRuntimeAttachError> {
         runtime_attach::attach_existing(db).await
+    }
+
+    /// Hold the outbox owner gate while a second owner phase relies on the
+    /// completed preparation marker. The caller must keep `tx` open through
+    /// its dependent writes so legacy outbox initialization cannot invalidate
+    /// the marker between validation and adoption.
+    pub(crate) async fn verify_owner_preparation_complete_tx(
+        tx: &mut crate::db::Transaction<'_>,
+        identity: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), NotificationOutboxRuntimeAttachError> {
+        runtime_attach::verify_owner_preparation_complete_tx(tx, identity).await
     }
 
     async fn execute(
