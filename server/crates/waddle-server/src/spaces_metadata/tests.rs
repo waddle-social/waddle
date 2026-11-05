@@ -275,7 +275,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
     use std::str::FromStr;
     use std::time::Duration;
 
-    use anyhow::{bail, Result};
+    use anyhow::{bail, Context, Result};
     use sqlx::postgres::{PgConnectOptions, PgPool};
 
     use crate::channel_space_links::{
@@ -314,20 +314,6 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 .fetch_one(&cluster_admin)
                 .await
                 .expect("read test cluster login");
-            let public_control_execute: bool = sqlx::query_scalar(
-                "SELECT EXISTS (\
-                   SELECT 1 FROM pg_catalog.pg_proc p \
-                   CROSS JOIN LATERAL pg_catalog.aclexplode( \
-                     COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner)) \
-                   ) acl \
-                   WHERE p.oid = 'pg_catalog.pg_control_system()'::regprocedure \
-                     AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE' \
-                 )",
-            )
-            .fetch_one(&cluster_admin)
-            .await
-            .expect("capture original control-function public ACL");
-
             let suffix = uuid::Uuid::new_v4().simple().to_string();
             let database = format!("space_store_attach_{suffix}");
             let owner = format!("space_store_o_{suffix}");
@@ -379,6 +365,25 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
             let admin = PgPool::connect(&base_url)
                 .await
                 .expect("connect isolated database administrator");
+            let public_control_execute: bool = sqlx::query_scalar(
+                "SELECT EXISTS (\
+                   SELECT 1 FROM pg_catalog.pg_proc p \
+                   CROSS JOIN LATERAL pg_catalog.aclexplode( \
+                     COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner)) \
+                   ) acl \
+                   WHERE p.oid = 'pg_catalog.pg_control_system()'::regprocedure \
+                     AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE' \
+                 )",
+            )
+            .fetch_one(&admin)
+            .await
+            .expect("capture disposable database control-function ACL");
+            sqlx::query(&format!(
+                "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"
+            ))
+            .execute(&admin)
+            .await
+            .expect("allow owner to verify its physical identity in disposable database");
             sqlx::query("REVOKE ALL ON SCHEMA public FROM PUBLIC")
                 .execute(&admin)
                 .await
@@ -423,6 +428,49 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 &DatabaseConfig::new(DatabaseDriver::Postgres, owner_url),
             )
             .await?;
+            let owner_guard = owner_database.guard().await?;
+            owner_guard
+                .execute(
+                    "CREATE TABLE spaces_metadata (\
+                       space_jid TEXT PRIMARY KEY, space_node TEXT, name TEXT NOT NULL, description TEXT, \
+                       icon_url TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\
+                     )",
+                    (),
+                )
+                .await?;
+            owner_guard
+                .execute(
+                    "INSERT INTO spaces_metadata \
+                     (space_jid, name, description, icon_url, created_at, updated_at) \
+                     VALUES ('design@spaces.localhost', 'Design', NULL, NULL, 1700000000, 1700000001), \
+                            ('design@archive.localhost', 'Archived Design', NULL, NULL, 1700000002, 1700000003)",
+                    (),
+                )
+                .await?;
+            owner_guard
+                .execute(
+                    "CREATE INDEX idx_spaces_metadata_created_at \
+                     ON spaces_metadata (created_at ASC, space_jid ASC)",
+                    (),
+                )
+                .await?;
+            owner_guard
+                .execute(
+                    "CREATE TABLE channel_space_links (\
+                       channel_jid TEXT PRIMARY KEY, space_jid TEXT NOT NULL, space_node TEXT, \
+                       created_at INTEGER NOT NULL\
+                     )",
+                    (),
+                )
+                .await?;
+            owner_guard
+                .execute(
+                    "INSERT INTO channel_space_links (channel_jid, space_jid, created_at) \
+                     VALUES ('general@muc.localhost', 'design@spaces.localhost', 1700000004)",
+                    (),
+                )
+                .await?;
+            drop(owner_guard);
             let lineage = lineage::enroll(
                 &owner_database,
                 &LineageConfig {
@@ -431,10 +479,204 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 },
             )
             .await?;
-            let owner_spaces =
-                DatabaseSpacesMetadataStore::initialize_owner(owner_database.clone()).await?;
-            let owner_links =
-                DatabaseChannelSpaceLinkStore::initialize_owner(owner_database.clone()).await?;
+            let identity = lineage
+                .postgres_identity
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("PostgreSQL lineage has no identity"))?;
+            sqlx::query(&format!("GRANT {} TO {}", self.definer, self.owner))
+                .execute(&self.admin)
+                .await?;
+            if !matches!(
+                crate::spaces_metadata::prepare_space_stores_owner(
+                    owner_database.clone(),
+                    &identity,
+                )
+                .await,
+                Err(SpaceStoreAttachError::UnsafeOwnerRole)
+            ) {
+                bail!("owner preparation accepted an owner role with inherited privileges");
+            }
+            sqlx::query(&format!("REVOKE {} FROM {}", self.definer, self.owner))
+                .execute(&self.admin)
+                .await?;
+            let owner_guard = owner_database.guard().await?;
+            let mut rows = owner_guard
+                .query(
+                    "SELECT (SELECT COUNT(*)::bigint FROM spaces_metadata), \
+                            (SELECT COUNT(*)::bigint FROM channel_space_links)",
+                    (),
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("owner membership recheck returned no row"))?;
+            if row.get::<i64>(0)? != 2 || row.get::<i64>(1)? != 1 {
+                bail!("rejected owner membership changed legacy store rows");
+            }
+            drop(rows);
+            drop(owner_guard);
+            let owner_guard = owner_database.guard().await?;
+            owner_guard
+                .execute("ALTER TABLE spaces_metadata ADD COLUMN owner_note TEXT", ())
+                .await?;
+            owner_guard
+                .execute(
+                    "UPDATE spaces_metadata SET owner_note = name || '-preserve'",
+                    (),
+                )
+                .await?;
+            drop(owner_guard);
+            let mut wrong_identity = identity.clone();
+            wrong_identity.schema.oid = wrong_identity.schema.oid.wrapping_add(1);
+            if !matches!(
+                crate::spaces_metadata::prepare_space_stores_owner(
+                    owner_database.clone(),
+                    &wrong_identity,
+                )
+                .await,
+                Err(SpaceStoreAttachError::OwnerIdentityMismatch)
+            ) {
+                bail!("owner preparation accepted a mismatched schema identity");
+            }
+            if crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+                .await
+                .is_ok()
+            {
+                bail!("owner preparation accepted an unknown legacy metadata column");
+            }
+            let owner_guard = owner_database.guard().await?;
+            let mut preserved_column = owner_guard
+                .query(
+                    "SELECT COUNT(*)::bigint FROM spaces_metadata \
+                     WHERE owner_note IN ('Design-preserve', 'Archived Design-preserve')",
+                    (),
+                )
+                .await?;
+            let preserved_column_count: i64 = preserved_column
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("legacy-column recheck returned no row"))?
+                .get(0)?;
+            if preserved_column_count != 2 {
+                bail!("failed owner prep did not preserve unknown legacy column values");
+            }
+            owner_guard
+                .execute("ALTER TABLE spaces_metadata DROP COLUMN owner_note", ())
+                .await?;
+            owner_guard
+                .execute(
+                    "CREATE TABLE spaces_metadata_new (recoverable TEXT NOT NULL)",
+                    (),
+                )
+                .await?;
+            owner_guard
+                .execute(
+                    "INSERT INTO spaces_metadata_new (recoverable) VALUES ('keep')",
+                    (),
+                )
+                .await?;
+            drop(owner_guard);
+            if crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+                .await
+                .is_ok()
+            {
+                bail!("owner preparation overwrote existing rebuild scratch data");
+            }
+            let owner_guard = owner_database.guard().await?;
+            let mut scratch = owner_guard
+                .query("SELECT recoverable FROM spaces_metadata_new", ())
+                .await?;
+            let scratch_row = scratch
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("owner prep lost existing rebuild scratch data"))?;
+            if scratch_row.get::<String>(0)? != "keep" {
+                bail!("owner prep modified existing rebuild scratch data");
+            }
+            drop(scratch);
+            owner_guard
+                .execute("DROP TABLE spaces_metadata_new", ())
+                .await?;
+            drop(owner_guard);
+            if crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+                .await
+                .is_ok()
+            {
+                bail!("owner preparation silently dropped colliding legacy space rows");
+            }
+            let owner_guard = owner_database.guard().await?;
+            let mut duplicate_rows = owner_guard
+                .query(
+                    "SELECT COUNT(*)::bigint FROM spaces_metadata WHERE name IN \
+                     ('Design', 'Archived Design')",
+                    (),
+                )
+                .await?;
+            let duplicate_count: i64 = duplicate_rows
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("duplicate-row recheck returned no row"))?
+                .get(0)?;
+            drop(duplicate_rows);
+            if duplicate_count != 2 {
+                bail!("failed owner prep did not preserve both colliding legacy rows");
+            }
+            owner_guard
+                .execute(
+                    "DELETE FROM spaces_metadata WHERE space_jid = 'design@archive.localhost'",
+                    (),
+                )
+                .await?;
+            drop(owner_guard);
+            crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+                .await?;
+            let owner_guard = owner_database.guard().await?;
+            let mut migrated_rows = owner_guard
+                .query(
+                    "SELECT space_node FROM spaces_metadata \
+                     WHERE space_jid = 'design@spaces.localhost'",
+                    (),
+                )
+                .await?;
+            let metadata_node: String = migrated_rows
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("owner prep lost the metadata row"))?
+                .get(0)?;
+            drop(migrated_rows);
+            if metadata_node != "design" {
+                bail!("owner prep did not backfill metadata space_node");
+            }
+            let mut migrated_link = owner_guard
+                .query(
+                    "SELECT space_node FROM channel_space_links \
+                     WHERE channel_jid = 'general@muc.localhost'",
+                    (),
+                )
+                .await?;
+            let link_node: String = migrated_link
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("owner prep lost the channel-space link"))?
+                .get(0)?;
+            drop(migrated_link);
+            if link_node != "design" {
+                bail!("owner prep did not backfill channel link space_node");
+            }
+            let mut lineage_row = owner_guard
+                .query("SELECT lineage_uuid FROM _lineage WHERE id = 1", ())
+                .await?;
+            let stored_lineage: String = lineage_row
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("owner prep lost the lineage row"))?
+                .get(0)?;
+            drop(lineage_row);
+            if stored_lineage != lineage.lineage_uuid.to_string() {
+                bail!("owner prep changed the PostgreSQL lineage row");
+            }
+            drop(owner_guard);
 
             let attestation_config = PhysicalAttestationConfig::new(
                 lineage,
@@ -474,6 +716,12 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 .execute(&self.admin)
                 .await?;
             }
+            sqlx::query(&format!(
+                "GRANT SELECT ON {}._waddle_space_store_owner TO {}",
+                self.target, self.runtime
+            ))
+            .execute(&self.admin)
+            .await?;
 
             let table_owners_are_no_login: bool = sqlx::query_scalar(
                 "SELECT bool_and(owner.rolname = $1 AND NOT owner.rolcanlogin) \
@@ -481,7 +729,8 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
                  JOIN pg_catalog.pg_roles owner ON owner.oid = relation.relowner \
                  WHERE namespace.nspname = $2 \
-                   AND relation.relname IN ('spaces_metadata', 'channel_space_links') \
+                   AND relation.relname IN (\
+                     'spaces_metadata', 'channel_space_links', '_waddle_space_store_owner') \
                    AND relation.relkind = 'r'",
             )
             .bind(&self.owner)
@@ -504,10 +753,130 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 "space-store runtime",
                 attested,
             );
-            let attached_spaces =
-                DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await?;
-            let attached_links =
-                DatabaseChannelSpaceLinkStore::attach_existing(runtime_database.clone()).await?;
+            sqlx::query(&format!("GRANT {} TO {}", self.definer, self.owner))
+                .execute(&self.admin)
+                .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::UnsafeOwnerRole) => {}
+                Err(error) => bail!("owner role membership had wrong attach error: {error:?}"),
+                Ok(_) => bail!("runtime attachment accepted an owner role with membership"),
+            }
+            sqlx::query(&format!("REVOKE {} FROM {}", self.definer, self.owner))
+                .execute(&self.admin)
+                .await?;
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (_resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            let cancelled_owner_database = owner_database.clone();
+            let cancelled_identity = identity.clone();
+            let cancelled_prepare = tokio::spawn(async move {
+                crate::spaces_metadata::runtime_attach::prepare_space_stores_owner_paused_for_test(
+                    cancelled_owner_database,
+                    &cancelled_identity,
+                    entered_tx,
+                    resume_rx,
+                )
+                .await
+            });
+            if let Err(entered_error) = entered_rx.await {
+                let task_result = cancelled_prepare.await;
+                bail!(
+                    "owner preparation closed its cancellation checkpoint: {entered_error}; \
+                     task result: {task_result:?}"
+                );
+            }
+            cancelled_prepare.abort();
+            if !matches!(cancelled_prepare.await, Err(error) if error.is_cancelled()) {
+                bail!("owner preparation did not cancel at the invalidated-marker checkpoint");
+            }
+
+            let inherited =
+                crate::server::ResolvedXmppDatabaseUrl::InheritedGlobal(boundary_url.clone());
+            let (attached_spaces, attached_links, attached_global) =
+                crate::server::create_space_stores(&runtime_database, &inherited, &inherited)
+                    .await?;
+            if !attached_global {
+                bail!("inherited global selection did not attach to the attested main pool");
+            }
+            for (spaces, links) in [
+                (
+                    crate::server::ResolvedXmppDatabaseUrl::Explicit(boundary_url.clone()),
+                    inherited.clone(),
+                ),
+                (
+                    inherited.clone(),
+                    crate::server::ResolvedXmppDatabaseUrl::Explicit(boundary_url.clone()),
+                ),
+                (
+                    crate::server::ResolvedXmppDatabaseUrl::EphemeralFallback,
+                    inherited.clone(),
+                ),
+                (
+                    inherited.clone(),
+                    crate::server::ResolvedXmppDatabaseUrl::EphemeralFallback,
+                ),
+            ] {
+                if crate::server::create_space_stores(&runtime_database, &spaces, &links)
+                    .await
+                    .is_ok()
+                {
+                    bail!("attested startup accepted a non-inherited store selection");
+                }
+            }
+
+            sqlx::query(&format!(
+                "UPDATE {}._waddle_space_store_owner \
+                 SET database_name = 'wrong' WHERE marker_id = 1",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::OwnerMarkerInvalid) => {}
+                Err(error) => bail!("altered owner identity marker had wrong error: {error}"),
+                Ok(_) => bail!("altered owner identity marker was accepted"),
+            }
+            sqlx::query(&format!(
+                "UPDATE {}._waddle_space_store_owner SET database_name = $1 WHERE marker_id = 1",
+                self.target
+            ))
+            .bind(&self.database)
+            .execute(&self.admin)
+            .await?;
+
+            sqlx::query(&format!(
+                "GRANT TEMPORARY ON DATABASE {} TO {}",
+                self.database, self.owner
+            ))
+            .execute(&self.admin)
+            .await?;
+            let mut shadow_tx = owner_database.begin().await?;
+            shadow_tx
+                .execute(
+                    "CREATE TEMP TABLE spaces_metadata (space_node TEXT PRIMARY KEY)",
+                    (),
+                )
+                .await?;
+            match crate::spaces_metadata::runtime_attach::verify_temporary_shadow_for_test(
+                &mut shadow_tx,
+            )
+            .await
+            {
+                Err(SpaceStoreAttachError::TemporaryRelationShadow {
+                    table: "spaces_metadata",
+                }) => {}
+                Err(error) => {
+                    bail!("temporary space-store shadow detector returned wrong error: {error}")
+                }
+                Ok(()) => bail!("temporary spaces_metadata shadow was accepted"),
+            }
+            shadow_tx.rollback().await?;
+            sqlx::query(&format!(
+                "REVOKE TEMP ON DATABASE {} FROM {}",
+                self.database, self.owner
+            ))
+            .execute(&self.admin)
+            .await
+            .context("revoke owner TEMP privilege")?;
 
             let metadata_row = metadata(
                 space_jid("pg-space"),
@@ -517,15 +886,27 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 1_800_000_000,
                 1_800_000_000,
             );
-            attached_spaces.upsert(&metadata_row).await?;
-            if attached_spaces.get(&metadata_row.space_jid).await? != Some(metadata_row.clone()) {
+            attached_spaces
+                .upsert(&metadata_row)
+                .await
+                .context("metadata runtime upsert")?;
+            if attached_spaces
+                .get(&metadata_row.space_jid)
+                .await
+                .context("metadata runtime get")?
+                != Some(metadata_row.clone())
+            {
                 bail!("attested runtime could not round-trip spaces metadata DML");
             }
-            if !attached_spaces.delete(&metadata_row.space_jid).await? {
+            if !attached_spaces
+                .delete(&metadata_row.space_jid)
+                .await
+                .context("metadata runtime delete")?
+            {
                 bail!("attested runtime could not delete spaces metadata");
             }
 
-            let channel: jid::BareJid = "general@muc.localhost".parse()?;
+            let channel: jid::BareJid = "attached@muc.localhost".parse()?;
             let space = space_jid("pg-space");
             let link = ChannelSpaceLink {
                 channel_jid: channel.clone(),
@@ -533,13 +914,129 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 space_jid: space,
                 created_at: 1_800_000_001,
             };
-            attached_links.set(&link).await?;
-            if attached_links.get(&channel).await? != Some(link) {
+            attached_links
+                .set(&link)
+                .await
+                .context("channel-space runtime set")?;
+            if attached_links
+                .get(&channel)
+                .await
+                .context("channel-space runtime get")?
+                != Some(link)
+            {
                 bail!("attested runtime could not round-trip channel-space link DML");
             }
-            if !attached_links.clear(&channel).await? {
+            if !attached_links
+                .clear(&channel)
+                .await
+                .context("channel-space runtime clear")?
+            {
                 bail!("attested runtime could not delete channel-space link");
             }
+
+            let default_collation: String = sqlx::query_scalar(
+                "SELECT pg_catalog.format('%I.%I', collation_ns.nspname, co.collname) \
+                 FROM pg_catalog.pg_attribute a \
+                 JOIN pg_catalog.pg_class r ON r.oid = a.attrelid \
+                 JOIN pg_catalog.pg_namespace table_ns ON table_ns.oid = r.relnamespace \
+                 JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation \
+                 JOIN pg_catalog.pg_namespace collation_ns \
+                   ON collation_ns.oid = co.collnamespace \
+                 WHERE table_ns.nspname = $1 AND r.relname = 'spaces_metadata' \
+                   AND a.attname = 'name'",
+            )
+            .bind(&self.target)
+            .fetch_one(&self.admin)
+            .await
+            .context("read default spaces-metadata column collation")?;
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata ALTER COLUMN name TYPE TEXT COLLATE \"C\"",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::InvalidColumn {
+                    table: "spaces_metadata",
+                    column: "name",
+                }) => {}
+                Err(error) => bail!("non-default column collation had wrong error: {error}"),
+                Ok(_) => bail!("non-default column collation was accepted"),
+            }
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata ALTER COLUMN name TYPE TEXT COLLATE {}",
+                self.target, default_collation
+            ))
+            .execute(&self.admin)
+            .await?;
+
+            sqlx::query(&format!(
+                "DROP INDEX {}.idx_spaces_metadata_space_jid",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            sqlx::query(&format!(
+                "CREATE INDEX idx_spaces_metadata_space_jid \
+                 ON {}.spaces_metadata (space_jid COLLATE \"C\")",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::InvalidIndex {
+                    index: "idx_spaces_metadata_space_jid",
+                }) => {}
+                Err(error) => bail!("non-default index collation had wrong error: {error}"),
+                Ok(_) => bail!("non-default index collation was accepted"),
+            }
+            sqlx::query(&format!(
+                "DROP INDEX {}.idx_spaces_metadata_space_jid",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            sqlx::query(&format!(
+                "CREATE INDEX idx_spaces_metadata_space_jid \
+                 ON {}.spaces_metadata (space_jid)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+
+            sqlx::query(&format!(
+                "DROP INDEX {}.idx_spaces_metadata_space_jid",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            sqlx::query(&format!(
+                "CREATE INDEX idx_spaces_metadata_space_jid \
+                 ON {}.spaces_metadata (space_jid text_pattern_ops)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::InvalidIndex {
+                    index: "idx_spaces_metadata_space_jid",
+                }) => {}
+                Err(error) => bail!("non-default index operator class had wrong error: {error}"),
+                Ok(_) => bail!("non-default index operator class was accepted"),
+            }
+            sqlx::query(&format!(
+                "DROP INDEX {}.idx_spaces_metadata_space_jid",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            sqlx::query(&format!(
+                "CREATE INDEX idx_spaces_metadata_space_jid \
+                 ON {}.spaces_metadata (space_jid)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
 
             for table in ["spaces_metadata", "channel_space_links"] {
                 sqlx::query(&format!(
@@ -552,8 +1049,59 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
             DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await?;
             DatabaseChannelSpaceLinkStore::attach_existing(runtime_database.clone()).await?;
 
-            drop(owner_spaces);
-            drop(owner_links);
+            let mut primary_key_names: Vec<String> = sqlx::query_scalar(
+                "SELECT con.conname::text \
+                 FROM pg_catalog.pg_constraint con \
+                 JOIN pg_catalog.pg_class r ON r.oid = con.conrelid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace \
+                 WHERE n.nspname = $1 AND r.relname = 'spaces_metadata' \
+                   AND con.contype = 'p'",
+            )
+            .bind(&self.target)
+            .fetch_all(&self.admin)
+            .await
+            .context("read rebuilt spaces-metadata primary-key name")?;
+            if primary_key_names.len() != 1 {
+                bail!("expected exactly one spaces-metadata primary key constraint");
+            }
+            let primary_key_constraint = primary_key_names.remove(0);
+            let primary_key_constraint =
+                crate::db::physical_attestation::quote_identifier(&primary_key_constraint);
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata DROP CONSTRAINT {primary_key_constraint}",
+                self.target,
+            ))
+            .execute(&self.admin)
+            .await?;
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata \
+                 ADD CONSTRAINT spaces_metadata_pkey PRIMARY KEY (space_node) INCLUDE (name)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::InvalidPrimaryKey {
+                    table: "spaces_metadata",
+                }) => {}
+                Err(error) => bail!("included primary-key column had wrong error: {error}"),
+                Ok(_) => bail!("primary-key INCLUDE column was accepted"),
+            }
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata DROP CONSTRAINT spaces_metadata_pkey",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata \
+                 ADD CONSTRAINT spaces_metadata_pkey PRIMARY KEY (space_node)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await?;
+
             drop(attached_spaces);
             drop(attached_links);
 
@@ -591,6 +1139,13 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 Err(error) => bail!("missing spaces_metadata index had wrong error: {error}"),
                 Ok(_) => bail!("missing spaces_metadata index was accepted"),
             }
+            sqlx::query(&format!(
+                "CREATE INDEX idx_spaces_metadata_created_at \
+                 ON {}.spaces_metadata (created_at ASC, space_node ASC)",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
 
             sqlx::query(&format!(
                 "GRANT TRUNCATE ON {}.channel_space_links TO {}",
@@ -603,11 +1158,9 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 Err(error) => bail!("unsafe channel_space_links grant had wrong error: {error}"),
                 Ok(_) => bail!("unsafe channel_space_links grant was accepted"),
             }
-
             sqlx::query(&format!(
-                "CREATE INDEX idx_spaces_metadata_created_at \
-                 ON {}.spaces_metadata (created_at ASC, space_node ASC)",
-                self.target
+                "REVOKE TRUNCATE ON {}.channel_space_links FROM {}",
+                self.target, self.runtime
             ))
             .execute(&self.admin)
             .await?;
@@ -655,30 +1208,52 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 Ok(_) => bail!("generated name column was accepted"),
             }
 
+            sqlx::query(&format!(
+                "ALTER TABLE {}.spaces_metadata ALTER COLUMN name DROP EXPRESSION",
+                self.target
+            ))
+            .execute(&self.admin)
+            .await?;
+            DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await?;
+
             drop(owner_guard);
+            let raw = DatabaseSpacesMetadataStore::initialize_owner(owner_database.clone()).await?;
+            drop(raw);
+            match DatabaseSpacesMetadataStore::attach_existing(runtime_database.clone()).await {
+                Err(SpaceStoreAttachError::OwnerMarkerMissing) => {}
+                Err(error) => bail!("legacy raw initialization had wrong error: {error}"),
+                Ok(_) => bail!("legacy raw initialization left the marker complete"),
+            }
             drop(owner_database);
             drop(runtime_database);
             Ok(())
         }
 
         async fn cleanup(self) {
-            self.admin.close().await;
             sqlx::query(&format!(
                 "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM {}",
                 self.definer
             ))
-            .execute(&self.cluster_admin)
+            .execute(&self.admin)
             .await
             .expect("remove disposable definer function grant");
+            sqlx::query(&format!(
+                "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM {}",
+                self.owner
+            ))
+            .execute(&self.admin)
+            .await
+            .expect("remove disposable owner function grant");
             let restore_public = if self.had_public_control_execute {
                 "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO PUBLIC"
             } else {
                 "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC"
             };
             sqlx::query(restore_public)
-                .execute(&self.cluster_admin)
+                .execute(&self.admin)
                 .await
-                .expect("restore original control-function public ACL");
+                .expect("restore disposable database control-function ACL");
+            self.admin.close().await;
             sqlx::query(&format!(
                 "REVOKE {} FROM \"{}\"",
                 self.owner,

@@ -85,6 +85,8 @@ use lifecycle::bootstrap_mam_lineage;
 pub(crate) use lifecycle::bootstrap_store_lineage;
 #[cfg(feature = "test-support")]
 pub use lifecycle::create_pubsub_storage;
+#[cfg(test)]
+pub(crate) use lifecycle::create_space_stores;
 #[cfg(feature = "test-support")]
 pub(crate) use lifecycle::register_inbox_lineage;
 pub use lifecycle::start;

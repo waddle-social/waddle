@@ -30,7 +30,7 @@ use tracing::{info, instrument};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 use crate::space_identity::SpaceNode;
 
-mod schema;
+pub(crate) mod schema;
 pub mod storage;
 #[cfg(test)]
 mod tests;
@@ -49,4 +49,5 @@ pub use links::ChannelSpaceLink;
 pub use links::ChannelSpaceLinkError;
 pub use links::ChannelSpaceLinkStore;
 pub use links::DatabaseChannelSpaceLinkStore;
+pub(crate) use links::CHANNEL_SPACE_LINK_CONTRACT;
 use links::SELECT_COLS;
