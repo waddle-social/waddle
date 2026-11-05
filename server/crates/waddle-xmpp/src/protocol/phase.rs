@@ -50,6 +50,10 @@ pub enum ConnectionPhase {
     /// challenge. The next legal client step is `<response>`.
     ScramPending { auth: ScramPendingState },
 
+    /// SASL2 OAUTHBEARER rejected an invalid token and is awaiting the
+    /// mechanism's required dummy response or an abort before final failure.
+    Sasl2OAuthErrorPending,
+
     /// SASL succeeded and the connection now has an authenticated bare JID,
     /// but resource binding has not yet completed.
     Authenticated { bare_jid: BareJid },
@@ -85,6 +89,10 @@ impl ConnectionPhase {
 
     pub fn scram_pending(auth: ScramPendingState) -> Self {
         Self::ScramPending { auth }
+    }
+
+    pub fn sasl2_oauth_error_pending() -> Self {
+        Self::Sasl2OAuthErrorPending
     }
 
     pub fn authenticated(full_jid: &FullJid) -> Self {
@@ -189,6 +197,20 @@ impl ConnectionPhase {
         match self {
             Self::ScramPending { auth } => auth.is_sasl2(),
             _ => false,
+        }
+    }
+
+    pub fn is_sasl2_oauth_error_pending(&self) -> bool {
+        matches!(self, Self::Sasl2OAuthErrorPending)
+    }
+
+    /// Consume the pending OAuth error exchange and return to pre-auth state.
+    pub fn take_sasl2_oauth_error_pending(&mut self) -> bool {
+        if self.is_sasl2_oauth_error_pending() {
+            *self = Self::Unauthenticated;
+            true
+        } else {
+            false
         }
     }
 
@@ -300,6 +322,21 @@ mod tests {
             ScramPendingState::new_sasl2(ScramServer::new(), vec![1, 2, 3], vec![4, 5, 6], "alice");
         let phase = ConnectionPhase::scram_pending(sasl2);
         assert!(phase.scram_pending_is_sasl2());
+    }
+
+    #[test]
+    fn sasl2_oauth_error_pending_is_pre_auth_and_consumes_to_unauthenticated() {
+        let mut phase = ConnectionPhase::sasl2_oauth_error_pending();
+        assert!(phase.is_sasl2_oauth_error_pending());
+        assert!(!phase.is_authenticated());
+        assert!(!phase.allows_sasl_auth());
+        assert!(!phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(!phase.allows_stream_management_enable());
+        assert!(!phase.allows_stream_management_resume());
+        assert!(phase.take_sasl2_oauth_error_pending());
+        assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+        assert!(!phase.take_sasl2_oauth_error_pending());
     }
 
     #[test]

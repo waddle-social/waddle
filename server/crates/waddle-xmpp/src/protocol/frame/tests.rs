@@ -196,6 +196,15 @@ fn parses_sasl2_authenticate_and_response_frames() {
         other => panic!("expected SASL2 response, got {other:?}"),
     }
 
+    assert!(matches!(
+        parse_frame(r#"<abort xmlns="urn:xmpp:sasl:2"/>"#),
+        Ok(InboundFrame::Sasl2Abort)
+    ));
+    assert!(matches!(
+        parse_frame(r#"<abort xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>"#),
+        Err(ParseError::UnknownRoot(root)) if root == "abort"
+    ));
+
     let wrong_namespace = r#"<authenticate xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="OAUTHBEARER">eA==</authenticate>"#;
     assert!(parse_frame(wrong_namespace).is_err());
     let malformed_payload = r#"<authenticate xmlns="urn:xmpp:sasl:2" mechanism="OAUTHBEARER"><initial-response>!</initial-response></authenticate>"#;

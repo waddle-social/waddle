@@ -103,6 +103,7 @@ pub(super) fn parse_input(text: &str) -> PrebindInput {
                 PrebindInput::Auth(PrebindSaslInput::UnsupportedMechanism)
             }
             InboundFrame::Sasl2Response(_) => PrebindInput::UnsupportedContinuation,
+            InboundFrame::Sasl2Abort => PrebindInput::Abort,
             InboundFrame::Stanza(stanza) => PrebindInput::Stanza {
                 stanza: Arc::new(*stanza),
                 message_stanza_lang: parsed.message_stanza_lang,

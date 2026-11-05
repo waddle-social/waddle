@@ -167,6 +167,21 @@ async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_
         .get_child("authentication", NS_SASL2)
         .is_none());
 
+    // An abort outside an active SASL exchange is rejected without clearing
+    // the established session or moving the connection phase.
+    send_raw(&mut peer, "<abort xmlns='urn:xmpp:sasl:2'/>").await;
+    let failure =
+        Sasl2Failure::from_element(&receive(&mut peer).await).expect("post-auth abort is rejected");
+    assert_eq!(failure.condition, Sasl2FailureCondition::Aborted);
+    send_raw(
+        &mut peer,
+        "<iq xmlns='jabber:client' type='set' id='bind-after-abort'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><resource>web</resource></bind></iq>",
+    )
+    .await;
+    let bind = receive(&mut peer).await;
+    assert_eq!(bind.name(), "iq");
+    assert_eq!(bind.attr("type"), Some("result"));
+
     stop_server(server).await;
 }
 
@@ -218,32 +233,194 @@ async fn malformed_sasl2_authenticate_returns_sasl2_failure_without_authenticati
 }
 
 #[tokio::test]
-async fn sasl2_rejects_invalid_tokens_and_mismatched_authorization_identity() {
-    for (token, authzid, expected) in [
-        ("invalid-token", None, Sasl2FailureCondition::NotAuthorized),
-        // The session is created for each case below; this authzid must not
-        // replace the principal derived from the bearer session.
-        (
-            "valid-token",
-            Some("mallory@example.com"),
-            Sasl2FailureCondition::InvalidAuthzid,
-        ),
-    ] {
-        let state = websocket_state_with_sasl2().await;
-        let session = create_test_session(&state, "alice").await;
-        let token = if token == "valid-token" {
-            &session.id
-        } else {
-            token
-        };
-        let (mut peer, server) = connect(state).await;
-        let _ = start_stream(&mut peer).await;
-        send(&mut peer, authenticate(bearer(token, authzid))).await;
-        let failure = receive(&mut peer).await;
-        let failure = Sasl2Failure::from_element(&failure).expect("SASL2 failure");
-        assert_eq!(failure.condition, expected);
-        stop_server(server).await;
-    }
+async fn sasl2_rejects_mismatched_authorization_identity() {
+    let state = websocket_state_with_sasl2().await;
+    let session = create_test_session(&state, "alice").await;
+    let (mut peer, server) = connect(state.clone()).await;
+    let _ = start_stream(&mut peer).await;
+    send(
+        &mut peer,
+        authenticate(bearer(&session.id, Some("mallory@example.com"))),
+    )
+    .await;
+    let challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("SASL2 authzid mismatch uses an error challenge");
+    assert_eq!(
+        challenge.data.as_bytes(),
+        br#"{"status":"invalid_request"}"#
+    );
+    send(
+        &mut peer,
+        Sasl2Response {
+            data: Sasl2Data::new(vec![0x01]),
+        }
+        .to_element(),
+    )
+    .await;
+    let failure = Sasl2Failure::from_element(&receive(&mut peer).await)
+        .expect("dummy response completes the failed authzid exchange");
+    assert_eq!(failure.condition, Sasl2FailureCondition::NotAuthorized);
+
+    // A mismatch is a generic OAuth mechanism error, not an invalid bearer
+    // token challenge; the valid token is still usable after failure.
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let success = Sasl2Success::from_element(&receive(&mut peer).await)
+        .expect("the failed authzid did not establish a session");
+    assert_eq!(
+        success.authorization_identifier.to_string(),
+        "alice@example.com"
+    );
+    let _post_auth_features = receive(&mut peer).await;
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_oauth_invalid_token_uses_rfc7628_error_challenge_then_fails() {
+    let state = websocket_state_with_sasl2().await;
+    let session = create_test_session(&state, "alice").await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    send(&mut peer, authenticate(bearer("invalid-token", None))).await;
+    let challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("invalid token starts a SASL2 error challenge");
+    assert_eq!(challenge.data.as_bytes(), br#"{"status":"invalid_token"}"#);
+
+    send(
+        &mut peer,
+        Sasl2Response {
+            data: Sasl2Data::new(vec![0x01]),
+        }
+        .to_element(),
+    )
+    .await;
+    let failure = Sasl2Failure::from_element(&receive(&mut peer).await)
+        .expect("dummy response completes the failed authentication");
+    assert_eq!(failure.condition, Sasl2FailureCondition::NotAuthorized);
+
+    // The failed challenge never authenticated the connection and returns it
+    // to the pre-auth state so a fresh exchange can proceed.
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let success = Sasl2Success::from_element(&receive(&mut peer).await)
+        .expect("fresh valid token authenticates after error completion");
+    assert_eq!(
+        success.authorization_identifier.to_string(),
+        "alice@example.com"
+    );
+    let _post_auth_features = receive(&mut peer).await;
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_oauth_malformed_mechanism_data_uses_error_challenge() {
+    let state = websocket_state_with_sasl2().await;
+    let session = create_test_session(&state, "alice").await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    // The SASL2 initial-response Base64 is valid, but its decoded bytes are
+    // not a syntactically valid OAUTHBEARER client response.
+    send(&mut peer, authenticate(vec![0xff, 0x00])).await;
+    let challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("mechanism data failure uses a SASL2 challenge");
+    assert_eq!(
+        challenge.data.as_bytes(),
+        br#"{"status":"invalid_request"}"#
+    );
+
+    send(
+        &mut peer,
+        Sasl2Response {
+            data: Sasl2Data::new(vec![0x01]),
+        }
+        .to_element(),
+    )
+    .await;
+    let failure = Sasl2Failure::from_element(&receive(&mut peer).await)
+        .expect("dummy response completes the failed mechanism exchange");
+    assert_eq!(failure.condition, Sasl2FailureCondition::NotAuthorized);
+
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let success = Sasl2Success::from_element(&receive(&mut peer).await)
+        .expect("malformed mechanism data did not authenticate");
+    assert_eq!(
+        success.authorization_identifier.to_string(),
+        "alice@example.com"
+    );
+    let _post_auth_features = receive(&mut peer).await;
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_oauth_error_challenge_can_be_aborted() {
+    let state = websocket_state_with_sasl2().await;
+    let session = create_test_session(&state, "alice").await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    send(&mut peer, authenticate(bearer("invalid-token", None))).await;
+    let _challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("invalid token starts a SASL2 error challenge");
+    send_raw(&mut peer, "<abort xmlns='urn:xmpp:sasl:2'/>").await;
+    let failure = Sasl2Failure::from_element(&receive(&mut peer).await)
+        .expect("abort fails the current authentication");
+    assert_eq!(failure.condition, Sasl2FailureCondition::Aborted);
+
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let success = Sasl2Success::from_element(&receive(&mut peer).await)
+        .expect("aborted auth does not block a fresh valid exchange");
+    assert_eq!(
+        success.authorization_identifier.to_string(),
+        "alice@example.com"
+    );
+    let _post_auth_features = receive(&mut peer).await;
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn malformed_sasl2_oauth_error_response_fails_and_resets_pre_auth_state() {
+    let state = websocket_state_with_sasl2().await;
+    let session = create_test_session(&state, "alice").await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    send(&mut peer, authenticate(bearer("invalid-token", None))).await;
+    let _challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("invalid token starts a SASL2 error challenge");
+    send_raw(&mut peer, "<response xmlns='urn:xmpp:sasl:2'>!</response>").await;
+    let failure = Sasl2Failure::from_element(&receive(&mut peer).await)
+        .expect("malformed challenge response fails SASL2");
+    assert_eq!(failure.condition, Sasl2FailureCondition::MalformedRequest);
+
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let success = Sasl2Success::from_element(&receive(&mut peer).await)
+        .expect("malformed response did not leave the auth phase stuck");
+    assert_eq!(
+        success.authorization_identifier.to_string(),
+        "alice@example.com"
+    );
+    let _post_auth_features = receive(&mut peer).await;
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_oauth_error_pending_closes_on_non_sasl_traffic() {
+    let state = websocket_state_with_sasl2().await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    send(&mut peer, authenticate(bearer("invalid-token", None))).await;
+    let _challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("invalid token starts a SASL2 error challenge");
+    send_raw(
+        &mut peer,
+        "<iq xmlns='jabber:client' type='get' id='pending-auth'><query xmlns='jabber:iq:roster'/></iq>",
+    )
+    .await;
+    let close = receive(&mut peer).await;
+    assert_eq!(close.name(), "close");
+    assert_eq!(close.ns(), NS_FRAMING);
+    stop_server(server).await;
 }
 
 #[tokio::test]

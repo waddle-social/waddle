@@ -51,6 +51,8 @@ pub enum InboundFrame {
     Sasl2Authenticate(Sasl2Authenticate),
     /// XEP-0388 SASL2 continuation response.
     Sasl2Response(Sasl2Response),
+    /// XEP-0388 SASL2 authentication abort.
+    Sasl2Abort,
     /// A typed XMPP stanza (IQ, message, or presence).
     ///
     /// Uses [`crate::Stanza`] for uniformity with the rest of
@@ -149,7 +151,9 @@ pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError>
     // local name only for these known roots; their parsers still validate the
     // expanded namespace and the complete XML element.
     let root = match root.split_once(':') {
-        Some((_, local @ ("open" | "close" | "auth" | "response" | "authenticate"))) => local,
+        Some((_, local @ ("open" | "close" | "auth" | "response" | "authenticate" | "abort"))) => {
+            local
+        }
         _ => root,
     };
     match root {
@@ -158,6 +162,7 @@ pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError>
         "auth" => parse_auth(trimmed),
         "response" => parse_response(trimmed),
         "authenticate" => parse_sasl2_authenticate(trimmed),
+        "abort" => parse_sasl2_abort(trimmed),
         "iq" | "message" | "presence" => parse_stanza(trimmed, root),
         other => Err(ParseError::UnknownRoot(other.to_string())),
     }
@@ -238,6 +243,23 @@ fn parse_sasl2_authenticate(frame: &str) -> Result<ParsedFrame, ParseError> {
     })?;
     Ok(ParsedFrame {
         frame: InboundFrame::Sasl2Authenticate(request),
+        message_stanza_lang: None,
+    })
+}
+
+fn parse_sasl2_abort(frame: &str) -> Result<ParsedFrame, ParseError> {
+    let element =
+        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    if element.is("abort", SASL) {
+        // Keep the historical prebind classifier responsible for SASL1
+        // aborts; only SASL2 aborts are typed in this parser.
+        return Err(ParseError::UnknownRoot("abort".to_owned()));
+    }
+    if !element.is("abort", NS_SASL2) {
+        return Err(ParseError::MalformedSasl("invalid SASL2 abort"));
+    }
+    Ok(ParsedFrame {
+        frame: InboundFrame::Sasl2Abort,
         message_stanza_lang: None,
     })
 }

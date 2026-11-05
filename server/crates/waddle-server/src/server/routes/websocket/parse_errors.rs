@@ -29,7 +29,7 @@ pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
         }
 }
 
-fn is_sasl2_parse_failure(frame: &str, err: &ParseError) -> bool {
+pub(super) fn is_sasl2_parse_failure(frame: &str, err: &ParseError) -> bool {
     if !matches!(
         err,
         ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)
