@@ -8,6 +8,7 @@
 
 mod drain;
 mod producer;
+mod runtime_attach;
 mod schema;
 mod store;
 mod store_jobs;
@@ -17,6 +18,7 @@ mod types;
 pub(crate) use drain::drain_due;
 pub(crate) use producer::CallTeardownPersistenceSupervisor;
 
+pub use runtime_attach::CallTeardownRuntimeAttachError;
 pub use store::{
     retry_delay_ms, CallTeardownOutboxStore, BASE_RETRY_DELAY_MS, CLAIM_TIMEOUT_MS,
     FAILED_RETENTION_MS, MAX_ATTEMPTS, MAX_RETRY_DELAY_MS,
