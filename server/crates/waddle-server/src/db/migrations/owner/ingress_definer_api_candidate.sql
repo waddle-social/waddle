@@ -1,7 +1,14 @@
 -- DARK EXPERIMENT ONLY. Render the schema and role placeholders before use.
--- This is deliberately not registered or installed by startup. Installation
--- replaces the DML guards for canonical messages and aliases only, after the
--- owner has quiesced writers and protected-table DDL.
+-- This is deliberately not registered or installed by startup. Its target is
+-- a fixed operation-specific API for every table in EPOCH_GUARDED_TABLES,
+-- including writes and reads that take row locks. The runtime LOGIN may only
+-- execute these functions; the NOLOGIN API owner owns functions but neither
+-- tables nor memberships, and the migration identity renders and installs
+-- this fragment. Functions must compose inside the caller's existing
+-- READ COMMITTED transaction, qualify every relation, and use no dynamic SQL
+-- or generic SQL entry point. Do not use this candidate for role or epoch
+-- cutover; its installation requires the complete restricted-login ACL,
+-- ownership, lock-read denial, and operation test matrix.
 
 CREATE OR REPLACE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard()
 RETURNS trigger
