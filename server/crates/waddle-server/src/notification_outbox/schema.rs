@@ -246,7 +246,12 @@ impl NotificationOutboxStore {
             // Compatibility path for the existing startup wiring. It retains
             // legacy DDL behavior but cannot certify owner preparation; if a
             // trusted marker already exists, invalidate it before any work.
-            let store = self.clone();
+            let mut store = self.clone();
+            store.owner_preparation = Some(super::OwnerPreparationProof {
+                identity: None,
+                probe_key: super::fresh_owner_probe_key(),
+                schema_identity: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            });
             tokio::spawn(async move {
                 store
                     .initialize_postgres_schema(OUTBOX_SCHEMA_GATE_WAIT)
@@ -328,19 +333,25 @@ impl NotificationOutboxStore {
                 .execute(&mut connection)
                 .await
                 .map_err(DatabaseError::from)?;
-            if trusted_owner {
-                let proof = self
-                    .owner_preparation
-                    .as_ref()
-                    .ok_or(NotificationOutboxError::UnsafeOwnerBoundary)?;
-                self.verify_owner_gate_connection(&mut connection, &proof.identity)
+            let proof = self
+                .owner_preparation
+                .as_ref()
+                .ok_or(NotificationOutboxError::UnsafeOwnerBoundary)?;
+            if let Some(identity) = proof.identity.as_ref() {
+                self.verify_owner_gate_connection(&mut connection, identity)
                     .await?;
-                sqlx::query("SELECT pg_advisory_xact_lock($1::integer, $2::integer)")
-                    .bind(proof.probe_key.0)
-                    .bind(proof.probe_key.1)
-                    .execute(&mut connection)
-                    .await
-                    .map_err(DatabaseError::from)?;
+            } else if trusted_owner {
+                return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+            }
+            let schema_identity = self.capture_owner_gate_schema(&mut connection).await?;
+            *proof.schema_identity.lock().await = Some(schema_identity);
+            sqlx::query("SELECT pg_advisory_xact_lock($1::integer, $2::integer)")
+                .bind(proof.probe_key.0)
+                .bind(proof.probe_key.1)
+                .execute(&mut connection)
+                .await
+                .map_err(DatabaseError::from)?;
+            if trusted_owner {
                 self.invalidate_owner_preparation().await?;
             } else {
                 self.invalidate_owner_preparation_if_present().await?;
@@ -441,11 +452,102 @@ impl NotificationOutboxStore {
                 "notification outbox owner transaction left PostgreSQL".to_owned(),
             ));
         }
-        let schema = &proof.identity.schema.name.0;
         let mut rows = tx
             .query(
-                "SELECT pg_catalog.pg_try_advisory_xact_lock_shared(?::integer, ?::integer), \
-                 (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+                "SELECT pg_catalog.pg_try_advisory_xact_lock_shared(?::integer, ?::integer)",
+                crate::db_params![proof.probe_key.0, proof.probe_key.1],
+            )
+            .await?;
+        let acquired_probe = rows
+            .next()
+            .await?
+            .map(|row| row.get::<bool>(0))
+            .transpose()?
+            .unwrap_or(true);
+        drop(rows);
+        if acquired_probe {
+            return Err(DatabaseError::QueryFailed(
+                "notification outbox transaction escaped its pinned advisory-lock domain"
+                    .to_owned(),
+            ));
+        }
+        if let Some(identity) = proof.identity.as_ref() {
+            self.verify_owner_transaction_identity(tx, identity).await?;
+        }
+        let expected_schema = proof.schema_identity.lock().await.clone().ok_or_else(|| {
+            DatabaseError::QueryFailed(
+                "notification outbox gate schema was not captured".to_owned(),
+            )
+        })?;
+        self.verify_owner_transaction_schema(tx, &expected_schema)
+            .await?;
+        Ok(())
+    }
+
+    async fn capture_owner_gate_schema(
+        &self,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<(i64, String, String), NotificationOutboxError> {
+        use sqlx::Row as SqlxRow;
+
+        let row = sqlx::query(
+            "SELECT n.oid::bigint, n.nspname::text, \
+                    pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text \
+             FROM pg_catalog.pg_namespace n \
+             WHERE n.nspname = pg_catalog.current_schema()",
+        )
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+        let Some(row) = row else {
+            return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+        };
+        Ok((
+            row.try_get(0).map_err(DatabaseError::from)?,
+            row.try_get(1).map_err(DatabaseError::from)?,
+            row.try_get(2).map_err(DatabaseError::from)?,
+        ))
+    }
+
+    async fn verify_owner_transaction_schema(
+        &self,
+        tx: &mut Transaction<'_>,
+        expected: &(i64, String, String),
+    ) -> Result<(), DatabaseError> {
+        let mut rows = tx
+            .query(
+                "SELECT n.oid::bigint, n.nspname::text, \
+                        pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text \
+                 FROM pg_catalog.pg_namespace n \
+                 WHERE n.nspname = pg_catalog.current_schema()",
+                (),
+            )
+            .await?;
+        let valid = match rows.next().await? {
+            Some(row) => {
+                row.get::<i64>(0)? == expected.0
+                    && row.get::<String>(1)? == expected.1
+                    && row.get::<String>(2)? == expected.2
+            }
+            None => false,
+        };
+        if !valid {
+            return Err(DatabaseError::QueryFailed(
+                "notification outbox transaction changed its gate schema".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_owner_transaction_identity(
+        &self,
+        tx: &mut Transaction<'_>,
+        expected: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), DatabaseError> {
+        let schema = &expected.schema.name.0;
+        let mut rows = tx
+            .query(
+                "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
                  db.oid::bigint, db.datname::text, n.oid::bigint, n.nspname::text, \
                  n.nspname = pg_catalog.current_schema() AND owner.rolname = current_user \
                  AND NOT pg_catalog.pg_is_in_recovery() \
@@ -460,29 +562,27 @@ impl NotificationOutboxStore {
                  JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
                  JOIN pg_catalog.pg_database db ON db.datname = pg_catalog.current_database() \
                  WHERE n.nspname = ?",
-                crate::db_params![proof.probe_key.0, proof.probe_key.1, schema],
+                crate::db_params![schema],
             )
             .await?;
         let valid = match rows.next().await? {
             Some(row) => {
-                let acquired_probe: bool = row.get(0)?;
-                let system: String = row.get(1)?;
-                !acquired_probe
-                    && system
-                        .parse::<crate::db::lineage::PgSystemIdentifier>()
-                        .ok()
-                        == Some(proof.identity.system_identifier)
-                    && row.get::<i64>(2)? == i64::from(proof.identity.database.oid)
-                    && row.get::<String>(3)? == proof.identity.database.name.0
-                    && row.get::<i64>(4)? == i64::from(proof.identity.schema.oid)
-                    && row.get::<String>(5)? == *schema
-                    && row.get::<bool>(6)?
+                let system: String = row.get(0)?;
+                system
+                    .parse::<crate::db::lineage::PgSystemIdentifier>()
+                    .ok()
+                    == Some(expected.system_identifier)
+                    && row.get::<i64>(1)? == i64::from(expected.database.oid)
+                    && row.get::<String>(2)? == expected.database.name.0
+                    && row.get::<i64>(3)? == i64::from(expected.schema.oid)
+                    && row.get::<String>(4)? == *schema
+                    && row.get::<bool>(5)?
             }
             None => false,
         };
         if !valid {
             return Err(DatabaseError::QueryFailed(
-                "notification outbox owner transaction escaped its pinned advisory-lock domain"
+                "notification outbox owner transaction failed its identity and role check"
                     .to_owned(),
             ));
         }

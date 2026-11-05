@@ -354,10 +354,12 @@ async fn verify_columns(
         .query(
             "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod), \
                     a.attnotnull, COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), ''), \
-                    a.attgenerated::text, a.attidentity::text \
+                    a.attgenerated::text, a.attidentity::text, \
+                    a.attcollation = typ.typcollation \
              FROM pg_catalog.pg_attribute a \
              JOIN pg_catalog.pg_class t ON t.oid = a.attrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_catalog.pg_type typ ON typ.oid = a.atttypid \
              LEFT JOIN pg_catalog.pg_attrdef d \
                ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE n.nspname = ? AND t.relname = ? AND t.relkind = 'r' \
@@ -374,6 +376,7 @@ async fn verify_columns(
             normalize_expression(&row.get::<String>(3)?),
             row.get::<String>(4)?,
             row.get::<String>(5)?,
+            row.get::<bool>(6)?,
         ));
     }
     drop(rows);
@@ -386,6 +389,7 @@ async fn verify_columns(
                     && actual.3 == normalize_expression(expected.default)
                     && actual.4.is_empty()
                     && actual.5.is_empty()
+                    && actual.6
             })
         })
     {
@@ -639,7 +643,17 @@ async fn verify_named_index(
                       JOIN pg_catalog.pg_attribute a \
                         ON a.attrelid = t.oid AND a.attnum = k.attnum \
                       WHERE k.position <= i.indnkeyatts ORDER BY k.position), ','), \
-                    COALESCE(pg_catalog.pg_get_expr(i.indpred, i.indrelid), '') \
+                    COALESCE(pg_catalog.pg_get_expr(i.indpred, i.indrelid), ''), \
+                    COALESCE(( \
+                      SELECT pg_catalog.bool_and(op.opcdefault \
+                         AND op.opcintype = a.atttypid \
+                         AND k.collation_oid = a.attcollation) \
+                      FROM unnest( \
+                           i.indkey::smallint[], i.indclass::oid[], i.indcollation::oid[]) \
+                           k(attnum, opclass, collation_oid) \
+                      JOIN pg_catalog.pg_attribute a \
+                        ON a.attrelid = t.oid AND a.attnum = k.attnum \
+                      JOIN pg_catalog.pg_opclass op ON op.oid = k.opclass), false) \
              FROM pg_catalog.pg_index i \
              JOIN pg_catalog.pg_class t ON t.oid = i.indrelid \
              JOIN pg_catalog.pg_class ix ON ix.oid = i.indexrelid \
@@ -662,12 +676,14 @@ async fn verify_named_index(
     let total_count: i64 = row.get(9)?;
     let columns: String = row.get(10)?;
     let predicate: String = row.get(11)?;
+    let default_operator_and_collation: bool = row.get(12)?;
     let (expected_unique, expected_columns, expected_predicate) = expected_index(name);
     if unique != expected_unique
         || !healthy
         || primary
         || !no_expression
         || !btree
+        || !default_operator_and_collation
         || key_count != expected_columns.len() as i64
         || total_count != expected_columns.len() as i64
         || columns != expected_columns.join(",")

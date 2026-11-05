@@ -248,7 +248,25 @@ impl Fixture {
         let initially_attached =
             NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
         drop(initially_attached);
-        let legacy_owner_store = NotificationOutboxStore::try_new(owner_database.clone()).await?;
+        let mut legacy_ddl_guard = self.admin.begin().await?;
+        let legacy_candidate_lock = format!(
+            "LOCK TABLE {}.notification_candidates IN ACCESS EXCLUSIVE MODE",
+            self.target
+        );
+        legacy_ddl_guard
+            .execute(legacy_candidate_lock.as_str())
+            .await?;
+        let legacy_owner_database = owner_database.clone();
+        let legacy_owner_caller =
+            tokio::spawn(
+                async move { NotificationOutboxStore::try_new(legacy_owner_database).await },
+            );
+        self.wait_for_lock("granted").await?;
+        self.wait_for_gate_lock_count(2).await?;
+        self.wait_for_marker_revision(0).await?;
+        legacy_ddl_guard.commit().await?;
+        let legacy_owner_store =
+            tokio::time::timeout(Duration::from_secs(20), legacy_owner_caller).await???;
         if self.marker_revision().await? != 0 {
             bail!("legacy try_new unexpectedly left a trusted preparation marker");
         }
@@ -418,6 +436,68 @@ impl Fixture {
             NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
 
         sqlx::query(&format!(
+            "DROP INDEX {}.idx_notification_candidates_identity",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE UNIQUE INDEX idx_notification_candidates_identity \
+             ON {}.notification_candidates \
+             (recipient_bare_jid, conversation_jid, thread_id, stanza_id COLLATE \"C\", class)",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationOutboxStore::attach_existing(runtime_database.clone()).await {
+            Err(NotificationOutboxRuntimeAttachError::InvalidIndexes {
+                table: "notification_candidates",
+            }) => {}
+            Err(error) => bail!("custom index collation returned an unexpected error: {error}"),
+            Ok(_) => bail!("attachment accepted a nondefault identity-index collation"),
+        }
+        sqlx::query(&format!(
+            "DROP INDEX {}.idx_notification_candidates_identity",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE UNIQUE INDEX idx_notification_candidates_identity \
+             ON {}.notification_candidates \
+             (recipient_bare_jid, conversation_jid, thread_id, stanza_id, class)",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        let _after_collation_cleanup =
+            NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
+
+        sqlx::query(&format!(
+            "ALTER TABLE {}.notification_outbox \
+             ALTER COLUMN context_xml TYPE text COLLATE \"C\" USING context_xml::text",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationOutboxStore::attach_existing(runtime_database.clone()).await {
+            Err(NotificationOutboxRuntimeAttachError::InvalidColumns {
+                table: "notification_outbox",
+            }) => {}
+            Err(error) => bail!("custom column collation returned an unexpected error: {error}"),
+            Ok(_) => bail!("attachment accepted a nondefault column collation"),
+        }
+        sqlx::query(&format!(
+            "ALTER TABLE {}.notification_outbox \
+             ALTER COLUMN context_xml TYPE text USING context_xml::text",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        let _after_column_collation_cleanup =
+            NotificationOutboxStore::attach_existing(runtime_database.clone()).await?;
+
+        sqlx::query(&format!(
             "CREATE TABLE {}.notification_outbox_dependents (job_id text \
              REFERENCES {}.notification_outbox(job_id))",
             self.target, self.target
@@ -458,6 +538,30 @@ impl Fixture {
             loop {
                 let count: i64 = sqlx::query_scalar(&query).fetch_one(&self.admin).await?;
                 if count > 0 {
+                    return Ok::<(), sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn wait_for_gate_lock_count(&self, expected: i64) -> Result<()> {
+        let query = format!(
+            "SELECT COUNT(DISTINCT (held.classid, held.objid))::bigint \
+             FROM pg_catalog.pg_locks fixed \
+             JOIN pg_catalog.pg_locks held ON held.pid = fixed.pid \
+             WHERE fixed.locktype = 'advisory' AND fixed.classid = {}::oid \
+               AND fixed.objid = {}::oid AND fixed.granted \
+               AND held.locktype = 'advisory' AND held.mode = 'ExclusiveLock' \
+               AND held.granted",
+            OUTBOX_SCHEMA_GATE.0, OUTBOX_SCHEMA_GATE.1
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let count: i64 = sqlx::query_scalar(&query).fetch_one(&self.admin).await?;
+                if count >= expected {
                     return Ok::<(), sqlx::Error>(());
                 }
                 tokio::task::yield_now().await;

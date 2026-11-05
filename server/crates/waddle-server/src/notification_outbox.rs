@@ -88,8 +88,9 @@ pub struct NotificationOutboxStore {
 
 #[derive(Clone)]
 struct OwnerPreparationProof {
-    identity: crate::db::lineage::PgIdentity,
+    identity: Option<crate::db::lineage::PgIdentity>,
     probe_key: (i32, i32),
+    schema_identity: std::sync::Arc<tokio::sync::Mutex<Option<(i64, String, String)>>>,
 }
 
 impl NotificationOutboxStore {
@@ -123,8 +124,9 @@ impl NotificationOutboxStore {
         store.validate_typed_schema_contract()?;
         let mut preparing = store.clone();
         preparing.owner_preparation = Some(OwnerPreparationProof {
-            identity: identity.clone(),
+            identity: Some(identity.clone()),
             probe_key: fresh_owner_probe_key(),
+            schema_identity: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         });
         tokio::spawn(async move {
             preparing
