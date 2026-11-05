@@ -14,9 +14,9 @@
 //! production storage schema or wire protocol.
 
 use jid::FullJid;
+use minidom::element::Nodes;
 use minidom::Element;
 use minidom::Node;
-use std::io::{self, Write};
 use uuid::Uuid;
 use xmpp_parsers::presence::Show;
 
@@ -30,58 +30,32 @@ pub const ACCOUNT_RESOURCE_OPERATION_CAPACITY: usize = 64;
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOADS: usize = 64;
 /// Maximum serialized size of all presence extension payloads in one snapshot.
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES: usize = 32 * 1024;
-/// Maximum number of XML tree nodes, attributes, and prefix declarations
-/// traversed across all presence payloads in one snapshot.
+/// Maximum counted element headers, child nodes, attributes, and prefix
+/// declarations across all presence payloads in one snapshot. Child elements
+/// count once as a child node and once as their own element header.
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_ITEMS: usize = 4 * 1024;
 /// Maximum nesting depth accepted in one presence payload.
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH: usize = 128;
 /// Maximum status text length retained in one snapshot.
 pub const ACCOUNT_RESOURCE_MAX_STATUS_BYTES: usize = 4 * 1024;
 
-/// Counts serialized bytes without retaining them and refuses any write that
-/// would exceed the aggregate snapshot payload limit.
-#[derive(Debug)]
-struct CappedByteCounter {
-    bytes_written: usize,
-    limit: usize,
-}
-
-impl CappedByteCounter {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes_written: 0,
-            limit,
-        }
-    }
-}
-
-impl Write for CappedByteCounter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let remaining = self.limit - self.bytes_written;
-        if buffer.len() > remaining {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "serialized account-resource payload exceeds its limit",
-            ));
-        }
-
-        self.bytes_written += buffer.len();
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[derive(Debug, Default)]
 struct PresencePayloadPreflight {
     raw_bytes: usize,
+    serialized_upper_bytes: usize,
     items: usize,
+    qualified_names: usize,
+    longest_prefix: usize,
 }
 
 impl PresencePayloadPreflight {
-    fn add_bytes(&mut self, bytes: usize) -> bool {
+    fn has_raw_capacity(&self, bytes: usize) -> bool {
+        self.raw_bytes
+            .checked_add(bytes)
+            .is_some_and(|total| total <= ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES)
+    }
+
+    fn add_raw_bytes(&mut self, bytes: usize) -> bool {
         let Some(total) = self.raw_bytes.checked_add(bytes) else {
             return false;
         };
@@ -90,6 +64,65 @@ impl PresencePayloadPreflight {
         }
         self.raw_bytes = total;
         true
+    }
+
+    fn add_serialized_bytes(&mut self, bytes: usize) -> bool {
+        let Some(total) = self.serialized_upper_bytes.checked_add(bytes) else {
+            return false;
+        };
+        self.serialized_upper_bytes = total;
+        true
+    }
+
+    fn add_plain_field(&mut self, field: &str, copies: usize) -> bool {
+        if !self.has_raw_capacity(field.len())
+            || !xml_characters_are_valid(field)
+            || !self.add_raw_bytes(field.len())
+            || !self.add_serialized_bytes(field.len().saturating_mul(copies))
+        {
+            return false;
+        }
+        true
+    }
+
+    fn add_escaped_field(&mut self, field: &str, attribute_context: bool) -> bool {
+        if !self.has_raw_capacity(field.len()) {
+            return false;
+        }
+        let Some(escaped_bytes) = escaped_xml_bytes(field, attribute_context) else {
+            return false;
+        };
+        self.add_raw_bytes(field.len()) && self.add_serialized_bytes(escaped_bytes)
+    }
+
+    fn add_qualified_name(&mut self) -> bool {
+        let Some(total) = self.qualified_names.checked_add(1) else {
+            return false;
+        };
+        self.qualified_names = total;
+        true
+    }
+
+    fn add_markup_allowance(&mut self, item_count: usize) -> bool {
+        self.add_serialized_bytes(item_count.saturating_mul(XML_ITEM_MARKUP_ALLOWANCE_BYTES))
+    }
+
+    fn serialized_upper_bound_within_limit(&self) -> bool {
+        // A qualified name can repeat the longest explicit prefix, or a
+        // generated prefix. Allow for both the QName and its namespace
+        // declaration; `ns4095` is six bytes, so 16 safely covers generated
+        // prefixes while remaining independent of input strings.
+        let prefix_bytes = self.longest_prefix.max(XML_GENERATED_PREFIX_MAX_BYTES);
+        let Some(repeated_prefix_bytes) = self
+            .qualified_names
+            .checked_mul(prefix_bytes)
+            .and_then(|bytes| bytes.checked_mul(2))
+        else {
+            return false;
+        };
+        self.serialized_upper_bytes
+            .checked_add(repeated_prefix_bytes)
+            .is_some_and(|bytes| bytes <= ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES)
     }
 
     fn add_item(&mut self) -> bool {
@@ -104,19 +137,54 @@ impl PresencePayloadPreflight {
     }
 }
 
-/// Inspect all XML strings and structure before minidom serializes an item.
-/// Its rxml encoder builds a temporary buffer per item and escapes each input
-/// byte to at most a fixed-size entity, so capping the complete borrowed tree
-/// and its item count first gives each such buffer a fixed memory ceiling. This
-/// raw-tree budget is conservative and can reject a payload whose serialized
-/// form would fit (for example, repeated namespace declarations). The byte
-/// counter below enforces the exact serialized-size limit for accepted trees.
-fn presence_payloads_within_raw_bounds(payloads: &[Element]) -> bool {
+const XML_ITEM_MARKUP_ALLOWANCE_BYTES: usize = 32;
+const XML_GENERATED_PREFIX_MAX_BYTES: usize = 16;
+
+fn xml_characters_are_valid(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(
+            character,
+            '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+        )
+    })
+}
+
+/// Count the UTF-8 bytes produced by rxml's XML escaping without allocating.
+fn escaped_xml_bytes(value: &str, attribute_context: bool) -> Option<usize> {
+    if !xml_characters_are_valid(value) {
+        return None;
+    }
+
+    value.as_bytes().iter().try_fold(0usize, |total, byte| {
+        let escaped_len = match byte {
+            b'<' | b'>' => 4,
+            b'&' => 5,
+            b'\'' | b'"' if attribute_context => 5,
+            b'\r' => 5,
+            b'\n' | b'\t' if attribute_context => 5,
+            _ => 1,
+        };
+        total.checked_add(escaped_len)
+    })
+}
+
+/// Inspect borrowed XML fields and structure without invoking minidom's
+/// serializer. The conservative upper bound counts actual escaped bytes,
+/// duplicated element names, repeated explicit/generated prefixes, and fixed
+/// XML syntax per bounded item. It can reject a payload whose serialized form
+/// would fit; every accepted tree is still guaranteed to serialize to no more
+/// than the snapshot's 32 KiB payload limit. This path is panic-free for
+/// hostile namespace maps and builder-created invalid XML characters.
+fn presence_payloads_within_serialized_upper_bound(payloads: &[Element]) -> bool {
     let mut preflight = PresencePayloadPreflight::default();
     let mut pending = Vec::with_capacity(payloads.len());
 
     for payload in payloads {
-        if !preflight.add_item() {
+        if !preflight.add_item()
+            || !preflight.add_qualified_name()
+            || !preflight.add_plain_field(payload.name(), 2)
+            || !preflight.add_escaped_field(payload.ns_ref(), true)
+        {
             return false;
         }
         pending.push((payload, 0));
@@ -124,28 +192,29 @@ fn presence_payloads_within_raw_bounds(payloads: &[Element]) -> bool {
 
     while let Some((element, depth)) = pending.pop() {
         if depth > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH
-            || !preflight.add_bytes(element.name().len())
-            || !preflight.add_bytes(element.ns_ref().len())
+            || !xml_ncname_is_valid(element.name())
         {
             return false;
         }
 
         for (prefix, namespace) in element.prefixes.declared_prefixes() {
-            if !preflight.add_item()
-                || !prefix
-                    .as_ref()
-                    .is_none_or(|prefix| preflight.add_bytes(prefix.len()))
-                || !preflight.add_bytes(namespace.len())
-            {
+            if !preflight.add_item() || !preflight.add_escaped_field(namespace, true) {
                 return false;
+            }
+            if let Some(prefix) = prefix {
+                if !xml_ncname_is_valid(prefix) || !preflight.add_plain_field(prefix, 1) {
+                    return false;
+                }
+                preflight.longest_prefix = preflight.longest_prefix.max(prefix.len());
             }
         }
 
         for ((namespace, name), value) in element.attrs().iter() {
             if !preflight.add_item()
-                || !preflight.add_bytes(namespace.len())
-                || !preflight.add_bytes(name.len())
-                || !preflight.add_bytes(value.len())
+                || !preflight.add_qualified_name()
+                || !preflight.add_escaped_field(namespace, true)
+                || !preflight.add_plain_field(name, 1)
+                || !preflight.add_escaped_field(value, true)
             {
                 return false;
             }
@@ -162,10 +231,17 @@ fn presence_payloads_within_raw_bounds(payloads: &[Element]) -> bool {
                     if child_depth > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH {
                         return false;
                     }
+                    if !preflight.add_item()
+                        || !preflight.add_qualified_name()
+                        || !preflight.add_plain_field(child.name(), 2)
+                        || !preflight.add_escaped_field(child.ns_ref(), true)
+                    {
+                        return false;
+                    }
                     pending.push((child, child_depth));
                 }
                 Node::Text(text) => {
-                    if !preflight.add_bytes(text.len()) {
+                    if !preflight.add_escaped_field(text, false) {
                         return false;
                     }
                 }
@@ -173,7 +249,133 @@ fn presence_payloads_within_raw_bounds(payloads: &[Element]) -> bool {
         }
     }
 
+    preflight.add_markup_allowance(preflight.items)
+        && preflight.serialized_upper_bound_within_limit()
+}
+
+fn xml_ncname_is_valid(value: &str) -> bool {
+    <&minidom::rxml::NcNameStr>::try_from(value).is_ok()
+}
+
+struct ElementNodePair<'a> {
+    left: Nodes<'a>,
+    right: Nodes<'a>,
+}
+
+fn element_payloads_structurally_equal(left: &[Element], right: &[Element]) -> bool {
+    if left.len() != right.len() || left.len() > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOADS {
+        return false;
+    }
+
+    let mut compared_items = 0usize;
+    for (left, right) in left.iter().zip(right) {
+        if !element_headers_structurally_equal(left, right, &mut compared_items) {
+            return false;
+        }
+
+        // Journaled snapshots have a maximum depth of 128. A fixed stack keeps
+        // conflict/replay comparison allocation-free and non-recursive; an
+        // over-bound incoming tree cannot match a retained bounded snapshot.
+        let mut stack: [Option<ElementNodePair<'_>>;
+            ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH + 1] = std::array::from_fn(|_| None);
+        stack[0] = Some(ElementNodePair {
+            left: left.nodes(),
+            right: right.nodes(),
+        });
+        let mut depth = 0usize;
+
+        loop {
+            let next = {
+                let Some(frame) = stack[depth].as_mut() else {
+                    return false;
+                };
+                (frame.left.next(), frame.right.next())
+            };
+            match next {
+                (None, None) => {
+                    stack[depth] = None;
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                (Some(Node::Text(left)), Some(Node::Text(right))) if left == right => {}
+                (Some(Node::Element(left)), Some(Node::Element(right))) => {
+                    let child_depth = depth + 1;
+                    if child_depth > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH
+                        || !element_headers_structurally_equal(left, right, &mut compared_items)
+                    {
+                        return false;
+                    }
+                    depth = child_depth;
+                    stack[depth] = Some(ElementNodePair {
+                        left: left.nodes(),
+                        right: right.nodes(),
+                    });
+                }
+                _ => return false,
+            }
+        }
+    }
     true
+}
+
+fn element_headers_structurally_equal(
+    left: &Element,
+    right: &Element,
+    compared_items: &mut usize,
+) -> bool {
+    let nodes = left.nodes();
+    let other_nodes = right.nodes();
+    let item_count = 1usize
+        .checked_add(left.attrs().len())
+        .and_then(|count| count.checked_add(left.prefixes.declared_prefixes().len()))
+        .and_then(|count| count.checked_add(nodes.len()));
+    let Some(item_count) = item_count else {
+        return false;
+    };
+    let Some(total) = compared_items.checked_add(item_count) else {
+        return false;
+    };
+    if total > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_ITEMS {
+        return false;
+    }
+    *compared_items = total;
+
+    left.name() == right.name()
+        && left.ns_ref() == right.ns_ref()
+        && left.prefixes.declared_prefixes() == right.prefixes.declared_prefixes()
+        && left.attrs().iter().eq(right.attrs().iter())
+        && nodes.len() == other_nodes.len()
+}
+
+/// Drop an owned XML tree without invoking Element's recursive derived Drop.
+/// Frames contain owned child iterators, so the auxiliary stack grows with
+/// nesting depth rather than with the number of siblings.
+fn discard_element_tree(mut root: Element) {
+    let mut pending = vec![root.take_nodes().into_iter()];
+    drop(root);
+
+    while let Some(frame) = pending.last_mut() {
+        match frame.next() {
+            Some(Node::Element(mut child)) => {
+                pending.push(child.take_nodes().into_iter());
+                drop(child);
+            }
+            Some(Node::Text(text)) => drop(text),
+            None => {
+                pending.pop();
+            }
+        }
+    }
+}
+
+fn discard_unretained_operation(mut operation: AccountResourceOperation) {
+    if let AccountResourceMutation::UpdateSnapshot { snapshot, .. } = &mut operation.mutation {
+        for payload in snapshot.presence_payloads.drain(..) {
+            discard_element_tree(payload);
+        }
+    }
 }
 
 /// Monotonic revision of this single full-JID resource slot.
@@ -205,7 +407,7 @@ impl AccountResourceOperationId {
 /// One coherent resource snapshot. The typed SM session id is an opaque
 /// session reference carried with the exact binding evidence below; it is not
 /// a durable foreign key and does not itself authorize any SM operation.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct AccountResourceSnapshot {
     pub presence_available: bool,
     pub presence_show: Option<Show>,
@@ -216,6 +418,23 @@ pub struct AccountResourceSnapshot {
     pub roster_interested: bool,
     pub blocklist_interested: bool,
     pub stream_management_ref: Option<SmSessionId>,
+}
+
+impl PartialEq for AccountResourceSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.presence_available == other.presence_available
+            && self.presence_show == other.presence_show
+            && self.presence_status == other.presence_status
+            && self.presence_priority == other.presence_priority
+            && element_payloads_structurally_equal(
+                &self.presence_payloads,
+                &other.presence_payloads,
+            )
+            && self.carbons_enabled == other.carbons_enabled
+            && self.roster_interested == other.roster_interested
+            && self.blocklist_interested == other.blocklist_interested
+            && self.stream_management_ref == other.stream_management_ref
+    }
 }
 
 impl AccountResourceSnapshot {
@@ -233,14 +452,7 @@ impl AccountResourceSnapshot {
             return false;
         }
 
-        if !presence_payloads_within_raw_bounds(&self.presence_payloads) {
-            return false;
-        }
-
-        let mut counter = CappedByteCounter::new(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES);
-        self.presence_payloads
-            .iter()
-            .all(|payload| payload.write_to(&mut counter).is_ok())
+        presence_payloads_within_serialized_upper_bound(&self.presence_payloads)
     }
 }
 
@@ -864,20 +1076,27 @@ impl AccountResourceSlot {
         &mut self,
         operation: AccountResourceOperation,
     ) -> Result<AccountResourceExecution, AccountResourceExecuteError> {
-        if let Some(previous) = self.journal.iter().find(|entry| entry.id == operation.id) {
-            return if previous.mutation == operation.mutation {
-                Ok(AccountResourceExecution::Replayed(previous.outcome))
-            } else {
-                Err(AccountResourceExecuteError::OperationIdConflict)
-            };
+        if let Some((matches_payload, outcome)) = self
+            .journal
+            .iter()
+            .find(|entry| entry.id == operation.id)
+            .map(|entry| (entry.mutation == operation.mutation, entry.outcome))
+        {
+            if matches_payload {
+                return Ok(AccountResourceExecution::Replayed(outcome));
+            }
+            discard_unretained_operation(operation);
+            return Err(AccountResourceExecuteError::OperationIdConflict);
         }
 
         if self.journal.len() == ACCOUNT_RESOURCE_OPERATION_CAPACITY {
+            discard_unretained_operation(operation);
             return Err(AccountResourceExecuteError::JournalFull);
         }
 
         if let AccountResourceMutation::UpdateSnapshot { snapshot, .. } = &operation.mutation {
             if !snapshot.within_bounds() {
+                discard_unretained_operation(operation);
                 return Err(AccountResourceExecuteError::SnapshotTooLarge);
             }
         }
@@ -1690,11 +1909,11 @@ mod tests {
         claim_identity: &UserClaimIdentity,
         binding_ref: &BindingRef,
         payload: Element,
-        raw_tree_within_bounds: bool,
+        upper_bound_within_limit: bool,
     ) {
         assert_eq!(
-            presence_payloads_within_raw_bounds(std::slice::from_ref(&payload)),
-            raw_tree_within_bounds
+            presence_payloads_within_serialized_upper_bound(std::slice::from_ref(&payload)),
+            upper_bound_within_limit
         );
         let before_revision = slot.revision();
         let before_snapshot = slot.snapshot().cloned().expect("active snapshot");
@@ -2230,9 +2449,9 @@ mod tests {
         let oversized_payload = Element::builder("payload", "urn:example")
             .append("x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1))
             .build();
-        assert!(!presence_payloads_within_raw_bounds(std::slice::from_ref(
-            &oversized_payload
-        )));
+        assert!(!presence_payloads_within_serialized_upper_bound(
+            std::slice::from_ref(&oversized_payload)
+        ));
 
         let oversized_payload_snapshot = snapshot(
             true,
@@ -2262,6 +2481,70 @@ mod tests {
             AccountResourceOperationLookup::Unknown
         );
         assert_eq!(slot.snapshot(), Some(&original));
+
+        let payload_with_prefix_one = Element::builder("payload", "urn:example")
+            .prefix(Some("p".to_owned()), "urn:prefix:one")
+            .expect("first prefix declaration")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "p:Thing")
+            .build();
+        let payload_with_prefix_two = Element::builder("payload", "urn:example")
+            .prefix(Some("p".to_owned()), "urn:prefix:two")
+            .expect("second prefix declaration")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "p:Thing")
+            .build();
+        let first_prefix_snapshot = snapshot(
+            true,
+            None,
+            None,
+            0,
+            vec![payload_with_prefix_one],
+            false,
+            false,
+            false,
+            None,
+        );
+        let second_prefix_snapshot = snapshot(
+            true,
+            None,
+            None,
+            0,
+            vec![payload_with_prefix_two],
+            false,
+            false,
+            false,
+            None,
+        );
+        assert_ne!(first_prefix_snapshot, second_prefix_snapshot);
+
+        let prefix_expected_revision = slot.revision();
+        let prefix_operation = AccountResourceOperation::new(
+            AccountResourceOperationId::fresh(),
+            AccountResourceMutation::UpdateSnapshot {
+                claim_identity: claim_identity.clone(),
+                expected_revision: prefix_expected_revision,
+                binding_ref: binding_ref.clone(),
+                snapshot: first_prefix_snapshot,
+            },
+        );
+        slot.execute(prefix_operation.clone())
+            .expect("commit first prefix mapping");
+        let prefix_conflict = AccountResourceOperation::new(
+            prefix_operation.id,
+            AccountResourceMutation::UpdateSnapshot {
+                claim_identity,
+                expected_revision: prefix_expected_revision,
+                binding_ref,
+                snapshot: second_prefix_snapshot,
+            },
+        );
+        assert_eq!(
+            slot.execute(prefix_conflict.clone()),
+            Err(AccountResourceExecuteError::OperationIdConflict)
+        );
+        assert_eq!(
+            slot.lookup(&prefix_conflict),
+            AccountResourceOperationLookup::PayloadMismatch
+        );
     }
 
     #[test]
@@ -2322,21 +2605,198 @@ mod tests {
             false,
         );
 
-        // The raw preflight allows this tree, but rxml expands each ampersand
-        // to `&amp;`. The capped writer rejects the exact serialized overflow.
+        // Escaped-byte accounting rejects this without constructing a
+        // serialized buffer: each ampersand expands to `&amp;`.
         let escaped_overflow = Element::builder("payload", "urn:example")
             .append("&".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES / 4 + 1))
             .build();
-        assert!(presence_payloads_within_raw_bounds(std::slice::from_ref(
-            &escaped_overflow
-        )));
+        assert!(!presence_payloads_within_serialized_upper_bound(
+            std::slice::from_ref(&escaped_overflow)
+        ));
         assert_payload_update_rejected(
             &mut slot,
             &claim_identity,
             &binding_ref,
             escaped_overflow,
-            true,
+            false,
         );
+    }
+
+    #[test]
+    fn payload_bound_avoids_minidom_serializer_and_allows_plain_text_over_five_kib() {
+        let large_text = Element::builder("payload", "urn:example")
+            .append("x".repeat(6 * 1024))
+            .build();
+        assert!(presence_payloads_within_serialized_upper_bound(&[
+            large_text.clone()
+        ]));
+        assert!(snapshot(
+            true,
+            None,
+            None,
+            0,
+            vec![large_text],
+            false,
+            false,
+            false,
+            None,
+        )
+        .within_bounds());
+
+        let child_with_rebound_prefix = Element::builder("child", "urn:child")
+            .prefix(Some("p".to_owned()), "urn:child-prefix")
+            .expect("child prefix")
+            .build();
+        let prefix_rebinding_tree = Element::builder("payload", "urn:parent")
+            .prefix(Some("p".to_owned()), "urn:parent-prefix")
+            .expect("parent prefix")
+            .append(child_with_rebound_prefix)
+            .build();
+        assert!(presence_payloads_within_serialized_upper_bound(&[
+            prefix_rebinding_tree
+        ]));
+
+        let explicit_xml_prefix = Element::builder("payload", "urn:example")
+            .prefix(
+                Some("xml".to_owned()),
+                "http://www.w3.org/XML/1998/namespace",
+            )
+            .expect("valid explicit xml prefix")
+            .build();
+        assert!(presence_payloads_within_serialized_upper_bound(&[
+            explicit_xml_prefix
+        ]));
+
+        let whitespace_expansion = Element::builder("payload", "urn:example")
+            .attr(
+                minidom::rxml::xml_ncname!("value").to_owned(),
+                "\r\n\t".repeat(3 * 1024),
+            )
+            .build();
+        assert!(!presence_payloads_within_serialized_upper_bound(&[
+            whitespace_expansion
+        ]));
+
+        let invalid_builder_name = Element::builder("payload\0invalid", "urn:example").build();
+        assert!(!presence_payloads_within_serialized_upper_bound(&[
+            invalid_builder_name
+        ]));
+    }
+
+    #[test]
+    fn near_limit_many_text_nodes_replay_without_false_conflict() {
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let binding_ref = binding(local_connection());
+        bind_active(&mut slot, &claim_identity, &binding_ref);
+
+        let mut payload = Element::bare("payload", "urn:example");
+        for _ in 0..900 {
+            payload.append_text_node("x");
+        }
+        let snapshot = snapshot(
+            true,
+            None,
+            None,
+            0,
+            vec![payload],
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(snapshot.within_bounds());
+
+        let update = operation(AccountResourceMutation::UpdateSnapshot {
+            claim_identity,
+            expected_revision: slot.revision(),
+            binding_ref,
+            snapshot,
+        });
+        let applied = slot
+            .execute(update.clone())
+            .expect("apply bounded snapshot");
+        assert!(matches!(
+            applied,
+            AccountResourceExecution::Applied(AccountResourceOperationOutcome::Committed { .. })
+        ));
+        assert!(matches!(
+            slot.execute(update).expect("replay bounded snapshot"),
+            AccountResourceExecution::Replayed(AccountResourceOperationOutcome::Committed { .. })
+        ));
+    }
+
+    #[test]
+    fn conflicting_deep_payload_is_drained_without_recursive_drop() {
+        fn chain(depth: usize) -> Element {
+            let mut child = Element::bare("node", "urn:deep");
+            for _ in 0..depth {
+                let mut parent = Element::bare("node", "urn:deep");
+                parent.append_child(child);
+                child = parent;
+            }
+            child
+        }
+
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let binding_ref = binding(local_connection());
+        bind_active(&mut slot, &claim_identity, &binding_ref);
+
+        let expected_revision = slot.revision();
+        let retained = operation(AccountResourceMutation::UpdateSnapshot {
+            claim_identity: claim_identity.clone(),
+            expected_revision,
+            binding_ref: binding_ref.clone(),
+            snapshot: snapshot(
+                true,
+                None,
+                None,
+                0,
+                vec![chain(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH)],
+                false,
+                false,
+                false,
+                None,
+            ),
+        });
+        let retained_id = retained.id;
+        slot.execute(retained).expect("commit bounded deep payload");
+
+        let rejected = AccountResourceOperation::new(
+            retained_id,
+            AccountResourceMutation::UpdateSnapshot {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                snapshot: snapshot(
+                    true,
+                    None,
+                    None,
+                    0,
+                    vec![chain(100_000)],
+                    false,
+                    false,
+                    false,
+                    None,
+                ),
+            },
+        );
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                assert_eq!(
+                    slot.lookup(&rejected),
+                    AccountResourceOperationLookup::PayloadMismatch
+                );
+                assert_eq!(
+                    slot.execute(rejected),
+                    Err(AccountResourceExecuteError::OperationIdConflict)
+                );
+            })
+            .expect("spawn small-stack test thread")
+            .join()
+            .expect("deep payload rejection must not overflow the thread stack");
     }
 
     #[test]
