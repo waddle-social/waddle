@@ -499,7 +499,7 @@ pub async fn start_with_config(
 /// Preserve the configured location's provenance before constructing PubSub.
 /// Restricted runtime attachment must share the exact attested main pool;
 /// opening an equal-looking URL would create another authority domain.
-pub(crate) async fn create_pubsub_storage(
+pub async fn create_pubsub_storage(
     global: &crate::db::Database,
     location: &ResolvedXmppDatabaseUrl,
 ) -> Result<(Arc<crate::pubsub::DatabasePubSubStorage>, bool)> {
