@@ -10,6 +10,7 @@ use waddle_server::db::physical_attestation::{
     attested_pool, install, PgRoleName, PhysicalAttestationConfig,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
 use waddle_server::muc_durable::{MucOwnerPreparationError, PostgresMucRoomStore};
 use waddle_server::room_effect_outbox::{RoomEffectOutboxStore, RoomEffectRuntimeAttachError};
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
@@ -254,6 +255,24 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         RoomEffectOutboxStore::attach_existing(runtime.clone()).await,
         Err(RoomEffectRuntimeAttachError::Relation { .. })
     ));
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::Relation {
+            table: "clustering_muc_rooms",
+            ..
+        })
+    ));
+    let absent_room_table: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.to_regclass('{}.clustering_muc_rooms')::text",
+        f.target
+    ))
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert!(
+        absent_room_table.is_none(),
+        "runtime verification must not create schema"
+    );
     assert!(RoomEffectOutboxStore::try_new(runtime.clone())
         .await
         .is_err());
@@ -388,6 +407,9 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
     PostgresMucRoomStore::initialize_owner(&owner_db, &identity)
         .await
         .expect("prepare fresh room schema");
+    MucDestroyCompletionOutboxStore::try_new(owner_db.clone())
+        .await
+        .expect("prepare destroy completion outbox");
     run_sql(&f, &format!("INSERT INTO {}.clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json) VALUES ('room@conference.example.test', 'space', 'channel', '{{}}')", f.target)).await;
     assert!(matches!(
         PostgresMucRoomStore::initialize_owner(&owner_db, &identity).await,
@@ -419,6 +441,75 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         ),
     )
     .await;
+    for table in [
+        "clustering_muc_rooms",
+        "clustering_muc_room_affiliations",
+        "clustering_muc_room_lifecycles",
+        "clustering_muc_destroy_outbox",
+    ] {
+        run_sql(
+            &f,
+            &format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{} TO {}",
+                f.target, table, f.runtime
+            ),
+        )
+        .await;
+    }
+    run_sql(
+        &f,
+        &format!(
+            "GRANT SELECT, INSERT, DELETE ON {}.clustering_muc_admin_receipts TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    let verified_room_runtime = RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone())
+        .await
+        .expect("verify complete room runtime schema");
+    assert!(verified_room_runtime.belongs_to_main_pool(&runtime));
+    assert!(!verified_room_runtime.belongs_to_main_pool(&pool.ingress()));
+    assert!(verified_room_runtime
+        .effect_outbox()
+        .belongs_to_main_pool(&runtime));
+    let mut mismatched_lineage = f.lineage.clone();
+    mismatched_lineage
+        .postgres_identity
+        .as_mut()
+        .expect("fixture PostgreSQL identity")
+        .schema
+        .oid += 1;
+    let mismatched_attested = attested_pool(
+        f.runtime_options.clone(),
+        f.with_lineage(mismatched_lineage),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("construct mismatched identity test pool");
+    let mismatched_pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "mismatched room runtime identity",
+        mismatched_attested,
+        1,
+        1,
+    )
+    .await
+    .expect("wrap mismatched identity test pool");
+    assert!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(mismatched_pool.global().clone())
+            .await
+            .is_err()
+    );
+    drop(mismatched_pool);
+    // The main lane has one slot. Returning from verification with a usable
+    // checkout proves the read-only preflight released its transaction.
+    runtime
+        .guard()
+        .await
+        .expect("single-slot main pool is available after verification")
+        .execute("SELECT 1", ())
+        .await
+        .expect("preflight did not retain the pool slot");
+    drop(verified_room_runtime);
     let attached = RoomEffectOutboxStore::attach_existing(runtime.clone())
         .await
         .expect("verify outbox");
@@ -434,6 +525,163 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
     RoomEffectOutboxStore::initialize_owner(&owner_db, &identity)
         .await
         .expect("preserve existing rows");
+    run_sql(
+        &f,
+        &format!(
+            "ALTER TABLE {}.clustering_muc_rooms ADD COLUMN verifier_drift TEXT",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::InvalidTable {
+            table: "clustering_muc_rooms"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "ALTER TABLE {}.clustering_muc_rooms DROP COLUMN verifier_drift",
+            f.target
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT TRUNCATE ON {}.clustering_muc_room_lifecycles TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "clustering_muc_room_lifecycles"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "REVOKE TRUNCATE ON {}.clustering_muc_room_lifecycles FROM {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT UPDATE ON {}.clustering_muc_admin_receipts TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "clustering_muc_admin_receipts"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "REVOKE UPDATE ON {}.clustering_muc_admin_receipts FROM {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT UPDATE (removed_sessions_json) ON {}.clustering_muc_admin_receipts TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "clustering_muc_admin_receipts"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "REVOKE UPDATE (removed_sessions_json) ON {}.clustering_muc_admin_receipts FROM {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!("GRANT CREATE ON SCHEMA {} TO {}", f.target, f.definer),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "runtime role"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!("REVOKE CREATE ON SCHEMA {} FROM {}", f.target, f.definer),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!("GRANT USAGE ON SCHEMA {} TO {}", f.target, f.outsider),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "runtime role"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!("REVOKE USAGE ON SCHEMA {} FROM {}", f.target, f.outsider),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT SELECT ON {}.clustering_muc_admin_receipts TO {}",
+            f.target, f.outsider
+        ),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "clustering_muc_admin_receipts"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "REVOKE SELECT ON {}.clustering_muc_admin_receipts FROM {}",
+            f.target, f.outsider
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "CREATE INDEX muc_lifecycle_extra ON {}.clustering_muc_room_lifecycles (updated_at)",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::InvalidIndex {
+            table: "clustering_muc_room_lifecycles"
+        })
+    ));
+    run_sql(&f, &format!("DROP INDEX {}.muc_lifecycle_extra", f.target)).await;
     // The opaque attachment has no methods for draining or unbranded writes,
     // even when lifecycle authority is unavailable.
     run_sql(
@@ -446,6 +694,13 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         &format!("DROP TABLE {}.clustering_muc_room_lifecycles", f.target),
     )
     .await;
+    assert!(matches!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()).await,
+        Err(RoomEffectRuntimeAttachError::Relation {
+            table: "clustering_muc_room_lifecycles",
+            ..
+        })
+    ));
     let _still_verified = RoomEffectOutboxStore::attach_existing(runtime.clone())
         .await
         .expect("verify outbox without claiming lifecycle authority");
