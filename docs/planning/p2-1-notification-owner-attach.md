@@ -37,3 +37,21 @@ rows keep their identities. Exercise the existing one-slot and rollback seams.
 The other P2.1 startup stores, epoch/ACL rollout and physical old-writer
 fencing remain separate gates. `RestrictedStartupError::UnconvertedStores`
 must remain fatal before listeners.
+
+## Coordinated push-store handoff
+
+The push store also creates and upgrades tables during its HTTP constructor,
+then adopts notification ancestry before the outbox has finished upgrading.
+Prepare its schema and data under a separate trusted-owner gate, followed by
+notification outbox owner preparation, then exact legacy push ancestry adoption.
+The gate order must not nest push preparation while waiting on the outbox gate.
+Publish a push completion revision only after the applicable owner work is
+durable. Attach the push runtime to the supplied attested main pool with a
+bounded read-only shape and ACL check; preserve the existing legacy startup
+path until owner orchestration and old-writer fencing are ready.
+
+The push and outbox attachments remain dark. Push acceptance, delivery and
+retirement also touch notification lineage/outbox rows, so their runtime grants
+and custody contract need a joint check before serving. Restricted startup
+must still fail before listeners while registration, activity, RoomEffect and
+other owner constructors remain unconverted.
