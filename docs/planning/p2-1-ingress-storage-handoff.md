@@ -24,3 +24,13 @@ startup `UnconvertedStores` refusal remains before listeners and constructors.
 No runtime role switch, endpoint binding, worker start, epoch transition,
 primary fencing, or mailbox schema is in scope. The V1009 runtime-grant and
 old-writer cutoff gates remain prerequisites for restricted serving.
+
+## Architecture outcome
+
+The independent gate cleared dark selector wiring only. MAM selection retains
+URL provenance and requires an operator-supplied owner role and claim schema.
+The attested variant shares the main pool and aliases MAM lineage to Global.
+Cluster builds refuse this variant without live claim handles. Caller-owned
+archive acceptance still uses its ingress transaction; the MAM trait adapter
+commits each of its own operations separately. Restricted startup remains
+closed until the remaining stores and rollout authority are proven.

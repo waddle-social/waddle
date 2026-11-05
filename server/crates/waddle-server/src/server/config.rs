@@ -1,3 +1,5 @@
+use crate::db::lineage::PgSchemaName;
+use crate::db::physical_attestation::{validate_identifier, PgRoleName};
 use anyhow::Context;
 use jid::{BareJid, DomainPart};
 use std::path::PathBuf;
@@ -15,6 +17,60 @@ pub enum ResolvedXmppDatabaseUrl {
     /// to an in-memory SQLite store.
     #[default]
     EphemeralFallback,
+}
+
+/// Independent operator handoff required to attach the dark attested MAM
+/// adapter. These values are never inferred from the database URL, catalogs,
+/// or `search_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MamOwnerClaimHandoff {
+    pub(crate) mam_owner: PgRoleName,
+    pub(crate) claim_schema: PgSchemaName,
+}
+
+impl MamOwnerClaimHandoff {
+    pub fn new(mam_owner: PgRoleName, claim_schema: PgSchemaName) -> anyhow::Result<Self> {
+        validate_identifier(&claim_schema.0, "MAM claim schema")
+            .context("invalid MAM claim schema in operator handoff")?;
+        Ok(Self {
+            mam_owner,
+            claim_schema,
+        })
+    }
+
+    fn from_env() -> anyhow::Result<Option<Self>> {
+        const OWNER_ENV: &str = "WADDLE_XMPP_MAM_SCHEMA_OWNER";
+        const CLAIM_SCHEMA_ENV: &str = "WADDLE_XMPP_MAM_CLAIM_SCHEMA";
+
+        let owner = nonempty_env(OWNER_ENV)?;
+        let claim_schema = nonempty_env(CLAIM_SCHEMA_ENV)?;
+        match (owner, claim_schema) {
+            (None, None) => Ok(None),
+            (Some(owner), Some(claim_schema)) => {
+                let mam_owner = PgRoleName::new(owner).context("invalid MAM schema owner")?;
+                Self::new(mam_owner, PgSchemaName(claim_schema)).map(Some)
+            }
+            _ => anyhow::bail!(
+                "{OWNER_ENV} and {CLAIM_SCHEMA_ENV} must be supplied together as the MAM owner handoff"
+            ),
+        }
+    }
+}
+
+fn nonempty_env(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                anyhow::bail!("{name} must not be empty when supplied");
+            }
+            Ok(Some(value.to_owned()))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be valid Unicode")
+        }
+    }
 }
 
 impl ResolvedXmppDatabaseUrl {
@@ -54,6 +110,9 @@ pub struct XmppConfig {
     pub muc_domain: DomainPart,
     /// MAM database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub mam_database_url: ResolvedXmppDatabaseUrl,
+    /// Explicit operator identity handoff for dark attested MAM attachment.
+    /// Legacy startup does not consume it.
+    pub mam_owner_claim_handoff: Option<MamOwnerClaimHandoff>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub inbox_database_url: ResolvedXmppDatabaseUrl,
     /// Spaces-metadata database URL — prefers dedicated XMPP DSN, otherwise
@@ -122,6 +181,7 @@ impl Default for XmppConfig {
             spaces_jid,
             muc_domain,
             mam_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
+            mam_owner_claim_handoff: None,
             inbox_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
             spaces_metadata_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
             channel_space_links_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
@@ -183,6 +243,7 @@ impl XmppConfig {
             .unwrap_or_else(|| derived_muc_domain(&domain))?;
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
+        let mam_owner_claim_handoff = MamOwnerClaimHandoff::from_env()?;
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
         let spaces_metadata_database_url =
             resolve_xmpp_database_url("WADDLE_XMPP_SPACES_METADATA_DATABASE_URL");
@@ -223,6 +284,7 @@ impl XmppConfig {
             spaces_jid,
             muc_domain,
             mam_database_url,
+            mam_owner_claim_handoff,
             inbox_database_url,
             spaces_metadata_database_url,
             channel_space_links_database_url,

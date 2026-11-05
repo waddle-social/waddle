@@ -101,6 +101,27 @@ pub async fn attach_pending_startup(
     crate::server::attach_pending_startup_for_test(selection, global).await
 }
 
+/// Exercise production MAM startup selection without starting HTTP. The
+/// observation includes the lineage alias target derived from the selected
+/// production branch, if this attachment shares the global boundary.
+#[cfg(feature = "test-support")]
+pub async fn select_mam_storage_for_test(
+    selection: &crate::server::ResolvedXmppDatabaseUrl,
+    owner_handoff: Option<&crate::server::MamOwnerClaimHandoff>,
+    clustering_enabled: bool,
+    clustering_claim_pair_live: bool,
+    global: &Database,
+) -> anyhow::Result<(bool, Option<crate::db::lineage::DurableStore>)> {
+    crate::server::select_mam_storage_for_test(
+        selection,
+        owner_handoff,
+        clustering_enabled,
+        clustering_claim_pair_live,
+        global,
+    )
+    .await
+}
+
 /// Exercise production ingress authority selection without starting HTTP.
 #[cfg(feature = "test-support")]
 pub async fn create_ingress_authority_at_startup(

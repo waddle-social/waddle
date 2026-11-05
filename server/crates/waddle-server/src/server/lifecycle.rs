@@ -17,9 +17,9 @@ use super::ServerConfig;
 use super::SocketAddr;
 use super::Spawn;
 use super::XmppConfig;
-use super::{create_websocket_mam_storage, start_http_server, HttpServerDeps};
 use super::{ensure_fixed_test_account, fixed_test_account_enabled};
 use super::{resolve_server_owner_jids, AppState, AppStateDeps};
+use super::{select_websocket_mam_storage, start_http_server, HttpServerDeps, MamStartupStorage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RestrictedStartupError {
@@ -379,19 +379,20 @@ pub async fn start_with_config(
     // writes when clustering is live, mirroring the
     // `sm_persistence`/`pending_delivery` `open_for_cluster_mode` gating
     // already established for their own durability stores.
-    let websocket_mam_storage = create_websocket_mam_storage(
-        xmpp_config.mam_database_url.clone_resolved_url(),
+    let websocket_mam_startup = select_websocket_mam_storage(
+        &xmpp_config.mam_database_url,
+        xmpp_config.mam_owner_claim_handoff.as_ref(),
         server_config.clustering.enabled,
         state.clustering_claims.claim_pair().is_some(),
         db_pool.global(),
     )
     .await?;
-    super::bootstrap_mam_lineage(&state, &websocket_mam_storage).await?;
+    super::bootstrap_mam_lineage(&state, &websocket_mam_startup).await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
     let http_state = state.clone();
-    let http_mam_storage = websocket_mam_storage.clone();
+    let http_mam_storage = websocket_mam_startup.as_mam_storage();
     let http_server_config = server_config.clone();
     let http_xmpp_config = xmpp_config.clone();
     let http_shutdown_handle = shutdown.handle();
@@ -642,8 +643,15 @@ pub(in crate::server) async fn bootstrap_and_register_store_lineage(
 
 pub(in crate::server) async fn bootstrap_mam_lineage(
     state: &AppState,
-    storage: &waddle_xmpp::mam::SqlxMamStorage,
+    storage: &MamStartupStorage,
 ) -> Result<()> {
+    if let Some(alias_target) = storage.lineage_alias_target() {
+        state.register_lineage_alias(crate::db::lineage::DurableStore::Mam, alias_target);
+        return Ok(());
+    }
+    let MamStartupStorage::Legacy(storage) = storage else {
+        unreachable!("attested MAM storage returns before legacy lineage handling")
+    };
     if let Some(pool) = storage.sqlite_pool() {
         let in_memory = crate::db::lineage::sqlite_pool_is_in_memory(pool).await?;
         let database = crate::db::Database::from_sqlite_pool(

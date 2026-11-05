@@ -52,7 +52,7 @@ pub use routes::interpret::effects;
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
 pub mod xmpp_state;
 
-pub use config::{ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};
+pub use config::{MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
 use crate::config::ServerConfig;
@@ -62,7 +62,7 @@ use crate::spaces_metadata::DatabaseSpacesMetadataStore;
 use acme::start_acme_runtime;
 use anyhow::Result;
 use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
-use http::{create_websocket_mam_storage, start_http_server, HttpServerDeps};
+use http::{select_websocket_mam_storage, start_http_server, HttpServerDeps, MamStartupStorage};
 use kameo::actor::Spawn;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -74,6 +74,8 @@ mod tests;
 mod lifecycle;
 #[cfg(feature = "test-support")]
 pub(crate) use config::resolve_xmpp_database_url_values;
+#[cfg(feature = "test-support")]
+pub(crate) use http::select_mam_storage_for_test;
 #[cfg(feature = "test-support")]
 pub(crate) use http::{
     attach_pending_startup_for_test, attach_sm_startup_for_test, create_ingress_authority_for_test,
