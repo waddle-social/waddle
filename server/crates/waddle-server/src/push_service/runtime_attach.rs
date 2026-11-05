@@ -849,9 +849,9 @@ pub(super) async fn verify(db: &Database) -> Result<(), PushServiceAttachError> 
             source,
         })?;
     capability.attest_transaction(&mut tx).await?;
-    verify_active_schema(&mut tx, &identity).await?;
+    verify_active_schema(&mut tx, identity).await?;
     verify_runtime_role(&mut tx, schema).await?;
-    if !verify_marker_shape_and_data_tx(&mut tx, &identity).await? {
+    if !verify_marker_shape_and_data_tx(&mut tx, identity).await? {
         return Err(PushServiceAttachError::InvalidMarker);
     }
     verify_table(&mut tx, schema, &MARKER).await?;

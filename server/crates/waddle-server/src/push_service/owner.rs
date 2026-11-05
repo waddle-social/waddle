@@ -378,7 +378,7 @@ pub(super) async fn lock_existing_push_relations_tx(
         if !names.iter().any(|existing| existing == name) {
             continue;
         }
-        let quoted_name = crate::db::physical_attestation::quote_identifier(&name);
+        let quoted_name = crate::db::physical_attestation::quote_identifier(name);
         tx.execute(
             &format!("LOCK TABLE {quoted_schema}.{quoted_name} IN SHARE ROW EXCLUSIVE MODE"),
             (),
