@@ -159,7 +159,7 @@ const OWNER_MARKER_CONTRACT: TableContract = TableContract {
     indexes: &[],
 };
 
-const MANAGED_RELATIONS: &[&'static str] = &[
+const MANAGED_RELATIONS: &[&str] = &[
     OWNER_MARKER,
     "channel_space_links",
     "spaces_metadata",
@@ -862,7 +862,7 @@ pub(crate) async fn verify_attested_store(
         verify_contract_shape(&mut tx, schema, contract).await?;
     }
     verify_owner_relation_ownership(&mut tx, schema).await?;
-    verify_marker(&mut tx, schema, &identity).await?;
+    verify_marker(&mut tx, schema, identity).await?;
     verify_marker_acl(&mut tx, schema).await?;
     verify_runtime_acl(&mut tx, schema, SPACES_METADATA_CONTRACT.name).await?;
     verify_runtime_acl(&mut tx, schema, CHANNEL_SPACE_LINK_CONTRACT.name).await?;
