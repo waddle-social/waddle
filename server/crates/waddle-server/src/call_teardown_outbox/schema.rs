@@ -1,7 +1,11 @@
 use super::CallTeardownOutboxError;
+use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
 use crate::db::ConnectionGuard;
 use crate::db::Database;
 use crate::db::DatabaseDriver;
+use crate::db::Transaction;
+
+const OWNER_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_997;
 
 pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxError> {
     let timestamp_type = crate::db::i64_sql_type(db.driver());
@@ -35,6 +39,133 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
             (),
         )
         .await?;
+    Ok(())
+}
+
+/// Prepare the current outbox contract in one transaction, bound to the
+/// trusted owner and the supplied physical database/schema identity. The
+/// existing legacy initializer remains available for SQLite and raw owner
+/// connections that predate the restricted startup path.
+pub(super) async fn initialize_owner(
+    db: &Database,
+    identity: &PgIdentity,
+) -> Result<(), CallTeardownOutboxError> {
+    if db.driver() != DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+        return Err(CallTeardownOutboxError::OwnerPreparationRequired);
+    }
+
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![OWNER_SCHEMA_ADVISORY_LOCK_KEY],
+    )
+    .await?;
+    pin_owner_schema(&mut tx, identity).await?;
+
+    tx.execute(
+        &table_sql("call_teardown_outbox", crate::db::i64_sql_type(db.driver())),
+        (),
+    )
+    .await?;
+    for column in [
+        "producing_node",
+        "session_binding",
+        "occupant",
+        "unbound_occupant",
+    ] {
+        tx.execute(
+            &format!(
+                "ALTER TABLE call_teardown_outbox ADD COLUMN IF NOT EXISTS \
+                 {column} TEXT NULL CHECK ({column} IS NULL OR {column} <> '')"
+            ),
+            (),
+        )
+        .await?;
+    }
+    upgrade_retirement_action_postgres(&mut tx).await?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \
+         ON call_teardown_outbox (status, next_attempt_at_ms, created_at_ms)",
+        (),
+    )
+    .await?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_dedupe \
+         ON call_teardown_outbox (status, call_id, action)",
+        (),
+    )
+    .await?;
+    super::runtime_attach::verify_owner_shape(
+        &mut tx,
+        &identity.schema.name.0,
+        i64::from(identity.schema.oid),
+    )
+    .await
+    .map_err(CallTeardownOutboxError::OwnerSchemaShape)?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn pin_owner_schema(
+    tx: &mut Transaction<'_>,
+    identity: &PgIdentity,
+) -> Result<(), CallTeardownOutboxError> {
+    let schema = &identity.schema.name.0;
+    crate::db::physical_attestation::validate_identifier(schema, "call teardown owner schema")
+        .map_err(|_| CallTeardownOutboxError::UnsafeOwnerBoundary)?;
+    let mut rows = tx
+        .query(
+            "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+             db.oid::bigint, db.datname::text, n.oid::bigint, n.nspname::text, \
+             n.nspname = pg_catalog.current_schema() \
+             AND COALESCE((pg_catalog.current_schemas(false))[1]::text, '') = n.nspname \
+             AND pg_catalog.cardinality(pg_catalog.current_schemas(false)) <= 2 \
+             AND (pg_catalog.cardinality(pg_catalog.current_schemas(false)) = 1 \
+               OR pg_catalog.left((pg_catalog.current_schemas(false))[2]::text, 8) = 'pg_temp_') \
+             AND owner.rolname = current_user AND NOT owner.rolcanlogin \
+             AND NOT owner.rolsuper AND NOT owner.rolcreatedb \
+             AND NOT owner.rolcreaterole AND NOT owner.rolreplication \
+             AND NOT owner.rolbypassrls AND owner.oid <> db.datdba \
+             AND NOT pg_catalog.has_database_privilege(owner.oid, db.oid, 'TEMP') \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
+                 COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a \
+                 WHERE a.grantee = 0 OR (a.grantee <> n.nspowner \
+                   AND (a.privilege_type <> 'USAGE' OR a.is_grantable))) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                             WHERE c.relnamespace = pg_catalog.pg_my_temp_schema()) \
+             FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
+             JOIN pg_catalog.pg_database db ON db.datname = pg_catalog.current_database() \
+             WHERE n.nspname = ?",
+            crate::db_params![schema],
+        )
+        .await?;
+    let valid = match rows.next().await? {
+        Some(row) => {
+            let system: String = row.get(0)?;
+            system.parse::<PgSystemIdentifier>().ok() == Some(identity.system_identifier)
+                && row.get::<i64>(1)? == i64::from(identity.database.oid)
+                && row.get::<String>(2)? == identity.database.name.0
+                && row.get::<i64>(3)? == i64::from(identity.schema.oid)
+                && row.get::<String>(4)? == *schema
+                && row.get::<bool>(5)?
+        }
+        None => false,
+    };
+    if !valid {
+        return Err(CallTeardownOutboxError::UnsafeOwnerBoundary);
+    }
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    tx.query(
+        "SELECT pg_catalog.set_config('search_path', ?, true)",
+        crate::db_params![format!("{quoted_schema}, pg_temp")],
+    )
+    .await?;
     Ok(())
 }
 
@@ -203,62 +334,67 @@ async fn upgrade_retirement_action(db: &Database) -> Result<(), CallTeardownOutb
             }
         }
         DatabaseDriver::Postgres => {
-            // Serialize startup upgrades before inspecting/dropping constraints.
-            transaction
-                .execute(
-                    "LOCK TABLE call_teardown_outbox IN ACCESS EXCLUSIVE MODE",
-                    (),
-                )
-                .await?;
-            let mut rows = transaction
-                .query(
-                    "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint \
-                 WHERE conrelid = 'call_teardown_outbox'::regclass AND contype = 'c'",
-                    (),
-                )
-                .await?;
-            let mut constraints = Vec::new();
-            let mut current_constraints = 0;
-            while let Some(row) = rows.next().await? {
-                let name: String = row.get(0)?;
-                let definition: String = row.get(1)?;
-                if definition.contains("'remove_participant'") {
-                    if definition.contains("'retire_displaced_participant'")
-                        && definition.contains("'muji_presence_clear_only'")
-                        && (!definition.contains("identity")
-                            || definition.contains("occupant IS NOT NULL"))
-                    {
-                        current_constraints += 1;
-                    }
-                    constraints.push(name);
-                }
-            }
-            drop(rows);
-            if current_constraints != 2 || constraints.len() != 2 {
-                for name in constraints {
-                    let quoted = name.replace('"', "\"\"");
-                    transaction
-                        .execute(
-                            &format!(
-                                "ALTER TABLE call_teardown_outbox DROP CONSTRAINT \"{quoted}\""
-                            ),
-                            (),
-                        )
-                        .await?;
-                }
-                transaction
-                    .execute(
-                        &format!(
-                            "ALTER TABLE call_teardown_outbox \
-                     ADD CONSTRAINT call_teardown_outbox_action_check CHECK ({ACTION_CHECK}), \
-                     ADD CONSTRAINT call_teardown_outbox_target_check CHECK ({TARGET_CHECK})"
-                        ),
-                        (),
-                    )
-                    .await?;
-            }
+            upgrade_retirement_action_postgres(&mut transaction).await?;
         }
     }
     transaction.commit().await?;
+    Ok(())
+}
+
+async fn upgrade_retirement_action_postgres(
+    transaction: &mut Transaction<'_>,
+) -> Result<(), CallTeardownOutboxError> {
+    // Serialize startup upgrades before inspecting/dropping constraints.
+    transaction
+        .execute(
+            "LOCK TABLE call_teardown_outbox IN ACCESS EXCLUSIVE MODE",
+            (),
+        )
+        .await?;
+    let mut rows = transaction
+        .query(
+            "SELECT conname, pg_catalog.pg_get_constraintdef(oid) \
+             FROM pg_catalog.pg_constraint \
+             WHERE conrelid = 'call_teardown_outbox'::regclass AND contype = 'c'",
+            (),
+        )
+        .await?;
+    let mut constraints = Vec::new();
+    let mut current_constraints = 0;
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(0)?;
+        let definition: String = row.get(1)?;
+        if definition.contains("'remove_participant'") {
+            if definition.contains("'retire_displaced_participant'")
+                && definition.contains("'muji_presence_clear_only'")
+                && (!definition.contains("identity") || definition.contains("occupant IS NOT NULL"))
+            {
+                current_constraints += 1;
+            }
+            constraints.push(name);
+        }
+    }
+    drop(rows);
+    if current_constraints != 2 || constraints.len() != 2 {
+        for name in constraints {
+            let quoted = name.replace('"', "\"\"");
+            transaction
+                .execute(
+                    &format!("ALTER TABLE call_teardown_outbox DROP CONSTRAINT \"{quoted}\""),
+                    (),
+                )
+                .await?;
+        }
+        transaction
+            .execute(
+                &format!(
+                    "ALTER TABLE call_teardown_outbox \
+                     ADD CONSTRAINT call_teardown_outbox_action_check CHECK ({ACTION_CHECK}), \
+                     ADD CONSTRAINT call_teardown_outbox_target_check CHECK ({TARGET_CHECK})"
+                ),
+                (),
+            )
+            .await?;
+    }
     Ok(())
 }

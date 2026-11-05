@@ -361,6 +361,16 @@ pub struct CallTeardownQueueStats {
 
 #[derive(Debug, Error)]
 pub enum CallTeardownOutboxError {
+    #[error(
+        "call teardown owner schema preparation requires a trusted PostgreSQL owner connection"
+    )]
+    OwnerPreparationRequired,
+    #[error("call teardown owner schema identity or privileges are unsafe")]
+    UnsafeOwnerBoundary,
+    #[error("call teardown owner-prepared schema does not meet the current contract: {0}")]
+    OwnerSchemaShape(#[source] super::CallTeardownRuntimeAttachError),
+    #[error(transparent)]
+    RuntimeAttach(#[from] super::CallTeardownRuntimeAttachError),
     #[error(transparent)]
     Database(#[from] DatabaseError),
     #[error(transparent)]

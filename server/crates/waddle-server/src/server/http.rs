@@ -899,13 +899,19 @@ async fn create_websocket_state(
                 waddle_xmpp::ownership::NodeIdentity::local(),
             )
         });
+    let call_teardown_db = state.db_pool.global().clone();
     let call_teardown_outbox = Arc::new(
-        CallTeardownOutboxStore::new_with_node_identity(
-            state.db_pool.global().clone(),
-            call_teardown_node_identity,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to initialize call teardown outbox: {error}"))?,
+        if call_teardown_db.uses_attested_postgres_pool() {
+            CallTeardownOutboxStore::attach_existing(call_teardown_db, call_teardown_node_identity)
+                .await
+        } else {
+            CallTeardownOutboxStore::new_with_node_identity(
+                call_teardown_db,
+                call_teardown_node_identity,
+            )
+            .await
+        }
+        .map_err(|error| anyhow::anyhow!("failed to open call teardown outbox: {error}"))?,
     );
     let call_teardown_persistence = CallTeardownPersistenceSupervisor::new(
         Arc::clone(&call_teardown_outbox),

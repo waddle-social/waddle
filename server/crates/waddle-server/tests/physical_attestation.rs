@@ -6627,3 +6627,7 @@ mod inbox_startup;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/mam_read.rs"]
 mod mam_read;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/call_teardown_attach.rs"]
+mod call_teardown_attach;
