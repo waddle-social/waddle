@@ -224,14 +224,24 @@ impl Fixture {
         .await?;
         let runtime_options = PgConnectOptions::from_str(&boundary_url)?.username(&self.runtime);
         let attested = attested_pool(
-            runtime_options,
-            attestation_config,
+            runtime_options.clone(),
+            attestation_config.clone(),
             1,
             Duration::from_secs(3),
         )?;
         let runtime_database = crate::test_support::database_from_attested_postgres_pool(
             "push-service runtime",
             attested,
+        );
+        let second_attested = attested_pool(
+            runtime_options,
+            attestation_config,
+            1,
+            Duration::from_secs(3),
+        )?;
+        let second_runtime_database = crate::test_support::database_from_attested_postgres_pool(
+            "second push-service runtime",
+            second_attested,
         );
 
         DatabasePushServiceStore::initialize_owner(&owner_database, &identity).await?;
@@ -300,11 +310,18 @@ impl Fixture {
             Ok(()) => bail!("attested runtime handle performed owner initialization"),
         }
 
-        let store = DatabasePushServiceStore::attach_existing_without_pubsub(
-            runtime_database.clone(),
-            &secret,
-        )
-        .await?;
+        // Two independently attested nodes may start together. Both must
+        // attach even though their catalog checks take conflicting SUE locks.
+        let (store, _) = tokio::try_join!(
+            DatabasePushServiceStore::attach_existing_without_pubsub(
+                runtime_database.clone(),
+                &secret,
+            ),
+            DatabasePushServiceStore::attach_existing_without_pubsub(
+                second_runtime_database,
+                &secret,
+            ),
+        )?;
         let owner: jid::BareJid = "alice@example.net".parse()?;
         let node = store
             .ensure_node(&owner, "push-service-attach-test")

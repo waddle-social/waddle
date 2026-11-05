@@ -83,6 +83,8 @@ pub(crate) use http::{create_ingress_inbox_storage, InboxStartup};
 use lifecycle::bootstrap_and_register_store_lineage;
 use lifecycle::bootstrap_mam_lineage;
 pub(crate) use lifecycle::bootstrap_store_lineage;
+#[cfg(feature = "test-support")]
+pub use lifecycle::create_pubsub_storage;
 #[cfg(test)]
 pub(crate) use lifecycle::create_space_stores;
 #[cfg(feature = "test-support")]

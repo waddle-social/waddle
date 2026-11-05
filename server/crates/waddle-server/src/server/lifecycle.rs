@@ -184,11 +184,8 @@ pub async fn start_with_config(
     // `DatabasePubSubStorage` handle is also passed onward into the
     // HTTP server so the notification-settings projection can read the
     // same database without re-opening it.
-    let pubsub_database_storage = crate::pubsub::build_database_pubsub_storage(
-        xmpp_config.pubsub_database_url.clone_resolved_url(),
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
+    let (pubsub_database_storage, pubsub_attached_global) =
+        create_pubsub_storage(db_pool.global(), &xmpp_config.pubsub_database_url).await?;
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         pubsub_database_storage.clone();
     // #807: spawn the registry behind the instrumented, explicitly-bounded
@@ -364,12 +361,19 @@ pub async fn start_with_config(
         )
         .await?;
     }
-    bootstrap_and_register_store_lineage(
-        &state,
-        crate::db::lineage::DurableStore::Pubsub,
-        pubsub_database_storage.database(),
-    )
-    .await?;
+    if pubsub_attached_global {
+        state.register_lineage_alias(
+            crate::db::lineage::DurableStore::Pubsub,
+            crate::db::lineage::DurableStore::Global,
+        );
+    } else {
+        bootstrap_and_register_store_lineage(
+            &state,
+            crate::db::lineage::DurableStore::Pubsub,
+            pubsub_database_storage.database(),
+        )
+        .await?;
+    }
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
     // the clustering global database and enable fenced groupchat-archive
     // writes when clustering is live, mirroring the
@@ -493,6 +497,29 @@ pub async fn start_with_config(
             "critical actor service terminated; node fenced and drained: {failure:?}"
         )),
         None => result.map(|()| metrics_flush),
+    }
+}
+
+/// Preserve the configured location's provenance before constructing PubSub.
+/// Restricted runtime attachment must share the exact attested main pool;
+/// opening an equal-looking URL would create another authority domain.
+pub async fn create_pubsub_storage(
+    global: &crate::db::Database,
+    location: &ResolvedXmppDatabaseUrl,
+) -> Result<(Arc<crate::pubsub::DatabasePubSubStorage>, bool)> {
+    if global.uses_attested_postgres_pool() {
+        if !matches!(location, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+            anyhow::bail!("restricted PubSub storage must inherit the global database location");
+        }
+        let storage = crate::pubsub::DatabasePubSubStorage::attach_existing(global.clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to attach PubSub storage: {error}"))?;
+        Ok((Arc::new(storage), true))
+    } else {
+        let storage = crate::pubsub::build_database_pubsub_storage(location.clone_resolved_url())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to initialize PubSub storage: {error}"))?;
+        Ok((storage, false))
     }
 }
 

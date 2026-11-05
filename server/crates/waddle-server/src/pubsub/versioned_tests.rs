@@ -222,6 +222,78 @@ async fn versioned_push_pubsub_sqlite_orders_concurrent_retries_and_tombstones()
 }
 
 #[tokio::test]
+async fn sqlite_schema_reset_drops_push_watermark_with_backing_item() {
+    let storage = DatabasePubSubStorage::open(None).await.expect("storage");
+    let service: BareJid = "push@example.com".parse().expect("service");
+    let publisher: BareJid = "alice@example.com".parse().expect("publisher");
+    let node = PublicationNode::try_new("reset-watermark").expect("node");
+    let push_item = item("payload", "reset-item");
+    let version = PublicationVersion::try_new(1, uuid::Uuid::new_v4()).expect("version");
+    storage
+        .get_or_create_node(&service, node.as_str())
+        .await
+        .expect("node");
+    storage
+        .publish_push_item_versioned(&service, &publisher, &node, &push_item, version)
+        .await
+        .expect("publish");
+    assert_eq!(storage.row_count("pubsub_items").await.expect("items"), 1);
+    assert_eq!(
+        storage
+            .row_count("pubsub_push_publications")
+            .await
+            .expect("watermarks"),
+        1
+    );
+
+    storage
+        .execute(
+            "UPDATE pubsub_schema_version SET version = ?",
+            crate::db_params![7],
+        )
+        .await
+        .expect("simulate an older schema");
+    storage
+        .initialize()
+        .await
+        .expect("reset empty-versioned store");
+
+    assert_eq!(storage.row_count("pubsub_items").await.expect("items"), 0);
+    assert_eq!(
+        storage
+            .row_count("pubsub_push_publications")
+            .await
+            .expect("watermarks"),
+        0
+    );
+    storage
+        .get_or_create_node(&service, node.as_str())
+        .await
+        .expect("recreate push node after reset");
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(&service, &publisher, &node, &push_item, version)
+            .await
+            .expect("replay the same publication after reset"),
+        VersionedPublishResult::Applied(_)
+    ));
+    assert_eq!(storage.row_count("pubsub_items").await.expect("items"), 1);
+    assert_eq!(
+        storage
+            .row_count("pubsub_push_publications")
+            .await
+            .expect("watermarks"),
+        1
+    );
+    let mut rows = storage
+        .query("SELECT version FROM pubsub_schema_version", ())
+        .await
+        .expect("schema version");
+    let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(version, 8);
+}
+
+#[tokio::test]
 async fn versioned_push_pubsub_postgres_orders_concurrent_retries_and_tombstones() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;

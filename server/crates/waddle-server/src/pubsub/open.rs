@@ -50,6 +50,9 @@ impl DatabasePubSubStorage {
 
     /// Attach the exact attested PostgreSQL main-lane database after a
     /// bounded read-only verification. This never initializes or repairs it.
+    /// A trusted bootstrap must grant EXECUTE on the owner-created attach-lock
+    /// function only to the attested runtime role; PgIdentity does not carry a
+    /// runtime role name, so owner preparation deliberately does not infer it.
     /// The application is trusted to issue its normal DML: table grants alone
     /// cannot prevent arbitrary SQL from choosing identity values or changing
     /// projection counters. Old writers and privileged DDL must remain fenced.
