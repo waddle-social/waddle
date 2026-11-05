@@ -1,9 +1,10 @@
-//! Dark MAM adapters bound to an attested PostgreSQL database.
+//! MAM adapters on the admitted PostgreSQL main database.
 //!
-//! `DarkMamReader` provides read-only snapshots, while `DatabaseMamStorage`
-//! implements `MamStorage` on the same admitted main-database transactions.
-//! Neither adapter is wired into startup or protocol routing. Trusted writers,
-//! owner DDL, role membership, and ACL changes must be quiescent while attached.
+//! `DarkMamReader` provides read-only attested snapshots. `DatabaseMamStorage`
+//! implements `MamStorage` with separate attested and legacy owner attachments.
+//! The owner attachment serves through the shared main pool without claiming
+//! restricted authority. Trusted writers, owner DDL, role membership, and ACL
+//! changes must remain quiescent for the dark attested attachment.
 
 use crate::db::physical_attestation::{
     quote_identifier, AttestedPostgresWriterCapability, PgRoleName,

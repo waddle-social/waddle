@@ -1031,6 +1031,7 @@ async fn test_app_for_state(state: Arc<AppState>) -> Router {
         xmpp_config: test_xmpp_config(),
         mam_storage,
         pubsub_database_storage,
+        owner_outbox: None,
         acme_http01_challenge_service: None,
         shutdown_handle: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
             .handle(),

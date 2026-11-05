@@ -37,6 +37,8 @@ pub enum IngressStartupError {
     Pool(#[source] DatabaseError),
     #[error("an attested PostgreSQL ingress lane is required for this constructor")]
     AttestedIngressPoolRequired,
+    #[error("an owner PostgreSQL ingress lane is required for this constructor")]
+    OwnerSharedIngressPoolRequired,
     #[error(transparent)]
     UnitOfWork(#[from] IngressUowError),
 }
@@ -163,6 +165,9 @@ impl IngressAuthority {
         if database.attested_pg_writer_capability().is_some() {
             return Err(IngressStartupError::AttestedIngressPoolRequired);
         }
+        if database.ingress_pool_size().is_some() {
+            return Err(IngressStartupError::OwnerSharedIngressPoolRequired);
+        }
         // SQLite is a single-writer database: the authority shares the global
         // handle (which also keeps a private in-memory database reachable).
         // PostgreSQL gets a dedicated, bounded pool so ingress transactions
@@ -205,6 +210,32 @@ impl IngressAuthority {
             || database.attested_pg_writer_capability().is_none()
         {
             return Err(IngressStartupError::AttestedIngressPoolRequired);
+        }
+        Self::finish_startup(
+            config,
+            database,
+            lineage,
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await
+    }
+
+    /// Bind ordinary owner startup to the reserved ingress lane of its one
+    /// physical main pool. This makes no restricted-role or epoch claim.
+    pub async fn try_new_with_owner_shared_database(
+        config: IngressConfig,
+        database: Database,
+        lineage: LineageConfig,
+        #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
+    ) -> Result<Self, IngressStartupError> {
+        config.validate()?;
+        if database.driver() != DatabaseDriver::Postgres
+            || !database.is_ingress_lane()
+            || database.ingress_pool_size() != Some(config.pool_size)
+            || database.attested_pg_writer_capability().is_some()
+        {
+            return Err(IngressStartupError::OwnerSharedIngressPoolRequired);
         }
         Self::finish_startup(
             config,

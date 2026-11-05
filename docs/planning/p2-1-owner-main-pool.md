@@ -18,19 +18,27 @@ Rust paths below are under `server/crates/waddle-server/src/` unless specified.
    owner mutation. Reject zero, overflow and capacity violations.
    Do not hand an unlaned clone to an actor or serving store. Retain the
    separately budgeted control-plane pool and the existing SQLite path.
-2. Prepare MAM on an owned session before sealing the lanes. The existing
-   `SqlxMamStorage::bootstrap_postgres_schema_on_owned_connection` is usable
-   only after a verified physical identity, owner role, lineage and complete
-   migration ledger have been established on that session, with lineage then
-   ledger session locks held before MAM takes its own lock. A completed
-   `bootstrap_global_owner` call does **not** retain those locks. Build this
-   private pre-lane gate with independently trusted inputs, or use the
-   existing `bootstrap_dark_postgres_mam_owner` protocol on a temporary
-   privileged session that closes before serving; never call the
-   connection bootstrap directly after global migrations. Its autocommit DDL
-   can leave a partial or unknown outcome. On error or cancellation discard
-   the owned session and fail startup; any retry needs backend fencing and
-   catalog/counter reconciliation, not an automatic replay.
+2. Prepare legacy owner MAM on an owned session before sealing the lanes.
+   `SqlxMamStorage::open` currently creates a separate ten-connection pool and
+   runs `bootstrap_postgres_connection(conn, None)` under its MAM advisory lock.
+   Expose that exact legacy operation through a clearly named consuming
+   connection API and call it using the unlaned main pool's detached startup
+   session. Before sealing, run the existing legacy Push Service schema
+   initializer followed by notification outbox preparation on that same pool:
+   outbox ancestry adoption consults Push Service publish jobs. Drop both
+   temporary unlaned store handles. Serving startup then attaches the outbox
+   to the sealed main lane without rerunning its detached-session initializer.
+   MAM discards its owned session on error or cancellation; the outbox
+   initializer closes its detached gate session on completion or error.
+   Preparation must fail this startup attempt on error. A supervisor restart
+   can re-enter these legacy initializers;
+   ambiguous DDL requires operator reconciliation. This path makes
+   **no** independently attested identity or owner/runtime role claim. The
+   separate dark `bootstrap_postgres_schema_on_owned_connection` remains
+   gated: it requires verified physical identity, owner role, lineage and
+   complete ledger on one session, with lineage then ledger session locks held
+   before MAM's lock. A completed `bootstrap_global_owner` does **not** retain
+   those locks; never call the dark initializer directly after it.
 3. In `mam_runtime/database_storage.rs`, add an explicitly owner-only
    `MamStorage` attachment over the sealed `Database` main lane. Keep the
    existing attested attachment and its capability checks strict. Reject an
@@ -72,37 +80,50 @@ Rust paths below are under `server/crates/waddle-server/src/` unless specified.
   room-effect, Push, notification and clustered SM paths remain separate
   blockers. The owner login is not a restricted authority. Do not edit CI,
   workflow files, deployment configuration or XMPP wire behavior in this PR.
-- **Implementation gate:** do not cut over owner MAM startup until the trusted
-  bootstrap inputs and held-lock proof in step 2 are available. If they are
-  absent, stop the affected serving conversion; a schema snapshot or completed
-  global migration is insufficient evidence for the dark initializer.
+- **Implementation gate:** the owner path may use only the legacy-equivalent
+  initializer in step 2. Any use of the dark initializer still requires its
+  independently trusted inputs and held-lock proof. Neither path may silently
+  substitute for the other after an error.
 
-## Acceptance evidence
+## This PR's acceptance evidence
 
-- PostgreSQL startup with inherited locations serves through one exact main
-  backend plus its reserved ingress lane, with no serving child-pool DSN
-  reconnect. Wrong/explicit store locations fail before mutation. Check the
-  configured physical maximum and separate control-plane capacity.
-- Exercise a `main=1`, `ingress=1` fixture: hold the main permit while a
-  direct ingress archive/receipt transaction commits, and hold the ingress
-  permit while a standalone MAM operation completes. Prove the ingress path
-  does not request a main-lane permit, and standalone MAM does not request an
-  ingress permit. Assert bounded timeout behavior when each lane is full.
-- For direct and recovery paths, prove archive and receipt visibility only
-  after the same commit, rollback of both on failure, and authoritative
-  readback after an indeterminate commit. Cover inbox, SM and pending writes
-  in the same transaction where their contracts require it. Check clustered
-  MAM fencing and lock order under concurrent writers.
-- Verify owner MAM preparation and attachment across fresh, already prepared,
-  malformed and wrong-owner schemas; test cancellation/unknown completion as
-  a startup failure without automatic retry. Verify the attested constructor
-  still refuses the owner-only path and restricted startup still fails before
-  listeners.
-- SQLite in-memory and file-backed startup retain the same pool and their
-  current transactional behavior. Reverting the implementation can restore
-  the former owner startup path; a failed startup must not silently fall back
-  to a different pool within one process.
+- PostgreSQL owner bootstrap with inherited locations prepares MAM, Push and
+  outbox on the one pre-lane main pool, then seals it at the checked
+  `main + ingress` physical maximum. A prepared outbox token binds the
+  sealed serving handle to that exact pool. A retained unlaned clone or the
+  tested malformed candidate view fails startup. This legacy initializer
+  does not attest every preexisting outbox column type.
+- At `main=1`, `ingress=1`, hold each lane while the other checks out,
+  verify bounded saturation waits and a standalone MAM read on the main lane.
+  Inspect serving call sites for child DSN reopens and nested checkout.
+- Explicit store overrides fail before PostgreSQL owner mutation. Owner
+  preparation cancellation releases its detached session and unlaned clones.
+  Restricted startup still fails before listeners.
+- Run focused PostgreSQL and SQLite regressions, formatting, scoped Clippy
+  and an independent final diff review. The SQLite startup path remains the
+  existing path.
 
-Code review and targeted PostgreSQL/SQLite tests establish this serving-path
-slice only. They do not establish runtime role isolation, epoch activation,
-old-writer fencing or production behavior.
+## Verification completed
+
+- PostgreSQL 17 shared-owner integration: 4 passed, including lane isolation,
+  sealed outbox read/prune, malformed candidate-view rejection, and an
+  explicit override rejected before `_lineage` mutation.
+- PostgreSQL 17 outbox cancellation regression: 1 passed. SQLite in-memory
+  pool regression: 1 passed.
+- Library and binary `cargo check`, `cargo fmt --all -- --check`, and
+  `git diff --check` passed. Scoped library/binary Clippy with all features
+  passed using `-D warnings -A unused_imports -A dead_code` for existing
+  unrelated unused/dead-code warnings; no source lint suppression was added.
+- Independent read-only architecture and source reviews found no blocking
+  regression. The final representation-only box change was reviewed by the
+  integration owner. CI and production startup were not exercised.
+
+## Remaining #2116 qualification
+
+Direct and recovery archive/receipt atomicity, indeterminate-commit readback,
+inbox/SM/pending write coherence, clustered MAM fencing under concurrent
+writers, wrong-owner and unknown-completion migration cases, full SQLite
+in-memory/file startup, runtime role isolation, epoch activation, old-writer
+fencing and production behavior remain separate gates. Reverting this PR
+restores the former owner startup path; this PR must never silently fall back
+to a second pool within one process.

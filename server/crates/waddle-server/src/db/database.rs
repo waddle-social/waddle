@@ -17,6 +17,7 @@ use super::{connect_backend, DatabaseBackend};
 use super::{debug, info, instrument};
 use super::{ConnectionGuard, DatabaseDriver, Transaction};
 use super::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 /// Database-specific errors.
@@ -91,6 +92,16 @@ pub enum DatabaseError {
         "attested PostgreSQL pool has capacity {actual}, but its lane budgets require {expected}"
     )]
     AttestedPoolLaneCapacityMismatch { expected: u32, actual: u32 },
+
+    #[error(
+        "owner PostgreSQL pool has capacity {actual}, but its lane budgets require {expected}"
+    )]
+    OwnerPoolLaneCapacityMismatch { expected: u32, actual: u32 },
+
+    #[error("owner PostgreSQL ingress lanes require an unsealed non-attested main pool")]
+    OwnerPoolLaneUnavailable,
+    #[error("owner PostgreSQL pool has an unsealed handle clone")]
+    OwnerPoolUnsealedClone,
 }
 
 /// Default main-pool connection cap, preserving the behavior that was
@@ -221,6 +232,9 @@ pub struct Database {
     /// Present only when the exact hook-bearing pool and its unforgeable
     /// writer capability were consumed together.
     pub(in crate::db) attested_pg_writer: Option<AttestedPostgresWriterCapability>,
+    /// Tracks clones of a URL-opened owner handle until lane sealing. The
+    /// weak identity also binds pre-lane preparation to the sealed pool.
+    owner_startup_identity: Option<Arc<()>>,
 }
 
 impl Database {
@@ -278,6 +292,7 @@ impl Database {
                 "sqlite:external-pool".to_string()
             },
             attested_pg_writer: None,
+            owner_startup_identity: None,
         }
     }
 
@@ -297,6 +312,7 @@ impl Database {
             driver: DatabaseDriver::Postgres,
             database_url: "postgres:external-pool".to_string(),
             attested_pg_writer: None,
+            owner_startup_identity: None,
         }
     }
 
@@ -429,6 +445,7 @@ impl Database {
             // future consumer misclassifies this marker.
             database_url: "postgres://[attested-pool?mode=memory".to_owned(),
             attested_pg_writer: Some(attested_pg_writer),
+            owner_startup_identity: None,
         })
     }
 
@@ -627,6 +644,8 @@ impl Database {
             driver: config.driver,
             database_url: config.database_url.clone(),
             attested_pg_writer: None,
+            owner_startup_identity: (config.driver == DatabaseDriver::Postgres)
+                .then(|| Arc::new(())),
         })
     }
 
@@ -640,6 +659,57 @@ impl Database {
         let mut ingress = self.clone();
         ingress.admission = admission.clone();
         ingress
+    }
+
+    /// Seal the bootstrapped owner pool into disjoint admission lanes. The
+    /// caller must own this handle before any actor or store receives a clone.
+    pub(crate) fn seal_owner_postgres_lanes(
+        mut self,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        if main_budget == 0 {
+            return Err(DatabaseError::PoolSizeZero { which: "main" });
+        }
+        if ingress_budget == 0 {
+            return Err(DatabaseError::PoolSizeZero { which: "ingress" });
+        }
+        let expected = main_budget
+            .checked_add(ingress_budget)
+            .ok_or(DatabaseError::PoolSizeOverflow)?;
+        if self.driver != DatabaseDriver::Postgres
+            || self.attested_pg_writer.is_some()
+            || self.ingress_admission.is_some()
+            || !self.is_main_lane()
+        {
+            return Err(DatabaseError::OwnerPoolLaneUnavailable);
+        }
+        if self
+            .owner_startup_identity
+            .as_ref()
+            .is_none_or(|identity| Arc::strong_count(identity) != 1)
+        {
+            return Err(DatabaseError::OwnerPoolUnsealedClone);
+        }
+        let DatabaseBackend::Postgres(pool) = &self.backend else {
+            return Err(DatabaseError::OwnerPoolLaneUnavailable);
+        };
+        let actual = pool.options().get_max_connections();
+        if actual != expected {
+            return Err(DatabaseError::OwnerPoolLaneCapacityMismatch { expected, actual });
+        }
+        let acquire_timeout = pool.options().get_acquire_timeout();
+        self.admission = PoolAdmission::new(main_budget, acquire_timeout, PoolLane::Main);
+        self.ingress_admission = Some(PoolAdmission::new(
+            ingress_budget,
+            acquire_timeout,
+            PoolLane::Ingress,
+        ));
+        Ok(self)
+    }
+
+    pub(crate) fn owner_startup_identity(&self) -> Option<Weak<()>> {
+        self.owner_startup_identity.as_ref().map(Arc::downgrade)
     }
 
     pub(crate) fn is_ingress_lane(&self) -> bool {
