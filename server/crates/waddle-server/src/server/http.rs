@@ -1479,6 +1479,8 @@ async fn create_websocket_state(
     let provider_dispatch_tasks = ProviderDispatchTracker::new();
     let ingress = open_ingress_authority(server_config, &state).await?;
     let websocket_state = Arc::new(WebSocketState {
+        #[cfg(feature = "test-support")]
+        sasl2_test_capability: false,
         deps: WebSocketDeps {
             app_state: state.clone(),
             auth_state: auth_state.clone(),

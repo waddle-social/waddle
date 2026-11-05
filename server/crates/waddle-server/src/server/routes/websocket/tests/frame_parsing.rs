@@ -595,6 +595,101 @@ async fn different_auth_mechanism_aborting_scram_records_scram_failure_metrics()
     );
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn malformed_sasl2_scram_response_records_one_failure_metric() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = super::create_test_websocket_state_with_extension_manager(
+        super::empty_extension_manager().await,
+        super::TestStateOverrides {
+            sasl2_test_capability: true,
+            ..super::TestStateOverrides::default()
+        },
+    )
+    .await;
+    register_test_native_user(&state, "alice", "correct horse battery staple").await;
+    let client_first = BASE64_STANDARD.encode("n,,n=alice,r=clientnonce");
+    let authenticate = element_to_xml(
+        Element::builder("authenticate", waddle_xmpp_core::xep0388::NS_SASL2)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
+            .append(
+                Element::builder("initial-response", waddle_xmpp_core::xep0388::NS_SASL2)
+                    .append(client_first)
+                    .build(),
+            )
+            .build(),
+    );
+    let mut conn = WsConnState::new();
+
+    let challenge =
+        handle_xmpp_frame(&authenticate, "example.com", state.as_ref(), &mut conn).await;
+    assert_eq!(challenge.len(), 1);
+    assert!(Element::from_str(&challenge[0])
+        .expect("challenge XML")
+        .is("challenge", waddle_xmpp_core::xep0388::NS_SASL2));
+
+    let failure = handle_xmpp_frame(
+        "<response xmlns='urn:xmpp:sasl:2'>!</response>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let failure = Element::from_str(&failure[0]).expect("failure XML");
+    assert!(failure.is("failure", waddle_xmpp_core::xep0388::NS_SASL2));
+    assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.auth.failures",
+            &[("stage", "scram"), ("error_code", "malformed")]
+        ),
+        Some(1),
+        "parse-error cleanup must record exactly one SCRAM failure"
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn typed_oversized_frame_closes_pending_sasl2_exchange() {
+    let state = crate::test_support::websocket_state_with_sasl2().await;
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::sasl2_oauth_error_pending();
+    let parsed = waddle_xmpp::protocol::frame::parse_frame_with_metadata(
+        "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='example.com' version='1.0'/>",
+    )
+    .expect("typed input parses before size is applied");
+    let domain: jid::BareJid = "example.com".parse().expect("XMPP domain");
+    let permit = state
+        .deps
+        .app_state
+        .node_lifecycle
+        .admit()
+        .expect("test node admits requests");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+
+    let responses = super::super::frame::handle_parsed_xmpp_frame_with_admission(
+        parsed,
+        &domain,
+        waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1,
+        state.as_ref(),
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await
+    .into_serialized_frames();
+
+    assert_eq!(responses.len(), 1);
+    let close = Element::from_str(&responses[0]).expect("stream close XML");
+    assert!(close.is("close", "urn:ietf:params:xml:ns:xmpp-framing"));
+    assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
+    assert!(!conn.phase.is_sasl2_oauth_error_pending());
+    assert!(conn.authenticated_session.is_none());
+}
+
 #[tokio::test]
 async fn websocket_resource_bind_returns_client_iq() {
     let state = create_test_websocket_state().await;

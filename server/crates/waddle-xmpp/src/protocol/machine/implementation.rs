@@ -267,6 +267,9 @@ impl XmppStateMachine {
             }
             InboundFrame::Auth { .. } => vec![],
             InboundFrame::SaslResponse(_) => vec![],
+            InboundFrame::Sasl2Authenticate(_)
+            | InboundFrame::Sasl2Response(_)
+            | InboundFrame::Sasl2Abort => vec![],
             InboundFrame::Stanza(stanza) => self.on_stanza(*stanza),
         }
     }
@@ -279,6 +282,7 @@ impl XmppStateMachine {
             ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
+            | ConnectionPhase::Sasl2OAuthErrorPending
             | ConnectionPhase::Authenticated { .. }
             | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {
@@ -370,6 +374,7 @@ impl XmppStateMachine {
             ConnectionPhase::Ready { full_jid, .. } => full_jid.clone(),
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
+            | ConnectionPhase::Sasl2OAuthErrorPending
             | ConnectionPhase::Authenticated { .. }
             | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {

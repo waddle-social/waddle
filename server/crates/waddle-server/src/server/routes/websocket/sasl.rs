@@ -5,18 +5,36 @@ use crate::server::routes::auth_telemetry::{
 use waddle_xmpp::auth::OAuthBearerParseError;
 use waddle_xmpp::telemetry::attributes::AuthStage;
 
-/// Count the failed attempt on `xmpp.auth.attempts` (#1320) and build
-/// the SASL failure frame. Every failure return in this module routes
-/// through here so early-step rejections (bad base64, unknown user,
-/// malformed first message) are not invisible to the counter.
-fn sasl_failure_counted(mechanism: &'static str) -> Element {
-    waddle_xmpp::metrics::record_auth_attempt(mechanism, false);
-    sasl_failure_element("not-authorized")
+fn oauth_failure(
+    sasl2: bool,
+    status: &'static str,
+    sasl1_condition: &'static str,
+    authenticated_session: &mut Option<Session>,
+    phase: &mut ConnectionPhase,
+) -> Vec<Element> {
+    waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", false);
+    *authenticated_session = None;
+    if sasl2 {
+        use waddle_xmpp_core::xep0388::{Sasl2Challenge, Sasl2Data};
+
+        *phase = ConnectionPhase::sasl2_oauth_error_pending();
+        let json = format!("{{\"status\":\"{status}\"}}");
+        vec![Sasl2Challenge {
+            data: Sasl2Data::new(json.into_bytes()),
+        }
+        .to_element()]
+    } else {
+        vec![sasl_failure_element(sasl1_condition)]
+    }
 }
 
-fn oauth_invalid_authzid() -> Element {
-    waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", false);
-    sasl_failure_element("invalid-authzid")
+fn oauth_status_for_session_validation_error(error: &crate::auth::AuthError) -> &'static str {
+    match error {
+        crate::auth::AuthError::SessionNotFound(_) | crate::auth::AuthError::SessionExpired => {
+            "invalid_token"
+        }
+        _ => "server_error",
+    }
 }
 
 fn scram_bare_identifier(username: &str, domain: &str) -> Option<BareJid> {
@@ -45,6 +63,7 @@ pub(super) async fn handle_sasl_oauthbearer(
     stream_from: Option<&BareJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
+    sasl2: bool,
 ) -> Vec<Element> {
     debug!("SASL OAUTHBEARER auth attempt");
 
@@ -52,7 +71,13 @@ pub(super) async fn handle_sasl_oauthbearer(
         Ok(data) => data,
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to decode base64 data");
-            return vec![sasl_failure_counted("OAUTHBEARER")];
+            return oauth_failure(
+                sasl2,
+                "invalid_request",
+                "not-authorized",
+                authenticated_session,
+                phase,
+            );
         }
     };
 
@@ -60,14 +85,32 @@ pub(super) async fn handle_sasl_oauthbearer(
         Ok(OAuthBearerResult::Credentials(credentials)) => credentials,
         Ok(OAuthBearerResult::DiscoveryRequest) => {
             warn!("SASL OAUTHBEARER: discovery request received on token-auth WebSocket path");
-            return vec![sasl_failure_counted("OAUTHBEARER")];
+            return oauth_failure(
+                sasl2,
+                "invalid_request",
+                "not-authorized",
+                authenticated_session,
+                phase,
+            );
         }
         Err(OAuthBearerParseError::InvalidAuthzid) => {
-            return vec![oauth_invalid_authzid()];
+            return oauth_failure(
+                sasl2,
+                "invalid_request",
+                "invalid-authzid",
+                authenticated_session,
+                phase,
+            );
         }
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to parse bearer data");
-            return vec![sasl_failure_counted("OAUTHBEARER")];
+            return oauth_failure(
+                sasl2,
+                "invalid_request",
+                "not-authorized",
+                authenticated_session,
+                phase,
+            );
         }
     };
 
@@ -81,7 +124,15 @@ pub(super) async fn handle_sasl_oauthbearer(
         Ok(session) => {
             let principal = match session.user_jid.parse::<BareJid>() {
                 Ok(principal) if principal.node().is_some() => principal,
-                _ => return vec![sasl_failure_counted("OAUTHBEARER")],
+                _ => {
+                    return oauth_failure(
+                        sasl2,
+                        "server_error",
+                        "not-authorized",
+                        authenticated_session,
+                        phase,
+                    )
+                }
             };
             let bare_jid_str =
                 match localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
@@ -93,34 +144,74 @@ pub(super) async fn handle_sasl_oauthbearer(
                             error = %e,
                             "SASL OAUTHBEARER: failed to build JID from session localpart",
                         );
-                        return vec![sasl_failure_counted("OAUTHBEARER")];
+                        return oauth_failure(
+                            sasl2,
+                            "server_error",
+                            "not-authorized",
+                            authenticated_session,
+                            phase,
+                        );
                     }
                 };
 
             let derived = match bare_jid_str.parse::<BareJid>() {
                 Ok(derived) => derived,
-                Err(_) => return vec![sasl_failure_counted("OAUTHBEARER")],
+                Err(_) => {
+                    return oauth_failure(
+                        sasl2,
+                        "server_error",
+                        "not-authorized",
+                        authenticated_session,
+                        phase,
+                    )
+                }
             };
             if derived != principal {
-                return vec![sasl_failure_counted("OAUTHBEARER")];
+                return oauth_failure(
+                    sasl2,
+                    "server_error",
+                    "not-authorized",
+                    authenticated_session,
+                    phase,
+                );
             }
             if credentials
                 .authzid
                 .as_ref()
                 .is_some_and(|authzid| authzid != &principal)
             {
-                return vec![oauth_invalid_authzid()];
+                return oauth_failure(
+                    sasl2,
+                    "invalid_request",
+                    "invalid-authzid",
+                    authenticated_session,
+                    phase,
+                );
             }
             if stream_from.is_some_and(|from| from != &principal) {
-                *phase = ConnectionPhase::closing(None);
-                return vec![sasl_failure_counted("OAUTHBEARER")];
+                if !sasl2 {
+                    *phase = ConnectionPhase::closing(None);
+                }
+                return oauth_failure(
+                    sasl2,
+                    "invalid_request",
+                    "not-authorized",
+                    authenticated_session,
+                    phase,
+                );
             }
 
             let full_jid = match principal.with_resource_str("pending") {
                 Ok(jid) => jid,
                 Err(e) => {
                     warn!(jid = %bare_jid_str, error = %e, "SASL OAUTHBEARER: JID construction failed");
-                    return vec![sasl_failure_counted("OAUTHBEARER")];
+                    return oauth_failure(
+                        sasl2,
+                        "server_error",
+                        "not-authorized",
+                        authenticated_session,
+                        phase,
+                    );
                 }
             };
 
@@ -132,7 +223,13 @@ pub(super) async fn handle_sasl_oauthbearer(
                 .await
                 .is_err()
             {
-                return vec![sasl_failure_counted("OAUTHBEARER")];
+                return oauth_failure(
+                    sasl2,
+                    "server_error",
+                    "not-authorized",
+                    authenticated_session,
+                    phase,
+                );
             }
 
             info!(
@@ -148,9 +245,44 @@ pub(super) async fn handle_sasl_oauthbearer(
             vec![sasl_success_element()]
         }
         Err(e) => {
-            warn!(error = %e, "SASL OAUTHBEARER authentication failed");
-            vec![sasl_failure_counted("OAUTHBEARER")]
+            let status = oauth_status_for_session_validation_error(&e);
+            // SessionNotFound formats the presented bearer token, so do not
+            // include verifier errors in logs or the wire response.
+            warn!("SASL OAUTHBEARER session validation failed");
+            oauth_failure(
+                sasl2,
+                status,
+                "not-authorized",
+                authenticated_session,
+                phase,
+            )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::oauth_status_for_session_validation_error;
+    use crate::auth::AuthError;
+
+    #[test]
+    fn oauth_session_validation_errors_use_generic_oauth_statuses() {
+        assert_eq!(
+            oauth_status_for_session_validation_error(&AuthError::SessionNotFound(
+                "secret-token".to_owned()
+            )),
+            "invalid_token"
+        );
+        assert_eq!(
+            oauth_status_for_session_validation_error(&AuthError::SessionExpired),
+            "invalid_token"
+        );
+        assert_eq!(
+            oauth_status_for_session_validation_error(&AuthError::DatabaseError(
+                "db unavailable".to_owned()
+            )),
+            "server_error"
+        );
     }
 }
 
@@ -164,6 +296,7 @@ pub(super) async fn handle_sasl_scram_client_first(
     domain: &str,
     state: &WebSocketState,
     phase: &mut ConnectionPhase,
+    sasl2: bool,
 ) -> Vec<Element> {
     debug!("SASL SCRAM-SHA-256 auth attempt");
 
@@ -232,25 +365,38 @@ pub(super) async fn handle_sasl_scram_client_first(
         }
     };
 
-    let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+    let challenge = if sasl2 {
+        waddle_xmpp_core::xep0388::Sasl2Challenge {
+            data: waddle_xmpp_core::xep0388::Sasl2Data::new(server_first.message.into_bytes()),
+        }
+        .to_element()
+    } else {
+        let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+        Element::builder("challenge", waddle_xmpp::ns::SASL)
+            .append(challenge_b64)
+            .build()
+    };
     debug!(username = %username, "SCRAM-SHA-256 challenge generated");
 
-    *phase = ConnectionPhase::scram_pending(ScramPendingState::new(
-        scram_server,
-        creds.stored_key,
-        creds.server_key,
-        username,
-    ));
+    let pending = if sasl2 {
+        ScramPendingState::new_sasl2(scram_server, creds.stored_key, creds.server_key, username)
+    } else {
+        ScramPendingState::new(scram_server, creds.stored_key, creds.server_key, username)
+    };
+    *phase = ConnectionPhase::scram_pending(pending);
 
-    vec![Element::builder("challenge", waddle_xmpp::ns::SASL)
-        .append(challenge_b64)
-        .build()]
+    vec![challenge]
 }
 
 /// Handle SASL SCRAM-SHA-256 response (client-final-message).
 ///
 /// Verifies the client proof against stored keys and returns `<success>` or
 /// `<failure>`.
+pub(super) struct ScramResponse {
+    pub(super) element: Element,
+    pub(super) server_final: Option<Vec<u8>>,
+}
+
 pub(super) async fn handle_sasl_scram_response(
     b64_data: &str,
     domain: &str,
@@ -259,15 +405,18 @@ pub(super) async fn handle_sasl_scram_response(
     stream_from: Option<&BareJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
-) -> Vec<Element> {
+) -> ScramResponse {
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
         Err(_) => {
             let bare_identifier = scram_bare_identifier(scram.username(), domain);
-            return vec![scram_failure_counted(
-                AuthFailure::ScramMalformed,
-                bare_identifier.as_ref(),
-            )];
+            return ScramResponse {
+                element: scram_failure_counted(
+                    AuthFailure::ScramMalformed,
+                    bare_identifier.as_ref(),
+                ),
+                server_final: None,
+            };
         }
     };
 
@@ -275,10 +424,13 @@ pub(super) async fn handle_sasl_scram_response(
         Ok(s) => s,
         Err(_) => {
             let bare_identifier = scram_bare_identifier(scram.username(), domain);
-            return vec![scram_failure_counted(
-                AuthFailure::ScramMalformed,
-                bare_identifier.as_ref(),
-            )];
+            return ScramResponse {
+                element: scram_failure_counted(
+                    AuthFailure::ScramMalformed,
+                    bare_identifier.as_ref(),
+                ),
+                server_final: None,
+            };
         }
     };
 
@@ -286,10 +438,13 @@ pub(super) async fn handle_sasl_scram_response(
         Ok(result) => result,
         Err(_) => {
             let bare_identifier = scram_bare_identifier(scram.username(), domain);
-            return vec![scram_failure_counted(
-                AuthFailure::ScramInvalidCredentials,
-                bare_identifier.as_ref(),
-            )];
+            return ScramResponse {
+                element: scram_failure_counted(
+                    AuthFailure::ScramInvalidCredentials,
+                    bare_identifier.as_ref(),
+                ),
+                server_final: None,
+            };
         }
     };
 
@@ -298,20 +453,29 @@ pub(super) async fn handle_sasl_scram_response(
     let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
         Ok(jid) => jid,
         Err(_) => {
-            return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+            return ScramResponse {
+                element: scram_failure_counted(AuthFailure::ScramOther, None),
+                server_final: None,
+            };
         }
     };
 
     let bare_jid: BareJid = match bare_jid_str.parse() {
         Ok(jid) => jid,
         Err(_) => {
-            return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+            return ScramResponse {
+                element: scram_failure_counted(AuthFailure::ScramOther, None),
+                server_final: None,
+            };
         }
     };
 
     if stream_from.is_some_and(|from| from != &bare_jid) {
         *phase = ConnectionPhase::closing(None);
-        return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+        return ScramResponse {
+            element: scram_failure_counted(AuthFailure::ScramOther, None),
+            server_final: None,
+        };
     }
 
     info!(
@@ -349,8 +513,12 @@ pub(super) async fn handle_sasl_scram_response(
     *authenticated_session = Some(session);
     *phase = ConnectionPhase::authenticated(&full_jid);
 
-    let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
-    vec![Element::builder("success", waddle_xmpp::ns::SASL)
-        .append(success_b64)
-        .build()]
+    let server_final = server_final.message.into_bytes();
+    let success_b64 = BASE64_STANDARD.encode(&server_final);
+    ScramResponse {
+        element: Element::builder("success", waddle_xmpp::ns::SASL)
+            .append(success_b64)
+            .build(),
+        server_final: Some(server_final),
+    }
 }

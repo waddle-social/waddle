@@ -1421,6 +1421,24 @@ impl XmppServiceDomains {
 /// WebSocket route dependencies kept narrower than the full server graph.
 pub struct WebSocketState {
     pub deps: WebSocketDeps,
+    /// Explicit SASL2 negotiation switch for isolated protocol fixtures.
+    /// Production builds cannot set this field, and test fixtures default it
+    /// off unless they opt into the dedicated SASL2 helper.
+    #[cfg(feature = "test-support")]
+    pub(crate) sasl2_test_capability: bool,
+}
+
+impl WebSocketState {
+    pub(crate) fn sasl2_negotiation_enabled(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        {
+            self.sasl2_test_capability
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            false
+        }
+    }
 }
 
 pub struct WebSocketDeps {
