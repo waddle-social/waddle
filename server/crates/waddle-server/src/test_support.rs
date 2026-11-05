@@ -29,6 +29,13 @@ pub use shared_correctness::{
 #[cfg(feature = "test-support")]
 pub mod supervised_io;
 #[cfg(feature = "test-support")]
+pub mod actor_local_endpoint {
+    pub use crate::server::routes::websocket::actor_local_endpoint::{
+        ActorEndpointCleanupIndex, ActorLocalEndpointError, ActorLocalEndpointOwner,
+        ActorLocalPublishError, ActorLocalWriteError, ActorPublicationProbe,
+    };
+}
+#[cfg(feature = "test-support")]
 pub mod connection_actor {
     //! Dark, test-only vertical proof for a connection actor that owns the
     //! real WebSocket connection state and its reserved physical pump pair.

@@ -69,6 +69,10 @@ pub struct ConnectionBindGuard {
 }
 
 impl ConnectionBindGuard {
+    pub fn is_for(&self, jid: &FullJid) -> bool {
+        self.guard.is_some() && &self.jid == jid
+    }
+
     pub fn incumbent(&self) -> Option<Arc<SocketLifecycle>> {
         self.guard
             .as_ref()

@@ -15,6 +15,7 @@ use tracing::{debug, info, instrument};
 
 use crate::Stanza;
 
+mod actor_outbound;
 mod archive_dispatch;
 mod binding;
 mod connections;
@@ -29,16 +30,19 @@ mod state;
 mod subscriptions;
 mod write_interruption;
 
+pub use actor_outbound::{
+    ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver, ActorOutboundStage,
+};
 pub use archive_dispatch::{ArchiveDispatchRefusal, ArchiveDispatchRefusalReason};
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
-pub use endpoint::{BindingAdmissionState, SocketOutboundEndpoint};
+pub use endpoint::{ActorSocketOutboundEndpoint, BindingAdmissionState, SocketOutboundEndpoint};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};
 pub use outbound::{
-    BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachInterruption,
-    ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
-    LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance, ProvisionalConnectionEntry,
-    SendResult, TerminalOrderingRetryLease,
+    ActorProvisionalConnectionEntry, BroadcastOutcome, ConnectionEntry, DeliveryKind,
+    ForceDetachInterruption, ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome,
+    ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,
+    ProvisionalConnectionEntry, SendResult, TerminalOrderingRetryLease,
 };
 pub use sending::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,

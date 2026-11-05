@@ -1,13 +1,23 @@
 //! Opaque outbound queue ownership and per-binding admission.
 
+use super::actor_outbound::{ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver};
 use super::outbound::LocalConnectionBindingId;
 use super::{mpsc, OutboundStanza};
-use crate::ownership::BindingRef;
+use crate::ownership::{BindingRef, ConnectionRef};
 use std::sync::Arc;
 
 #[derive(Debug)]
 struct OutboundQueue {
-    sender: mpsc::Sender<OutboundStanza>,
+    sender: QueueSender,
+}
+
+#[derive(Debug)]
+enum QueueSender {
+    Legacy(mpsc::Sender<OutboundStanza>),
+    Actor {
+        sender: mpsc::Sender<ActorOutboundId>,
+        custody: Arc<ActorOutboundCustody>,
+    },
 }
 
 /// Admission state for one published socket binding.
@@ -65,16 +75,72 @@ pub struct SocketOutboundEndpoint {
     queue: Arc<OutboundQueue>,
 }
 
+/// Only this opaque endpoint can enter actor-owned provisional publication.
+/// It has no conversion into the legacy Active entry constructors.
+#[derive(Debug)]
+pub struct ActorSocketOutboundEndpoint(SocketOutboundEndpoint);
+
+impl ActorSocketOutboundEndpoint {
+    pub fn channel(
+        connection: ConnectionRef,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> Option<(Self, ActorOutboundReceiver, Arc<ActorOutboundCustody>)> {
+        let (endpoint, receiver, custody) =
+            SocketOutboundEndpoint::actor_channel(connection, max_count, max_payload_bytes)?;
+        Some((Self(endpoint), receiver, custody))
+    }
+
+    pub(super) fn into_inner(self) -> SocketOutboundEndpoint {
+        self.0
+    }
+}
+
 impl SocketOutboundEndpoint {
+    pub(super) fn actor_custody(&self) -> Option<Arc<ActorOutboundCustody>> {
+        match &self.queue.sender {
+            QueueSender::Actor { custody, .. } => Some(Arc::clone(custody)),
+            QueueSender::Legacy(_) => None,
+        }
+    }
+
     /// Create a bounded socket queue without exposing its sending half.
     pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<OutboundStanza>) {
         let (sender, receiver) = mpsc::channel(capacity);
         (
             Self {
-                queue: Arc::new(OutboundQueue { sender }),
+                queue: Arc::new(OutboundQueue {
+                    sender: QueueSender::Legacy(sender),
+                }),
             },
             receiver,
         )
+    }
+
+    /// An inactive actor endpoint keeps full envelopes in process-local
+    /// custody and places only exact IDs in the bounded receiver channel.
+    /// The caller must establish an independent cleanup owner before exposing
+    /// this endpoint to any publication path.
+    fn actor_channel(
+        connection: ConnectionRef,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> Option<(Self, ActorOutboundReceiver, Arc<ActorOutboundCustody>)> {
+        let custody = ActorOutboundCustody::new(connection, max_count, max_payload_bytes)?;
+        let (sender, receiver) = mpsc::channel(max_count);
+        let endpoint = Self {
+            queue: Arc::new(OutboundQueue {
+                sender: QueueSender::Actor {
+                    sender,
+                    custody: custody.clone(),
+                },
+            }),
+        };
+        Some((
+            endpoint,
+            ActorOutboundReceiver::new(receiver, custody.clone()),
+            custody,
+        ))
     }
 
     pub(super) fn bind(
@@ -98,7 +164,9 @@ impl SocketOutboundEndpoint {
 impl From<mpsc::Sender<OutboundStanza>> for SocketOutboundEndpoint {
     fn from(sender: mpsc::Sender<OutboundStanza>) -> Self {
         Self {
-            queue: Arc::new(OutboundQueue { sender }),
+            queue: Arc::new(OutboundQueue {
+                sender: QueueSender::Legacy(sender),
+            }),
         }
     }
 }
@@ -175,10 +243,17 @@ impl BindingOutboundEndpoint {
     }
 
     pub(super) fn seal(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
-        self.admission
+        let sealed = self
+            .admission
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-            .seal(owner, binding_ref)
+            .seal(owner, binding_ref);
+        if sealed {
+            if let QueueSender::Actor { custody, .. } = &self.queue.sender {
+                custody.seal();
+            }
+        }
+        sealed
     }
 
     /// Recover the socket queue only after this exact binding is sealed and
@@ -196,10 +271,15 @@ impl BindingOutboundEndpoint {
             admission.matches(owner, Some(binding_ref))
                 && admission.state == BindingAdmissionState::Sealed
         };
-        if !sealed_for_binding
-            || self.queue.sender.is_closed()
-            || self.queue.sender.capacity() != self.queue.sender.max_capacity()
-        {
+        let queue_empty = match &self.queue.sender {
+            QueueSender::Legacy(sender) => {
+                !sender.is_closed() && sender.capacity() == sender.max_capacity()
+            }
+            // A sealed actor custody table cannot be reopened for another
+            // binding. The physical owner creates a fresh actor channel.
+            QueueSender::Actor { .. } => false,
+        };
+        if !sealed_for_binding || !queue_empty {
             return Err(self);
         }
 
@@ -218,27 +298,48 @@ impl BindingOutboundEndpoint {
 
     pub(super) async fn reserve_owned(&self) -> Result<EndpointPermit, EndpointEnqueueRejection> {
         self.check_active()?;
-        match self.queue.sender.clone().reserve_owned().await {
-            Ok(permit) => Ok(EndpointPermit {
-                permit,
-                endpoint: self.clone(),
-            }),
-            Err(_) => Err(EndpointEnqueueRejection::ChannelClosed),
-        }
+        let permit = match &self.queue.sender {
+            QueueSender::Legacy(sender) => EndpointQueuePermit::Legacy(
+                sender
+                    .clone()
+                    .reserve_owned()
+                    .await
+                    .map_err(|_| EndpointEnqueueRejection::ChannelClosed)?,
+            ),
+            QueueSender::Actor { sender, .. } => EndpointQueuePermit::Actor(
+                sender
+                    .clone()
+                    .reserve_owned()
+                    .await
+                    .map_err(|_| EndpointEnqueueRejection::ChannelClosed)?,
+            ),
+        };
+        Ok(EndpointPermit {
+            permit,
+            endpoint: self.clone(),
+        })
     }
 
     pub(super) fn try_reserve_owned(&self) -> Result<EndpointPermit, EndpointEnqueueRejection> {
         self.check_active()?;
-        match self.queue.sender.clone().try_reserve_owned() {
-            Ok(permit) => Ok(EndpointPermit {
-                permit,
-                endpoint: self.clone(),
-            }),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(EndpointEnqueueRejection::Full),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(EndpointEnqueueRejection::ChannelClosed)
-            }
-        }
+        let permit = match &self.queue.sender {
+            QueueSender::Legacy(sender) => EndpointQueuePermit::Legacy(
+                sender
+                    .clone()
+                    .try_reserve_owned()
+                    .map_err(map_reserve_error)?,
+            ),
+            QueueSender::Actor { sender, .. } => EndpointQueuePermit::Actor(
+                sender
+                    .clone()
+                    .try_reserve_owned()
+                    .map_err(map_reserve_error)?,
+            ),
+        };
+        Ok(EndpointPermit {
+            permit,
+            endpoint: self.clone(),
+        })
     }
 
     pub(super) fn commit_reserved(
@@ -256,7 +357,7 @@ impl BindingOutboundEndpoint {
             Ok(sink) => sink,
             Err(reason) => return EndpointEnqueueOutcome::refused(reason, outbound),
         };
-        if sink.queue.sender.is_closed() {
+        if sink.queue.is_closed() {
             return EndpointEnqueueOutcome::refused(
                 EndpointEnqueueRejection::ChannelClosed,
                 outbound,
@@ -264,9 +365,38 @@ impl BindingOutboundEndpoint {
         }
         // The receiver may close between this check and send. A consumed
         // permit is therefore acceptance or unknown, never a retry proof.
-        permit.permit.send(outbound);
+        let outcome = match (permit.permit, &sink.queue.sender) {
+            (EndpointQueuePermit::Legacy(permit), QueueSender::Legacy(_)) => {
+                permit.send(outbound);
+                EndpointEnqueueOutcome::AcceptedOrUnknown
+            }
+            (EndpointQueuePermit::Actor(permit), QueueSender::Actor { custody, .. }) => {
+                let Some(binding) = sink._admission.binding_ref.as_ref() else {
+                    return EndpointEnqueueOutcome::refused(
+                        EndpointEnqueueRejection::BindingMismatch,
+                        outbound,
+                    );
+                };
+                if binding.connection_ref() != custody.connection() {
+                    return EndpointEnqueueOutcome::refused(
+                        EndpointEnqueueRejection::BindingMismatch,
+                        outbound,
+                    );
+                }
+                match custody.insert(sink._admission.owner, binding, outbound) {
+                    Ok(id) => {
+                        permit.send(id);
+                        EndpointEnqueueOutcome::AcceptedOrUnknown
+                    }
+                    Err(outbound) => {
+                        EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::Full, outbound)
+                    }
+                }
+            }
+            (_, _) => unreachable!("permit and queue type are tied to the same endpoint"),
+        };
         drop(sink);
-        EndpointEnqueueOutcome::AcceptedOrUnknown
+        outcome
     }
 
     /// Hold binding admission while a sink operation and any associated
@@ -319,11 +449,36 @@ impl BindingOutboundEndpoint {
     }
 
     pub(super) fn is_closed(&self) -> bool {
-        self.queue.sender.is_closed()
+        self.queue.is_closed()
     }
 
     pub(super) fn same_binding(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.queue, &other.queue) && Arc::ptr_eq(&self.admission, &other.admission)
+    }
+
+    pub(super) fn is_actor_owned(&self) -> bool {
+        matches!(&self.queue.sender, QueueSender::Actor { .. })
+    }
+
+    pub(super) fn actor_custody(&self) -> Option<Arc<ActorOutboundCustody>> {
+        match &self.queue.sender {
+            QueueSender::Actor { custody, .. } => Some(Arc::clone(custody)),
+            QueueSender::Legacy(_) => None,
+        }
+    }
+
+    pub(super) fn is_provisional(&self) -> bool {
+        self.admission
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .state
+            == BindingAdmissionState::Provisional
+    }
+
+    pub(super) fn seal_if_actor(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) {
+        if self.is_actor_owned() {
+            let _ = self.seal(owner, binding_ref);
+        }
     }
 
     pub(super) fn matches_owner(
@@ -339,12 +494,12 @@ impl BindingOutboundEndpoint {
 
     #[cfg(feature = "test-utils")]
     pub(super) fn capacity(&self) -> usize {
-        self.queue.sender.capacity()
+        self.queue.capacity()
     }
 
     #[cfg(feature = "test-utils")]
     pub(super) fn max_capacity(&self) -> usize {
-        self.queue.sender.max_capacity()
+        self.queue.max_capacity()
     }
 }
 
@@ -355,13 +510,47 @@ pub(super) struct AdmittedOutboundEndpoint<'a> {
 
 impl AdmittedOutboundEndpoint<'_> {
     pub(super) fn try_send(&self, outbound: OutboundStanza) -> EndpointEnqueueOutcome {
-        match self.queue.sender.try_send(outbound) {
-            Ok(()) => EndpointEnqueueOutcome::AcceptedOrUnknown,
-            Err(mpsc::error::TrySendError::Full(outbound)) => {
-                EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::Full, outbound)
-            }
-            Err(mpsc::error::TrySendError::Closed(outbound)) => {
-                EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::ChannelClosed, outbound)
+        match &self.queue.sender {
+            QueueSender::Legacy(sender) => match sender.try_send(outbound) {
+                Ok(()) => EndpointEnqueueOutcome::AcceptedOrUnknown,
+                Err(mpsc::error::TrySendError::Full(outbound)) => {
+                    EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::Full, outbound)
+                }
+                Err(mpsc::error::TrySendError::Closed(outbound)) => {
+                    EndpointEnqueueOutcome::refused(
+                        EndpointEnqueueRejection::ChannelClosed,
+                        outbound,
+                    )
+                }
+            },
+            QueueSender::Actor { sender, custody } => {
+                let permit = match sender.clone().try_reserve_owned() {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        return EndpointEnqueueOutcome::refused(map_reserve_error(error), outbound)
+                    }
+                };
+                let Some(binding) = self._admission.binding_ref.as_ref() else {
+                    return EndpointEnqueueOutcome::refused(
+                        EndpointEnqueueRejection::BindingMismatch,
+                        outbound,
+                    );
+                };
+                if binding.connection_ref() != custody.connection() {
+                    return EndpointEnqueueOutcome::refused(
+                        EndpointEnqueueRejection::BindingMismatch,
+                        outbound,
+                    );
+                }
+                match custody.insert(self._admission.owner, binding, outbound) {
+                    Ok(id) => {
+                        permit.send(id);
+                        EndpointEnqueueOutcome::AcceptedOrUnknown
+                    }
+                    Err(outbound) => {
+                        EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::Full, outbound)
+                    }
+                }
             }
         }
     }
@@ -369,8 +558,46 @@ impl AdmittedOutboundEndpoint<'_> {
 
 #[derive(Debug)]
 pub(super) struct EndpointPermit {
-    permit: mpsc::OwnedPermit<OutboundStanza>,
+    permit: EndpointQueuePermit,
     endpoint: BindingOutboundEndpoint,
+}
+
+#[derive(Debug)]
+enum EndpointQueuePermit {
+    Legacy(mpsc::OwnedPermit<OutboundStanza>),
+    Actor(mpsc::OwnedPermit<ActorOutboundId>),
+}
+
+fn map_reserve_error<T>(error: mpsc::error::TrySendError<T>) -> EndpointEnqueueRejection {
+    match error {
+        mpsc::error::TrySendError::Full(_) => EndpointEnqueueRejection::Full,
+        mpsc::error::TrySendError::Closed(_) => EndpointEnqueueRejection::ChannelClosed,
+    }
+}
+
+impl OutboundQueue {
+    fn is_closed(&self) -> bool {
+        match &self.sender {
+            QueueSender::Legacy(sender) => sender.is_closed(),
+            QueueSender::Actor { sender, .. } => sender.is_closed(),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn capacity(&self) -> usize {
+        match &self.sender {
+            QueueSender::Legacy(sender) => sender.capacity(),
+            QueueSender::Actor { sender, .. } => sender.capacity(),
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn max_capacity(&self) -> usize {
+        match &self.sender {
+            QueueSender::Legacy(sender) => sender.max_capacity(),
+            QueueSender::Actor { sender, .. } => sender.max_capacity(),
+        }
+    }
 }
 
 #[cfg(test)]

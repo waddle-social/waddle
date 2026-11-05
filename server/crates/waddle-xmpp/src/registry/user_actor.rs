@@ -77,6 +77,10 @@ mod tests;
 mod implementation;
 pub use implementation::health_check_or_wedge_kill;
 pub use implementation::ClearPresenceState;
+#[cfg(any(test, feature = "test-utils"))]
+pub use implementation::ConfirmProvisionalConnection;
+#[cfg(any(test, feature = "test-utils"))]
+pub use implementation::ConfirmedProvisionalMirror;
 pub use implementation::ConflictCloseAllResources;
 pub use implementation::DrainPendingSubscriptions;
 pub use implementation::GetAvailableResources;
@@ -85,11 +89,15 @@ pub use implementation::GetPresenceState;
 pub use implementation::GetResources;
 pub use implementation::GetRoutingResources;
 pub use implementation::HealthCheck;
+#[cfg(feature = "test-utils")]
+pub use implementation::HoldUserActorForPublication;
 pub use implementation::IsCarbonsEnabled;
 pub use implementation::IsConnected;
 pub use implementation::QueuePendingSubscription;
 pub use implementation::RegisterConnection;
 pub use implementation::RegisterConnectionIfOwnerOrAbsent;
+#[cfg(any(test, feature = "test-utils"))]
+pub use implementation::RegisterProvisionalConnectionIfExpected;
 pub use implementation::ResourceCount;
 pub use implementation::ResourceRoutingState;
 pub use implementation::SetCarbonsEnabled;
