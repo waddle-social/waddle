@@ -659,9 +659,15 @@ async fn check_marker_shape(
                             AND i.indisvalid AND i.indisready AND i.indisunique AND i.indisprimary
                             AND i.indnkeyatts = 1 AND i.indnatts = 1
                             AND i.indexprs IS NULL AND i.indpred IS NULL)
+              AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                              coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))
+                          ) a WHERE a.grantee = runtime.oid AND a.privilege_type = 'SELECT'
+                                   AND NOT a.is_grantable)
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
                                   coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))
-                              ) a WHERE a.grantee <> c.relowner)
+                              ) a WHERE a.grantee NOT IN (o.oid, runtime.oid)
+                                   OR (a.grantee = runtime.oid
+                                       AND (a.privilege_type <> 'SELECT' OR a.is_grantable)))
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
                               CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) a
                               WHERE col.attrelid = c.oid
@@ -669,12 +675,9 @@ async fn check_marker_shape(
            FROM pg_catalog.pg_class c
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
            JOIN pg_catalog.pg_roles o ON o.rolname = ?
+           JOIN pg_catalog.pg_roles runtime ON runtime.rolname = ?
            WHERE n.nspname = ? AND c.relname = ?"#,
-            crate::db_params![
-                config.owner.owner.as_str(),
-                schema,
-                MARKER_TABLE
-            ],
+            crate::db_params![config.owner.owner.as_str(), config.owner.runtime.as_str(), schema, MARKER_TABLE],
         )
         .await?;
     let valid = match rows.next().await? {

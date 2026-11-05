@@ -70,6 +70,19 @@ pub(crate) async fn verify_room_observation_migration_v1023_in_transaction(
         .await
 }
 
+/// Verify the exact unregistered candidate guard through the caller's
+/// already-attested, read-only transaction. The caller must hold lineage then
+/// migration-ledger advisory locks and the epoch relation prelock first.
+pub(crate) async fn verify_relation_guard_candidate_in_transaction(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+    quoted_schema: &str,
+) -> Result<(), DarkMigrationOwnerError> {
+    epoch_acl::verify_relation_guard_candidate_in_transaction(tx, config, schema, quoted_schema)
+        .await
+}
+
 /// The independent identity and separately provisioned roles for the lab.
 #[derive(Clone, Debug)]
 pub struct DarkMigrationOwnerConfig {

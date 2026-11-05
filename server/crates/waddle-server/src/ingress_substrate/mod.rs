@@ -26,6 +26,7 @@ pub(crate) use owned_alias::{
 };
 pub(crate) use retention::{
     invalidate_retention, invalidate_retention_in_prepared_transaction, refresh_retention,
+    refresh_retention_in_prepared_transaction,
     refresh_retention_in_prepared_transaction_with_db_clock, refresh_retention_with_db_clock,
 };
 #[cfg(test)]
@@ -147,8 +148,4 @@ pub(crate) use substrate::{
     prepared_ingress_relation, prepared_ingress_sql, record_delivery_in_prepared_transaction,
     record_message_in_prepared_transaction, resolve_alias_in_prepared_transaction,
     terminalize_message_in_prepared_transaction, PreparedIngressRelation,
-};
-#[cfg(feature = "test-support")]
-pub(crate) use substrate::{
-    record_delivery_in_relation_guard_lab, record_message_in_relation_guard_lab,
 };

@@ -1,5 +1,3 @@
-use crate::db::DatabaseDriver;
-use crate::ingress_uow::DbRetryClass;
 use crate::ingress_uow::DeliveryEffectRepository;
 use crate::ingress_uow::EffectDeliveryBinding;
 use crate::ingress_uow::EffectDescendantRepository;
@@ -13,7 +11,7 @@ use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::ownership::NodeIdentity;
 
 use crate::db::Row;
-use crate::ingress_uow::IngressUowTransaction;
+use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 
 use super::sources::{active_subscription, load_source, locked, terminal_receipt};
 use super::{ObservationError, ObservationWork};
@@ -221,31 +219,14 @@ pub(super) async fn lock_canonical_keys(
     tx: &mut IngressUowTransaction<'_>,
     keys: &[MessageKey],
 ) -> Result<(), ObservationError> {
-    crate::ingress_substrate::acquire_epoch_lock_first(tx.transaction_mut())
-        .await
-        .map_err(ObservationError::from)?;
     let mut keys = keys.to_vec();
     keys.sort_by_key(MessageKey::to_storage);
     keys.dedup();
-    let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-        "SELECT message_key FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE NOWAIT"
-    } else {
-        "SELECT message_key FROM ingress_messages WHERE message_key = ?"
-    };
     for key in keys {
-        let mut rows = tx
-            .transaction_mut()
-            .query(sql, crate::db_params![key.to_storage().to_string()])
-            .await
-            .map_err(|error| match &error {
-                crate::db::DatabaseError::Internal(sqlx::Error::Database(database))
-                    if database.code().as_deref() == Some("55P03") =>
-                {
-                    ObservationError::RetryableDatabase(DbRetryClass::CanonicalLockContention)
-                }
-                _ => ObservationError::from(error),
-            })?;
-        let _ = rows.next().await?;
+        match EffectDescendantRepository::lock_nowait(tx, key).await {
+            Ok(()) | Err(IngressUowError::EffectIntentMessageMissing) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }

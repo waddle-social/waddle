@@ -8,25 +8,42 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context};
+use chrono::Utc;
+use jid::BareJid;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
-use waddle_xmpp::ingress::{
-    EffectMessageIdentity, IngressEffectIntent, MessageKey, ProtocolEpoch, SemanticDigest,
+use waddle_extensions::{
+    ConfiguredRoomObserver, ExtensionPayload, ObservationGeneration, PluginId,
+    RoomObservationOutcome, RoomObservationResult, RoomObservationScope,
+    RoomObservationSubscription, Sha256Digest, XmlElement,
 };
+use waddle_xmpp::ingress::{
+    AliasOutcome, AliasResolution, DeliveryKey, EffectMessageIdentity, IngressEffectIntent,
+    IngressOrdinal, MessageKey, NormalizedTarget, ProtocolEpoch, SemanticDigest, WireHandledCount,
+};
+use waddle_xmpp::mam::ArchiveOrdinal;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::ClaimStore;
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp_core::xep0359::OriginId;
+use waddle_xmpp_core::xep0359::{add_origin_id, add_stanza_id, StanzaId};
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
 use crate::db::physical_attestation::{
-    attested_pool, install, AttestedPgPool, AttestedPostgresWriterCapability, PgRoleName,
-    PhysicalAttestationConfig,
+    attested_pool, install, AttestedPgPool, PgRoleName, PhysicalAttestationConfig,
 };
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use crate::ingress_uow::{
-    CandidateTransaction, CanonicalMessageRepository, EffectDescendantRepository, IngressLineage,
-    IngressUnitOfWork, IngressUowError, ReconcileVerdict,
+    ArchiveDispatchObligation, ArchiveDispatchRepository, CandidateTransaction,
+    CanonicalMessageRepository, CapturedRoomSource, DeliveryEffectRepository, DispatchTarget,
+    EffectDescendantRepository, EffectIntentRepository, EffectReceiptRepository, IngressLineage,
+    IngressUnitOfWork, IngressUowError, IngressUowTransaction, ReconcileVerdict,
+    RelationGuardCapability, RelationGuardCapabilityError, RoomObservationRepository,
+    SmIngressRepository, SmIngressStreamRepository,
 };
 
 const GUARD: &str =
@@ -48,14 +65,22 @@ enum LabWriteError {
 /// attested pool and the exact reserved ingress admission lane together.
 pub(crate) struct RelationGuardLabToken {
     ingress: Database,
-    capability: AttestedPostgresWriterCapability,
+    capability: RelationGuardCapability,
 }
 
 impl RelationGuardLabToken {
+    pub(crate) fn capability(&self) -> &RelationGuardCapability {
+        &self.capability
+    }
+
     pub(crate) fn permits(&self, database: &Database) -> bool {
+        let Some(writer) = database.attested_pg_writer_capability() else {
+            return false;
+        };
         database.shares_ingress_lane(&self.ingress)
-            && database
-                .verify_attested_pg_writer_capability(&self.capability)
+            && self
+                .capability
+                .verify_for_database(database, &writer)
                 .is_ok()
     }
 }
@@ -63,6 +88,7 @@ impl RelationGuardLabToken {
 struct LabLane {
     main: Database,
     ingress: Database,
+    verifier: IngressUnitOfWork,
     uow: IngressUnitOfWork,
     fixture: RelationGuardLabToken,
 }
@@ -70,26 +96,28 @@ struct LabLane {
 impl LabLane {
     async fn new(pool: AttestedPgPool, lineage: &AttestedLineage) -> anyhow::Result<Self> {
         let main =
-            Database::from_attested_postgres_pool_with_ingress("relation-guard-lab", pool, 1, 1)
-                .await?;
+            Database::from_attested_postgres_pool_with_ingress("relation-guard-lab", pool, 2, 2)
+                .await
+                .context("construct attested main and ingress lanes")?;
         let ingress = main.ingress_lane();
-        let capability = ingress
-            .attested_pg_writer_capability()
-            .context("attested ingress lane required")?;
+        let lineage_config = LineageConfig {
+            deployment_uuid: Some(lineage.deployment_uuid),
+            action: None,
+        };
+        let verifier = IngressUnitOfWork::open(main.clone(), lineage_config.clone())?;
+        let capability = verifier
+            .verify_relation_guard_capability()
+            .await
+            .context("verify relation-guard candidate")?;
+        let uow = IngressUnitOfWork::open(ingress.clone(), lineage_config)?;
         let fixture = RelationGuardLabToken {
             ingress: ingress.clone(),
             capability,
         };
-        let uow = IngressUnitOfWork::open(
-            ingress.clone(),
-            LineageConfig {
-                deployment_uuid: Some(lineage.deployment_uuid),
-                action: None,
-            },
-        )?;
         Ok(Self {
             main,
             ingress,
+            verifier,
             uow,
             fixture,
         })
@@ -319,6 +347,7 @@ impl Lab {
             action: None,
         }).await?;
         MigrationRunner::single().run(&owner_db).await?;
+        crate::ingress_uow::initialize_room_observations(&owner_db).await?;
         #[cfg(feature = "clustering")]
         if !candidate_guard {
             crate::clustering::claims::PostgresClaimStore::new(owner_db.clone()).ensure_schema().await?;
@@ -332,14 +361,34 @@ impl Lab {
         ensure!(latest == 1028, "unexpected migration catalog version: {latest}");
         if candidate_guard {
             sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
+            sqlx::query("CREATE TABLE guarded.waddle_epoch_transition_lab_marker (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, attempt_id UUID NOT NULL)")
+                .execute(&mut owner_connection).await?;
+            sqlx::query("INSERT INTO guarded.waddle_epoch_transition_lab_marker (version, checksum, attempt_id) VALUES ($1, $2, $3)")
+                .bind("relation-guard-lab-1")
+                .bind(hex::encode(Sha256::digest(GUARD.as_bytes())))
+                .bind(Uuid::new_v4())
+                .execute(&mut owner_connection).await?;
         }
         for statement in [
             format!("GRANT SELECT ON guarded._lineage TO {definer}"),
             format!("GRANT SELECT ON guarded.ingress_protocol_epoch, guarded.ingress_epoch_guard_manifest TO {runtime}"),
-            format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_messages TO {runtime}"),
-            format!("GRANT SELECT, INSERT ON guarded.ingress_effect_intents, guarded.ingress_effect_receipts, guarded.ingress_deliveries, guarded.ingress_effect_descendants TO {runtime}"),
+            format!("GRANT SELECT ON guarded._migrations TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.ingress_messages, guarded.ingress_sm_streams, guarded.ingress_send_attempts TO {runtime}"),
+            format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_origin_aliases, guarded.ingress_sm_refs, guarded.ingress_deliveries TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_intents TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_descendants TO {runtime}"),
+            format!("GRANT SELECT, INSERT ON guarded.ingress_effect_receipts, guarded.ingress_carbon_receipts, guarded.ingress_delivery_receipts, guarded.ingress_archive_dispatch, guarded.ingress_owner_rejections TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE ON extension_room_observers, extension_room_sources, extension_room_source_revisions, extension_room_observation_work, extension_room_publications TO {runtime}"),
+            format!("GRANT SELECT, INSERT ON extension_room_observation_receipts TO {runtime}"),
         ] {
             sqlx::query(&statement).execute(&mut owner_connection).await?;
+        }
+        if candidate_guard {
+            sqlx::query(&format!(
+                "GRANT SELECT ON guarded.waddle_epoch_transition_lab_marker TO {runtime}"
+            ))
+            .execute(&mut owner_connection)
+            .await?;
         }
         #[cfg(feature = "clustering")]
         if !candidate_guard {
@@ -373,8 +422,10 @@ impl Lab {
             PgRoleName::new(definer.clone())?, PgSchemaName("attestor".to_owned()),
         )?;
         let config = install(&installer_options, config, Uuid::new_v4()).await?;
-        let attested = attested_pool(runtime_options.clone(), config.clone(), 2, Duration::from_secs(5))?;
-        let lane = LabLane::new(attested, &lineage).await?;
+        let attested = attested_pool(runtime_options.clone(), config.clone(), 4, Duration::from_secs(5))?;
+        let lane = LabLane::new(attested, &lineage)
+            .await
+            .context("initialize attested relation-guard lane")?;
         Ok(Self { resources: None, cluster: cluster.clone(), admin, owner_options, runtime_options, lane, database_name,
             owner, migrator, runtime, installer, definer, lineage, config, password, application })
         }.await;
@@ -391,11 +442,11 @@ impl Lab {
     }
 
     async fn begin(&self) -> anyhow::Result<CandidateTransaction<'_>> {
-        Ok(self
-            .lane
+        self.lane
             .uow
             .begin_in_relation_guard_lab(&self.lane.fixture)
-            .await?)
+            .await
+            .context("relation-lab UOW begin")
     }
 
     async fn write(
@@ -468,25 +519,17 @@ impl Lab {
 }
 
 async fn write_chain(
-    candidate: &mut CandidateTransaction<'_>,
+    candidate: &mut IngressUowTransaction<'_>,
     key: MessageKey,
     digest: &SemanticDigest,
     intent: &IngressEffectIntent,
     descendant: Uuid,
 ) -> Result<(), IngressUowError> {
-    let message =
-        CanonicalMessageRepository::record_message_in_relation_guard_lab(candidate, key, digest)
+    let existing = CanonicalMessageRepository::lock(candidate, key).await?;
+    CanonicalMessageRepository::record_message(candidate, key, digest, None).await?;
+    let verdict =
+        EffectIntentRepository::reconcile(candidate, key, std::slice::from_ref(intent), existing)
             .await?;
-    let existing = match message {
-        crate::ingress_substrate::MessageWriteOutcome::Recorded => false,
-        crate::ingress_substrate::MessageWriteOutcome::AlreadyRecorded => true,
-        crate::ingress_substrate::MessageWriteOutcome::MessageVanished => {
-            return Err(IngressUowError::EffectIntentMessageMissing)
-        }
-    };
-    let verdict = candidate
-        .reconcile_intents(key, std::slice::from_ref(intent), existing)
-        .await?;
     if matches!(
         verdict,
         ReconcileVerdict::Contradiction { .. } | ReconcileVerdict::Divergent { .. }
@@ -494,17 +537,30 @@ async fn write_chain(
         return Err(IngressUowError::EffectIntentConflict);
     }
     let receipt = crate::ingress::receipt_key(intent)?;
-    candidate
-        .record_receipt(key, receipt.kind, &receipt.semantic_identity_hash)
-        .await?;
-    EffectDescendantRepository::attach_in_relation_guard_lab(
+    EffectReceiptRepository::record_receipt(
         candidate,
         key,
-        &intent.semantic_key(),
-        descendant,
+        receipt.kind,
+        &receipt.semantic_identity_hash,
     )
     .await?;
+    EffectDescendantRepository::attach(candidate, key, &intent.semantic_key(), descendant).await?;
     Ok(())
+}
+
+async fn write_uow_chain(
+    uow: &IngressUnitOfWork,
+    capability: &RelationGuardCapability,
+    key: MessageKey,
+    digest: &SemanticDigest,
+    intent: &IngressEffectIntent,
+    descendant: Uuid,
+) -> Result<ProtocolEpoch, IngressUowError> {
+    let mut transaction = uow.begin_with_relation_guard(capability).await?;
+    let epoch = transaction.protocol_epoch();
+    write_chain(&mut transaction, key, digest, intent, descendant).await?;
+    transaction.commit().await?;
+    Ok(epoch)
 }
 
 fn migration_url(
@@ -708,7 +764,7 @@ async fn role_boundary(lab: &Lab) -> anyhow::Result<()> {
     );
     ensure!(
         candidate.has_fixture_bounds_and_isolation().await?,
-        "candidate preparation loosened tighter session timeouts"
+        "candidate preparation lost its READ COMMITTED epoch prelock proof or tight session timeouts"
     );
     drop(candidate);
     Ok(())
@@ -719,7 +775,8 @@ async fn ingress_lane_boundary(lab: &Lab) -> anyhow::Result<()> {
         lab.lane.uow.begin().await.is_err(),
         "the installed-guard UoW unexpectedly bypassed its epoch row lock"
     );
-    let held = lab.begin().await?;
+    let first_held = lab.begin().await?;
+    let second_held = lab.begin().await?;
     let main = lab.lane.main.guard().await?;
     tokio::time::timeout(Duration::from_secs(2), main.execute("SELECT 1", ())).await??;
     ensure!(
@@ -728,11 +785,14 @@ async fn ingress_lane_boundary(lab: &Lab) -> anyhow::Result<()> {
             .is_err(),
         "a second UoW bypassed the occupied ingress admission lane"
     );
-    drop(held);
+    drop(first_held);
+    drop(second_held);
     let main_held = lab.lane.main.begin().await?;
+    let main_held_second = lab.lane.main.begin().await?;
     let recovered = tokio::time::timeout(Duration::from_secs(5), lab.begin()).await??;
     drop(recovered);
     drop(main_held);
+    drop(main_held_second);
 
     let wrong_lineage = IngressUnitOfWork::open(
         lab.lane.ingress.clone(),
@@ -753,6 +813,61 @@ async fn ingress_lane_boundary(lab: &Lab) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn verifier_lane_boundary(lab: &Lab) -> anyhow::Result<()> {
+    let lineage = LineageConfig {
+        deployment_uuid: Some(lab.lineage.deployment_uuid),
+        action: None,
+    };
+
+    let one_slot_pool = attested_pool(
+        lab.runtime_options.clone(),
+        lab.config.clone(),
+        1,
+        Duration::from_secs(5),
+    )?;
+    let one_slot = Database::from_attested_postgres_pool("one-slot-verifier", one_slot_pool);
+    let one_slot_uow = IngressUnitOfWork::open(one_slot, lineage.clone())?;
+    ensure!(
+        matches!(
+            one_slot_uow.verify_relation_guard_capability().await,
+            Err(RelationGuardCapabilityError::VerifierLanesRequired)
+        ),
+        "a one-slot attested pool did not fail fast"
+    );
+
+    let two_slot_pool = attested_pool(
+        lab.runtime_options.clone(),
+        lab.config.clone(),
+        2,
+        Duration::from_secs(5),
+    )?;
+    let database = Database::from_attested_postgres_pool_with_ingress(
+        "one-main-one-ingress-verifier",
+        two_slot_pool,
+        1,
+        1,
+    )
+    .await?;
+    let main_uow = IngressUnitOfWork::open(database.clone(), lineage.clone())?;
+    let capability = main_uow.verify_relation_guard_capability().await?;
+    let ingress_uow = IngressUnitOfWork::open(database.ingress_lane(), lineage)?;
+    ensure!(
+        matches!(
+            ingress_uow.verify_relation_guard_capability().await,
+            Err(RelationGuardCapabilityError::VerifierLanesRequired)
+        ),
+        "the verifier accepted an ingress-lane handle instead of the main handle"
+    );
+    let transaction = ingress_uow.begin_with_relation_guard(&capability).await?;
+    ensure!(
+        transaction.protocol_epoch() == ProtocolEpoch::ZERO
+            && matches!(transaction.lineage(), IngressLineage::Attested(lineage) if lineage == &lab.lineage),
+        "the 1+1 lane capability did not prepare the attested epoch-zero transaction"
+    );
+    drop(transaction);
+    Ok(())
+}
+
 async fn proof_failures(
     lab: &Lab,
     digest: &SemanticDigest,
@@ -766,7 +881,9 @@ async fn proof_failures(
         ("waddle.protocol_epoch", "999"),
         ("waddle.protocol_epoch_xid", "0"),
     ] {
-        let statement = format!("CREATE TRIGGER \"000_lab_break_proof\" BEFORE INSERT ON guarded.ingress_effect_receipts FOR EACH STATEMENT EXECUTE FUNCTION guarded.lab_break_proof('{name}', '{value}')");
+        let statement = format!(
+            "CREATE TRIGGER \"000_lab_break_proof\" BEFORE INSERT ON guarded.ingress_effect_receipts FOR EACH STATEMENT EXECUTE FUNCTION guarded.lab_break_proof('{name}', '{value}')"
+        );
         sqlx::query(&statement).execute(&mut owner).await?;
         let mut runtime = PgConnection::connect_with(&lab.runtime_options).await?;
         sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
@@ -846,6 +963,17 @@ async fn shadow_and_wrong_pool(
         ),
         "the fixture proof was accepted by a different physical pool"
     );
+    ensure!(
+        matches!(
+            wrong_pool
+                .begin_with_relation_guard(&lab.lane.fixture.capability)
+                .await,
+            Err(IngressUowError::RelationGuardCapability(
+                RelationGuardCapabilityError::WrongPool
+            ))
+        ),
+        "the production UOW accepted a capability from a different physical pool"
+    );
     drop(wrong_pool);
     drop(other);
 
@@ -865,6 +993,32 @@ async fn shadow_and_wrong_pool(
         ),
         "the fixture proof was accepted on the main admission lane"
     );
+
+    let checksum = hex::encode(Sha256::digest(GUARD.as_bytes()));
+    let mut owner = PgConnection::connect_with(&lab.owner_options).await?;
+    sqlx::query("UPDATE guarded.waddle_epoch_transition_lab_marker SET checksum = 'tampered'")
+        .execute(&mut owner)
+        .await?;
+    ensure!(
+        lab.lane
+            .verifier
+            .verify_relation_guard_capability()
+            .await
+            .is_err(),
+        "the verifier accepted a mismatched owner marker"
+    );
+    ensure!(
+        lab.lane
+            .uow
+            .begin_with_relation_guard(&lab.lane.fixture.capability)
+            .await
+            .is_err(),
+        "a previously issued capability survived owner-marker drift"
+    );
+    sqlx::query("UPDATE guarded.waddle_epoch_transition_lab_marker SET checksum = $1")
+        .bind(&checksum)
+        .execute(&mut owner)
+        .await?;
 
     sqlx::query(&format!("CREATE SCHEMA shadow AUTHORIZATION {}", lab.owner))
         .execute(&lab.admin)
@@ -908,6 +1062,408 @@ async fn shadow_and_wrong_pool(
             .await?;
         ensure!(count == 0, "candidate wrote to shadow.{table}");
     }
+    Ok(())
+}
+
+async fn guarded_relation_acl_failures(lab: &Lab) -> anyhow::Result<()> {
+    let cases = vec![
+        (
+            "GRANT DELETE ON guarded.ingress_messages TO PUBLIC".to_owned(),
+            "REVOKE DELETE ON guarded.ingress_messages FROM PUBLIC".to_owned(),
+            "PUBLIC DML",
+        ),
+        (
+            format!(
+                "GRANT TRUNCATE ON guarded.ingress_messages TO {}",
+                lab.runtime
+            ),
+            format!(
+                "REVOKE TRUNCATE ON guarded.ingress_messages FROM {}",
+                lab.runtime
+            ),
+            "runtime TRUNCATE",
+        ),
+        (
+            format!(
+                "GRANT UPDATE (kind) ON guarded.ingress_effect_intents TO {}",
+                lab.runtime
+            ),
+            format!(
+                "REVOKE UPDATE (kind) ON guarded.ingress_effect_intents FROM {}",
+                lab.runtime
+            ),
+            "runtime column UPDATE",
+        ),
+        (
+            format!(
+                "GRANT SELECT ON guarded.ingress_messages TO {} WITH GRANT OPTION",
+                lab.runtime
+            ),
+            format!(
+                "REVOKE GRANT OPTION FOR SELECT ON guarded.ingress_messages FROM {}",
+                lab.runtime
+            ),
+            "runtime grant option",
+        ),
+    ];
+    for (grant, revoke, reason) in cases {
+        sqlx::query(&grant).execute(&lab.admin).await?;
+        let rejected = lab
+            .lane
+            .verifier
+            .verify_relation_guard_capability()
+            .await
+            .is_err();
+        sqlx::query(&revoke).execute(&lab.admin).await?;
+        ensure!(
+            rejected,
+            "candidate verifier accepted unexpected guarded-relation ACL: {reason}"
+        );
+        lab.lane.verifier.verify_relation_guard_capability().await?;
+    }
+    Ok(())
+}
+
+async fn prepared_descendant_api_checks(lab: &Lab) -> anyhow::Result<()> {
+    let digest = SemanticDigest::from_storage(1, [3_u8; 32])?;
+    let intent = make_intent(false)?;
+    let message_key = MessageKey::new();
+    let source = Uuid::new_v4();
+    let target = Uuid::new_v4();
+    lab.write(message_key, &digest, &intent, source).await?;
+
+    let capability = lab.lane.fixture.capability();
+    let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+    let binding = DeliveryEffectRepository::bind_effect(
+        &mut transaction,
+        message_key,
+        &intent.semantic_key(),
+    )
+    .await?;
+    ensure!(
+        binding
+            == crate::ingress_uow::EffectDeliveryBinding::Bound(DeliveryKey::effect(
+                message_key,
+                &intent.semantic_key(),
+            )),
+        "prepared effect binding returned an unexpected delivery key"
+    );
+    transaction.commit().await?;
+
+    let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+    EffectDescendantRepository::lock_nowait(&mut transaction, message_key).await?;
+    transaction.commit().await?;
+
+    let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+    EffectDescendantRepository::copy(&mut transaction, source, target).await?;
+    transaction.commit().await?;
+
+    let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+    EffectDescendantRepository::settle_all(&mut transaction, source, Utc::now()).await?;
+    transaction.commit().await?;
+
+    let states: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE descendant_key = $1), \
+                count(*) FILTER (WHERE descendant_key = $2), \
+                count(*) FILTER (WHERE descendant_key = $1 AND settled_at IS NOT NULL), \
+                count(*) FILTER (WHERE descendant_key = $2 AND settled_at IS NOT NULL) \
+         FROM guarded.ingress_effect_descendants WHERE descendant_key IN ($1, $2)",
+    )
+    .bind(source.to_string())
+    .bind(target.to_string())
+    .fetch_one(&lab.admin)
+    .await?;
+    ensure!(
+        states == (1, 1, 1, 0),
+        "prepared descendant lock/copy/settle did not preserve the expected rows: {states:?}"
+    );
+    Ok(())
+}
+
+async fn prepared_alias_sm_archive_api_checks(lab: &Lab) -> anyhow::Result<()> {
+    let capability = lab.lane.fixture.capability();
+
+    let sender: BareJid = "alias-author@example.test".parse()?;
+    let target = NormalizedTarget::Bare("alias-target@example.test".parse()?);
+    let origin = OriginId::new("relation-guard-alias-origin");
+    let digest = SemanticDigest::from_storage(1, [5_u8; 32])?;
+    let alias_key = MessageKey::new();
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let resolution = CanonicalMessageRepository::resolve_and_record_alias(
+            &mut transaction,
+            &sender,
+            &target,
+            &origin,
+            &digest,
+            || alias_key,
+        )
+        .await?;
+        ensure!(
+            matches!(resolution, AliasResolution::Aliased(AliasOutcome::Inserted(key)) if key == alias_key),
+            "candidate alias repository did not insert its canonical key"
+        );
+        transaction.commit().await?;
+    }
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let resolution = CanonicalMessageRepository::resolve_and_record_alias(
+            &mut transaction,
+            &sender,
+            &target,
+            &origin,
+            &digest,
+            MessageKey::new,
+        )
+        .await?;
+        ensure!(
+            matches!(resolution, AliasResolution::Aliased(AliasOutcome::Existing(key)) if key == alias_key),
+            "candidate alias replay did not resolve to the persisted key"
+        );
+        transaction.commit().await?;
+    }
+
+    let stream = SmSessionId::new(format!("relation-guard-sm-{}", Uuid::new_v4()));
+    let sm_ingress_id;
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        sm_ingress_id = SmIngressStreamRepository::mint(&mut transaction, &stream).await?;
+        SmIngressRepository::insert_sm_ref(
+            &mut transaction,
+            sm_ingress_id,
+            IngressOrdinal::FIRST,
+            WireHandledCount::new(1),
+            alias_key,
+        )
+        .await?;
+        let binding = SmIngressRepository::lookup_wire_binding(
+            &mut transaction,
+            sm_ingress_id,
+            WireHandledCount::new(1),
+        )
+        .await?;
+        ensure!(
+            binding == Some((alias_key, IngressOrdinal::FIRST)),
+            "candidate SM enrollment/ref did not retain its wire binding"
+        );
+        transaction.commit().await?;
+    }
+
+    let archive_intent = make_intent(true)?;
+    let archive_key = MessageKey::new();
+    let archive_digest = SemanticDigest::from_storage(1, [6_u8; 32])?;
+    lab.write(
+        archive_key,
+        &archive_digest,
+        &archive_intent,
+        Uuid::new_v4(),
+    )
+    .await?;
+    let (archive, resource) = match &archive_intent {
+        IngressEffectIntent::RouteDirect {
+            recipient, fanout, ..
+        } => (
+            recipient.clone(),
+            fanout
+                .first()
+                .context("archive fixture has a resource audience")?
+                .clone(),
+        ),
+        _ => bail!("archive fixture intent was not a direct route"),
+    };
+    let receipt = crate::ingress::receipt_key(&archive_intent)?;
+    let ordinal = ArchiveOrdinal::from_storage(1)?;
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        ensure!(
+            CanonicalMessageRepository::lock(&mut transaction, archive_key).await?,
+            "archive fixture message is missing"
+        );
+        ArchiveDispatchRepository::record(
+            &mut transaction,
+            archive_key,
+            &archive,
+            ordinal,
+            &[ArchiveDispatchObligation {
+                receipt: receipt.clone(),
+                target: DispatchTarget::Resource(resource),
+            }],
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let positions =
+            ArchiveDispatchRepository::positions(&mut transaction, archive_key, &receipt).await?;
+        ensure!(
+            positions.len() == 1
+                && positions[0].archive == archive
+                && positions[0].ordinal == ordinal,
+            "candidate archive dispatch did not persist its position"
+        );
+        transaction.commit().await?;
+    }
+    Ok(())
+}
+
+fn relation_observation_payload() -> anyhow::Result<ExtensionPayload> {
+    let namespace = waddle_extensions::PayloadNamespace::try_new("urn:waddle:relation-guard:1")?;
+    let element = XmlElement::try_new(namespace.clone(), "result", vec![], vec![])?;
+    Ok(ExtensionPayload::try_new(namespace, element)?)
+}
+
+async fn room_observation_relation_uow_checks(lab: &Lab) -> anyhow::Result<()> {
+    let room: BareJid = "room@conference.example.org".parse()?;
+    let author: BareJid = "author@example.org".parse()?;
+    let observer = ConfiguredRoomObserver {
+        plugin: PluginId::try_new("relation-guard-observer")?,
+        generation: ObservationGeneration::try_new(1)?,
+        identity: Sha256Digest::try_new("a".repeat(64))?,
+        scope: RoomObservationScope::Rooms(vec![room.clone()]),
+        max_concurrent: 1,
+    };
+    let subscription = RoomObservationSubscription {
+        plugin: observer.plugin.clone(),
+        generation: observer.generation,
+        identity: observer.identity.clone(),
+        room: room.clone(),
+    };
+    let now = Utc::now();
+    let now_ms = now.timestamp_millis();
+    let capability = lab.lane.fixture.capability();
+
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        RoomObservationRepository::sync_configured(
+            &mut transaction,
+            std::slice::from_ref(&observer),
+            now_ms,
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+
+    let key = MessageKey::new();
+    let digest = SemanticDigest::from_storage(1, [4_u8; 32])?;
+    let intent = IngressEffectIntent::RoomObserver {
+        room: room.clone(),
+        requester: author.clone(),
+        sender: "room@conference.example.org/author".parse()?,
+        plugin: observer.plugin.clone(),
+        generation: observer.generation,
+        identity: observer.identity.clone(),
+        correction_target: None,
+    };
+    let intents = [intent];
+    let mut message = Message::new(Some(room.clone().into()));
+    message.from = Some("room@conference.example.org/author".parse()?);
+    message.type_ = MessageType::Groupchat;
+    message.id = Some(Id("relation-observation".to_owned()));
+    message
+        .bodies
+        .insert(Lang::new(), "room observation candidate".to_owned());
+    add_stanza_id(
+        &mut message,
+        &StanzaId::new("relation-observation-stanza", room.clone().into()),
+    );
+    add_origin_id(&mut message, "relation-observation-origin");
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let existing = CanonicalMessageRepository::lock(&mut transaction, key).await?;
+        CanonicalMessageRepository::record_message(&mut transaction, key, &digest, None).await?;
+        let verdict =
+            EffectIntentRepository::reconcile(&mut transaction, key, &intents, existing).await?;
+        ensure!(
+            !matches!(
+                verdict,
+                ReconcileVerdict::Contradiction { .. } | ReconcileVerdict::Divergent { .. }
+            ),
+            "room observer intent unexpectedly conflicted"
+        );
+        RoomObservationRepository::capture(
+            &mut transaction,
+            CapturedRoomSource {
+                key,
+                room: &room,
+                message: &message,
+                sender: &author,
+                intents: &intents,
+                observed_at: now,
+                correction_target: None,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+
+    let work = {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let work = RoomObservationRepository::claim(&mut transaction, &subscription, now_ms)
+            .await?
+            .context("relation-guard room observer claim")?;
+        ensure!(
+            RoomObservationRepository::start(&mut transaction, &work, now_ms).await?,
+            "relation-guard room observer start was rejected"
+        );
+        transaction.commit().await?;
+        work
+    };
+
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        ensure!(
+            RoomObservationRepository::finish(
+                &mut transaction,
+                &work,
+                &RoomObservationOutcome::Completed(RoomObservationResult {
+                    payloads: vec![relation_observation_payload()?],
+                    usage: None,
+                }),
+                now_ms,
+            )
+            .await?,
+            "relation-guard room observer finish was rejected"
+        );
+        transaction.commit().await?;
+    }
+
+    let publication = {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let publication =
+            RoomObservationRepository::publication(&mut transaction, &subscription, now_ms)
+                .await?
+                .context("relation-guard room observer publication")?;
+        ensure!(
+            RoomObservationRepository::assert_publication(&mut transaction, &publication).await?,
+            "relation-guard room observer publication became stale"
+        );
+        ensure!(
+            RoomObservationRepository::mark_published(
+                &mut transaction,
+                &publication.id,
+                now_ms.saturating_add(1),
+            )
+            .await?,
+            "relation-guard room observer publication did not settle"
+        );
+        transaction.commit().await?;
+        publication
+    };
+
+    let (publication_status, settled_descendants): (String, i64) = sqlx::query_as(
+        "SELECT p.status, count(*) FILTER (WHERE d.settled_at IS NOT NULL) \
+         FROM guarded.extension_room_publications p \
+         JOIN guarded.ingress_effect_descendants d ON d.descendant_key = p.id \
+         WHERE p.id = $1 GROUP BY p.status",
+    )
+    .bind(publication.id.to_string())
+    .fetch_one(&lab.admin)
+    .await?;
+    ensure!(
+        publication_status == "published" && settled_descendants == 1,
+        "room observer publication/descendant was not settled through the relation UOW"
+    );
     Ok(())
 }
 
@@ -997,9 +1553,16 @@ async fn verify_failed_provision_cleanup(lab: &Lab) -> anyhow::Result<()> {
 }
 
 async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
-    verify_failed_provision_cleanup(lab).await?;
-    role_boundary(lab).await?;
-    ingress_lane_boundary(lab).await?;
+    verify_failed_provision_cleanup(lab)
+        .await
+        .context("failed-provision cleanup checks")?;
+    role_boundary(lab).await.context("runtime role boundary")?;
+    ingress_lane_boundary(lab)
+        .await
+        .context("ingress lane and capability checks")?;
+    verifier_lane_boundary(lab)
+        .await
+        .context("two-lane verifier capacity checks")?;
     let digest = SemanticDigest::from_storage(1, [1_u8; 32])?;
     let intent = make_intent(false)?;
     let key = MessageKey::new();
@@ -1059,13 +1622,7 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     let empty_key = MessageKey::new();
     {
         let mut empty = lab.begin().await?;
-        ensure!(matches!(
-            CanonicalMessageRepository::record_message_in_relation_guard_lab(
-                &mut empty, empty_key, &digest
-            )
-            .await?,
-            crate::ingress_substrate::MessageWriteOutcome::Recorded
-        ));
+        CanonicalMessageRepository::record_message(&mut empty, empty_key, &digest, None).await?;
         empty.commit().await?;
     }
     ensure!(
@@ -1086,7 +1643,7 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     let mut candidate = lab.begin().await?;
     ensure!(
         matches!(
-            EffectDescendantRepository::attach_in_relation_guard_lab(
+            EffectDescendantRepository::attach(
                 &mut candidate,
                 missing,
                 &intent.semantic_key(),
@@ -1112,12 +1669,36 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     .await?;
     drop(candidate);
     wait_for_counts(lab, rollback_key, &[0, 0, 0, 0, 0]).await?;
-    proof_failures(lab, &digest, &intent).await?;
-    shadow_and_wrong_pool(lab, &digest, &intent).await?;
-    concurrency_and_transition(lab, &digest, &intent).await?;
-    proof_failures(lab, &digest, &intent).await?;
-    lost_commit_ack(lab, &digest, &intent, false).await?;
-    lost_commit_ack(lab, &digest, &intent, true).await?;
+    proof_failures(lab, &digest, &intent)
+        .await
+        .context("epoch proof failure checks")?;
+    shadow_and_wrong_pool(lab, &digest, &intent)
+        .await
+        .context("wrong-pool and search-path checks")?;
+    guarded_relation_acl_failures(lab)
+        .await
+        .context("guarded relation ACL rejection checks")?;
+    prepared_descendant_api_checks(lab)
+        .await
+        .context("prepared descendant repository checks")?;
+    prepared_alias_sm_archive_api_checks(lab)
+        .await
+        .context("prepared alias, SM, and archive repository checks")?;
+    room_observation_relation_uow_checks(lab)
+        .await
+        .context("room-observation relation UOW checks")?;
+    concurrency_and_transition(lab, &digest, &intent)
+        .await
+        .context("concurrent writers and queued owner transition")?;
+    proof_failures(lab, &digest, &intent)
+        .await
+        .context("post-transition epoch proof checks")?;
+    lost_commit_ack(lab, &digest, &intent, false)
+        .await
+        .context("lost COMMIT acknowledgement")?;
+    lost_commit_ack(lab, &digest, &intent, true)
+        .await
+        .context("expired COMMIT acknowledgement deadline")?;
     Ok(())
 }
 
@@ -1142,6 +1723,56 @@ async fn wait_for_blocked(lab: &Lab, application: &str, blocker: i32) -> anyhow:
     .context("expected PostgreSQL lock wait not observed")?
 }
 
+async fn wait_for_relation_lock_pids(lab: &Lab, count: usize) -> anyhow::Result<Vec<i32>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pids: Vec<i32> = sqlx::query_scalar(
+                "SELECT DISTINCT l.pid FROM pg_catalog.pg_locks l \
+                 JOIN pg_catalog.pg_stat_activity a ON a.pid = l.pid \
+                 WHERE a.application_name = $1 \
+                   AND l.relation = 'guarded.ingress_protocol_epoch'::regclass \
+                   AND l.locktype = 'relation' AND l.mode = 'AccessShareLock' AND l.granted \
+                 ORDER BY l.pid",
+            )
+            .bind(&lab.application)
+            .fetch_all(&lab.admin)
+            .await?;
+            if pids.len() >= count {
+                return Ok::<_, anyhow::Error>(pids);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("independent relation-lock writers were not observed")?
+}
+
+async fn wait_for_blocker_count(
+    lab: &Lab,
+    application: &str,
+    minimum: usize,
+) -> anyhow::Result<(i32, usize)> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observation: Option<(i32, i64)> = sqlx::query_as(
+                "SELECT pid, pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid))::bigint \
+                 FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+            )
+            .bind(application)
+            .fetch_optional(&lab.admin)
+            .await?;
+            if let Some((pid, blockers)) = observation {
+                if usize::try_from(blockers).is_ok_and(|count| count >= minimum) {
+                    return Ok::<_, anyhow::Error>((pid, blockers as usize));
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("expected queued owner to wait for both writers")?
+}
+
 async fn check_relation_lock(lab: &Lab, pid: i32) -> anyhow::Result<()> {
     let (access_share, row_share): (bool, bool) = sqlx::query_as(
         "SELECT coalesce(bool_or(mode = 'AccessShareLock'), false), \
@@ -1163,81 +1794,104 @@ async fn concurrency_and_transition(
     digest: &SemanticDigest,
     intent: &IngressEffectIntent,
 ) -> anyhow::Result<()> {
-    let mut blocker = PgConnection::connect_with(&lab.owner_options).await?;
-    sqlx::query("BEGIN").execute(&mut blocker).await?;
-    sqlx::query("LOCK TABLE ONLY guarded.ingress_effect_descendants IN SHARE MODE")
-        .execute(&mut blocker)
-        .await?;
-    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut blocker)
-        .await?;
     let first = MessageKey::new();
+    let second = MessageKey::new();
     let queued = MessageKey::new();
+    let mut first_writer = lab.begin().await?;
+    let mut second_writer = lab.begin().await?;
+    ensure!(
+        first_writer.protocol_epoch() == ProtocolEpoch::ZERO
+            && second_writer.protocol_epoch() == ProtocolEpoch::ZERO,
+        "epoch-zero writers did not prepare"
+    );
+    write_chain(&mut first_writer, first, digest, intent, Uuid::new_v4()).await?;
+    write_chain(&mut second_writer, second, digest, intent, Uuid::new_v4()).await?;
+    let writer_pids = wait_for_relation_lock_pids(lab, 2).await?;
+    ensure!(
+        writer_pids.len() == 2,
+        "two independent writer sessions did not hold ACCESS SHARE"
+    );
+    for pid in writer_pids {
+        check_relation_lock(lab, pid).await?;
+    }
+
     let owner_options = lab.owner_options.clone();
     let lineage = lab.lineage.lineage_uuid.0;
     let transition_application = format!("{}_transition", lab.application);
-    let control = async {
-        let writer_pid = wait_for_blocked(lab, &lab.application, blocker_pid).await?;
-        check_relation_lock(lab, writer_pid).await?;
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
-        let application = transition_application.clone();
-        let transition = tokio::spawn(async move {
-            let mut connection =
-                PgConnection::connect_with(&owner_options.application_name(&application)).await?;
-            sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("LOCK TABLE ONLY guarded.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE")
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("UPDATE guarded.ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1")
-                .bind(lineage).execute(&mut connection).await?;
-            let _ = ready_tx.send(());
-            let _ = commit_rx.await;
-            sqlx::query("COMMIT").execute(&mut connection).await?;
-            Ok::<(), sqlx::Error>(())
-        });
-        let transition_pid = wait_for_blocked(lab, &transition_application, writer_pid).await?;
-        sqlx::query("COMMIT").execute(&mut blocker).await?;
-        tokio::time::timeout(Duration::from_secs(5), ready_rx).await??;
-        let later = lab.write(queued, digest, intent, Uuid::new_v4());
-        let observe = async {
-            let pid = wait_for_blocked(lab, &lab.application, transition_pid).await?;
-            let application_locks: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_catalog.pg_locks WHERE pid = $1 AND granted \
-                 AND relation IN ('guarded.ingress_messages'::regclass, 'guarded.ingress_effect_intents'::regclass, \
-                 'guarded.ingress_effect_receipts'::regclass, 'guarded.ingress_deliveries'::regclass, \
-                 'guarded.ingress_effect_descendants'::regclass)"
-            ).bind(pid).fetch_one(&lab.admin).await?;
-            ensure!(
-                application_locks == 0,
-                "queued writer held a domain lock before the epoch barrier"
-            );
-            commit_tx
-                .send(())
-                .map_err(|_| anyhow::anyhow!("transition task dropped"))?;
-            Ok::<(), anyhow::Error>(())
-        };
-        let (later, observed) = tokio::join!(later, observe);
-        observed?;
-        ensure!(
-            later? == ProtocolEpoch::from_storage(1),
-            "queued writer did not read the post-transition epoch"
-        );
-        transition.await??;
-        Ok::<(), anyhow::Error>(())
-    };
-    let (first_result, control_result) =
-        tokio::join!(lab.write(first, digest, intent, Uuid::new_v4()), control);
-    control_result?;
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    let application = transition_application.clone();
+    let transition = tokio::spawn(async move {
+        let mut connection =
+            PgConnection::connect_with(&owner_options.application_name(&application)).await?;
+        sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("LOCK TABLE ONLY guarded.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("UPDATE guarded.ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1")
+            .bind(lineage).execute(&mut connection).await?;
+        let _ = ready_tx.send(());
+        let _ = commit_rx.await;
+        sqlx::query("COMMIT").execute(&mut connection).await?;
+        Ok::<(), sqlx::Error>(())
+    });
+    let (transition_pid, transition_blockers) =
+        wait_for_blocker_count(lab, &transition_application, 2).await?;
     ensure!(
-        first_result? == ProtocolEpoch::ZERO,
-        "pre-transition writer did not retain epoch zero"
+        transition_blockers >= 2,
+        "owner transition did not wait for both independent writers"
     );
+
+    first_writer.commit().await?;
+    let uow = lab.lane.uow.clone();
+    let capability = lab.lane.fixture.capability.clone();
+    let queued_digest = digest.clone();
+    let queued_intent = intent.clone();
+    let later = tokio::spawn(async move {
+        write_uow_chain(
+            &uow,
+            &capability,
+            queued,
+            &queued_digest,
+            &queued_intent,
+            Uuid::new_v4(),
+        )
+        .await
+    });
+    let queued_pid = wait_for_blocked(lab, &lab.application, transition_pid).await?;
+    let application_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_locks WHERE pid = $1 AND granted \
+         AND relation IN ('guarded.ingress_messages'::regclass, 'guarded.ingress_effect_intents'::regclass, \
+         'guarded.ingress_effect_receipts'::regclass, 'guarded.ingress_deliveries'::regclass, \
+         'guarded.ingress_effect_descendants'::regclass)",
+    )
+    .bind(queued_pid)
+    .fetch_one(&lab.admin)
+    .await?;
+    ensure!(
+        application_locks == 0,
+        "queued writer held a domain lock before the epoch barrier"
+    );
+
+    second_writer.commit().await?;
+    tokio::time::timeout(Duration::from_secs(5), ready_rx).await??;
+    commit_tx
+        .send(())
+        .map_err(|_| anyhow::anyhow!("transition task dropped"))?;
+    ensure!(
+        later.await?? == ProtocolEpoch::from_storage(1),
+        "queued writer did not read the post-transition epoch"
+    );
+    transition.await??;
     ensure!(
         counts(lab, first).await? == vec![1, 1, 1, 1, 1],
         "first chain incomplete"
+    );
+    ensure!(
+        counts(lab, second).await? == vec![1, 1, 1, 1, 1],
+        "second chain incomplete"
     );
     ensure!(
         counts(lab, queued).await? == vec![1, 1, 1, 1, 1],
@@ -1302,13 +1956,47 @@ async fn lose_commit_reply(
     disconnect: std::sync::Arc<tokio::sync::Notify>,
     marker: &'static [u8],
 ) -> std::io::Result<()> {
+    use tokio::task::JoinSet;
+
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (client, _) = accepted?;
+                let target = target.clone();
+                let held = held.clone();
+                let disconnect = disconnect.clone();
+                connections.spawn(async move {
+                    proxy_commit_connection(client, &target, held, disconnect, marker).await
+                });
+            }
+            result = connections.join_next(), if !connections.is_empty() => {
+                match result {
+                    Some(Ok(Ok(true))) => return Ok(()),
+                    Some(Ok(Ok(false))) => {}
+                    Some(Ok(Err(error))) => return Err(error),
+                    Some(Err(error)) => return Err(std::io::Error::other(error)),
+                    None => {}
+                }
+            }
+        }
+    }
+}
+
+async fn proxy_commit_connection(
+    client: tokio::net::TcpStream,
+    target: &PgConnectOptions,
+    held: std::sync::Arc<tokio::sync::Notify>,
+    disconnect: std::sync::Arc<tokio::sync::Notify>,
+    marker: &'static [u8],
+) -> std::io::Result<bool> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (client, _) = listener.accept().await?;
-    let server = super::postgres_proxy::connect_local_postgres(&target).await?;
+    let server = super::postgres_proxy::connect_local_postgres(target).await?;
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = tokio::io::split(server);
     let saw_commit = std::sync::Arc::new(AtomicBool::new(false));
+    let completion_flag = saw_commit.clone();
     let upstream_flag = saw_commit.clone();
     let upstream = async move {
         const COMMIT: &[u8] = b"COMMIT\0";
@@ -1350,7 +2038,10 @@ async fn lose_commit_reply(
             client_write.write_all(&bytes[..n]).await?;
         }
     };
-    tokio::select! { result = upstream => result, result = downstream => result }
+    tokio::select! {
+        result = upstream => result.map(|_| false),
+        result = downstream => result.map(|_| completion_flag.load(Ordering::SeqCst)),
+    }
 }
 
 async fn lost_commit_ack(
@@ -1379,8 +2070,10 @@ async fn lost_commit_ack(
         .application_name(&lab.application)
         .ssl_mode(sqlx::postgres::PgSslMode::Disable)
         .options([("search_path", "guarded")]);
-    let pool = attested_pool(options, lab.config.clone(), 2, Duration::from_secs(5))?;
-    let lane = LabLane::new(pool, &lab.lineage).await?;
+    let pool = attested_pool(options, lab.config.clone(), 4, Duration::from_secs(5))?;
+    let lane = LabLane::new(pool, &lab.lineage)
+        .await
+        .context("initialize proxy-backed relation-guard lane")?;
     let old = std::mem::replace(&mut lab.lane, lane);
     drop(old);
     let key = MessageKey::new();

@@ -143,7 +143,7 @@ async fn settle_publications(
     drop(rows);
     let now = DateTime::from_timestamp_millis(now_ms).ok_or(ObservationError::Codec)?;
     for id in ids {
-        EffectDescendantRepository::settle_all_raw(tx.transaction_mut(), id, now)
+        EffectDescendantRepository::settle_all(tx, id, now)
             .await
             .map_err(ObservationError::from)?;
     }

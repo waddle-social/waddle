@@ -14,7 +14,10 @@ use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, Transaction};
 #[cfg(feature = "test-support")]
 use crate::ingress_substrate::prepare_attested_receipt_transaction;
-use crate::ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch};
+use crate::ingress_substrate::{
+    acquire_epoch_lock_first, prepared_ingress_relation, prepared_ingress_sql,
+    supported_protocol_epoch, PreparedAttestedReceiptWriter, PreparedIngressRelation,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EffectDescendantRepository;
@@ -102,106 +105,30 @@ async fn begin_raw_ingress_writer_inner<'a>(
 }
 
 impl EffectDescendantRepository {
-    /// Attach one descendant under the sealed laboratory transaction. The
-    /// ordinary entry below retains its V1009 proof and raw-writer behavior.
-    #[cfg(feature = "test-support")]
-    pub(crate) async fn attach_in_relation_guard_lab(
-        lab: &mut super::CandidateTransaction<'_>,
-        message_key: MessageKey,
-        effect: &IngressEffectKey,
-        descendant: Uuid,
-    ) -> Result<(), IngressUowError> {
-        use crate::ingress_substrate::{prepared_ingress_sql, PreparedIngressRelation};
-
-        {
-            let (tx, prepared) = lab.transaction.prepared_parts();
-            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
-            let query = prepared_ingress_sql(
-                tx.driver(),
-                Some(prepared),
-                PreparedIngressRelation::Messages,
-                (
-                    "SELECT 1 FROM ",
-                    " WHERE message_key = ?::uuid FOR UPDATE NOWAIT",
-                ),
-                "SELECT 1 FROM ingress_messages WHERE message_key = ?",
-            );
-            let mut rows = tx
-                .query(
-                    &query,
-                    crate::db_params![message_key.to_storage().to_string()],
-                )
-                .await
-                .map_err(canonical_nowait_error)?;
-            if rows.next().await.map_err(canonical_nowait_error)?.is_none() {
-                return Err(IngressUowError::EffectIntentMessageMissing);
-            }
-            drop(rows);
-            ensure_intent_in_prepared(tx, Some(prepared), message_key, effect).await?;
-        }
-        if matches!(
-            effect,
-            IngressEffectKey::CallSignal(..)
-                | IngressEffectKey::Pin(..)
-                | IngressEffectKey::DmPinMutation(..)
-                | IngressEffectKey::DmCallThreadState(..)
-        ) {
-            return Err(IngressUowError::EffectIntentConflict);
-        }
-        let delivery = DeliveryKey::effect(message_key, effect);
-        {
-            let fixture = lab.fixture;
-            let (tx, prepared) = lab.transaction.prepared_parts();
-            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
-            if crate::ingress_substrate::record_delivery_in_relation_guard_lab(
-                tx,
-                prepared,
-                fixture,
-                delivery,
-                message_key,
-            )
-            .await?
-                == MessageWriteOutcome::MessageVanished
-            {
-                return Err(IngressUowError::EffectIntentMessageMissing);
-            }
-        }
-        let (tx, prepared) = lab.transaction.prepared_parts();
-        let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
-        let query = prepared_ingress_sql(
-            tx.driver(),
-            Some(prepared),
-            PreparedIngressRelation::EffectDescendants,
-            ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"),
-            "INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        );
-        let inserted = tx
-            .execute(
-                &query,
-                crate::db_params![
-                    message_key.to_storage().to_string(),
-                    effect.storage_kind(),
-                    identity_hash(effect).to_vec(),
-                    descendant.to_string()
-                ],
-            )
-            .await?;
-        if inserted > 0 {
-            crate::ingress_substrate::invalidate_retention_in_prepared_transaction(
-                tx,
-                Some(prepared),
-                message_key,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     pub async fn lock_nowait(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
-        Self::lock_nowait_raw(transaction.transaction_mut(), message_key).await
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                lock_nowait_prepared(tx, prepared, message_key).await
+            }
+            _ => Self::lock_nowait_raw(tx, message_key).await,
+        }
+    }
+
+    pub async fn lock_all_nowait(
+        transaction: &mut IngressUowTransaction<'_>,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                lock_all_nowait_prepared(tx, prepared, descendant).await
+            }
+            _ => Self::lock_all_nowait_raw(tx, descendant).await,
+        }
     }
 
     pub async fn copy(
@@ -209,7 +136,13 @@ impl EffectDescendantRepository {
         source: Uuid,
         target: Uuid,
     ) -> Result<(), IngressUowError> {
-        Self::copy_raw(transaction.transaction_mut(), source, target).await
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                copy_prepared(tx, prepared, source, target).await
+            }
+            _ => Self::copy_raw(tx, source, target).await,
+        }
     }
 
     pub async fn settle_all(
@@ -217,7 +150,13 @@ impl EffectDescendantRepository {
         descendant: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), IngressUowError> {
-        Self::settle_all_raw(transaction.transaction_mut(), descendant, now).await
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                settle_all_prepared(tx, prepared, descendant, now).await
+            }
+            _ => Self::settle_all_raw(tx, descendant, now).await,
+        }
     }
 
     /// New parents acquired after pre-existing work must never wait: abort the
@@ -266,6 +205,20 @@ impl EffectDescendantRepository {
         Self::lock_nowait_raw(tx, message_key).await
     }
 
+    pub async fn bind_effect(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+    ) -> Result<EffectDeliveryBinding, IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                bind_effect_prepared(tx, prepared, message_key, effect).await
+            }
+            _ => Self::bind_effect_raw(tx, message_key, effect).await,
+        }
+    }
+
     pub(crate) async fn bind_effect_raw(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
@@ -296,13 +249,13 @@ impl EffectDescendantRepository {
         effect: &IngressEffectKey,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
-        Self::attach_raw(
-            transaction.transaction_mut(),
-            message_key,
-            effect,
-            descendant,
-        )
-        .await
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                attach_prepared(tx, prepared, message_key, effect, descendant).await
+            }
+            _ => Self::attach_raw(tx, message_key, effect, descendant).await,
+        }
     }
 
     /// Bind scheduling custody to one recorded canonical effect and its target.
@@ -400,6 +353,183 @@ impl EffectDescendantRepository {
     }
 }
 
+async fn lock_nowait_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    message_key: MessageKey,
+) -> Result<(), IngressUowError> {
+    let query = prepared_ingress_sql(
+        tx.driver(),
+        Some(prepared),
+        PreparedIngressRelation::Messages,
+        (
+            "SELECT 1 FROM ",
+            " WHERE message_key = ?::uuid FOR UPDATE NOWAIT",
+        ),
+        "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+    );
+    let mut rows = tx
+        .query(
+            &query,
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(canonical_nowait_error)?;
+    if rows.next().await.map_err(canonical_nowait_error)?.is_none() {
+        return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    Ok(())
+}
+
+async fn lock_all_nowait_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    descendant: Uuid,
+) -> Result<(), IngressUowError> {
+    for key in ancestor_keys_in_prepared(tx, Some(prepared), descendant).await? {
+        lock_nowait_prepared(tx, prepared, key).await?;
+    }
+    Ok(())
+}
+
+async fn copy_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    source: Uuid,
+    target: Uuid,
+) -> Result<(), IngressUowError> {
+    lock_all_nowait_prepared(tx, prepared, source).await?;
+    let keys = ancestor_keys_in_prepared(tx, Some(prepared), source).await?;
+    let relation =
+        prepared_ingress_relation(Some(prepared), PreparedIngressRelation::EffectDescendants);
+    let query = format!(
+        "INSERT INTO {relation} (message_key, kind, semantic_identity_hash, descendant_key) \
+         SELECT message_key, kind, semantic_identity_hash, ? FROM {relation} \
+         WHERE descendant_key = ? AND settled_at IS NULL ON CONFLICT DO NOTHING"
+    );
+    tx.execute(
+        &query,
+        crate::db_params![target.to_string(), source.to_string()],
+    )
+    .await?;
+    for key in keys {
+        crate::ingress_substrate::invalidate_retention_in_prepared_transaction(
+            tx,
+            Some(prepared),
+            key,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn settle_all_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    descendant: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), IngressUowError> {
+    lock_all_nowait_prepared(tx, prepared, descendant).await?;
+    let keys = ancestor_keys_in_prepared(tx, Some(prepared), descendant).await?;
+    let query = prepared_ingress_sql(
+        tx.driver(),
+        Some(prepared),
+        PreparedIngressRelation::EffectDescendants,
+        (
+            "UPDATE ",
+            " SET settled_at = ?::timestamptz WHERE descendant_key = ? AND settled_at IS NULL",
+        ),
+        "UPDATE ingress_effect_descendants SET settled_at = ? WHERE descendant_key = ? AND settled_at IS NULL",
+    );
+    tx.execute(
+        &query,
+        crate::db_params![now.to_rfc3339(), descendant.to_string()],
+    )
+    .await?;
+    for key in keys {
+        crate::ingress_substrate::refresh_retention_in_prepared_transaction(
+            tx,
+            Some(prepared),
+            key,
+            now,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn bind_effect_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    message_key: MessageKey,
+    effect: &IngressEffectKey,
+) -> Result<EffectDeliveryBinding, IngressUowError> {
+    lock_nowait_prepared(tx, prepared, message_key).await?;
+    ensure_intent_in_prepared(tx, Some(prepared), message_key, effect).await?;
+    if matches!(
+        effect,
+        IngressEffectKey::CallSignal(..)
+            | IngressEffectKey::Pin(..)
+            | IngressEffectKey::DmPinMutation(..)
+            | IngressEffectKey::DmCallThreadState(..)
+    ) {
+        return Ok(EffectDeliveryBinding::AwaitingDurableOwner);
+    }
+    let key = DeliveryKey::effect(message_key, effect);
+    let outcome = crate::ingress_substrate::record_delivery_in_prepared_transaction(
+        tx,
+        Some(prepared),
+        key,
+        message_key,
+    )
+    .await?;
+    if outcome == MessageWriteOutcome::MessageVanished {
+        return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    Ok(EffectDeliveryBinding::Bound(key))
+}
+
+async fn attach_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &crate::ingress_substrate::PreparedAttestedReceiptWriter,
+    message_key: MessageKey,
+    effect: &IngressEffectKey,
+    descendant: Uuid,
+) -> Result<(), IngressUowError> {
+    if bind_effect_prepared(tx, prepared, message_key, effect).await?
+        == EffectDeliveryBinding::AwaitingDurableOwner
+    {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let query = prepared_ingress_sql(
+        tx.driver(),
+        Some(prepared),
+        PreparedIngressRelation::EffectDescendants,
+        ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"),
+        "INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+    );
+    let inserted = tx
+        .execute(
+            &query,
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                effect.storage_kind(),
+                identity_hash(effect).to_vec(),
+                descendant.to_string()
+            ],
+        )
+        .await?;
+    if inserted > 0 {
+        crate::ingress_substrate::invalidate_retention_in_prepared_transaction(
+            tx,
+            Some(prepared),
+            message_key,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn ensure_intent(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
@@ -481,9 +611,26 @@ async fn ancestor_keys(
     tx: &mut Transaction<'_>,
     descendant: Uuid,
 ) -> Result<Vec<MessageKey>, IngressUowError> {
-    let query = sql(tx, "SELECT DISTINCT message_key::text FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL ORDER BY message_key::text", "SELECT DISTINCT message_key FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL ORDER BY message_key");
+    ancestor_keys_in_prepared(tx, None, descendant).await
+}
+
+async fn ancestor_keys_in_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    descendant: Uuid,
+) -> Result<Vec<MessageKey>, IngressUowError> {
+    let query = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::EffectDescendants,
+        (
+            "SELECT DISTINCT message_key::text FROM ",
+            " WHERE descendant_key = ? AND settled_at IS NULL ORDER BY message_key::text",
+        ),
+        "SELECT DISTINCT message_key FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL ORDER BY message_key",
+    );
     let mut rows = tx
-        .query(query, crate::db_params![descendant.to_string()])
+        .query(&query, crate::db_params![descendant.to_string()])
         .await?;
     let mut keys = Vec::new();
     while let Some(row) = rows.next().await? {

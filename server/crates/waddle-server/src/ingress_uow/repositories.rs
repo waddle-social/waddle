@@ -460,28 +460,6 @@ impl CanonicalMessageRepository {
         .map_err(Into::into)
     }
 
-    /// Use the real message writer without reacquiring the installed guard's
-    /// row lock, exclusively inside the sealed candidate-guard fixture.
-    #[cfg(feature = "test-support")]
-    pub(crate) async fn record_message_in_relation_guard_lab(
-        lab: &mut super::CandidateTransaction<'_>,
-        message_key: MessageKey,
-        digest: &SemanticDigest,
-    ) -> Result<ingress_substrate::MessageWriteOutcome, IngressUowError> {
-        let fixture = lab.fixture;
-        let (tx, prepared) = lab.transaction.prepared_parts();
-        let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
-        ingress_substrate::record_message_in_relation_guard_lab(
-            tx,
-            prepared,
-            fixture,
-            message_key,
-            digest,
-        )
-        .await
-        .map_err(Into::into)
-    }
-
     #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
     pub(crate) async fn record_message_with_source(
         transaction: &mut IngressUowTransaction<'_>,
@@ -2536,12 +2514,7 @@ impl DeliveryEffectRepository {
         message_key: MessageKey,
         effect: &IngressEffectKey,
     ) -> Result<super::EffectDeliveryBinding, IngressUowError> {
-        super::EffectDescendantRepository::bind_effect_raw(
-            transaction.transaction_mut(),
-            message_key,
-            effect,
-        )
-        .await
+        super::EffectDescendantRepository::bind_effect(transaction, message_key, effect).await
     }
 
     pub async fn record(
