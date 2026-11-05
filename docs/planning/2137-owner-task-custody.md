@@ -66,4 +66,57 @@ inputs remain `NotStarted`. This package does not claim process-crash recovery.
 
 The data command accepts already-parsed `ParsedFrame` values and a typed
 `jid::BareJid`. Its producer must parse at the I/O boundary and pass the
-original wire byte length, which is checked against `MAX_FRAME_SI
+original wire byte length, which is checked against `MAX_FRAME_SIZE`; the
+actor does not accept raw XML strings. This API is dark and unselected, so the
+size check does not prove a future `/ws` adapter passes the measured wire size.
+The typed command currently covers RFC 7395/SASL/classic stanzas and peer
+recipient-pass work. XEP-0198 nonzas and malformed-frame response mapping still
+need typed commands before the driver can cover the live `/ws` input surface.
+
+## Endpoint cleanup integration tranche
+
+Implemented in this PR:
+
+The existing app-owned `ActorEndpointCleanupIndex` in
+`actor_local_endpoint.rs` remains the lifecycle authority for a physical
+connection. It owns the driver task's operation ledger and retains the driver's
+independent supervisor/join on that same record. No second per-connection
+index is added. Exact-reference lookup and acknowledgement survive caller and
+task-handle drops; stale references cannot reach the record.
+
+Stop and lease-loss seal admission immediately. A configured shutdown grace
+allows accepted work to finish; at its deadline, abort and join the worker,
+retaining the active input as `CompletionUnknown` and queued inputs as
+`NotStarted`. Keep the cleanup record until both driver and physical-pump
+cleanup have joined and retained work is settled. Attachment and shutdown are
+serialized by the same cleanup-record lifecycle lock. Preserve exact operation
+identity and never replay from caller cancellation.
+
+The new deterministic tests cover handle-independent lookup/ack, one handler
+execution, stale references, duplicate and late attachment rejection, deadline
+abort classifications, concurrent join callers, and control admission behind
+a stalled handler. Existing owner and pump tests continue to cover bounded
+inventory, lease loss, panic, stalled physical cleanup, and successor fencing.
+Keep `/ws` selection, endpoint publication, stream-management advancement,
+wire behavior, workflow files, P2 custody, and the remaining XEP-0198/malformed
+frame paths out of this tranche.
+
+Remaining activation gates include a hard output-memory bound, typed handling
+for XEP-0198 and malformed input, control progress while a handler is stalled,
+P2 effect custody, P3.2/P3.3, and explicit activation review. No route selector,
+publication path, stream-management advancement, or wire behavior changed.
+
+## Verification plan
+
+- Deterministically cancel a caller wait while a handler is paused; retrieve
+  the same completion by operation ID and prove the handler ran once.
+- Fill the data mailbox and retained ledger to the 256-operation limit; prove a
+  further operation returns typed overload while the separate control path
+  remains available. Separately revoke authority during a stalled operation
+  and prove out-of-band admission sealing.
+- Revoke authority during a handler and force worker shutdown during another;
+  verify returned, unknown, and never-started custody remains distinguishable.
+  Verify endpoint cleanup retains and joins the worker supervisor together with
+  physical I/O cleanup before pruning.
+- Run focused actor-owner tests, default and clustering server checks, format,
+  and scoped Clippy with warnings denied.
