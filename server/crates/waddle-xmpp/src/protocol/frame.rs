@@ -14,6 +14,7 @@ use crate::Stanza;
 use jid::BareJid;
 use std::str::FromStr;
 use thiserror::Error;
+use waddle_xmpp_core::xep0388::{Sasl2Authenticate, Sasl2Response, NS_SASL2};
 use xmpp_parsers::message::Lang;
 use xmpp_parsers::minidom::Element;
 
@@ -46,6 +47,10 @@ pub enum InboundFrame {
     /// SASL `<response>` continuation message (e.g. SCRAM
     /// client-final-message). The body is the base64-encoded payload.
     SaslResponse(String),
+    /// XEP-0388 SASL2 authentication request.
+    Sasl2Authenticate(Sasl2Authenticate),
+    /// XEP-0388 SASL2 continuation response.
+    Sasl2Response(Sasl2Response),
     /// A typed XMPP stanza (IQ, message, or presence).
     ///
     /// Uses [`crate::Stanza`] for uniformity with the rest of
@@ -83,9 +88,8 @@ pub enum ParseError {
     /// The payload was not well-formed XML.
     #[error("invalid XML: {0}")]
     InvalidXml(String),
-    /// The payload's root element is not one of the seven frame roots we
-    /// know how to handle (`open`, `close`, `auth`, `response`, `iq`,
-    /// `message`, `presence`).
+    /// The payload's root element is not one of the frame roots we know how
+    /// to handle (`open`, `close`, SASL authentication/response, or a stanza).
     #[error("unknown root element: <{0}>")]
     UnknownRoot(String),
     /// A SASL frame was recognised but was missing a required attribute or
@@ -145,7 +149,7 @@ pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError>
     // local name only for these known roots; their parsers still validate the
     // expanded namespace and the complete XML element.
     let root = match root.split_once(':') {
-        Some((_, local @ ("open" | "close" | "auth" | "response"))) => local,
+        Some((_, local @ ("open" | "close" | "auth" | "response" | "authenticate"))) => local,
         _ => root,
     };
     match root {
@@ -153,6 +157,7 @@ pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError>
         "close" => parse_close(trimmed),
         "auth" => parse_auth(trimmed),
         "response" => parse_response(trimmed),
+        "authenticate" => parse_sasl2_authenticate(trimmed),
         "iq" | "message" | "presence" => parse_stanza(trimmed, root),
         other => Err(ParseError::UnknownRoot(other.to_string())),
     }
@@ -199,10 +204,40 @@ fn parse_auth(frame: &str) -> Result<ParsedFrame, ParseError> {
 fn parse_response(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    if element.is("response", NS_SASL2) {
+        let response = Sasl2Response::from_element(&element).map_err(|err| {
+            ParseError::MalformedSasl(match err {
+                waddle_xmpp_core::xep0388::Sasl2Error::InvalidPayload => "invalid SASL2 payload",
+                _ => "invalid SASL2 response",
+            })
+        })?;
+        return Ok(ParsedFrame {
+            frame: InboundFrame::Sasl2Response(response),
+            message_stanza_lang: None,
+        });
+    }
     require_namespace(&element, "response", SASL)?;
     require_text_only_element(&element, "response")?;
     Ok(ParsedFrame {
         frame: InboundFrame::SaslResponse(element.text().trim().to_string()),
+        message_stanza_lang: None,
+    })
+}
+
+fn parse_sasl2_authenticate(frame: &str) -> Result<ParsedFrame, ParseError> {
+    let element =
+        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    let request = Sasl2Authenticate::from_element(&element).map_err(|err| {
+        ParseError::MalformedSasl(match err {
+            waddle_xmpp_core::xep0388::Sasl2Error::InvalidPayload => "invalid SASL2 payload",
+            waddle_xmpp_core::xep0388::Sasl2Error::InvalidMechanism => {
+                "missing or invalid SASL2 mechanism"
+            }
+            _ => "invalid SASL2 authenticate request",
+        })
+    })?;
+    Ok(ParsedFrame {
+        frame: InboundFrame::Sasl2Authenticate(request),
         message_stanza_lang: None,
     })
 }

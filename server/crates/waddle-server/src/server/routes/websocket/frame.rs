@@ -11,8 +11,9 @@ use super::sasl::{
 use super::state::{authenticated_client_room_origin, InboundFrameTerminal, WsConnState};
 use super::stream_management::{handle_sm_stanza, SmCtx};
 use super::transport_xml::{
-    build_handled_count_too_high_stream_error, build_stream_features_for_phase_element,
-    element_to_xml, sasl_failure_element, stanza_to_xml, websocket_stream_close_element,
+    build_handled_count_too_high_stream_error, build_stream_features_element,
+    build_stream_features_for_phase_element, element_to_xml, sasl2_failure_element,
+    sasl_failure_element, stanza_to_xml, websocket_stream_close_element,
     websocket_stream_open_element,
 };
 use super::{
@@ -306,6 +307,33 @@ fn stream_open_error_response(
     .into()
 }
 
+fn sasl2_failure_from_sasl1(responses: &[Element]) -> Element {
+    use waddle_xmpp_core::xep0388::Sasl2FailureCondition;
+
+    let condition = responses
+        .first()
+        .and_then(|response| {
+            response
+                .children()
+                .find(|condition| condition.ns() == waddle_xmpp_core::xep0388::NS_SASL)
+        })
+        .map(|condition| match condition.name() {
+            "aborted" => Sasl2FailureCondition::Aborted,
+            "account-disabled" => Sasl2FailureCondition::AccountDisabled,
+            "credentials-expired" => Sasl2FailureCondition::CredentialsExpired,
+            "encryption-required" => Sasl2FailureCondition::EncryptionRequired,
+            "incorrect-encoding" => Sasl2FailureCondition::IncorrectEncoding,
+            "invalid-authzid" => Sasl2FailureCondition::InvalidAuthzid,
+            "invalid-mechanism" => Sasl2FailureCondition::InvalidMechanism,
+            "malformed-request" => Sasl2FailureCondition::MalformedRequest,
+            "mechanism-too-weak" => Sasl2FailureCondition::MechanismTooWeak,
+            "temporary-auth-failure" => Sasl2FailureCondition::TemporaryAuthFailure,
+            _ => Sasl2FailureCondition::NotAuthorized,
+        })
+        .unwrap_or(Sasl2FailureCondition::NotAuthorized);
+    sasl2_failure_element(condition)
+}
+
 /// Handle an XMPP frame per RFC 7395
 #[cfg(test)]
 pub(super) async fn handle_xmpp_frame(
@@ -519,7 +547,8 @@ async fn handle_xmpp_frame_impl(
             }
             let open_element = websocket_stream_open_element(domain, from.as_ref());
             *stream_open_from = from;
-            let features_element = build_stream_features_for_phase_element(phase);
+            let features_element =
+                build_stream_features_for_phase_element(phase, state.sasl2_negotiation_enabled());
             conn.begin_server_stream_open_response();
             vec![open_element, features_element].into()
         }
@@ -548,7 +577,7 @@ async fn handle_xmpp_frame_impl(
             let responses = match await_control_stage(admission, async {
                 match mechanism.as_str() {
                     "SCRAM-SHA-256" => {
-                        handle_sasl_scram_client_first(&data, domain, state, phase).await
+                        handle_sasl_scram_client_first(&data, domain, state, phase, false).await
                     }
                     "OAUTHBEARER" => {
                         handle_sasl_oauthbearer(
@@ -585,15 +614,19 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::SaslResponse(data) => {
-            if !phase.allows_sasl_response() {
+            if !phase.allows_sasl_response() || phase.scram_pending_is_sasl2() {
                 warn!(phase = ?phase, "SASL response received in invalid phase");
                 record_scram_failure(AuthFailure::ScramOther, None);
+                if phase.scram_pending_is_sasl2() {
+                    let _ = phase.take_scram_pending();
+                }
                 return vec![sasl_failure_element("not-authorized")].into();
             }
-            let scram = phase
-                .take_scram_pending()
-                .expect("SASL response must have pending SCRAM state");
-            let responses = handle_sasl_scram_response(
+            let Some(scram) = phase.take_scram_pending() else {
+                record_scram_failure(AuthFailure::ScramOther, None);
+                return vec![sasl_failure_element("not-authorized")].into();
+            };
+            let response = handle_sasl_scram_response(
                 &data,
                 domain,
                 state,
@@ -609,7 +642,197 @@ async fn handle_xmpp_frame_impl(
             if phase.is_authenticated() {
                 conn.reset_stream_open_for_xmpp_lifecycle();
             }
-            responses.into()
+            vec![response.element].into()
+        }
+
+        InboundFrame::Sasl2Authenticate(request) => {
+            use waddle_xmpp_core::xep0388::{
+                Sasl2FailureCondition, Sasl2Mechanism, Sasl2Success, NS_SASL2,
+            };
+
+            // SASL2 is dark by default. Only an explicitly opted-in test
+            // fixture can advertise and dispatch this handshake; operator
+            // URL configuration is not evidence of the request's TLS or
+            // early-data state.
+            if !state.sasl2_negotiation_enabled() {
+                return vec![sasl2_failure_element(
+                    Sasl2FailureCondition::InvalidMechanism,
+                )]
+                .into();
+            }
+            if !phase.allows_sasl_auth() {
+                return vec![sasl2_failure_element(Sasl2FailureCondition::NotAuthorized)].into();
+            }
+            if !matches!(
+                &request.mechanism,
+                Sasl2Mechanism::OAuthBearer | Sasl2Mechanism::ScramSha256
+            ) {
+                return vec![sasl2_failure_element(
+                    Sasl2FailureCondition::InvalidMechanism,
+                )]
+                .into();
+            }
+            if request
+                .additional_children()
+                .iter()
+                .any(|child| !child.is("user-agent", NS_SASL2))
+            {
+                return vec![sasl2_failure_element(
+                    Sasl2FailureCondition::MalformedRequest,
+                )]
+                .into();
+            }
+            let Some(initial_response) = request.initial_response else {
+                return vec![sasl2_failure_element(
+                    Sasl2FailureCondition::MalformedRequest,
+                )]
+                .into();
+            };
+
+            let initial_response = initial_response.encoded();
+            let mechanism = request.mechanism;
+            let phase_was_unauthenticated = matches!(phase, ConnectionPhase::Unauthenticated);
+            let responses = match await_control_stage(admission, async {
+                match &mechanism {
+                    Sasl2Mechanism::OAuthBearer => {
+                        handle_sasl_oauthbearer(
+                            &initial_response,
+                            state,
+                            stream_open_from.as_ref(),
+                            authenticated_session,
+                            phase,
+                        )
+                        .await
+                    }
+                    Sasl2Mechanism::ScramSha256 => {
+                        handle_sasl_scram_client_first(
+                            &initial_response,
+                            domain,
+                            state,
+                            phase,
+                            true,
+                        )
+                        .await
+                    }
+                    _ => vec![sasl2_failure_element(
+                        Sasl2FailureCondition::InvalidMechanism,
+                    )],
+                }
+            })
+            .await
+            {
+                Ok(responses) => responses,
+                Err(terminal) => {
+                    *inbound_frame_terminal = Some(terminal);
+                    return ResponseBatch::default();
+                }
+            };
+
+            if responses
+                .first()
+                .is_some_and(|response| response.is("challenge", NS_SASL2))
+            {
+                return responses.into();
+            }
+
+            if responses
+                .first()
+                .is_some_and(|response| response.is("success", waddle_xmpp::ns::SASL))
+            {
+                if mechanism != Sasl2Mechanism::OAuthBearer {
+                    warn!("SASL2 SCRAM client-first unexpectedly completed authentication");
+                    *authenticated_session = None;
+                    *phase = ConnectionPhase::closing(None);
+                    return vec![
+                        sasl2_failure_element(Sasl2FailureCondition::TemporaryAuthFailure),
+                        websocket_stream_close_element(),
+                    ]
+                    .into();
+                }
+                let Some(authorization_identifier) = phase.authenticated_bare_jid().cloned() else {
+                    warn!("SASL2 OAuth verifier succeeded without an authenticated principal");
+                    *authenticated_session = None;
+                    *phase = ConnectionPhase::closing(None);
+                    return vec![
+                        sasl2_failure_element(Sasl2FailureCondition::TemporaryAuthFailure),
+                        websocket_stream_close_element(),
+                    ]
+                    .into();
+                };
+                let success = Sasl2Success {
+                    additional_data: None,
+                    authorization_identifier: authorization_identifier.into(),
+                    inline_results: Vec::new(),
+                }
+                .to_element();
+                return vec![success, build_stream_features_element(true)].into();
+            }
+
+            if phase_was_unauthenticated && phase.is_closing() {
+                // SASL2 failure leaves stream and session state unchanged.
+                // The shared legacy verifier closes on a stream/from mismatch;
+                // clear that legacy side effect for this SASL2 exchange.
+                *phase = ConnectionPhase::Unauthenticated;
+            }
+            vec![sasl2_failure_from_sasl1(&responses)].into()
+        }
+
+        InboundFrame::Sasl2Response(response) => {
+            use waddle_xmpp_core::xep0388::{Sasl2FailureCondition, Sasl2Success};
+
+            if !state.sasl2_negotiation_enabled() {
+                return vec![sasl2_failure_element(
+                    Sasl2FailureCondition::InvalidMechanism,
+                )]
+                .into();
+            }
+            if !phase.allows_sasl_response() || !phase.scram_pending_is_sasl2() {
+                return vec![sasl2_failure_element(Sasl2FailureCondition::NotAuthorized)].into();
+            }
+            let Some(scram) = phase.take_scram_pending() else {
+                return vec![sasl2_failure_element(Sasl2FailureCondition::NotAuthorized)].into();
+            };
+            let response_result = handle_sasl_scram_response(
+                &response.data.encoded(),
+                domain,
+                state,
+                scram,
+                stream_open_from.as_ref(),
+                authenticated_session,
+                phase,
+            )
+            .await;
+            if response_result.element.is("success", waddle_xmpp::ns::SASL) {
+                let Some(authorization_identifier) = phase.authenticated_bare_jid().cloned() else {
+                    return vec![sasl2_failure_element(Sasl2FailureCondition::NotAuthorized)]
+                        .into();
+                };
+                let Some(server_final) = response_result.server_final else {
+                    warn!("SASL2 SCRAM verifier omitted server-final data");
+                    record_scram_failure(AuthFailure::ScramOther, Some(&authorization_identifier));
+                    *authenticated_session = None;
+                    *phase = ConnectionPhase::closing(None);
+                    return vec![
+                        sasl2_failure_element(Sasl2FailureCondition::TemporaryAuthFailure),
+                        websocket_stream_close_element(),
+                    ]
+                    .into();
+                };
+                let success = Sasl2Success {
+                    additional_data: Some(waddle_xmpp_core::xep0388::Sasl2Data::new(server_final)),
+                    authorization_identifier: authorization_identifier.into(),
+                    inline_results: Vec::new(),
+                }
+                .to_element();
+                return vec![success, build_stream_features_element(true)].into();
+            }
+            if phase.is_closing() {
+                *phase = ConnectionPhase::Unauthenticated;
+            }
+            vec![sasl2_failure_from_sasl1(std::slice::from_ref(
+                &response_result.element,
+            ))]
+            .into()
         }
 
         InboundFrame::Stanza(stanza) => {

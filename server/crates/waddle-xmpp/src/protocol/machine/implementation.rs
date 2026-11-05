@@ -267,6 +267,7 @@ impl XmppStateMachine {
             }
             InboundFrame::Auth { .. } => vec![],
             InboundFrame::SaslResponse(_) => vec![],
+            InboundFrame::Sasl2Authenticate(_) | InboundFrame::Sasl2Response(_) => vec![],
             InboundFrame::Stanza(stanza) => self.on_stanza(*stanza),
         }
     }

@@ -248,6 +248,13 @@ pub(super) fn build_conflict_stream_error() -> String {
 }
 
 pub(super) fn build_stream_features_element(authenticated: bool) -> Element {
+    build_stream_features_element_with_sasl2(authenticated, false)
+}
+
+pub(super) fn build_stream_features_element_with_sasl2(
+    authenticated: bool,
+    sasl2_enabled: bool,
+) -> Element {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
         features = features.append(Element::builder("bind", waddle_xmpp::ns::BIND).build());
@@ -272,6 +279,19 @@ pub(super) fn build_stream_features_element(authenticated: bool) -> Element {
                 )
                 .build(),
         );
+        if sasl2_enabled {
+            features = features.append(
+                waddle_xmpp_core::xep0388::Sasl2Feature {
+                    mechanisms: vec![
+                        waddle_xmpp_core::xep0388::Sasl2Mechanism::ScramSha256,
+                        waddle_xmpp_core::xep0388::Sasl2Mechanism::OAuthBearer,
+                    ],
+                    inline: None,
+                }
+                .to_element()
+                .expect("SASL2 fixture feature has one supported mechanism"),
+            );
+        }
     }
 
     features.build()
@@ -282,8 +302,19 @@ pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
     element_to_xml(build_stream_features_element(authenticated))
 }
 
-pub(super) fn build_stream_features_for_phase_element(phase: &ConnectionPhase) -> Element {
-    build_stream_features_element(phase.is_authenticated())
+pub(super) fn build_stream_features_for_phase_element(
+    phase: &ConnectionPhase,
+    sasl2_enabled: bool,
+) -> Element {
+    build_stream_features_element_with_sasl2(phase.is_authenticated(), sasl2_enabled)
+}
+
+pub(super) fn sasl2_failure_element(
+    condition: waddle_xmpp_core::xep0388::Sasl2FailureCondition,
+) -> Element {
+    waddle_xmpp_core::xep0388::Sasl2Failure { condition }
+        .to_element()
+        .expect("known SASL2 failure condition serializes")
 }
 
 pub(super) fn sasl_success_element() -> Element {

@@ -1,4 +1,4 @@
-use super::transport_xml::sasl_failure_xml;
+use super::transport_xml::{element_to_xml, sasl2_failure_element, sasl_failure_xml};
 use super::{
     build_iq_error_xml_typed, feature_not_implemented_iq_error, inject_client_ns_if_missing,
     Element, FromStr, ParseError,
@@ -11,16 +11,40 @@ pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
     ) {
         return false;
     }
+    is_sasl2_parse_failure(frame, err)
+        || match parse_error_root_name(frame) {
+            Some("auth" | "response") => {
+                raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL)
+                    == waddle_xmpp::ns::SASL
+            }
+            Some(root) => match root.split_once(':') {
+                Some((prefix, "auth" | "response")) if !prefix.is_empty() => {
+                    let namespace_attr = format!("xmlns:{prefix}");
+                    decoded_raw_xml_attr_value(frame, &namespace_attr).as_deref()
+                        == Some(waddle_xmpp::ns::SASL)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+}
+
+fn is_sasl2_parse_failure(frame: &str, err: &ParseError) -> bool {
+    if !matches!(
+        err,
+        ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)
+    ) {
+        return false;
+    }
     match parse_error_root_name(frame) {
-        Some("auth" | "response") => {
-            raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL)
-                == waddle_xmpp::ns::SASL
+        Some("authenticate" | "response") => {
+            raw_xml_attr_value(frame, "xmlns") == Some(waddle_xmpp_core::xep0388::NS_SASL2)
         }
         Some(root) => match root.split_once(':') {
-            Some((prefix, "auth" | "response")) if !prefix.is_empty() => {
+            Some((prefix, "authenticate" | "response")) if !prefix.is_empty() => {
                 let namespace_attr = format!("xmlns:{prefix}");
                 decoded_raw_xml_attr_value(frame, &namespace_attr).as_deref()
-                    == Some(waddle_xmpp::ns::SASL)
+                    == Some(waddle_xmpp_core::xep0388::NS_SASL2)
             }
             _ => false,
         },
@@ -30,6 +54,11 @@ pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
 
 pub(super) fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
     match (parse_error_root_name(frame), err) {
+        _ if is_sasl2_parse_failure(frame, err) => {
+            Some(vec![element_to_xml(sasl2_failure_element(
+                waddle_xmpp_core::xep0388::Sasl2FailureCondition::MalformedRequest,
+            ))])
+        }
         _ if is_sasl_parse_failure(frame, err) => Some(vec![sasl_failure_xml("malformed-request")]),
         (Some("iq"), ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_)) => {
             invalid_iq_parse_error_response(frame).map(|response| vec![response])

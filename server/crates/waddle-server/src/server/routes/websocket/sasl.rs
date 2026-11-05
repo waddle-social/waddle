@@ -164,6 +164,7 @@ pub(super) async fn handle_sasl_scram_client_first(
     domain: &str,
     state: &WebSocketState,
     phase: &mut ConnectionPhase,
+    sasl2: bool,
 ) -> Vec<Element> {
     debug!("SASL SCRAM-SHA-256 auth attempt");
 
@@ -232,25 +233,38 @@ pub(super) async fn handle_sasl_scram_client_first(
         }
     };
 
-    let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+    let challenge = if sasl2 {
+        waddle_xmpp_core::xep0388::Sasl2Challenge {
+            data: waddle_xmpp_core::xep0388::Sasl2Data::new(server_first.message.into_bytes()),
+        }
+        .to_element()
+    } else {
+        let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+        Element::builder("challenge", waddle_xmpp::ns::SASL)
+            .append(challenge_b64)
+            .build()
+    };
     debug!(username = %username, "SCRAM-SHA-256 challenge generated");
 
-    *phase = ConnectionPhase::scram_pending(ScramPendingState::new(
-        scram_server,
-        creds.stored_key,
-        creds.server_key,
-        username,
-    ));
+    let pending = if sasl2 {
+        ScramPendingState::new_sasl2(scram_server, creds.stored_key, creds.server_key, username)
+    } else {
+        ScramPendingState::new(scram_server, creds.stored_key, creds.server_key, username)
+    };
+    *phase = ConnectionPhase::scram_pending(pending);
 
-    vec![Element::builder("challenge", waddle_xmpp::ns::SASL)
-        .append(challenge_b64)
-        .build()]
+    vec![challenge]
 }
 
 /// Handle SASL SCRAM-SHA-256 response (client-final-message).
 ///
 /// Verifies the client proof against stored keys and returns `<success>` or
 /// `<failure>`.
+pub(super) struct ScramResponse {
+    pub(super) element: Element,
+    pub(super) server_final: Option<Vec<u8>>,
+}
+
 pub(super) async fn handle_sasl_scram_response(
     b64_data: &str,
     domain: &str,
@@ -259,15 +273,18 @@ pub(super) async fn handle_sasl_scram_response(
     stream_from: Option<&BareJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
-) -> Vec<Element> {
+) -> ScramResponse {
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
         Err(_) => {
             let bare_identifier = scram_bare_identifier(scram.username(), domain);
-            return vec![scram_failure_counted(
-                AuthFailure::ScramMalformed,
-                bare_identifier.as_ref(),
-            )];
+            return ScramResponse {
+                element: scram_failure_counted(
+                    AuthFailure::ScramMalformed,
+                    bare_identifier.as_ref(),
+                ),
+                server_final: None,
+            };
         }
     };
 
@@ -275,10 +292,13 @@ pub(super) async fn handle_sasl_scram_response(
         Ok(s) => s,
         Err(_) => {
             let bare_identifier = scram_bare_identifier(scram.username(), domain);
-            return vec![scram_failure_counted(
-                AuthFailure::ScramMalformed,
-                bare_identifier.as_ref(),
-            )];
+            return ScramResponse {
+                element: scram_failure_counted(
+                    AuthFailure::ScramMalformed,
+                    bare_identifier.as_ref(),
+                ),
+                server_final: None,
+            };
         }
     };
 
@@ -286,10 +306,13 @@ pub(super) async fn handle_sasl_scram_response(
         Ok(result) => result,
         Err(_) => {
             let bare_identifier = scram_bare_identifier(scram.username(), domain);
-            return vec![scram_failure_counted(
-                AuthFailure::ScramInvalidCredentials,
-                bare_identifier.as_ref(),
-            )];
+            return ScramResponse {
+                element: scram_failure_counted(
+                    AuthFailure::ScramInvalidCredentials,
+                    bare_identifier.as_ref(),
+                ),
+                server_final: None,
+            };
         }
     };
 
@@ -298,20 +321,29 @@ pub(super) async fn handle_sasl_scram_response(
     let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
         Ok(jid) => jid,
         Err(_) => {
-            return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+            return ScramResponse {
+                element: scram_failure_counted(AuthFailure::ScramOther, None),
+                server_final: None,
+            };
         }
     };
 
     let bare_jid: BareJid = match bare_jid_str.parse() {
         Ok(jid) => jid,
         Err(_) => {
-            return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+            return ScramResponse {
+                element: scram_failure_counted(AuthFailure::ScramOther, None),
+                server_final: None,
+            };
         }
     };
 
     if stream_from.is_some_and(|from| from != &bare_jid) {
         *phase = ConnectionPhase::closing(None);
-        return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+        return ScramResponse {
+            element: scram_failure_counted(AuthFailure::ScramOther, None),
+            server_final: None,
+        };
     }
 
     info!(
@@ -349,8 +381,12 @@ pub(super) async fn handle_sasl_scram_response(
     *authenticated_session = Some(session);
     *phase = ConnectionPhase::authenticated(&full_jid);
 
-    let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
-    vec![Element::builder("success", waddle_xmpp::ns::SASL)
-        .append(success_b64)
-        .build()]
+    let server_final = server_final.message.into_bytes();
+    let success_b64 = BASE64_STANDARD.encode(&server_final);
+    ScramResponse {
+        element: Element::builder("success", waddle_xmpp::ns::SASL)
+            .append(success_b64)
+            .build(),
+        server_final: Some(server_final),
+    }
 }
