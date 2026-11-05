@@ -2,6 +2,11 @@
 
 use std::collections::HashMap;
 
+use super::schema::{
+    ACTIVITY_OWNER_STATE_REVISION, ACTIVITY_OWNER_STATE_REVISION_CHECK,
+    ACTIVITY_OWNER_STATE_SINGLETON_CHECK, ACTIVITY_OWNER_STATE_TABLE, ACTIVITY_SCHEMA_GATE,
+};
+use crate::db::lineage::PgIdentity;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use thiserror::Error;
 
@@ -48,6 +53,18 @@ pub enum DurableStoreAttachError {
     InvalidConstraint { table: &'static str },
     #[error("the PostgreSQL runtime role or notification-store grants are unsafe")]
     UnsafeRuntimeRole,
+    #[error("notification activity owner preparation is incomplete or missing")]
+    OwnerPreparationIncomplete,
+    #[error("notification activity owner marker has an invalid shape")]
+    InvalidOwnerMarker,
+    #[error("notification activity owner marker belongs to a different physical schema")]
+    OwnerIdentityMismatch,
+    #[error("notification store relation {table} could not be locked")]
+    RelationLock {
+        table: &'static str,
+        #[source]
+        source: DatabaseError,
+    },
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -159,12 +176,46 @@ const ACTIVITY_CHECKS: &[CheckContract] = &[
     },
 ];
 
+const ACTIVITY_OWNER_STATE_COLUMNS: &[ColumnContract] = &[
+    ColumnContract::plain("singleton", ColumnKind::Text, true),
+    ColumnContract::plain("prepared_revision", ColumnKind::Text, true),
+    ColumnContract::plain("system_identifier", ColumnKind::Text, true),
+    ColumnContract::plain("database_oid", ColumnKind::Bigint, true),
+    ColumnContract::plain("database_name", ColumnKind::Text, true),
+    ColumnContract::plain("schema_oid", ColumnKind::Bigint, true),
+    ColumnContract::plain("schema_name", ColumnKind::Text, true),
+];
+
+const ACTIVITY_OWNER_STATE_CHECKS: &[CheckContract] = &[
+    CheckContract {
+        name: ACTIVITY_OWNER_STATE_SINGLETON_CHECK,
+        column: "singleton",
+        nullable: false,
+        values: &["1"],
+    },
+    CheckContract {
+        name: ACTIVITY_OWNER_STATE_REVISION_CHECK,
+        column: "prepared_revision",
+        nullable: false,
+        values: &["0", "1"],
+    },
+];
+
 pub(crate) const ACTIVITY_CONTRACT: TableContract = TableContract {
     name: "notification_activity",
     columns: ACTIVITY_COLUMNS,
     primary_key: &["owner_bare_jid", "conversation_jid"],
     indexes: ACTIVITY_INDEXES,
     checks: ACTIVITY_CHECKS,
+    runtime_delete: false,
+};
+
+const ACTIVITY_OWNER_STATE_CONTRACT: TableContract = TableContract {
+    name: ACTIVITY_OWNER_STATE_TABLE,
+    columns: ACTIVITY_OWNER_STATE_COLUMNS,
+    primary_key: &["singleton"],
+    indexes: &[],
+    checks: ACTIVITY_OWNER_STATE_CHECKS,
     runtime_delete: false,
 };
 
@@ -228,6 +279,7 @@ pub(crate) async fn verify_attested_table(
     let schema = &identity.schema.name.0;
     crate::db::physical_attestation::validate_identifier(schema, "notification-store schema")
         .map_err(|_| DurableStoreAttachError::InvalidSchema)?;
+    let activity_contract = contract.name == ACTIVITY_CONTRACT.name;
     let qualified = format!(
         "{}.\"{}\"",
         crate::db::physical_attestation::quote_identifier(schema),
@@ -235,16 +287,24 @@ pub(crate) async fn verify_attested_table(
     );
 
     let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-        (),
-    )
-    .await?;
+    if activity_contract {
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+            (),
+        )
+        .await?;
+    } else {
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+            (),
+        )
+        .await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            (),
+        )
+        .await?;
+    }
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|error| match error {
@@ -255,18 +315,70 @@ pub(crate) async fn verify_attested_table(
                 DurableStoreAttachError::Database(error)
             }
         })?;
+
+    if activity_contract {
+        let mut rows = tx
+            .query(
+                "WITH acquired AS MATERIALIZED (\
+                   SELECT pg_catalog.pg_advisory_xact_lock_shared(?::integer, ?::integer)\
+                 ) SELECT true FROM acquired",
+                crate::db_params![ACTIVITY_SCHEMA_GATE.0, ACTIVITY_SCHEMA_GATE.1],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Err(DurableStoreAttachError::Database(
+                DatabaseError::QueryFailed(
+                    "notification activity shared schema gate returned no row".to_owned(),
+                ),
+            ));
+        };
+        if !row.get::<bool>(0)? {
+            return Err(DurableStoreAttachError::Database(
+                DatabaseError::QueryFailed(
+                    "notification activity shared schema gate was not acquired".to_owned(),
+                ),
+            ));
+        }
+        drop(rows);
+    }
     tx.execute(
         &format!("LOCK TABLE {qualified} IN SHARE UPDATE EXCLUSIVE MODE"),
         (),
     )
     .await
-    .map_err(|source| DurableStoreAttachError::Relation {
-        table: contract.name,
-        source,
+    .map_err(|source| {
+        if activity_contract {
+            DurableStoreAttachError::RelationLock {
+                table: contract.name,
+                source,
+            }
+        } else {
+            DurableStoreAttachError::Relation {
+                table: contract.name,
+                source,
+            }
+        }
     })?;
+    if activity_contract {
+        let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+        let marker_lock = format!(
+            "LOCK TABLE {quoted_schema}.\"{ACTIVITY_OWNER_STATE_TABLE}\" IN ACCESS SHARE MODE"
+        );
+        tx.execute(&marker_lock, ()).await.map_err(|source| {
+            if is_undefined_relation(&source) {
+                DurableStoreAttachError::OwnerPreparationIncomplete
+            } else {
+                DurableStoreAttachError::RelationLock {
+                    table: ACTIVITY_OWNER_STATE_TABLE,
+                    source,
+                }
+            }
+        })?;
+    }
 
     // The attestation covers the same connection that holds the qualified
-    // relation lock and performs every catalog inspection below.
+    // relation locks and performs every catalog inspection below. READ
+    // COMMITTED gives the first post-lock catalog query a fresh snapshot.
     capability.attest_transaction(&mut tx).await?;
     verify_active_schema(&mut tx, schema, i64::from(identity.schema.oid)).await?;
     verify_table(&mut tx, schema, contract).await?;
@@ -274,6 +386,36 @@ pub(crate) async fn verify_attested_table(
     verify_constraints(&mut tx, schema, contract).await?;
     verify_indexes(&mut tx, schema, contract).await?;
     verify_runtime_acl(&mut tx, schema, contract.name, contract.runtime_delete).await?;
+    if activity_contract {
+        verify_table(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+            .await
+            .map_err(|error| match error {
+                DurableStoreAttachError::InvalidTable { .. }
+                | DurableStoreAttachError::InboundForeignKey { .. }
+                | DurableStoreAttachError::UnexpectedTrigger { .. } => {
+                    DurableStoreAttachError::InvalidOwnerMarker
+                }
+                error => error,
+            })?;
+        verify_columns(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+            .await
+            .map_err(|_| DurableStoreAttachError::InvalidOwnerMarker)?;
+        verify_constraints(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+            .await
+            .map_err(|_| DurableStoreAttachError::InvalidOwnerMarker)?;
+        verify_indexes(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+            .await
+            .map_err(|error| match error {
+                DurableStoreAttachError::InvalidTable { .. }
+                | DurableStoreAttachError::InvalidIndex { .. }
+                | DurableStoreAttachError::UnexpectedIndex { .. } => {
+                    DurableStoreAttachError::InvalidOwnerMarker
+                }
+                error => error,
+            })?;
+        verify_runtime_owner_state_acl(&mut tx, schema).await?;
+        verify_owner_state(&mut tx, schema, identity).await?;
+    }
 
     tx.rollback().await?;
     Ok(())
@@ -513,6 +655,17 @@ fn normalize_check_definition(definition: &str) -> String {
 }
 
 fn expected_check_definition(check: &CheckContract) -> String {
+    // PostgreSQL rewrites an `IN` list with one member to a simple equality
+    // expression in `pg_get_constraintdef`; keep the catalog contract exact
+    // while matching that canonical rendering.
+    if check.values.len() == 1 {
+        let value = check.values[0];
+        if check.nullable {
+            return format!("{}isnullor{}='{}'", check.column, check.column, value);
+        }
+        return format!("{}='{}'", check.column, value);
+    }
+
     let values = check
         .values
         .iter()
@@ -769,4 +922,132 @@ async fn verify_runtime_acl(
         return Err(DurableStoreAttachError::UnsafeRuntimeRole);
     }
     Ok(())
+}
+
+async fn verify_runtime_owner_state_acl(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), DurableStoreAttachError> {
+    let mut rows = tx
+        .query(
+            r#"SELECT session_user::text = current_user::text
+                    AND current_user::text = runtime.rolname
+                    AND runtime.rolcanlogin AND NOT runtime.rolsuper
+                    AND NOT runtime.rolcreaterole AND NOT runtime.rolcreatedb
+                    AND NOT runtime.rolreplication AND NOT runtime.rolbypassrls
+                    AND runtime.oid <> database.datdba
+                    AND NOT pg_catalog.has_database_privilege(
+                      runtime.oid, database.oid, 'CREATE,TEMP')
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m
+                                    WHERE m.member = runtime.oid OR m.roleid = runtime.oid)
+                    AND pg_catalog.has_schema_privilege(runtime.oid, ns.oid, 'USAGE')
+                    AND NOT pg_catalog.has_schema_privilege(runtime.oid, ns.oid, 'CREATE')
+                    AND ns.nspowner = owner.oid AND relation.relowner = owner.oid
+                    AND owner.oid <> runtime.oid AND owner.oid <> database.datdba
+                    AND NOT owner.rolcanlogin AND NOT owner.rolsuper
+                    AND NOT owner.rolcreaterole AND NOT owner.rolcreatedb
+                    AND NOT owner.rolreplication AND NOT owner.rolbypassrls
+                    AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.aclexplode(
+                        CASE WHEN pg_catalog.cardinality(ns.nspacl) > 0
+                          THEN ns.nspacl
+                          ELSE pg_catalog.acldefault('n', ns.nspowner) END
+                      ) acl WHERE acl.grantee = 0
+                        OR (acl.grantee <> owner.oid
+                            AND (acl.privilege_type <> 'USAGE' OR acl.is_grantable))
+                    )
+                    AND pg_catalog.has_table_privilege(runtime.oid, relation.oid, 'SELECT')
+                    AND NOT pg_catalog.has_table_privilege(
+                      runtime.oid, relation.oid,
+                      'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+                    AND NOT pg_catalog.has_table_privilege(
+                      runtime.oid, relation.oid,
+                      'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION,
+                       UPDATE WITH GRANT OPTION, DELETE WITH GRANT OPTION,
+                       TRUNCATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION,
+                       TRIGGER WITH GRANT OPTION')
+                    AND CASE WHEN pg_catalog.current_setting('server_version_num')::integer >= 170000
+                      THEN NOT pg_catalog.has_table_privilege(runtime.oid, relation.oid, 'MAINTAIN')
+                      ELSE true END
+                    AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.aclexplode(
+                        CASE WHEN pg_catalog.cardinality(relation.relacl) > 0
+                          THEN relation.relacl
+                          ELSE pg_catalog.acldefault('r', relation.relowner) END
+                      ) acl WHERE acl.grantee NOT IN (owner.oid, runtime.oid)
+                        OR (acl.grantee = runtime.oid AND (
+                          acl.is_grantable OR acl.privilege_type <> 'SELECT'))
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_attribute a
+                      CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl
+                      WHERE a.attrelid = relation.oid AND a.attnum > 0
+                        AND NOT a.attisdropped
+                    )
+             FROM pg_catalog.pg_roles runtime
+             JOIN pg_catalog.pg_namespace ns ON ns.nspname = ?
+             JOIN pg_catalog.pg_roles owner ON owner.oid = ns.nspowner
+             JOIN pg_catalog.pg_database database
+               ON database.datname = pg_catalog.current_database()
+             JOIN pg_catalog.pg_class relation
+               ON relation.relnamespace = ns.oid AND relation.relname = ?
+                  AND relation.relkind = 'r'
+             WHERE runtime.rolname = current_user"#,
+            crate::db_params![schema, ACTIVITY_OWNER_STATE_TABLE],
+        )
+        .await
+        .map_err(|source| DurableStoreAttachError::Relation {
+            table: ACTIVITY_OWNER_STATE_TABLE,
+            source,
+        })?;
+    let safe = match rows.next().await? {
+        Some(row) => row.get::<bool>(0)?,
+        None => false,
+    };
+    if !safe {
+        return Err(DurableStoreAttachError::UnsafeRuntimeRole);
+    }
+    Ok(())
+}
+
+async fn verify_owner_state(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    identity: &PgIdentity,
+) -> Result<(), DurableStoreAttachError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let marker = format!("{quoted_schema}.\"{ACTIVITY_OWNER_STATE_TABLE}\"");
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT prepared_revision, system_identifier, database_oid, database_name, \
+                 schema_oid, schema_name FROM {marker} WHERE singleton = '1'"
+            ),
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(DurableStoreAttachError::OwnerPreparationIncomplete);
+    };
+    let revision: String = row.get(0)?;
+    let marker_identity_matches = row.get::<String>(1)? == identity.system_identifier.to_string()
+        && row.get::<i64>(2)? == i64::from(identity.database.oid)
+        && row.get::<String>(3)? == identity.database.name.0
+        && row.get::<i64>(4)? == i64::from(identity.schema.oid)
+        && row.get::<String>(5)? == identity.schema.name.0;
+    if !marker_identity_matches {
+        return Err(DurableStoreAttachError::OwnerIdentityMismatch);
+    }
+    if revision != ACTIVITY_OWNER_STATE_REVISION {
+        return Err(DurableStoreAttachError::OwnerPreparationIncomplete);
+    }
+    Ok(())
+}
+
+fn is_undefined_relation(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Internal(sqlx::Error::Database(database_error))
+            if database_error.code().as_deref() == Some("42P01")
+    )
 }

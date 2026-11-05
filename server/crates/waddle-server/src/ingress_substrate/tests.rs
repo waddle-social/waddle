@@ -213,6 +213,45 @@ async fn postgres_orphan_gc_reclaims_bounded_batches() {
 }
 
 #[tokio::test]
+async fn postgres_orphan_gc_fences_future_epoch_before_deleting_proofs() {
+    let Some(fixture) = Fixture::open("orphan_gc_epoch").await else {
+        return;
+    };
+    seed_gc_proofs(&fixture.db, MessageKey::new(), 1).await;
+    fixture
+        .db
+        .execute(
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        )
+        .await
+        .expect("activate supported epoch one");
+    assert!(matches!(
+        gc_orphan_proof_batch(&fixture.db, &gc_budget()).await,
+        Ok(OrphanSweepStep::Finished { deleted: 1 })
+    ));
+    assert_eq!(gc_proof_count(&fixture.db).await, 0);
+
+    seed_gc_proofs(&fixture.db, MessageKey::new(), 1).await;
+    fixture
+        .db
+        .execute(
+            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        )
+        .await
+        .expect("activate unsupported epoch two");
+    assert!(matches!(
+        gc_orphan_proof_batch(&fixture.db, &gc_budget()).await,
+        Err(AliasGcError::Substrate(
+            IngressSubstrateError::UnsupportedLiveEpoch
+        ))
+    ));
+    assert_eq!(gc_proof_count(&fixture.db).await, 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn sqlite_orphan_gc_preserves_live_parent() {
     let db = Database::in_memory("orphan-gc").await.expect("SQLite");
     MigrationRunner::single().run(&db).await.expect("migrate");
@@ -2450,6 +2489,61 @@ async fn epoch_activation_waits_behind_in_flight_epoch_zero_writes() {
         "the first post-activation write requires the transaction proof"
     );
     drop(writer);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn epoch_activation_waits_behind_orphan_gc_scan() {
+    let Some(fixture) = Fixture::open("orphan_gc_activation_race").await else {
+        return;
+    };
+    seed_gc_proofs(&fixture.db, MessageKey::new(), 1).await;
+
+    // Block the orphan scan after its epoch prelock. Since the GC delete
+    // target is sm_ingress_appends, this exercises ordering around the
+    // actual scan relation without implying that V1009 guards that table.
+    let mut blocker_conn = sqlx::PgConnection::connect(&fixture.schema_url)
+        .await
+        .expect("open relation blocker connection");
+    let mut blocker = blocker_conn.begin().await.expect("begin relation blocker");
+    sqlx::query("LOCK TABLE sm_ingress_appends IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("block the orphan scan relation");
+
+    let db = fixture.db.clone();
+    let sweep = tokio::spawn(async move { gc_orphan_proof_batch(&db, &gc_budget()).await });
+    wait_for_lock_waiter(&fixture.admin, "FROM sm_ingress_appends a").await;
+
+    let flip_url = fixture.schema_url.clone();
+    let flip = tokio::spawn(async move {
+        let mut conn = sqlx::PgConnection::connect(&flip_url)
+            .await
+            .expect("open activation connection");
+        sqlx::query(
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        )
+        .execute(&mut conn)
+        .await
+        .expect("activation completes after orphan GC commits");
+    });
+    wait_for_lock_waiter(&fixture.admin, "UPDATE ingress_protocol_epoch").await;
+    assert!(
+        !flip.is_finished(),
+        "activation must wait while orphan GC holds the epoch share lock"
+    );
+
+    blocker
+        .commit()
+        .await
+        .expect("release orphan scan relation");
+    assert!(matches!(
+        sweep.await.expect("join orphan GC task"),
+        Ok(OrphanSweepStep::Finished { deleted: 1 })
+    ));
+    flip.await.expect("join activation task");
+    assert_eq!(gc_proof_count(&fixture.db).await, 0);
     fixture.close().await;
 }
 
