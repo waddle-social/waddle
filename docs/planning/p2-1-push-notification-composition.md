@@ -30,3 +30,16 @@ affected pieces as isolated dark verifiers and record the exact prerequisite.
 No worker, Push command, XMPP wire, epoch, mailbox or serving activation is in
 scope. Owner-side adoption and old-writer cutoff must complete before a later
 restricted serving cutover.
+
+## Architecture outcome
+
+The independent gate cleared only dark, read-only attachment and an opaque
+diagnostic over the same attested main handle. It did not clear serving or a
+functional Push bundle. VAPID needs owner-prepared key custody and a separate
+read-only attach with qualified SQL, exact role/ACL/schema checks, a durable
+completion proof, and public/private key consistency. The diagnostic may
+observe the existing store attachments; it must not expose their functional
+handles to startup. Before serving, a joint cross-store ACL and custody proof
+must cover Push registration and notification outbox writes, owner ancestry
+adoption, the old-writer cutoff, and root-key rotation policy. The fatal
+startup guard remains in place throughout this slice.

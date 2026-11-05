@@ -15,6 +15,7 @@ mod http;
 mod liveness;
 pub(crate) mod process_metrics;
 pub(crate) mod profile_publish_route;
+pub mod push_notification_runtime;
 mod room_registry_gauge;
 pub(crate) mod session_janitors;
 mod state;
