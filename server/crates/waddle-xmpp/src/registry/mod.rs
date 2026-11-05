@@ -22,14 +22,14 @@ pub mod user_actor;
 pub mod user_registry;
 
 pub use connection_registry::{
-    BindingAdmissionState, BroadcastOutcome, ConnectionBindGuard, ConnectionEntry,
-    ConnectionRegistry, DeliveryKind, ForceDetachInterruption, ForceDetachOfferError,
-    ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest, LiveResumeControl,
-    LocalConnectionBindingId, LocalIoRelinquishment, LocalIoRelinquishmentOutcome,
-    LocalResumeReply, LocalSocketIo, OutboundStanza, OutboundWriteAcceptance,
-    PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,
-    PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry, SendResult,
-    SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
+    ArchiveDispatchRefusal, ArchiveDispatchRefusalReason, BindingAdmissionState, BroadcastOutcome,
+    ConnectionBindGuard, ConnectionEntry, ConnectionRegistry, DeliveryKind,
+    ForceDetachInterruption, ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome,
+    ForceDetachRequest, LiveResumeControl, LocalConnectionBindingId, LocalIoRelinquishment,
+    LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo, OutboundStanza,
+    OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
+    PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,
+    SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
     SocketWriteInterruption, TerminalOrderingRetryLease, WriteAcceptanceEnqueueOutcome,
     WriteAcceptanceEnqueueRejection,
 };
@@ -38,7 +38,9 @@ pub use selection::{
     select_routable_resources_for_user, try_get_resources_for_user, ResourceLookupError,
 };
 pub use user_actor::delivery::{
-    GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
+    GetConnectionEntry, LocalRetryDispatchOutcome, LocalRetryRefusal, SelectRoutableResources,
+    TrySendDirect, TrySendDirectWithCustody, TrySendPeer, TrySendPeerWithCustody,
+    TrySendPendingFlush,
 };
 pub use user_actor::GetResources;
 pub use user_registry::{

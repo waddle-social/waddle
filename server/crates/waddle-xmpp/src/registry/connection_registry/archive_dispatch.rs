@@ -10,6 +10,62 @@ use super::{ConnectionEntry, ConnectionRegistry, OutboundStanza};
 use crate::mam::ArchiveOrdinal;
 use crate::stream_management::SmIngressAppendKey;
 
+/// Why an archive-aware local enqueue was proven not to accept its envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveDispatchRefusalReason {
+    Provisional,
+    Sealed,
+    Full,
+    ChannelClosed,
+    BindingMismatch,
+    ArchiveOrderMismatch,
+    ArchiveFrontierUnavailable,
+    DuplicateRequiresWriteAcceptance,
+}
+
+/// Exact envelope returned from a local archive dispatch that did not enqueue.
+#[derive(Debug)]
+pub struct ArchiveDispatchRefusal {
+    pub reason: ArchiveDispatchRefusalReason,
+    pub outbound: Box<OutboundStanza>,
+}
+
+impl ArchiveDispatchRefusal {
+    fn new(reason: ArchiveDispatchRefusalReason, outbound: OutboundStanza) -> Self {
+        Self {
+            reason,
+            outbound: Box::new(outbound),
+        }
+    }
+}
+
+impl From<EndpointEnqueueRejection> for ArchiveDispatchRefusalReason {
+    fn from(reason: EndpointEnqueueRejection) -> Self {
+        match reason {
+            EndpointEnqueueRejection::Provisional => Self::Provisional,
+            EndpointEnqueueRejection::Sealed => Self::Sealed,
+            EndpointEnqueueRejection::Full => Self::Full,
+            EndpointEnqueueRejection::ChannelClosed => Self::ChannelClosed,
+            EndpointEnqueueRejection::BindingMismatch => Self::BindingMismatch,
+        }
+    }
+}
+
+impl ArchiveDispatchRefusalReason {
+    fn as_endpoint_rejection(self) -> EndpointEnqueueRejection {
+        match self {
+            Self::Provisional => EndpointEnqueueRejection::Provisional,
+            Self::Sealed => EndpointEnqueueRejection::Sealed,
+            Self::Full
+            | Self::ArchiveOrderMismatch
+            | Self::ArchiveFrontierUnavailable
+            | Self::DuplicateRequiresWriteAcceptance => EndpointEnqueueRejection::Full,
+            Self::ChannelClosed => EndpointEnqueueRejection::ChannelClosed,
+            Self::BindingMismatch => EndpointEnqueueRejection::BindingMismatch,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ArchiveDispatchFrontiers {
     archives: BTreeMap<jid::BareJid, (ArchiveOrdinal, Vec<SmIngressAppendKey>)>,
@@ -23,6 +79,18 @@ impl ConnectionEntry {
         &self,
         outbound: OutboundStanza,
     ) -> Result<(), EndpointEnqueueRejection> {
+        self.try_send_archive_ordered_with_refusal(outbound)
+            .map_err(|refusal| refusal.reason.as_endpoint_rejection())
+    }
+
+    /// Attempt a non-blocking archive-aware enqueue while retaining the exact
+    /// outbound envelope whenever the local endpoint proves it was not
+    /// accepted. The caller remains responsible for binding this refusal to
+    /// the local owner and `BindingRef` before exposing retry custody.
+    pub(in crate::registry) fn try_send_archive_ordered_with_refusal(
+        &self,
+        outbound: OutboundStanza,
+    ) -> Result<(), ArchiveDispatchRefusal> {
         if outbound.ingress_append.as_ref().is_some_and(|obligation| {
             [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
                 .iter()
@@ -31,7 +99,12 @@ impl ConnectionEntry {
             // Suppression settles the obligation without a queue write, so it
             // must still be ordered against activation and sealing. Check
             // current opt-in while holding the same admission gate as enqueue.
-            let suppressed = self.endpoint.with_active(|_| !self.is_carbons_enabled())?;
+            let suppressed = match self.endpoint.with_active(|_| !self.is_carbons_enabled()) {
+                Ok(suppressed) => suppressed,
+                Err(reason) => {
+                    return Err(ArchiveDispatchRefusal::new(reason.into(), outbound));
+                }
+            };
             if suppressed {
                 return Ok(());
             }
@@ -43,7 +116,9 @@ impl ConnectionEntry {
         else {
             return match self.endpoint.try_send(outbound) {
                 EndpointEnqueueOutcome::AcceptedOrUnknown => Ok(()),
-                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => Err(reason),
+                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, outbound } => {
+                    Err(ArchiveDispatchRefusal::new(reason.into(), *outbound))
+                }
             };
         };
         let key = obligation.key.clone();
@@ -54,52 +129,64 @@ impl ConnectionEntry {
         {
             // Backpressure, not "disconnected": the caller must recheck its
             // predecessor gate instead of falling through to a different stream.
-            return Err(EndpointEnqueueRejection::Full);
+            return Err(ArchiveDispatchRefusal::new(
+                ArchiveDispatchRefusalReason::ArchiveOrderMismatch,
+                outbound,
+            ));
         }
         let positions = obligation.archive_positions.clone();
-        match self.endpoint.with_active(|sink| {
-            let Ok(mut state) = self.archive_dispatch.lock() else {
-                return Err(EndpointEnqueueRejection::Full);
-            };
-            let duplicate = positions.iter().any(|position| {
-                state
-                    .archives
-                    .get(&position.archive)
-                    .is_some_and(|(ordinal, keys)| {
-                        *ordinal > position.ordinal
-                            || (*ordinal == position.ordinal && keys.contains(&key))
-                    })
-            });
-            if duplicate {
-                // Queue acceptance is sufficient for ordinary ingress delivery.
-                // It cannot fabricate the separate write-acceptance callback.
-                return if outbound.write_acceptance.is_some() {
-                    Err(EndpointEnqueueRejection::Full)
-                } else {
-                    Ok(())
+        self.endpoint.with_active_outbound(
+            outbound,
+            |reason, outbound| ArchiveDispatchRefusal::new(reason.into(), outbound),
+            |sink, outbound| {
+                let Ok(mut state) = self.archive_dispatch.lock() else {
+                    return Err(ArchiveDispatchRefusal::new(
+                        ArchiveDispatchRefusalReason::ArchiveFrontierUnavailable,
+                        outbound,
+                    ));
                 };
-            }
-            match sink.try_send(outbound) {
-                EndpointEnqueueOutcome::AcceptedOrUnknown => {}
-                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => return Err(reason),
-            }
-            for position in positions {
-                let entry = state
-                    .archives
-                    .entry(position.archive)
-                    .or_insert_with(|| (position.ordinal, Vec::new()));
-                if entry.0 < position.ordinal {
-                    *entry = (position.ordinal, Vec::new());
+                let duplicate = positions.iter().any(|position| {
+                    state
+                        .archives
+                        .get(&position.archive)
+                        .is_some_and(|(ordinal, keys)| {
+                            *ordinal > position.ordinal
+                                || (*ordinal == position.ordinal && keys.contains(&key))
+                        })
+                });
+                if duplicate {
+                    // Queue acceptance is sufficient for ordinary ingress delivery.
+                    // It cannot fabricate the separate write-acceptance callback.
+                    return if outbound.write_acceptance.is_some() {
+                        Err(ArchiveDispatchRefusal::new(
+                            ArchiveDispatchRefusalReason::DuplicateRequiresWriteAcceptance,
+                            outbound,
+                        ))
+                    } else {
+                        Ok(())
+                    };
                 }
-                if !entry.1.contains(&key) {
-                    entry.1.push(key.clone());
+                match sink.try_send(outbound) {
+                    EndpointEnqueueOutcome::AcceptedOrUnknown => {}
+                    EndpointEnqueueOutcome::ProvenNotEnqueued { reason, outbound } => {
+                        return Err(ArchiveDispatchRefusal::new(reason.into(), *outbound));
+                    }
                 }
-            }
-            Ok(())
-        }) {
-            Ok(result) => result,
-            Err(rejection) => Err(rejection),
-        }
+                for position in positions {
+                    let entry = state
+                        .archives
+                        .entry(position.archive)
+                        .or_insert_with(|| (position.ordinal, Vec::new()));
+                    if entry.0 < position.ordinal {
+                        *entry = (position.ordinal, Vec::new());
+                    }
+                    if !entry.1.contains(&key) {
+                        entry.1.push(key.clone());
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -173,6 +260,65 @@ mod tests {
             "refused enqueue must not publish an archive frontier"
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn sealed_binding_refusal_returns_exact_envelope_without_queue_or_frontier_change() {
+        let resource: jid::FullJid = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
+        let (endpoint, mut receiver) = super::super::SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let entry = ConnectionEntry::new_for_binding(endpoint, binding_ref.clone());
+        let owner = entry.binding_id();
+        let (acceptance, mut acceptance_rx) = crate::registry::OutboundWriteAcceptance::new();
+        let mut outbound = copy(&resource, MessageKey::new(), 1);
+        outbound.pending_row_id = Some(crate::pending_delivery::PendingRowId::new("retry-row"));
+        outbound.original_receipt_at = Some(chrono::Utc::now());
+        outbound.write_acceptance = Some(acceptance);
+        let expected_ingress = outbound
+            .ingress_append
+            .clone()
+            .expect("archive dispatch envelope has ingress identity");
+        let expected_row = outbound.pending_row_id.clone();
+        let expected_receipt_at = outbound.original_receipt_at;
+        assert!(entry.seal_binding(owner, &binding_ref));
+
+        let refusal = entry
+            .try_send_archive_ordered_with_refusal(outbound)
+            .expect_err("sealed admission must return the untouched envelope");
+        assert_eq!(refusal.reason, ArchiveDispatchRefusalReason::Sealed);
+        assert_eq!(refusal.outbound.pending_row_id, expected_row);
+        assert_eq!(refusal.outbound.original_receipt_at, expected_receipt_at);
+        assert_eq!(refusal.outbound.ingress_append, Some(expected_ingress));
+        assert!(
+            receiver.try_recv().is_err(),
+            "refusal must leave the queue empty"
+        );
+        assert!(
+            entry
+                .archive_dispatch
+                .lock()
+                .expect("archive dispatch mutex is not poisoned")
+                .archives
+                .is_empty(),
+            "refusal must leave the archive frontier unchanged"
+        );
+        assert!(matches!(
+            acceptance_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        refusal
+            .outbound
+            .write_acceptance
+            .as_ref()
+            .expect("callback stays attached to the original envelope")
+            .acknowledge();
+        acceptance_rx
+            .await
+            .expect("returned callback remains the original callback");
     }
 
     #[test]
