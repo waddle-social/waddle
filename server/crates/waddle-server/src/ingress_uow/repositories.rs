@@ -2514,12 +2514,7 @@ impl DeliveryEffectRepository {
         message_key: MessageKey,
         effect: &IngressEffectKey,
     ) -> Result<super::EffectDeliveryBinding, IngressUowError> {
-        super::EffectDescendantRepository::bind_effect_raw(
-            transaction.transaction_mut(),
-            message_key,
-            effect,
-        )
-        .await
+        super::EffectDescendantRepository::bind_effect(transaction, message_key, effect).await
     }
 
     pub async fn record(

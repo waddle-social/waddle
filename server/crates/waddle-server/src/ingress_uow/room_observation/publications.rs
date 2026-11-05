@@ -108,8 +108,8 @@ pub(super) async fn publication(
     }
     super::work::lock_canonical_keys(tx, &keys).await?;
     for (id, _, _) in &candidates {
-        EffectDescendantRepository::lock_all_nowait_raw(
-            tx.transaction_mut(),
+        EffectDescendantRepository::lock_all_nowait(
+            tx,
             Uuid::parse_str(id).map_err(|_| ObservationError::Codec)?,
         )
         .await
@@ -136,7 +136,7 @@ pub(super) async fn publication(
             ).await?;
             let now =
                 chrono::DateTime::from_timestamp_millis(now_ms).ok_or(ObservationError::Codec)?;
-            EffectDescendantRepository::settle_all_raw(tx.transaction_mut(), id, now)
+            EffectDescendantRepository::settle_all(tx, id, now)
                 .await
                 .map_err(ObservationError::from)?;
             continue;
@@ -171,7 +171,7 @@ pub(super) async fn assert_publication(
         Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
     );
     super::work::lock_canonical_keys(tx, &[key]).await?;
-    EffectDescendantRepository::lock_all_nowait_raw(tx.transaction_mut(), publication.id)
+    EffectDescendantRepository::lock_all_nowait(tx, publication.id)
         .await
         .map_err(ObservationError::from)?;
     if !active_subscription(tx, &publication.subscription).await? {
@@ -195,7 +195,7 @@ pub(super) async fn mark_published(
     id: &Uuid,
     now_ms: i64,
 ) -> Result<bool, ObservationError> {
-    EffectDescendantRepository::lock_all_nowait_raw(tx.transaction_mut(), *id)
+    EffectDescendantRepository::lock_all_nowait(tx, *id)
         .await
         .map_err(ObservationError::from)?;
     let changed = tx.transaction_mut().execute(
@@ -204,7 +204,7 @@ pub(super) async fn mark_published(
     ).await?;
     if changed == 1 {
         let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or(ObservationError::Codec)?;
-        EffectDescendantRepository::settle_all_raw(tx.transaction_mut(), *id, now)
+        EffectDescendantRepository::settle_all(tx, *id, now)
             .await
             .map_err(ObservationError::from)?;
     }

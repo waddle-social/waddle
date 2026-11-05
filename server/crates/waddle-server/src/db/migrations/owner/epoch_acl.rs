@@ -903,16 +903,20 @@ async fn check_guarded_relation_acls(
     schema: &str,
 ) -> Result<(), DarkMigrationOwnerError> {
     for table in EPOCH_GUARDED_TABLES {
-        let (select, insert, update) = match table {
-            "ingress_messages" => (true, true, true),
-            "ingress_effect_intents" | "ingress_effect_receipts" | "ingress_deliveries" => {
-                (true, true, false)
+        let (select, insert, update, delete) = match table {
+            "ingress_messages" | "ingress_sm_streams" | "ingress_send_attempts" => {
+                (true, true, true, true)
             }
-            "ingress_effect_descendants" => (true, true, true),
-            "ingress_sm_refs" | "ingress_archive_dispatch" | "ingress_owner_rejections" => {
-                (true, false, false)
+            "ingress_origin_aliases" | "ingress_sm_refs" | "ingress_deliveries" => {
+                (true, true, false, true)
             }
-            _ => (false, false, false),
+            "ingress_effect_intents" | "ingress_effect_descendants" => (true, true, true, false),
+            "ingress_effect_receipts"
+            | "ingress_carbon_receipts"
+            | "ingress_delivery_receipts"
+            | "ingress_archive_dispatch"
+            | "ingress_owner_rejections" => (true, true, false, false),
+            _ => return Err(DarkMigrationOwnerError::EpochCatalogDrift),
         };
         // V1011 grants pg_monitor SELECT on the first six guarded tables;
         // later ingress migrations extend that same read profile to the rest.
@@ -923,7 +927,7 @@ async fn check_guarded_relation_acls(
                   AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'SELECT'))::int = ?
                   AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'INSERT'))::int = ?
                   AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'UPDATE'))::int = ?
-                  AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'DELETE')
+                  AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'DELETE'))::int = ?
                   AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'TRUNCATE')
                   AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'REFERENCES')
                   AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'TRIGGER')
@@ -945,7 +949,8 @@ async fn check_guarded_relation_acls(
                                           (acl.privilege_type = 'SELECT' AND ? = 0) OR
                                           (acl.privilege_type = 'INSERT' AND ? = 0) OR
                                           (acl.privilege_type = 'UPDATE' AND ? = 0) OR
-                                          acl.privilege_type IN ('DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')))
+                                          (acl.privilege_type = 'DELETE' AND ? = 0) OR
+                                          acl.privilege_type IN ('TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')))
                                      OR (acl.grantee = monitor.oid AND
                                          (? = 0 OR acl.privilege_type <> 'SELECT')))
                   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute column_
@@ -961,6 +966,7 @@ async fn check_guarded_relation_acls(
                 select,
                 insert,
                 update,
+                delete,
                 select,
                 insert,
                 update,
@@ -968,6 +974,7 @@ async fn check_guarded_relation_acls(
                 select,
                 insert,
                 update,
+                delete,
                 monitor_select,
                 config.owner.as_str(),
                 config.runtime.as_str(),

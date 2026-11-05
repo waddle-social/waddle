@@ -118,6 +118,19 @@ impl EffectDescendantRepository {
         }
     }
 
+    pub async fn lock_all_nowait(
+        transaction: &mut IngressUowTransaction<'_>,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                lock_all_nowait_prepared(tx, prepared, descendant).await
+            }
+            _ => Self::lock_all_nowait_raw(tx, descendant).await,
+        }
+    }
+
     pub async fn copy(
         transaction: &mut IngressUowTransaction<'_>,
         source: Uuid,
@@ -190,6 +203,20 @@ impl EffectDescendantRepository {
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
         Self::lock_nowait_raw(tx, message_key).await
+    }
+
+    pub async fn bind_effect(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+    ) -> Result<EffectDeliveryBinding, IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        match prepared {
+            Some(prepared) if prepared.uses_relation_guard() => {
+                bind_effect_prepared(tx, prepared, message_key, effect).await
+            }
+            _ => Self::bind_effect_raw(tx, message_key, effect).await,
+        }
     }
 
     pub(crate) async fn bind_effect_raw(
@@ -431,13 +458,12 @@ async fn settle_all_prepared(
     Ok(())
 }
 
-async fn attach_prepared(
+async fn bind_effect_prepared(
     tx: &mut Transaction<'_>,
-    prepared: &crate::ingress_substrate::PreparedAttestedReceiptWriter,
+    prepared: &PreparedAttestedReceiptWriter,
     message_key: MessageKey,
     effect: &IngressEffectKey,
-    descendant: Uuid,
-) -> Result<(), IngressUowError> {
+) -> Result<EffectDeliveryBinding, IngressUowError> {
     lock_nowait_prepared(tx, prepared, message_key).await?;
     ensure_intent_in_prepared(tx, Some(prepared), message_key, effect).await?;
     if matches!(
@@ -447,19 +473,33 @@ async fn attach_prepared(
             | IngressEffectKey::DmPinMutation(..)
             | IngressEffectKey::DmCallThreadState(..)
     ) {
-        return Err(IngressUowError::EffectIntentConflict);
+        return Ok(EffectDeliveryBinding::AwaitingDurableOwner);
     }
-    let delivery = DeliveryKey::effect(message_key, effect);
-    if crate::ingress_substrate::record_delivery_in_prepared_transaction(
+    let key = DeliveryKey::effect(message_key, effect);
+    let outcome = crate::ingress_substrate::record_delivery_in_prepared_transaction(
         tx,
         Some(prepared),
-        delivery,
+        key,
         message_key,
     )
-    .await?
-        == MessageWriteOutcome::MessageVanished
-    {
+    .await?;
+    if outcome == MessageWriteOutcome::MessageVanished {
         return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    Ok(EffectDeliveryBinding::Bound(key))
+}
+
+async fn attach_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: &crate::ingress_substrate::PreparedAttestedReceiptWriter,
+    message_key: MessageKey,
+    effect: &IngressEffectKey,
+    descendant: Uuid,
+) -> Result<(), IngressUowError> {
+    if bind_effect_prepared(tx, prepared, message_key, effect).await?
+        == EffectDeliveryBinding::AwaitingDurableOwner
+    {
+        return Err(IngressUowError::EffectIntentConflict);
     }
     let query = prepared_ingress_sql(
         tx.driver(),

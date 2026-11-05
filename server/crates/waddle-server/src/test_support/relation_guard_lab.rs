@@ -9,15 +9,27 @@ use std::time::Duration;
 
 use anyhow::{bail, ensure, Context};
 use chrono::Utc;
+use jid::BareJid;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
-use waddle_xmpp::ingress::{
-    EffectMessageIdentity, IngressEffectIntent, MessageKey, ProtocolEpoch, SemanticDigest,
+use waddle_extensions::{
+    ConfiguredRoomObserver, ExtensionPayload, ObservationGeneration, PluginId,
+    RoomObservationOutcome, RoomObservationResult, RoomObservationScope,
+    RoomObservationSubscription, Sha256Digest, XmlElement,
 };
+use waddle_xmpp::ingress::{
+    AliasOutcome, AliasResolution, DeliveryKey, EffectMessageIdentity, IngressEffectIntent,
+    IngressOrdinal, MessageKey, NormalizedTarget, ProtocolEpoch, SemanticDigest, WireHandledCount,
+};
+use waddle_xmpp::mam::ArchiveOrdinal;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::ClaimStore;
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp_core::xep0359::OriginId;
+use waddle_xmpp_core::xep0359::{add_origin_id, add_stanza_id, StanzaId};
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
@@ -26,10 +38,12 @@ use crate::db::physical_attestation::{
 };
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use crate::ingress_uow::{
-    CandidateTransaction, CanonicalMessageRepository, EffectDescendantRepository,
-    EffectIntentRepository, EffectReceiptRepository, IngressLineage, IngressUnitOfWork,
-    IngressUowError, IngressUowTransaction, ReconcileVerdict, RelationGuardCapability,
-    RelationGuardCapabilityError,
+    ArchiveDispatchObligation, ArchiveDispatchRepository, CandidateTransaction,
+    CanonicalMessageRepository, CapturedRoomSource, DeliveryEffectRepository, DispatchTarget,
+    EffectDescendantRepository, EffectIntentRepository, EffectReceiptRepository, IngressLineage,
+    IngressUnitOfWork, IngressUowError, IngressUowTransaction, ReconcileVerdict,
+    RelationGuardCapability, RelationGuardCapabilityError, RoomObservationRepository,
+    SmIngressRepository, SmIngressStreamRepository,
 };
 
 const GUARD: &str =
@@ -333,6 +347,7 @@ impl Lab {
             action: None,
         }).await?;
         MigrationRunner::single().run(&owner_db).await?;
+        crate::ingress_uow::initialize_room_observations(&owner_db).await?;
         #[cfg(feature = "clustering")]
         if !candidate_guard {
             crate::clustering::claims::PostgresClaimStore::new(owner_db.clone()).ensure_schema().await?;
@@ -358,10 +373,13 @@ impl Lab {
             format!("GRANT SELECT ON guarded._lineage TO {definer}"),
             format!("GRANT SELECT ON guarded.ingress_protocol_epoch, guarded.ingress_epoch_guard_manifest TO {runtime}"),
             format!("GRANT SELECT ON guarded._migrations TO {runtime}"),
-            format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_messages TO {runtime}"),
-            format!("GRANT SELECT, INSERT ON guarded.ingress_effect_intents, guarded.ingress_effect_receipts, guarded.ingress_deliveries TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.ingress_messages, guarded.ingress_sm_streams, guarded.ingress_send_attempts TO {runtime}"),
+            format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_origin_aliases, guarded.ingress_sm_refs, guarded.ingress_deliveries TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_intents TO {runtime}"),
             format!("GRANT SELECT, INSERT, UPDATE ON guarded.ingress_effect_descendants TO {runtime}"),
-            format!("GRANT SELECT ON guarded.ingress_sm_refs, guarded.ingress_archive_dispatch, guarded.ingress_owner_rejections TO {runtime}"),
+            format!("GRANT SELECT, INSERT ON guarded.ingress_effect_receipts, guarded.ingress_carbon_receipts, guarded.ingress_delivery_receipts, guarded.ingress_archive_dispatch, guarded.ingress_owner_rejections TO {runtime}"),
+            format!("GRANT SELECT, INSERT, UPDATE ON extension_room_observers, extension_room_sources, extension_room_source_revisions, extension_room_observation_work, extension_room_publications TO {runtime}"),
+            format!("GRANT SELECT, INSERT ON extension_room_observation_receipts TO {runtime}"),
         ] {
             sqlx::query(&statement).execute(&mut owner_connection).await?;
         }
@@ -1116,6 +1134,23 @@ async fn prepared_descendant_api_checks(lab: &Lab) -> anyhow::Result<()> {
 
     let capability = lab.lane.fixture.capability();
     let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+    let binding = DeliveryEffectRepository::bind_effect(
+        &mut transaction,
+        message_key,
+        &intent.semantic_key(),
+    )
+    .await?;
+    ensure!(
+        binding
+            == crate::ingress_uow::EffectDeliveryBinding::Bound(DeliveryKey::effect(
+                message_key,
+                &intent.semantic_key(),
+            )),
+        "prepared effect binding returned an unexpected delivery key"
+    );
+    transaction.commit().await?;
+
+    let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
     EffectDescendantRepository::lock_nowait(&mut transaction, message_key).await?;
     transaction.commit().await?;
 
@@ -1141,6 +1176,293 @@ async fn prepared_descendant_api_checks(lab: &Lab) -> anyhow::Result<()> {
     ensure!(
         states == (1, 1, 1, 0),
         "prepared descendant lock/copy/settle did not preserve the expected rows: {states:?}"
+    );
+    Ok(())
+}
+
+async fn prepared_alias_sm_archive_api_checks(lab: &Lab) -> anyhow::Result<()> {
+    let capability = lab.lane.fixture.capability();
+
+    let sender: BareJid = "alias-author@example.test".parse()?;
+    let target = NormalizedTarget::Bare("alias-target@example.test".parse()?);
+    let origin = OriginId::new("relation-guard-alias-origin");
+    let digest = SemanticDigest::from_storage(1, [5_u8; 32])?;
+    let alias_key = MessageKey::new();
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let resolution = CanonicalMessageRepository::resolve_and_record_alias(
+            &mut transaction,
+            &sender,
+            &target,
+            &origin,
+            &digest,
+            || alias_key,
+        )
+        .await?;
+        ensure!(
+            matches!(resolution, AliasResolution::Aliased(AliasOutcome::Inserted(key)) if key == alias_key),
+            "candidate alias repository did not insert its canonical key"
+        );
+        transaction.commit().await?;
+    }
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let resolution = CanonicalMessageRepository::resolve_and_record_alias(
+            &mut transaction,
+            &sender,
+            &target,
+            &origin,
+            &digest,
+            MessageKey::new,
+        )
+        .await?;
+        ensure!(
+            matches!(resolution, AliasResolution::Aliased(AliasOutcome::Existing(key)) if key == alias_key),
+            "candidate alias replay did not resolve to the persisted key"
+        );
+        transaction.commit().await?;
+    }
+
+    let stream = SmSessionId::new(format!("relation-guard-sm-{}", Uuid::new_v4()));
+    let sm_ingress_id;
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        sm_ingress_id = SmIngressStreamRepository::mint(&mut transaction, &stream).await?;
+        SmIngressRepository::insert_sm_ref(
+            &mut transaction,
+            sm_ingress_id,
+            IngressOrdinal::FIRST,
+            WireHandledCount::new(1),
+            alias_key,
+        )
+        .await?;
+        let binding = SmIngressRepository::lookup_wire_binding(
+            &mut transaction,
+            sm_ingress_id,
+            WireHandledCount::new(1),
+        )
+        .await?;
+        ensure!(
+            binding == Some((alias_key, IngressOrdinal::FIRST)),
+            "candidate SM enrollment/ref did not retain its wire binding"
+        );
+        transaction.commit().await?;
+    }
+
+    let archive_intent = make_intent(true)?;
+    let archive_key = MessageKey::new();
+    let archive_digest = SemanticDigest::from_storage(1, [6_u8; 32])?;
+    lab.write(
+        archive_key,
+        &archive_digest,
+        &archive_intent,
+        Uuid::new_v4(),
+    )
+    .await?;
+    let (archive, resource) = match &archive_intent {
+        IngressEffectIntent::RouteDirect {
+            recipient, fanout, ..
+        } => (
+            recipient.clone(),
+            fanout
+                .first()
+                .context("archive fixture has a resource audience")?
+                .clone(),
+        ),
+        _ => bail!("archive fixture intent was not a direct route"),
+    };
+    let receipt = crate::ingress::receipt_key(&archive_intent)?;
+    let ordinal = ArchiveOrdinal::from_storage(1)?;
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        ensure!(
+            CanonicalMessageRepository::lock(&mut transaction, archive_key).await?,
+            "archive fixture message is missing"
+        );
+        ArchiveDispatchRepository::record(
+            &mut transaction,
+            archive_key,
+            &archive,
+            ordinal,
+            &[ArchiveDispatchObligation {
+                receipt: receipt.clone(),
+                target: DispatchTarget::Resource(resource),
+            }],
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let positions =
+            ArchiveDispatchRepository::positions(&mut transaction, archive_key, &receipt).await?;
+        ensure!(
+            positions.len() == 1
+                && positions[0].archive == archive
+                && positions[0].ordinal == ordinal,
+            "candidate archive dispatch did not persist its position"
+        );
+        transaction.commit().await?;
+    }
+    Ok(())
+}
+
+fn relation_observation_payload() -> anyhow::Result<ExtensionPayload> {
+    let namespace = waddle_extensions::PayloadNamespace::try_new("urn:waddle:relation-guard:1")?;
+    let element = XmlElement::try_new(namespace.clone(), "result", vec![], vec![])?;
+    Ok(ExtensionPayload::try_new(namespace, element)?)
+}
+
+async fn room_observation_relation_uow_checks(lab: &Lab) -> anyhow::Result<()> {
+    let room: BareJid = "room@conference.example.org".parse()?;
+    let author: BareJid = "author@example.org".parse()?;
+    let observer = ConfiguredRoomObserver {
+        plugin: PluginId::try_new("relation-guard-observer")?,
+        generation: ObservationGeneration::try_new(1)?,
+        identity: Sha256Digest::try_new("a".repeat(64))?,
+        scope: RoomObservationScope::Rooms(vec![room.clone()]),
+        max_concurrent: 1,
+    };
+    let subscription = RoomObservationSubscription {
+        plugin: observer.plugin.clone(),
+        generation: observer.generation,
+        identity: observer.identity.clone(),
+        room: room.clone(),
+    };
+    let now = Utc::now();
+    let now_ms = now.timestamp_millis();
+    let capability = lab.lane.fixture.capability();
+
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        RoomObservationRepository::sync_configured(
+            &mut transaction,
+            std::slice::from_ref(&observer),
+            now_ms,
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+
+    let key = MessageKey::new();
+    let digest = SemanticDigest::from_storage(1, [4_u8; 32])?;
+    let intent = IngressEffectIntent::RoomObserver {
+        room: room.clone(),
+        requester: author.clone(),
+        sender: "room@conference.example.org/author".parse()?,
+        plugin: observer.plugin.clone(),
+        generation: observer.generation,
+        identity: observer.identity.clone(),
+        correction_target: None,
+    };
+    let intents = [intent];
+    let mut message = Message::new(Some(room.clone().into()));
+    message.from = Some("room@conference.example.org/author".parse()?);
+    message.type_ = MessageType::Groupchat;
+    message.id = Some(Id("relation-observation".to_owned()));
+    message
+        .bodies
+        .insert(Lang::new(), "room observation candidate".to_owned());
+    add_stanza_id(
+        &mut message,
+        &StanzaId::new("relation-observation-stanza", room.clone().into()),
+    );
+    add_origin_id(&mut message, "relation-observation-origin");
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let existing = CanonicalMessageRepository::lock(&mut transaction, key).await?;
+        CanonicalMessageRepository::record_message(&mut transaction, key, &digest, None).await?;
+        let verdict =
+            EffectIntentRepository::reconcile(&mut transaction, key, &intents, existing).await?;
+        ensure!(
+            !matches!(
+                verdict,
+                ReconcileVerdict::Contradiction { .. } | ReconcileVerdict::Divergent { .. }
+            ),
+            "room observer intent unexpectedly conflicted"
+        );
+        RoomObservationRepository::capture(
+            &mut transaction,
+            CapturedRoomSource {
+                key,
+                room: &room,
+                message: &message,
+                sender: &author,
+                intents: &intents,
+                observed_at: now,
+                correction_target: None,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+
+    let work = {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let work = RoomObservationRepository::claim(&mut transaction, &subscription, now_ms)
+            .await?
+            .context("relation-guard room observer claim")?;
+        ensure!(
+            RoomObservationRepository::start(&mut transaction, &work, now_ms).await?,
+            "relation-guard room observer start was rejected"
+        );
+        transaction.commit().await?;
+        work
+    };
+
+    {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        ensure!(
+            RoomObservationRepository::finish(
+                &mut transaction,
+                &work,
+                &RoomObservationOutcome::Completed(RoomObservationResult {
+                    payloads: vec![relation_observation_payload()?],
+                    usage: None,
+                }),
+                now_ms,
+            )
+            .await?,
+            "relation-guard room observer finish was rejected"
+        );
+        transaction.commit().await?;
+    }
+
+    let publication = {
+        let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
+        let publication =
+            RoomObservationRepository::publication(&mut transaction, &subscription, now_ms)
+                .await?
+                .context("relation-guard room observer publication")?;
+        ensure!(
+            RoomObservationRepository::assert_publication(&mut transaction, &publication).await?,
+            "relation-guard room observer publication became stale"
+        );
+        ensure!(
+            RoomObservationRepository::mark_published(
+                &mut transaction,
+                &publication.id,
+                now_ms.saturating_add(1),
+            )
+            .await?,
+            "relation-guard room observer publication did not settle"
+        );
+        transaction.commit().await?;
+        publication
+    };
+
+    let (publication_status, settled_descendants): (String, i64) = sqlx::query_as(
+        "SELECT p.status, count(*) FILTER (WHERE d.settled_at IS NOT NULL) \
+         FROM guarded.extension_room_publications p \
+         JOIN guarded.ingress_effect_descendants d ON d.descendant_key = p.id \
+         WHERE p.id = $1 GROUP BY p.status",
+    )
+    .bind(publication.id.to_string())
+    .fetch_one(&lab.admin)
+    .await?;
+    ensure!(
+        publication_status == "published" && settled_descendants == 1,
+        "room observer publication/descendant was not settled through the relation UOW"
     );
     Ok(())
 }
@@ -1359,6 +1681,12 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     prepared_descendant_api_checks(lab)
         .await
         .context("prepared descendant repository checks")?;
+    prepared_alias_sm_archive_api_checks(lab)
+        .await
+        .context("prepared alias, SM, and archive repository checks")?;
+    room_observation_relation_uow_checks(lab)
+        .await
+        .context("room-observation relation UOW checks")?;
     concurrency_and_transition(lab, &digest, &intent)
         .await
         .context("concurrent writers and queued owner transition")?;
