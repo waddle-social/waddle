@@ -25,6 +25,7 @@ pub mod waddle;
 pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;
 pub use namespace::{MigrationNamespace, WADDLE_NAMESPACE_START};
+pub(crate) use owner::verify_room_observation_migration_v1023_in_transaction;
 pub use owner::{
     bootstrap_dark_postgres_mam_owner, grant_dark_owner_rejection_runtime_access,
     inspect_dark_owner_rejection_runtime_access, inspect_dark_postgres_epoch_acl,
