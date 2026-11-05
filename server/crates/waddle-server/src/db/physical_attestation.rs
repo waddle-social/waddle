@@ -27,6 +27,9 @@ pub use installer::{
 };
 mod typed_authority;
 #[cfg(feature = "test-support")]
+pub(crate) use typed_authority::prelock_epoch_relation;
+pub(crate) use typed_authority::read_epoch_after_prelock;
+#[cfg(feature = "test-support")]
 pub use typed_authority::{
     allocation_lab_postgres_ddl, direct_lab_postgres_ddl, pin_lab_postgres_ddl, AdmissionPin,
     AdmissionPinLab, AdmissionPinLabError, DirectAdmission, DirectAdmissionLab,
@@ -36,8 +39,6 @@ pub use typed_authority::{
     PinOutcome, PinRecovery, PinState, PinTerminalDisposition, ALLOCATION_LAB_SQLITE_DDL,
     DIRECT_LAB_SQLITE_DDL, PIN_LAB_SQLITE_DDL,
 };
-#[cfg(feature = "test-support")]
-pub(crate) use typed_authority::{prelock_epoch_relation, read_epoch_after_prelock};
 pub use typed_authority::{DarkIngressAuthority, DarkIngressAuthorityError, TransactionBounds};
 #[cfg(feature = "test-support")]
 pub use typed_authority::{RetentionLab, RetentionLabBatch};
@@ -148,6 +149,10 @@ impl AttestedPostgresWriterCapability {
 
     pub(crate) fn installer_role(&self) -> &PgRoleName {
         &self.config.installer_login
+    }
+
+    pub(crate) fn runtime_role(&self) -> &PgRoleName {
+        &self.config.runtime_login
     }
 
     pub(crate) fn belongs_to(&self, other: &Self) -> bool {

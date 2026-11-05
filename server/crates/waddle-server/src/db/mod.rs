@@ -31,7 +31,9 @@ use tracing::{debug, info, instrument};
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use backend::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
+pub(crate) use migrations::verify_relation_guard_candidate_in_transaction;
 pub(crate) use migrations::verify_room_observation_migration_v1023_in_transaction;
+pub(crate) use migrations::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
 pub use migrations::{
     bootstrap_dark_postgres_mam_owner, grant_dark_owner_rejection_runtime_access,
     inspect_dark_owner_rejection_runtime_access, inspect_dark_postgres_epoch_acl,

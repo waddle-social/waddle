@@ -65,6 +65,7 @@ impl TransitionFixture {
             format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"),
             format!("CREATE TABLE {schema}.waddle_epoch_transition_lab_marker (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, attempt_id UUID NOT NULL)"),
             format!("ALTER TABLE {schema}.waddle_epoch_transition_lab_marker OWNER TO {owner}"),
+            format!("GRANT SELECT ON {schema}.waddle_epoch_transition_lab_marker TO {runtime}"),
         ] {
             sqlx::query(&statement).execute(&admin).await.expect("provision disposable fixture");
         }
@@ -1206,7 +1207,7 @@ async fn observation_refuses_mismatch_wrong_identity_and_changed_catalog() {
     );
 
     for (change, restore) in [
-        (format!("GRANT SELECT ON {}.waddle_epoch_transition_lab_marker TO {}", fixture.schema, fixture.runtime), format!("REVOKE SELECT ON {}.waddle_epoch_transition_lab_marker FROM {}", fixture.schema, fixture.runtime)),
+        (format!("REVOKE SELECT ON {}.waddle_epoch_transition_lab_marker FROM {}", fixture.schema, fixture.runtime), format!("GRANT SELECT ON {}.waddle_epoch_transition_lab_marker TO {}", fixture.schema, fixture.runtime)),
         (format!("ALTER TABLE {}.waddle_epoch_transition_lab_marker OWNER TO CURRENT_USER", fixture.schema), format!("ALTER TABLE {}.waddle_epoch_transition_lab_marker OWNER TO {}", fixture.schema, fixture.owner)),
         (format!("GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}", fixture.schema, fixture.runtime), format!("REVOKE UPDATE (id) ON {}.ingress_protocol_epoch FROM {}", fixture.schema, fixture.runtime)),
         (format!("ALTER TABLE {}.ingress_messages DISABLE TRIGGER ingress_messages_epoch_guard_dml", fixture.schema), format!("ALTER TABLE {}.ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml", fixture.schema)),

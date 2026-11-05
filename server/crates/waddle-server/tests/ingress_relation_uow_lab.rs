@@ -8,5 +8,5 @@ async fn restricted_relation_guarded_chain_uses_one_attested_transaction() {
     };
     waddle_server::test_support::verify_disposable_relation_guard_chain(&url)
         .await
-        .expect("disposable relation-guarded chain");
+        .unwrap_or_else(|error| panic!("disposable relation-guarded chain: {error:#}"));
 }

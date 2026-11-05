@@ -61,6 +61,8 @@ pub enum IngressUowError {
     PostgresRequired,
     #[error("ingress writer requires a physically attested PostgreSQL pool")]
     AttestedPoolRequired,
+    #[error(transparent)]
+    RelationGuardCapability(#[from] super::RelationGuardCapabilityError),
     #[error("live ingress protocol epoch exceeds what this binary supports")]
     EpochUnsupported {
         live: ProtocolEpoch,

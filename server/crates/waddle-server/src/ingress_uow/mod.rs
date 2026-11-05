@@ -53,6 +53,8 @@ pub(crate) use send_attempts::{start_fresh_postgres, start_fresh_sqlite};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
 mod projections;
 pub(crate) use projections::ProjectionRepository;
+mod relation_guard;
+pub use relation_guard::{RelationGuardCapability, RelationGuardCapabilityError};
 mod settlement;
 pub(crate) use settlement::settle_recorded;
 
@@ -124,8 +126,7 @@ pub(crate) struct OwnedAliasScope(());
 #[derive(Clone, Copy)]
 enum EpochPreparation {
     InstalledGuard,
-    #[cfg(feature = "test-support")]
-    RelationGuardLab,
+    RelationGuard,
 }
 
 impl IngressUnitOfWork {
@@ -201,8 +202,39 @@ impl IngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(None, EpochPreparation::InstalledGuard)
+        self.begin_inner(None, EpochPreparation::InstalledGuard, None)
             .await
+    }
+
+    /// Verify the dark candidate guard on this UOW's exact attested database
+    /// handle. Call this on its main lane, which must retain a reserved ingress
+    /// lane on the same pool. This does not enable the relation path for
+    /// ordinary startup. Verification uses one lease from each lane so the
+    /// owner locks precede the RR snapshot without self-deadlocking a one-slot
+    /// admission lane.
+    pub async fn verify_relation_guard_capability(
+        &self,
+    ) -> Result<RelationGuardCapability, RelationGuardCapabilityError> {
+        RelationGuardCapability::verify(&self.db, &self.lineage).await
+    }
+
+    /// Explicitly begin with the verifier-issued candidate relation guard.
+    /// `begin()` remains on the registered V1009 row-lock protocol.
+    pub async fn begin_with_relation_guard(
+        &self,
+        capability: &RelationGuardCapability,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        let writer = self
+            .attested_pg_writer
+            .as_ref()
+            .ok_or(IngressUowError::AttestedPoolRequired)?;
+        capability.verify_for_database(&self.db, writer)?;
+        self.begin_inner(
+            Some((Duration::from_secs(3), Duration::from_secs(5))),
+            EpochPreparation::RelationGuard,
+            Some(capability),
+        )
+        .await
     }
 
     /// Bound even the initial epoch lock wait before taking any row locks.
@@ -214,8 +246,12 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement)), EpochPreparation::InstalledGuard)
-            .await
+        self.begin_inner(
+            Some((lock, statement)),
+            EpochPreparation::InstalledGuard,
+            None,
+        )
+        .await
     }
 
     /// Fresh source rediscovery must see parents committed after an earlier
@@ -225,8 +261,12 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement)), EpochPreparation::InstalledGuard)
-            .await
+        self.begin_inner(
+            Some((lock, statement)),
+            EpochPreparation::InstalledGuard,
+            None,
+        )
+        .await
     }
 
     /// The fixture's sealed marker binds this experiment to its attested
@@ -241,20 +281,18 @@ impl IngressUnitOfWork {
         }
         let transaction = tokio::time::timeout(
             Duration::from_secs(5),
-            self.begin_inner(None, EpochPreparation::RelationGuardLab),
+            self.begin_with_relation_guard(fixture.capability()),
         )
         .await
         .map_err(|_| IngressUowError::Timeout)??;
-        Ok(CandidateTransaction {
-            transaction,
-            fixture,
-        })
+        Ok(CandidateTransaction { transaction })
     }
 
     async fn begin_inner(
         &self,
         bounds: Option<(Duration, Duration)>,
         preparation: EpochPreparation,
+        relation_capability: Option<&RelationGuardCapability>,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
         if let Some(capability) = &self.attested_pg_writer {
             self.db
@@ -279,7 +317,9 @@ impl IngressUnitOfWork {
                 .await?;
         }
         if let Some((lock, statement)) = bounds {
-            if !set_local_transaction_timeouts(&mut transaction, lock, statement).await? {
+            if matches!(preparation, EpochPreparation::InstalledGuard)
+                && !set_local_transaction_timeouts(&mut transaction, lock, statement).await?
+            {
                 return Err(IngressUowError::TransactionBoundsUnproven);
             }
         }
@@ -288,9 +328,8 @@ impl IngressUnitOfWork {
                 EpochPreparation::InstalledGuard => {
                     tighten_local_transaction_timeouts(&mut transaction).await?
                 }
-                #[cfg(feature = "test-support")]
-                EpochPreparation::RelationGuardLab => {
-                    bound_relation_guard_lab_transaction(&mut transaction).await?
+                EpochPreparation::RelationGuard => {
+                    bound_relation_guard_transaction(&mut transaction).await?
                 }
             };
             if !bounded {
@@ -303,9 +342,11 @@ impl IngressUnitOfWork {
                     EpochPreparation::InstalledGuard => {
                         prepare_attested_receipt_transaction(&mut transaction, capability).await?
                     }
-                    #[cfg(feature = "test-support")]
-                    EpochPreparation::RelationGuardLab => {
-                        prepare_relation_guard_lab_transaction(&mut transaction, capability).await?
+                    EpochPreparation::RelationGuard => {
+                        relation_capability
+                            .ok_or(IngressUowError::AttestedPoolRequired)?
+                            .prepare_transaction(&mut transaction)
+                            .await?
                     }
                 };
                 (prepared.protocol_epoch(), Some(prepared))
@@ -375,8 +416,7 @@ impl IngressUnitOfWork {
     }
 }
 
-#[cfg(feature = "test-support")]
-async fn bound_relation_guard_lab_transaction(
+async fn bound_relation_guard_transaction(
     transaction: &mut Transaction<'_>,
 ) -> Result<bool, DatabaseError> {
     let mut rows = transaction
@@ -393,32 +433,6 @@ async fn bound_relation_guard_lab_transaction(
         )
         .await?;
     Ok(rows.next().await?.is_some())
-}
-
-#[cfg(feature = "test-support")]
-async fn prepare_relation_guard_lab_transaction(
-    transaction: &mut Transaction<'_>,
-    capability: &AttestedPostgresWriterCapability,
-) -> Result<PreparedAttestedReceiptWriter, IngressUowError> {
-    use crate::db::physical_attestation::{prelock_epoch_relation, read_epoch_after_prelock};
-
-    let expected = &capability.identity().schema;
-    let connection = transaction
-        .postgres_connection()
-        .ok_or(IngressUowError::PostgresRequired)?;
-    prelock_epoch_relation(connection, &expected.name.0)
-        .await
-        .map_err(|_| IngressUowError::EpochProofMissing)?;
-    capability.attest_transaction(transaction).await?;
-    let connection = transaction
-        .postgres_connection()
-        .ok_or(IngressUowError::PostgresRequired)?;
-    let epoch = read_epoch_after_prelock(connection, &expected.name.0, expected.oid)
-        .await
-        .map_err(|_| IngressUowError::EpochProofMissing)?;
-    Ok(PreparedAttestedReceiptWriter::for_relation_guard_lab(
-        capability, epoch,
-    ))
 }
 
 async fn acquire_transaction_with_timeout<'a>(
@@ -469,49 +483,15 @@ pub struct IngressUowTransaction<'a> {
     authority_guards: Vec<CurrentNodeIdentityGuard>,
 }
 
-/// A fixture-sealed real UoW. Its methods expose only the operations needed
-/// by the disposable laboratory, never the underlying transaction or SQL.
+/// Test wrapper used to inject commit acknowledgement faults after the normal
+/// UOW/repository chain has completed.
 #[cfg(feature = "test-support")]
 pub(crate) struct CandidateTransaction<'a> {
     transaction: IngressUowTransaction<'a>,
-    fixture: &'a crate::test_support::relation_guard_lab::RelationGuardLabToken,
 }
 
 #[cfg(feature = "test-support")]
 impl CandidateTransaction<'_> {
-    pub(crate) fn protocol_epoch(&self) -> ProtocolEpoch {
-        self.transaction.protocol_epoch()
-    }
-
-    pub(crate) fn lineage(&self) -> &IngressLineage {
-        self.transaction.lineage()
-    }
-
-    pub(crate) async fn reconcile_intents(
-        &mut self,
-        message_key: waddle_xmpp::ingress::MessageKey,
-        planned: &[waddle_xmpp::ingress::IngressEffectIntent],
-        existing_authority: bool,
-    ) -> Result<ReconcileVerdict, IngressUowError> {
-        EffectIntentRepository::reconcile(
-            &mut self.transaction,
-            message_key,
-            planned,
-            existing_authority,
-        )
-        .await
-    }
-
-    pub(crate) async fn record_receipt(
-        &mut self,
-        message_key: waddle_xmpp::ingress::MessageKey,
-        kind: crate::ingress_substrate::EffectReceiptKind,
-        hash: &[u8; 32],
-    ) -> Result<(), IngressUowError> {
-        EffectReceiptRepository::record_receipt(&mut self.transaction, message_key, kind, hash)
-            .await
-    }
-
     pub(crate) async fn has_fixture_bounds_and_isolation(
         &mut self,
     ) -> Result<bool, IngressUowError> {
@@ -521,7 +501,17 @@ impl CandidateTransaction<'_> {
             .query(
                 "SELECT pg_catalog.current_setting('lock_timeout')::interval = interval '2500 ms' \
              AND pg_catalog.current_setting('statement_timeout')::interval = interval '4500 ms' \
-             AND pg_catalog.current_setting('transaction_isolation') = 'read committed'",
+             AND pg_catalog.current_setting('transaction_isolation') = 'read committed' \
+             AND coalesce(pg_catalog.current_setting('waddle.protocol_epoch', true) = \
+                 (SELECT epoch::text FROM guarded.ingress_protocol_epoch WHERE id = 1), false) \
+             AND coalesce(pg_catalog.current_setting('waddle.protocol_epoch_xid', true) = \
+                 pg_catalog.pg_current_xact_id()::text, false) \
+             AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'relation' \
+                 AND relation = 'guarded.ingress_protocol_epoch'::regclass \
+                 AND pid = pg_catalog.pg_backend_pid() AND mode = 'AccessShareLock' AND granted) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'relation' \
+                 AND relation = 'guarded.ingress_protocol_epoch'::regclass \
+                 AND pid = pg_catalog.pg_backend_pid() AND mode = 'RowShareLock' AND granted)",
                 (),
             )
             .await?;
@@ -550,6 +540,22 @@ impl CandidateTransaction<'_> {
 
     pub(crate) async fn commit(self) -> Result<(), IngressUowError> {
         self.transaction.commit().await
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl<'a> std::ops::Deref for CandidateTransaction<'a> {
+    type Target = IngressUowTransaction<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl std::ops::DerefMut for CandidateTransaction<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.transaction
     }
 }
 

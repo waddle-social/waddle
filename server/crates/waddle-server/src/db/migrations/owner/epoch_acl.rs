@@ -14,7 +14,7 @@ use crate::db::migrations::waddle::{
 };
 use crate::db::physical_attestation::PgRoleName;
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
-use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
+use crate::ingress_substrate::{supported_protocol_epoch, EPOCH_GUARDED_TABLES};
 
 // The candidate is a laboratory asset, not a registered migration. Its single
 // source is shared with the tests and included in the release source fileset.
@@ -298,6 +298,33 @@ pub(super) async fn inspect_catalog_in_transaction(
     schema: &str,
     quoted: &str,
 ) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
+    inspect_catalog_with_epoch_policy(tx, config, schema, quoted, true).await
+}
+
+/// Verify the exact candidate guard on a supported live epoch. The public
+/// dark diagnostic remains restricted to epoch zero; a capability verifier
+/// must also be able to re-attest after the disposable owner transition.
+pub(super) async fn verify_relation_guard_candidate_in_transaction(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+    quoted: &str,
+) -> Result<(), DarkMigrationOwnerError> {
+    let stage = inspect_catalog_with_epoch_policy(tx, config, schema, quoted, false).await?;
+    if stage == DarkEpochAclStage::RelationGuardEpochZero {
+        check_guarded_relation_acls(tx, config, schema).await
+    } else {
+        Err(DarkMigrationOwnerError::EpochCatalogDrift)
+    }
+}
+
+async fn inspect_catalog_with_epoch_policy(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+    quoted: &str,
+    require_epoch_zero: bool,
+) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
     check_runtime_role(tx, config, schema).await?;
     check_epoch_shape(tx, config, schema).await?;
     super::MigrationRunner::single()
@@ -432,7 +459,11 @@ pub(super) async fn inspect_catalog_in_transaction(
     ] {
         check_acl(tx, config, schema, table, stage).await?;
     }
-    check_epoch_zero(tx, quoted).await?;
+    if require_epoch_zero {
+        check_epoch_zero(tx, quoted).await?;
+    } else {
+        check_supported_epoch(tx, config, quoted).await?;
+    }
     Ok(stage)
 }
 
@@ -448,6 +479,26 @@ async fn check_epoch_zero(
              FROM {quoted_schema}.ingress_protocol_epoch"
         ),
         (),
+        DarkMigrationOwnerError::UnsupportedEpoch,
+    )
+    .await
+}
+
+async fn check_supported_epoch(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    quoted_schema: &str,
+) -> Result<(), DarkMigrationOwnerError> {
+    let supported = i64::from(supported_protocol_epoch().to_storage());
+    require(
+        tx,
+        &format!(
+            "SELECT count(*) = 1 AND bool_and(id = 1 AND epoch >= 0 AND epoch <= ? \
+             AND ((epoch = 0 AND activated_at IS NULL AND lineage_uuid IS NULL) \
+               OR (epoch > 0 AND activated_at IS NOT NULL AND lineage_uuid::text = ?))) \
+             FROM {quoted_schema}.ingress_protocol_epoch"
+        ),
+        crate::db_params![supported, config.expected.lineage_uuid.0.to_string()],
         DarkMigrationOwnerError::UnsupportedEpoch,
     )
     .await
@@ -844,4 +895,88 @@ async fn check_acl(
         DarkMigrationOwnerError::Roles,
     )
     .await
+}
+
+async fn check_guarded_relation_acls(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+) -> Result<(), DarkMigrationOwnerError> {
+    for table in EPOCH_GUARDED_TABLES {
+        let (select, insert, update) = match table {
+            "ingress_messages" => (true, true, true),
+            "ingress_effect_intents" | "ingress_effect_receipts" | "ingress_deliveries" => {
+                (true, true, false)
+            }
+            "ingress_effect_descendants" => (true, true, true),
+            "ingress_sm_refs" | "ingress_archive_dispatch" | "ingress_owner_rejections" => {
+                (true, false, false)
+            }
+            _ => (false, false, false),
+        };
+        // V1011 grants pg_monitor SELECT on the first six guarded tables;
+        // later ingress migrations extend that same read profile to the rest.
+        let monitor_select = true;
+        require(
+            tx,
+            r#"SELECT c.relkind = 'r' AND c.relpersistence = 'p' AND c.relowner = owner.oid
+                  AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'SELECT'))::int = ?
+                  AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'INSERT'))::int = ?
+                  AND (pg_catalog.has_table_privilege(runtime.oid, c.oid, 'UPDATE'))::int = ?
+                  AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'DELETE')
+                  AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'TRUNCATE')
+                  AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'REFERENCES')
+                  AND NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'TRIGGER')
+                  AND (pg_catalog.has_any_column_privilege(runtime.oid, c.oid, 'SELECT'))::int = ?
+                  AND (pg_catalog.has_any_column_privilege(runtime.oid, c.oid, 'INSERT'))::int = ?
+                  AND (pg_catalog.has_any_column_privilege(runtime.oid, c.oid, 'UPDATE'))::int = ?
+                  AND NOT pg_catalog.has_any_column_privilege(runtime.oid, c.oid, 'REFERENCES')
+                  AND CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 170000
+                       THEN NOT pg_catalog.has_table_privilege(runtime.oid, c.oid, 'MAINTAIN')
+                       ELSE true END
+                  AND (pg_catalog.has_table_privilege(monitor.oid, c.oid, 'SELECT'))::int = ?
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                                      coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))
+                                  ) acl
+                                  WHERE acl.grantee = 0
+                                     OR acl.grantee NOT IN (owner.oid, runtime.oid, monitor.oid)
+                                     OR (acl.grantee <> owner.oid AND acl.is_grantable)
+                                     OR (acl.grantee = runtime.oid AND (
+                                          (acl.privilege_type = 'SELECT' AND ? = 0) OR
+                                          (acl.privilege_type = 'INSERT' AND ? = 0) OR
+                                          (acl.privilege_type = 'UPDATE' AND ? = 0) OR
+                                          acl.privilege_type IN ('DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')))
+                                     OR (acl.grantee = monitor.oid AND
+                                         (? = 0 OR acl.privilege_type <> 'SELECT')))
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute column_
+                                  CROSS JOIN LATERAL pg_catalog.aclexplode(column_.attacl) acl
+                                  WHERE column_.attrelid = c.oid AND acl.grantee <> owner.oid)
+               FROM pg_catalog.pg_class c
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+               JOIN pg_catalog.pg_roles owner ON owner.rolname = ?
+               JOIN pg_catalog.pg_roles runtime ON runtime.rolname = ?
+               JOIN pg_catalog.pg_roles monitor ON monitor.rolname = 'pg_monitor'
+               WHERE n.nspname = ? AND c.relname = ?"#,
+            crate::db_params![
+                select,
+                insert,
+                update,
+                select,
+                insert,
+                update,
+                monitor_select,
+                select,
+                insert,
+                update,
+                monitor_select,
+                config.owner.as_str(),
+                config.runtime.as_str(),
+                schema,
+                table
+            ],
+            DarkMigrationOwnerError::EpochCatalogDrift,
+        )
+        .await?;
+    }
+    Ok(())
 }

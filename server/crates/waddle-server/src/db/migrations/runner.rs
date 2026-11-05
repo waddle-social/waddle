@@ -14,7 +14,7 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 /// append-only migration ledger. This differs from the claims lock key in
 /// `clustering::claims`; SQLite is single-node, where `BEGIN IMMEDIATE`
 /// provides the corresponding write serialization.
-pub(super) const MIGRATION_LEDGER_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_992;
+pub(crate) const MIGRATION_LEDGER_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_992;
 
 /// Migration runner for applying migrations to a database.
 pub struct MigrationRunner {

@@ -661,6 +661,28 @@ impl Database {
         ingress
     }
 
+    /// Obtain the reserved ingress lane used as a verifier's fresh snapshot
+    /// lease. The lock holder occupies the main lane at the same time, so the
+    /// attested pool and both admission lanes must each have a real slot.
+    pub(crate) fn relation_guard_snapshot_lane(&self) -> Option<Self> {
+        let DatabaseBackend::Postgres(pool) = &self.backend else {
+            return None;
+        };
+        let ingress_admission = self.ingress_admission.as_ref()?;
+        if !self.is_main_lane()
+            || self.attested_pg_writer.is_none()
+            || self.admission.limit().is_none_or(|limit| limit == 0)
+            || ingress_admission.lane() != PoolLane::Ingress
+            || ingress_admission.limit().is_none_or(|limit| limit == 0)
+            || pool.options().get_max_connections() < 2
+        {
+            return None;
+        }
+        let mut snapshot = self.clone();
+        snapshot.admission = ingress_admission.clone();
+        Some(snapshot)
+    }
+
     /// Seal the bootstrapped owner pool into disjoint admission lanes. The
     /// caller must own this handle before any actor or store receives a clone.
     pub(crate) fn seal_owner_postgres_lanes(
