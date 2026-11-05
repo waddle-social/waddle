@@ -4,7 +4,9 @@
 //! existing state without exposing it and serializes stop with operations that
 //! hold the lifecycle gate. The actor fixture exercises this same core.
 
-use super::frame::{handle_xmpp_frame_with_admission, ordered_relay_origin_from_sm, ResponseBatch};
+use super::frame::{
+    handle_parsed_xmpp_frame_with_admission, ordered_relay_origin_from_sm, ResponseBatch,
+};
 use super::interpret_loop::build_interpret_deps;
 use super::replay::{drive_interpret_loop, DriveOutcome};
 use super::state::WsConnState;
@@ -29,7 +31,7 @@ pub mod fixture;
 /// The unique protocol-state owner and its independently shared lifecycle gate.
 pub(super) struct ConnectionActorCore {
     state: WsConnState,
-    lifecycle: Arc<ConnectionActorLifecycle>,
+    pub(super) lifecycle: Arc<ConnectionActorLifecycle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,17 +92,19 @@ impl ConnectionActorCore {
     /// `WsConnState`; the returned batch is still only local output work.
     pub(super) async fn process_inbound_frame(
         &mut self,
-        frame: &str,
-        domain: &str,
+        parsed: waddle_xmpp::protocol::frame::ParsedFrame,
+        domain: &jid::BareJid,
+        wire_bytes: usize,
         state: &WebSocketState,
         permit: &NodeAdmissionPermit,
         shutdown: &CancellationToken,
     ) -> Result<ConnectionActorDriverCompletion<ResponseBatch>, ConnectionActorDriverError> {
         let lifecycle = Arc::clone(&self.lifecycle);
         run_with_driver_completion(lifecycle, permit, shutdown, || async {
-            handle_xmpp_frame_with_admission(
-                frame,
+            handle_parsed_xmpp_frame_with_admission(
+                parsed,
                 domain,
+                wire_bytes,
                 state,
                 &mut self.state,
                 permit,
@@ -186,7 +190,7 @@ where
     })
 }
 
-struct ConnectionActorLifecycle {
+pub(super) struct ConnectionActorLifecycle {
     state: Mutex<ConnectionActorLifecycleState>,
     #[cfg(feature = "test-support")]
     stop_callback_count: AtomicU64,
@@ -230,7 +234,7 @@ impl ConnectionActorLifecycle {
         Ok(ConnectionActorLifecycleGuard { state })
     }
 
-    fn request_stop(&self, reason: StopReason) -> bool {
+    pub(super) fn request_stop(&self, reason: StopReason) -> bool {
         let mut state = self.lock_state();
         if state.stop_reason.is_some() {
             return false;
@@ -255,16 +259,24 @@ mod tests {
 
     #[tokio::test]
     async fn actor_owner_delegates_inbound_frame_to_shared_protocol_handler() {
+        use std::str::FromStr;
+
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let lifecycle = crate::clustering::NodeLifecycle::new();
         let permit = lifecycle.admit().expect("serving permit");
         let shutdown = CancellationToken::new();
         let mut owner = ConnectionActorCore::new(WsConnState::new());
+        let frame =
+            r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#;
+        let parsed =
+            waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame).expect("typed frame");
+        let domain = jid::BareJid::from_str("example.com").expect("typed XMPP domain");
 
         let ConnectionActorDriverCompletion::CurrentAtCompletion(batch) = owner
             .process_inbound_frame(
-                r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
-                "example.com",
+                parsed,
+                &domain,
+                frame.len(),
                 state.as_ref(),
                 &permit,
                 &shutdown,
