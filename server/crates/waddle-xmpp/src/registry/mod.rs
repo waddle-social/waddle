@@ -22,10 +22,12 @@ pub mod user_actor;
 pub mod user_registry;
 
 pub use connection_registry::{
-    ArchiveDispatchRefusal, ArchiveDispatchRefusalReason, BindingAdmissionState, BroadcastOutcome,
-    ConnectionBindGuard, ConnectionEntry, ConnectionRegistry, DeliveryKind,
-    ForceDetachInterruption, ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome,
-    ForceDetachRequest, LiveResumeControl, LocalConnectionBindingId, LocalIoRelinquishment,
+    ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver, ActorOutboundStage,
+    ActorProvisionalConnectionEntry, ActorSocketOutboundEndpoint, ArchiveDispatchRefusal,
+    ArchiveDispatchRefusalReason, BindingAdmissionState, BroadcastOutcome, ConnectionBindGuard,
+    ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachInterruption,
+    ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+    LiveResumeControl, LocalConnectionBindingId, LocalIoRelinquishment,
     LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo, OutboundStanza,
     OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
     PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,

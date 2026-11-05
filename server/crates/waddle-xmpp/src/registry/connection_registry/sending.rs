@@ -703,6 +703,7 @@ impl ConnectionRegistry {
             if !entry.endpoint.is_closed() {
                 return false;
             }
+            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
@@ -744,6 +745,7 @@ impl ConnectionRegistry {
             if !entry.endpoint.is_closed() || !entry.endpoint.same_binding(endpoint) {
                 return false;
             }
+            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(sm_stream_owners, jid, entry);
             Self::remove_retired_presence(presence_states, jid);
             true

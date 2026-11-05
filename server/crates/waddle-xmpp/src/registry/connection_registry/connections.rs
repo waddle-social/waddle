@@ -1,10 +1,99 @@
 use super::{
-    debug, instrument, ConnectionEntry, ConnectionRegistry, FullJid, LocalConnectionBindingId,
-    Ordering, SocketOutboundEndpoint,
+    debug, instrument, ActorProvisionalConnectionEntry, ConnectionBindGuard, ConnectionEntry,
+    ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering, SocketOutboundEndpoint,
 };
 use crate::pending_delivery::SmSessionId;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::registry::user_actor::ConfirmedProvisionalMirror;
 
 impl ConnectionRegistry {
+    /// Publish an actor candidate while it still refuses all outbound work.
+    /// The caller holds the per-JID bind gate and must revalidate its current
+    /// node admission before this call and before mirroring to UserActor.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn publish_provisional_if_expected(
+        &self,
+        guard: &ConnectionBindGuard,
+        jid: FullJid,
+        candidate: &ActorProvisionalConnectionEntry,
+        expected: Option<LocalConnectionBindingId>,
+    ) -> bool {
+        if !guard.is_for(&jid) || candidate.jid() != &jid || candidate.binding_ref().is_none() {
+            return false;
+        }
+        match self.connections.entry(jid.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                if Some(occupied.get().binding_id()) != expected || !candidate.is_provisional() {
+                    return false;
+                }
+                occupied.get().seal_actor_binding_if_any();
+                Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
+                occupied.insert(candidate.entry_for_publication());
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                if expected.is_some() || !candidate.is_provisional() {
+                    return false;
+                }
+                vacant.insert(candidate.entry_for_publication());
+                crate::metrics::adjust_connections_active(1);
+            }
+        }
+        true
+    }
+
+    /// The UserActor minted `confirmed` during an exact mirror check. A later
+    /// replacement on either side seals the shared endpoint, so this CAS can
+    /// only activate the still-current tuple while the bind gate is held.
+    /// The caller must hold current node admission across this synchronous call.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn activate_provisional_if_confirmed(
+        &self,
+        guard: &ConnectionBindGuard,
+        jid: &FullJid,
+        candidate: &ActorProvisionalConnectionEntry,
+        confirmed: &ConfirmedProvisionalMirror,
+    ) -> bool {
+        if !guard.is_for(jid) || candidate.jid() != jid || !confirmed.matches(candidate) {
+            return false;
+        }
+        let Some(entry) = self.connections.get_mut(jid) else {
+            return false;
+        };
+        if !candidate.matches_entry(&entry) {
+            return false;
+        }
+        let Some(binding_ref) = candidate.binding_ref() else {
+            return false;
+        };
+        entry.activate_binding(candidate.binding_id(), binding_ref)
+    }
+
+    /// Compensation removes only this exact still-published candidate. A
+    /// same-JID successor is never removed by an old startup ticket.
+    pub fn retire_provisional_if_exact(
+        &self,
+        guard: &ConnectionBindGuard,
+        jid: &FullJid,
+        candidate: &ActorProvisionalConnectionEntry,
+    ) -> bool {
+        if !guard.is_for(jid) || candidate.jid() != jid {
+            return false;
+        }
+        let removed = self.connections.remove_if(jid, |_, entry| {
+            if !candidate.matches_entry(entry) {
+                return false;
+            }
+            entry.seal_actor_binding_if_any();
+            Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
+            true
+        });
+        if removed.is_some() {
+            crate::metrics::adjust_connections_active(-1);
+        }
+        removed.is_some()
+    }
+
     /// Register a connection with its opaque outbound socket endpoint.
     ///
     /// Returns the local identity of the published binding.
@@ -70,6 +159,7 @@ impl ConnectionRegistry {
         let binding_id = entry.binding_id();
         match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                occupied.get().seal_actor_binding_if_any();
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
                 }
@@ -99,7 +189,10 @@ impl ConnectionRegistry {
         match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 let remove_old_stream = occupied.get().sm_stream_id() != entry.sm_stream_id();
-                let old = interruption.publish_binding(&binding, || occupied.insert(entry))?;
+                let old = interruption.publish_binding(&binding, || {
+                    occupied.get().seal_actor_binding_if_any();
+                    occupied.insert(entry)
+                })?;
                 if remove_old_stream {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, &old);
                 }
@@ -134,6 +227,7 @@ impl ConnectionRegistry {
                     debug!("Skipped register: ownership moved to replacement connection");
                     return false;
                 }
+                occupied.get().seal_actor_binding_if_any();
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
                 }
@@ -156,6 +250,7 @@ impl ConnectionRegistry {
     #[instrument(skip(self, jid), fields(jid = %jid))]
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
+            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
@@ -191,6 +286,7 @@ impl ConnectionRegistry {
             if entry.binding_id() != *owner {
                 return false;
             }
+            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
@@ -224,6 +320,7 @@ impl ConnectionRegistry {
             if entry.sm_stream_id().as_ref() != Some(stream_id) {
                 return false;
             }
+            entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true

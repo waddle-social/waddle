@@ -105,6 +105,56 @@ fn acknowledge(outbound: OutboundStanza, accepted: &mut oneshot::Receiver<()>) {
     assert_eq!(accepted.try_recv(), Ok(()));
 }
 
+#[test]
+fn actor_queue_retains_complete_envelope_after_id_dequeue_and_seal() {
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    );
+    let binding_ref = BindingRef::fresh(connection.clone());
+    let owner = LocalConnectionBindingId::fresh();
+    let (socket, mut receiver, custody) =
+        SocketOutboundEndpoint::actor_channel(connection, 1, 4096).expect("bounded actor queue");
+    let endpoint = socket.bind(
+        owner,
+        Some(binding_ref.clone()),
+        BindingAdmissionState::Active,
+    );
+    let (outbound, expected, mut accepted) = payload();
+    assert!(matches!(
+        endpoint.try_send(outbound),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    let id = receiver
+        .try_recv()
+        .expect("only the ID crosses the channel");
+    assert_eq!(id.owner(), owner);
+    assert_eq!(id.binding(), &binding_ref);
+    assert_payload(
+        &custody.snapshot(&id).expect("custody retains envelope"),
+        &expected,
+        &mut accepted,
+    );
+    let (second, second_expected, mut second_accepted) = payload();
+    let _ = refused(
+        endpoint.try_send(second),
+        EndpointEnqueueRejection::Full,
+        &second_expected,
+        &mut second_accepted,
+    );
+    assert_eq!(custody.retained_count(), 1);
+    assert!(endpoint.seal(owner, &binding_ref));
+    assert_eq!(
+        custody.stage(&id),
+        Some(super::super::ActorOutboundStage::NotAttempted)
+    );
+    let (outbound, _) = custody
+        .take_terminal(&id)
+        .expect("exact terminal retrieval");
+    assert_payload(&outbound, &expected, &mut accepted);
+    assert_eq!(custody.retained_count(), 0);
+    assert!(receiver.try_recv().is_err());
+}
+
 fn binding(
     state: BindingAdmissionState,
 ) -> (
@@ -229,7 +279,7 @@ fn reserved_commit_refusals_return_the_envelope_and_capacity() {
         &expected,
         &mut accepted,
     );
-    assert_eq!(endpoint.queue.sender.capacity(), 1);
+    assert_eq!(endpoint.queue.capacity(), 1);
     assert!(receiver.try_recv().is_err());
     acknowledge(outbound, &mut accepted);
 
@@ -243,8 +293,39 @@ fn reserved_commit_refusals_return_the_envelope_and_capacity() {
         &expected,
         &mut accepted,
     );
-    assert_eq!(endpoint.queue.sender.capacity(), 1);
+    assert_eq!(endpoint.queue.capacity(), 1);
     assert!(receiver.try_recv().is_err());
+    acknowledge(outbound, &mut accepted);
+}
+
+#[test]
+fn actor_reserved_permit_racing_seal_returns_full_envelope_without_custody_insert() {
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    );
+    let binding_ref = BindingRef::fresh(connection.clone());
+    let owner = LocalConnectionBindingId::fresh();
+    let (socket, mut receiver, custody) =
+        SocketOutboundEndpoint::actor_channel(connection, 1, 4096).expect("bounded actor queue");
+    let endpoint = socket.bind(
+        owner,
+        Some(binding_ref.clone()),
+        BindingAdmissionState::Active,
+    );
+    let permit = endpoint
+        .try_reserve_owned()
+        .expect("reserve actor queue slot");
+    assert!(endpoint.seal(owner, &binding_ref));
+    let (outbound, expected, mut accepted) = payload();
+    let outbound = refused(
+        endpoint.commit_reserved(permit, outbound),
+        EndpointEnqueueRejection::Sealed,
+        &expected,
+        &mut accepted,
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(custody.retained_count(), 0);
+    assert!(custody.terminal_ids().expect("sealed custody").is_empty());
     acknowledge(outbound, &mut accepted);
 }
 
@@ -275,8 +356,8 @@ fn permit_binds_queue_and_admission_even_for_equal_ids() {
         &expected,
         &mut accepted,
     );
-    assert_eq!(a.queue.sender.capacity(), 1);
-    assert_eq!(b.queue.sender.capacity(), 0);
+    assert_eq!(a.queue.capacity(), 1);
+    assert_eq!(b.queue.capacity(), 0);
     assert!(receiver_a.try_recv().is_err());
     assert!(receiver_b.try_recv().is_err());
     assert!(matches!(
@@ -309,8 +390,8 @@ fn permit_binds_queue_and_admission_even_for_equal_ids() {
         &expected,
         &mut accepted,
     );
-    assert_eq!(a.queue.sender.capacity(), 1);
-    assert_eq!(b.queue.sender.capacity(), 0);
+    assert_eq!(a.queue.capacity(), 1);
+    assert_eq!(b.queue.capacity(), 0);
     assert!(receiver_a.try_recv().is_err());
     assert!(receiver_b.try_recv().is_err());
     drop(b_permit);
@@ -334,7 +415,7 @@ fn permit_binds_queue_and_admission_even_for_equal_ids() {
         &expected,
         &mut accepted,
     );
-    assert_eq!(a.queue.sender.capacity(), 1);
+    assert_eq!(a.queue.capacity(), 1);
     assert!(receiver.try_recv().is_err());
     acknowledge(outbound, &mut accepted);
 }
@@ -362,7 +443,7 @@ async fn blocked_send_rechecks_seal_without_seal_waking_the_waiter() {
         &expected,
         &mut accepted,
     );
-    assert_eq!(endpoint.queue.sender.capacity(), 1);
+    assert_eq!(endpoint.queue.capacity(), 1);
     assert!(receiver.try_recv().is_err());
     acknowledge(outbound, &mut accepted);
 }
@@ -375,7 +456,7 @@ async fn cancelled_waits_release_capacity_and_send_drops_its_envelope() {
     assert!(futures::poll!(reserve.as_mut()).is_pending());
     drop(reserve);
     drop(held);
-    assert_eq!(endpoint.queue.sender.capacity(), 1);
+    assert_eq!(endpoint.queue.capacity(), 1);
 
     assert!(matches!(
         endpoint.try_send(OutboundStanza::new(Stanza::Message(Message::new(None)))),
@@ -390,7 +471,7 @@ async fn cancelled_waits_release_capacity_and_send_drops_its_envelope() {
         Err(oneshot::error::TryRecvError::Closed)
     ));
     receiver.recv().await.expect("drain original frame");
-    assert_eq!(endpoint.queue.sender.capacity(), 1);
+    assert_eq!(endpoint.queue.capacity(), 1);
     assert!(endpoint.try_reserve_owned().is_ok());
 }
 
