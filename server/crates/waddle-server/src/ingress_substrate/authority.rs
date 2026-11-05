@@ -626,15 +626,31 @@ pub(super) async fn wire_generation(
         POSTGRES,
         SQLITE,
     );
-    let mut rows = tx
-        .query(&sql, crate::db_params![id.to_storage().to_string()])
-        .await
-        .map_err(discard_database_error)?;
+    let mut rows =
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_lock_sm_stream",
+                quote_postgres_identifier(prepared.schema())
+            );
+            tx.query(
+                &format!("SELECT checkpoint_h, wire_generation FROM {function}(?::uuid)"),
+                crate::db_params![id.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?
+        } else {
+            tx.query(&sql, crate::db_params![id.to_storage().to_string()])
+                .await
+                .map_err(discard_database_error)?
+        };
     let row = rows
         .next()
         .await
         .map_err(discard_database_error)?
         .ok_or(IngressSubstrateError::StreamMissing)?;
+    if rows.next().await.map_err(discard_database_error)?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult);
+    }
     let checkpoint: i64 = row.get(0).map_err(discard_database_error)?;
     let generation: i64 = row.get(1).map_err(discard_database_error)?;
     let checkpoint =
@@ -738,10 +754,23 @@ pub(crate) async fn advance_frontier_in_prepared_transaction(
         READ_POSTGRES,
         READ_SQLITE,
     );
-    let mut rows = tx
-        .query(&read, crate::db_params![id.to_storage().to_string()])
-        .await
-        .map_err(discard_database_error)?;
+    let mut rows =
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_lock_sm_stream",
+                quote_postgres_identifier(prepared.schema())
+            );
+            tx.query(
+                &format!("SELECT handled_ordinal::text FROM {function}(?::uuid)"),
+                crate::db_params![id.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?
+        } else {
+            tx.query(&read, crate::db_params![id.to_storage().to_string()])
+                .await
+                .map_err(discard_database_error)?
+        };
     let stored: String = rows
         .next()
         .await
@@ -749,6 +778,9 @@ pub(crate) async fn advance_frontier_in_prepared_transaction(
         .ok_or(IngressSubstrateError::StreamMissing)?
         .get(0)
         .map_err(discard_database_error)?;
+    if rows.next().await.map_err(discard_database_error)?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult);
+    }
     drop(rows);
     let stored = stored
         .parse::<u64>()
@@ -762,24 +794,52 @@ pub(crate) async fn advance_frontier_in_prepared_transaction(
     }
     const WRITE_POSTGRES: (&str, &str) = ("UPDATE ", " SET handled_ordinal = ?::numeric, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND handled_ordinal = ?::numeric");
     const WRITE_SQLITE: &str = "UPDATE ingress_sm_streams SET handled_ordinal = ?, row_revision = row_revision + 1, updated_at = CURRENT_TIMESTAMP WHERE sm_ingress_id = ? AND handled_ordinal = ?";
-    let write = prepared_ingress_sql(
-        tx.driver(),
-        prepared,
-        PreparedIngressRelation::SmStreams,
-        WRITE_POSTGRES,
-        WRITE_SQLITE,
-    );
-    let changed = tx
-        .execute(
-            &write,
-            crate::db_params![
-                offered.to_string(),
-                id.to_storage().to_string(),
-                stored.to_string()
-            ],
-        )
-        .await
-        .map_err(discard_database_error)?;
+    let changed =
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_advance_sm_frontier",
+                quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {function}(?::uuid, ?::numeric, ?::numeric)"),
+                    crate::db_params![
+                        id.to_storage().to_string(),
+                        offered.to_string(),
+                        stored.to_string()
+                    ],
+                )
+                .await
+                .map_err(discard_database_error)?;
+            let row = rows
+                .next()
+                .await
+                .map_err(discard_database_error)?
+                .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+            let changed: bool = row.get(0).map_err(discard_database_error)?;
+            if rows.next().await.map_err(discard_database_error)?.is_some() {
+                return Err(IngressSubstrateError::InvalidDefinerApiResult);
+            }
+            u64::from(changed)
+        } else {
+            let write = prepared_ingress_sql(
+                tx.driver(),
+                prepared,
+                PreparedIngressRelation::SmStreams,
+                WRITE_POSTGRES,
+                WRITE_SQLITE,
+            );
+            tx.execute(
+                &write,
+                crate::db_params![
+                    offered.to_string(),
+                    id.to_storage().to_string(),
+                    stored.to_string()
+                ],
+            )
+            .await
+            .map_err(discard_database_error)?
+        };
     Ok(if changed == 1 {
         flush_checkpoint_in_prepared_transaction(tx, prepared, id, checkpoint_h).await?;
         FrontierOutcome::Advanced
@@ -815,15 +875,31 @@ pub(crate) async fn flush_checkpoint_in_prepared_transaction(
         READ_POSTGRES,
         READ_SQLITE,
     );
-    let mut rows = tx
-        .query(&read, crate::db_params![id.to_storage().to_string()])
-        .await
-        .map_err(discard_database_error)?;
+    let mut rows =
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_lock_sm_stream",
+                quote_postgres_identifier(prepared.schema())
+            );
+            tx.query(
+                &format!("SELECT checkpoint_h FROM {function}(?::uuid)"),
+                crate::db_params![id.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?
+        } else {
+            tx.query(&read, crate::db_params![id.to_storage().to_string()])
+                .await
+                .map_err(discard_database_error)?
+        };
     let row = rows
         .next()
         .await
         .map_err(discard_database_error)?
         .ok_or(IngressSubstrateError::StreamMissing)?;
+    if rows.next().await.map_err(discard_database_error)?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult);
+    }
     let stored: i64 = row.get(0).map_err(discard_database_error)?;
     let stored = u32::try_from(stored).map_err(|_| IngressSubstrateError::InvalidStoredStream)?;
     drop(rows);
@@ -833,25 +909,52 @@ pub(crate) async fn flush_checkpoint_in_prepared_transaction(
     if offered == stored {
         return Ok(());
     }
-    const POSTGRES: (&str, &str) = ("UPDATE ", " SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?::uuid");
-    const SQLITE: &str = "UPDATE ingress_sm_streams SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?";
-    let write = prepared_ingress_sql(
-        tx.driver(),
-        prepared,
-        PreparedIngressRelation::SmStreams,
-        POSTGRES,
-        SQLITE,
-    );
-    tx.execute(
-        &write,
-        crate::db_params![
-            i64::from(offered),
-            i64::from(offered < stored),
-            id.to_storage().to_string()
-        ],
-    )
-    .await
-    .map_err(discard_database_error)?;
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_update_sm_checkpoint",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let mut rows = tx
+            .query(
+                &format!("SELECT {function}(?::uuid, ?::bigint, ?::bigint)"),
+                crate::db_params![
+                    id.to_storage().to_string(),
+                    i64::from(offered),
+                    i64::from(offered < stored)
+                ],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let _: bool = row.get(0).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+    } else {
+        const POSTGRES: (&str, &str) = ("UPDATE ", " SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?::uuid");
+        const SQLITE: &str = "UPDATE ingress_sm_streams SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?";
+        let write = prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
+        tx.execute(
+            &write,
+            crate::db_params![
+                i64::from(offered),
+                i64::from(offered < stored),
+                id.to_storage().to_string()
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    }
     Ok(())
 }
 

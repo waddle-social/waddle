@@ -18,6 +18,8 @@ mod durable_more;
 mod effect_descendants;
 #[cfg(feature = "test-support")]
 pub(crate) use effect_descendants::begin_raw_ingress_writer_with_capability;
+#[cfg(feature = "test-support")]
+pub(crate) use effect_descendants::begin_raw_ingress_writer_with_definer_api_candidate;
 pub(crate) use effect_descendants::canonical_nowait_error;
 pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transaction};
 mod error;

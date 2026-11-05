@@ -1173,6 +1173,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     for statement in [
         format!("GRANT USAGE, CREATE ON SCHEMA guarded TO {api_owner}"),
         format!("GRANT SELECT ON guarded.ingress_protocol_epoch TO {api_owner}"),
+        format!("GRANT UPDATE (id) ON guarded.ingress_protocol_epoch TO {api_owner}"),
         format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_messages TO {api_owner}"),
         format!("GRANT UPDATE (message_key) ON guarded.ingress_messages TO {api_owner}"),
         format!("GRANT SELECT, INSERT ON guarded.ingress_origin_aliases TO {api_owner}"),
@@ -1199,6 +1200,21 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     drop(transition_admin);
 
     assert_no_guarded_dml(&mut owner, &fixture.runtime).await;
+    for table in TABLES {
+        let table_owner: String = sqlx::query_scalar(
+            "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text \
+             FROM pg_catalog.pg_class c \
+             WHERE c.oid = pg_catalog.to_regclass($1)",
+        )
+        .bind(format!("guarded.{table}"))
+        .fetch_one(&mut owner)
+        .await
+        .expect("inspect guarded table owner");
+        assert_ne!(
+            table_owner, api_owner,
+            "API owner must not own guarded table {table}"
+        );
+    }
     let api_role_restricted: bool = sqlx::query_scalar(
         "SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND \
                 NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit \
@@ -1213,7 +1229,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
         "SELECT r.rolname = $1 FROM pg_catalog.pg_proc p \
          JOIN pg_catalog.pg_roles r ON r.oid = p.proowner \
          WHERE p.oid = pg_catalog.to_regprocedure(\
-           'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,bigint,bigint,uuid,numeric)')",
+           'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,numeric,numeric,uuid,numeric)')",
     )
     .bind(&api_owner)
     .fetch_one(&mut owner)
@@ -1226,7 +1242,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
            pg_catalog.has_function_privilege($1, p.oid, 'EXECUTE') \
          FROM pg_catalog.pg_proc p \
          WHERE p.oid = pg_catalog.to_regprocedure(\
-           'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,bigint,bigint,uuid,numeric)')",
+           'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,numeric,numeric,uuid,numeric)')",
     )
     .bind(&fixture.runtime)
     .fetch_one(&mut owner)
@@ -1235,6 +1251,44 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     assert!(security_definer);
     assert!(safe_search_path);
     assert!(runtime_execute);
+    let (
+        prepare_owner,
+        prepare_definer,
+        prepare_safe_path,
+        runtime_can_prepare,
+        public_can_prepare,
+    ): (String, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT pg_catalog.pg_get_userbyid(p.proowner)::text, p.prosecdef, \
+                'search_path=pg_catalog, pg_temp' = ANY(p.proconfig), \
+                pg_catalog.has_function_privilege($1, p.oid, 'EXECUTE'), \
+                EXISTS ( \
+                    SELECT 1 FROM pg_catalog.aclexplode( \
+                        COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner)) \
+                    ) acl \
+                    WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE' \
+                ) \
+         FROM pg_catalog.pg_proc p \
+         WHERE p.oid = pg_catalog.to_regprocedure( \
+           'guarded.waddle_ingress_definer_prepare()')",
+    )
+    .bind(&fixture.runtime)
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect internal definer precondition helper");
+    assert_eq!(prepare_owner, api_owner);
+    assert!(
+        !prepare_definer,
+        "internal precondition must use invoker identity"
+    );
+    assert!(prepare_safe_path);
+    assert!(
+        !runtime_can_prepare,
+        "runtime must not call the internal helper"
+    );
+    assert!(
+        !public_can_prepare,
+        "PUBLIC must not call the internal helper"
+    );
     let (trigger_security_definer, trigger_safe_search_path): (bool, bool) = sqlx::query_as(
         "SELECT p.prosecdef, \
            'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) \
@@ -1247,6 +1301,16 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .expect("inspect invoker trigger function path");
     assert!(!trigger_security_definer);
     assert!(trigger_safe_search_path);
+    let retained_guard_safe_path: bool = sqlx::query_scalar(
+        "SELECT 'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) \
+         FROM pg_catalog.pg_proc p \
+         WHERE p.oid = pg_catalog.to_regprocedure( \
+           'guarded.waddle_ingress_epoch_guard()')",
+    )
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect retained V1009 guard search path");
+    assert!(retained_guard_safe_path);
     let function_execute_grantees: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT COALESCE(
@@ -1262,7 +1326,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
         ) acl
         LEFT JOIN pg_catalog.pg_roles r ON r.oid = acl.grantee
         WHERE p.oid = pg_catalog.to_regprocedure(
-            'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,bigint,bigint,uuid,numeric)'
+            'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,numeric,numeric,uuid,numeric)'
         )
           AND acl.privilege_type = 'EXECUTE'
         "#,
@@ -1325,6 +1389,89 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .await
     .expect("revoke runtime TEMP while retaining type shadow");
 
+    // A forged epoch proof and real prelock cannot turn the runtime login into
+    // a direct writer. Exercise all 13 guarded relations, including TRUNCATE,
+    // rather than relying only on catalog ACL inspection.
+    for table in TABLES {
+        let column = first_column(&mut owner, table).await;
+        let statements = [
+            format!("INSERT INTO guarded.{table} ({column}) VALUES (NULL)"),
+            format!("UPDATE guarded.{table} SET {column} = NULL WHERE false"),
+            format!("DELETE FROM guarded.{table} WHERE false"),
+            format!("TRUNCATE guarded.{table}"),
+        ];
+        for statement in statements {
+            begin(&mut runtime).await;
+            writer_lock(&mut runtime).await;
+            forged_proof(&mut runtime).await;
+            let error = sqlx::query(&statement)
+                .execute(&mut runtime)
+                .await
+                .expect_err("runtime must lack every guarded direct write privilege");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("42501"),
+                "{table}: {statement}: {error}"
+            );
+            sqlx::query("ROLLBACK")
+                .execute(&mut runtime)
+                .await
+                .expect("rollback denied direct write");
+        }
+    }
+
+    // Ordinary reads may be permitted later, but row-lock reads need the
+    // fixed API too. Grant SELECT temporarily so the denial proves the
+    // missing UPDATE privilege rather than merely missing read access.
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_sm_streams",
+    ] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON guarded.{table} TO {}",
+            fixture.runtime
+        ))
+        .execute(&mut owner)
+        .await
+        .expect("grant temporary read-only access for row-lock probe");
+    }
+    for statement in [
+        "SELECT message_key FROM guarded.ingress_messages FOR UPDATE",
+        "SELECT message_key FROM guarded.ingress_messages FOR UPDATE SKIP LOCKED",
+        "SELECT alias_key_hash FROM guarded.ingress_origin_aliases FOR UPDATE",
+        "SELECT sm_ingress_id FROM guarded.ingress_sm_streams FOR SHARE",
+    ] {
+        let error = sqlx::query(statement)
+            .execute(&mut runtime)
+            .await
+            .expect_err("direct runtime row-lock read must be denied");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("42501"),
+            "{statement}: {error}"
+        );
+    }
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_sm_streams",
+    ] {
+        sqlx::query(&format!(
+            "REVOKE SELECT ON guarded.{table} FROM {}",
+            fixture.runtime
+        ))
+        .execute(&mut owner)
+        .await
+        .expect("restore restricted runtime read profile");
+    }
+
     // A function call without the prepared epoch lock fails before it can
     // create either canonical row.
     let no_lock_origin = format!("no-lock-{suffix}");
@@ -1362,6 +1509,55 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .await
     .expect("check missing-prelock call has no row effects");
     assert_eq!(no_lock_rows, 0);
+
+    // Read API bounds are fail-closed. A NULL LIMIT is unbounded in PostgreSQL,
+    // so reject it alongside zero and values beyond the bounded page contract.
+    for page_size in [None, Some(0), Some(65)] {
+        begin(&mut runtime).await;
+        writer_lock(&mut runtime).await;
+        proof(&mut runtime, 0).await;
+        let error = sqlx::query(
+            "SELECT * FROM guarded.waddle_ingress_list_legacy_ancestry_intents(\
+               NULL::uuid, NULL::integer, NULL::bytea, $1::integer)",
+        )
+        .bind(page_size)
+        .fetch_all(&mut runtime)
+        .await
+        .expect_err("malformed or oversized ancestry pages must be rejected");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("22023"),
+            "page size {page_size:?}: {error}"
+        );
+        sqlx::query("ROLLBACK")
+            .execute(&mut runtime)
+            .await
+            .expect("rollback invalid ancestry page request");
+    }
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let null_filter = sqlx::query(
+        "SELECT guarded.waddle_ingress_descendant_exists('legacy-value', NULL::boolean)",
+    )
+    .fetch_one(&mut runtime)
+    .await
+    .expect_err("nullable descendant filter must be rejected");
+    assert_eq!(
+        null_filter
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("22023"),
+        "{null_filter}"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback null descendant filter");
 
     // A caller-selected source tuple is not accepted merely because its
     // fields are well-formed: its durable session must still be live.

@@ -394,24 +394,9 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
-        let sql = if tx.driver() == DatabaseDriver::Postgres {
-            format!(
-                "SELECT 1 FROM {} WHERE message_key = ?::uuid FOR UPDATE",
-                ingress_substrate::prepared_ingress_relation(
-                    prepared,
-                    ingress_substrate::PreparedIngressRelation::Messages
-                )
-            )
-        } else {
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?".to_owned()
-        };
-        let mut rows = tx
-            .query(
-                &sql,
-                crate::db_params![message_key.to_storage().to_string()],
-            )
-            .await?;
-        Ok(rows.next().await?.is_some())
+        ingress_substrate::lock_message_for_child_in_prepared_transaction(tx, prepared, message_key)
+            .await
+            .map_err(Into::into)
     }
 
     /// Check durable terminal state without taking the canonical row lock.
@@ -1452,24 +1437,55 @@ impl SmIngressRepository {
         if let Some(key) = message_key {
             CanonicalMessageRepository::lock(transaction, key).await?;
         }
-        const POSTGRES: &str =
-            "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
-        const SQLITE: &str =
-            "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let deleted = transaction
-            .transaction_mut()
-            .execute(
+        let (tx, prepared) = transaction.prepared_parts();
+        let deleted = if let Some(prepared) =
+            prepared.filter(|prepared| prepared.uses_definer_api_candidate())
+        {
+            let function = format!(
+                "{}.waddle_ingress_delete_sm_ref",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {function}(?::uuid, ?::numeric)"),
+                    crate::db_params![
+                        sm_ingress_id.to_storage().to_string(),
+                        ordinal.to_storage().to_string()
+                    ],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let deleted: bool = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            u64::from(deleted)
+        } else {
+            const POSTGRES: &str =
+                "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
+            const SQLITE: &str =
+                "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
+            let sql = if tx.driver() == DatabaseDriver::Postgres {
+                POSTGRES
+            } else {
+                SQLITE
+            };
+            tx.execute(
                 sql,
                 crate::db_params![
                     sm_ingress_id.to_storage().to_string(),
                     ordinal.to_storage().to_string()
                 ],
             )
-            .await?;
+            .await?
+        };
         if let Some(key) = message_key {
-            ingress_substrate::refresh_retention_with_db_clock(transaction.transaction_mut(), key)
-                .await?;
+            ingress_substrate::refresh_retention_with_db_clock(tx, key).await?;
         }
         Ok(deleted)
     }
@@ -1489,6 +1505,29 @@ impl SmIngressStreamRepository {
         id: SmIngressId,
     ) -> Result<(), IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_insert_sm_stream",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {function}(?::uuid, ?::text)"),
+                    crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let _: bool = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return Ok(());
+        }
         let sql = ingress_substrate::prepared_ingress_sql(
             tx.driver(),
             prepared,
@@ -1538,6 +1577,60 @@ impl SmIngressStreamRepository {
         );
         const SQLITE: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING";
         let (tx, prepared) = transaction.prepared_parts();
+        let minted = SmIngressId::new();
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_insert_sm_stream",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {function}(?::uuid, ?::text)"),
+                    crate::db_params![
+                        minted.to_storage().to_string(),
+                        stream_id.as_str().to_string()
+                    ],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let inserted: bool = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            if inserted {
+                return Ok(minted);
+            }
+            let lookup = format!(
+                "{}.waddle_ingress_lookup_sm_stream",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {lookup}(?::text)::text"),
+                    crate::db_params![stream_id.as_str().to_string()],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let stored: Option<String> = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            let stored = stored.ok_or(IngressUowError::SmIngressStreamMissing)?;
+            return stored
+                .parse::<Uuid>()
+                .map(SmIngressId::from_storage)
+                .map_err(|_| IngressUowError::InvalidStoredSmIngressId);
+        }
         let sql = ingress_substrate::prepared_ingress_sql(
             tx.driver(),
             prepared,
@@ -1545,7 +1638,6 @@ impl SmIngressStreamRepository {
             POSTGRES,
             SQLITE,
         );
-        let minted = SmIngressId::new();
         let inserted = tx
             .execute(
                 &sql,
@@ -1617,6 +1709,39 @@ impl SmIngressStreamRepository {
         );
         const SQLITE: &str = "SELECT sm_ingress_id, CAST(handled_ordinal AS TEXT) FROM ingress_sm_streams WHERE stream_id = ?";
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_lock_sm_stream_by_name",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!(
+                        "SELECT sm_ingress_id::text, handled_ordinal::text \
+                         FROM {function}(?::text)"
+                    ),
+                    crate::db_params![stream_id.as_str().to_string()],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(None);
+            };
+            let id: String = row.get(0)?;
+            let frontier: String = row.get(1)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            let id = id
+                .parse::<Uuid>()
+                .map(SmIngressId::from_storage)
+                .map_err(|_| IngressUowError::InvalidStoredSmIngressId)?;
+            let frontier = frontier
+                .parse::<u64>()
+                .map_err(|_| IngressUowError::InvalidStoredFrontier)?;
+            return Ok(Some((id, frontier)));
+        }
         let sql = ingress_substrate::prepared_ingress_sql(
             tx.driver(),
             prepared,
@@ -1656,7 +1781,8 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
-        Self::lookup_unclaimed_in_transaction(transaction.transaction_mut(), None, stream_id).await
+        let (tx, prepared) = transaction.prepared_parts();
+        Self::lookup_unclaimed_in_transaction(tx, prepared, stream_id).await
     }
 
     async fn lookup_unclaimed_in_transaction(
@@ -1669,6 +1795,32 @@ impl SmIngressStreamRepository {
             " WHERE stream_id = ? FOR UPDATE",
         );
         const SQLITE: &str = "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_lock_sm_stream_by_name",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT sm_ingress_id::text FROM {function}(?::text)"),
+                    crate::db_params![stream_id.as_str().to_string()],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(None);
+            };
+            let id: String = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return id
+                .parse::<Uuid>()
+                .map(SmIngressId::from_storage)
+                .map(Some)
+                .map_err(|_| IngressUowError::InvalidStoredSmIngressId);
+        }
         let sql = ingress_substrate::prepared_ingress_sql(
             tx.driver(),
             prepared,
@@ -1774,14 +1926,36 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<u64, IngressUowError> {
-        transaction
-            .transaction_mut()
-            .execute(
-                "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
-            .await
-            .map_err(Into::into)
+        let (tx, prepared) = transaction.prepared_parts();
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let function = format!(
+                "{}.waddle_ingress_delete_sm_stream",
+                ingress_substrate::quote_postgres_identifier(prepared.schema())
+            );
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {function}(?::text)"),
+                    crate::db_params![stream_id.as_str().to_string()],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let deleted: bool = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return Ok(u64::from(deleted));
+        }
+        tx.execute(
+            "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(Into::into)
     }
 }
 
