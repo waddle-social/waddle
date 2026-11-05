@@ -172,6 +172,13 @@ async fn begin_sasl2_scram(peer: &mut Peer) {
     assert!(String::from_utf8_lossy(challenge.data.as_bytes()).starts_with("r=clientnonce"));
 }
 
+fn oversized_iq_frame() -> String {
+    format!(
+        "<iq xmlns='jabber:client' type='get' id='too-big'>{}</iq>",
+        "x".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
+    )
+}
+
 #[tokio::test]
 async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_in_place() {
     let state = websocket_state_with_sasl2().await;
@@ -485,6 +492,22 @@ async fn sasl2_oauth_error_pending_closes_on_whitespace() {
 }
 
 #[tokio::test]
+async fn sasl2_oauth_error_pending_closes_on_oversized_frame() {
+    let state = websocket_state_with_sasl2().await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    send(&mut peer, authenticate(bearer("invalid-token", None))).await;
+    let _challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("invalid token starts a SASL2 error challenge");
+    let oversized = oversized_iq_frame();
+    send_raw(&mut peer, &oversized).await;
+    expect_stream_closed(&mut peer).await;
+
+    stop_server(server).await;
+}
+
+#[tokio::test]
 async fn sasl2_scram_pending_closes_on_whitespace() {
     let state = websocket_state_with_sasl2().await;
     seed_scram_account(&state).await;
@@ -493,6 +516,21 @@ async fn sasl2_scram_pending_closes_on_whitespace() {
     begin_sasl2_scram(&mut peer).await;
 
     send_raw(&mut peer, " \t\r\n").await;
+    expect_stream_closed(&mut peer).await;
+
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_scram_pending_closes_on_oversized_frame() {
+    let state = websocket_state_with_sasl2().await;
+    seed_scram_account(&state).await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+    begin_sasl2_scram(&mut peer).await;
+
+    let oversized = oversized_iq_frame();
+    send_raw(&mut peer, &oversized).await;
     expect_stream_closed(&mut peer).await;
 
     stop_server(server).await;

@@ -335,6 +335,13 @@ fn sasl2_stream_error_response() -> ResponseBatch {
     .into()
 }
 
+fn close_pending_sasl2_exchange(conn: &mut WsConnState) -> ResponseBatch {
+    clear_sasl2_authentication_pending(&mut conn.phase, AuthFailure::ScramOther);
+    conn.authenticated_session = None;
+    conn.phase = ConnectionPhase::closing(None);
+    vec![websocket_stream_close_element()].into()
+}
+
 fn sasl2_failure_from_sasl1(responses: &[Element]) -> Element {
     use waddle_xmpp_core::xep0388::Sasl2FailureCondition;
 
@@ -410,6 +417,9 @@ pub(super) async fn handle_parsed_xmpp_frame_with_admission(
 ) -> ResponseBatch {
     if wire_bytes > MAX_FRAME_SIZE {
         warn!(len = wire_bytes, "Dropping oversized typed XMPP frame");
+        if sasl2_authentication_pending(&conn.phase) {
+            return close_pending_sasl2_exchange(conn);
+        }
         return ResponseBatch::default();
     }
     Box::pin(handle_xmpp_frame_impl(
@@ -449,6 +459,9 @@ async fn handle_xmpp_frame_impl(
 ) -> ResponseBatch {
     if parsed_input.is_none() && frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
+        if sasl2_authentication_pending(&conn.phase) {
+            return close_pending_sasl2_exchange(conn);
+        }
         return ResponseBatch::default();
     }
 

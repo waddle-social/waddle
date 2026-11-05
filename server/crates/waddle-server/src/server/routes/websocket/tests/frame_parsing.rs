@@ -651,6 +651,45 @@ async fn malformed_sasl2_scram_response_records_one_failure_metric() {
     );
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn typed_oversized_frame_closes_pending_sasl2_exchange() {
+    let state = crate::test_support::websocket_state_with_sasl2().await;
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::sasl2_oauth_error_pending();
+    let parsed = waddle_xmpp::protocol::frame::parse_frame_with_metadata(
+        "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='example.com' version='1.0'/>",
+    )
+    .expect("typed input parses before size is applied");
+    let domain: jid::BareJid = "example.com".parse().expect("XMPP domain");
+    let permit = state
+        .deps
+        .app_state
+        .node_lifecycle
+        .admit()
+        .expect("test node admits requests");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+
+    let responses = super::super::frame::handle_parsed_xmpp_frame_with_admission(
+        parsed,
+        &domain,
+        waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1,
+        state.as_ref(),
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await
+    .into_serialized_frames();
+
+    assert_eq!(responses.len(), 1);
+    let close = Element::from_str(&responses[0]).expect("stream close XML");
+    assert!(close.is("close", "urn:ietf:params:xml:ns:xmpp-framing"));
+    assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
+    assert!(!conn.phase.is_sasl2_oauth_error_pending());
+    assert!(conn.authenticated_session.is_none());
+}
+
 #[tokio::test]
 async fn websocket_resource_bind_returns_client_iq() {
     let state = create_test_websocket_state().await;
