@@ -9,6 +9,9 @@ mod schema_verify;
 mod tx_write;
 mod write;
 
+#[cfg(test)]
+mod write_tests;
+
 #[cfg(any(test, feature = "test-utils"))]
 mod test_utils;
 

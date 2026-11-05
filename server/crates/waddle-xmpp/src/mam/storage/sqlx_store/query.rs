@@ -1,17 +1,8 @@
-use std::collections::HashSet;
-
 use jid::BareJid;
-use sqlx::postgres::PgPool;
-use sqlx::sqlite::SqlitePool;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
-use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, MamQuery};
+use waddle_xmpp_core::mam::{ArchiveOrdinal, MamQuery};
 
-use crate::mam::storage::MamStorageError;
 use crate::mam::MamArchiveKind;
-
-use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
-use super::schema::SELECT_COLUMNS;
-use crate::mam::storage::query_semantics::missing_requested_id_in_set;
 
 /// Pre-computed bind values for the SQL `with` filter.
 ///
@@ -228,119 +219,4 @@ pub(super) fn push_postgres_mam_filters<'args>(
             .push_bind(cursor.to_storage());
     }
     push_common_mam_filters!(builder, query, with_filter);
-}
-
-/// Decoded rows always carry their committed position; a missing ordinal is a
-/// storage-contract violation, not a pagination miss.
-fn cursor_position(cursor: &ArchivedMessage) -> Result<ArchiveOrdinal, MamStorageError> {
-    cursor
-        .ordinal
-        .ok_or_else(|| MamStorageError::MissingOrdinal(cursor.id.clone()))
-}
-
-pub(super) async fn fetch_sqlite_cursor(
-    pool: &SqlitePool,
-    archive_jid: &BareJid,
-    cursor_id: &str,
-) -> Result<ArchiveOrdinal, MamStorageError> {
-    let mut builder = QueryBuilder::<Sqlite>::new(format!(
-        "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
-    ));
-    builder.push_bind(archive_jid.to_string());
-    builder.push(" AND id = ").push_bind(cursor_id);
-
-    let row = builder.build().fetch_optional(pool).await?;
-    let cursor = row
-        .as_ref()
-        .map(decode_sqlite_message_row)
-        .transpose()?
-        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))?;
-    cursor_position(&cursor)
-}
-
-pub(super) async fn fetch_postgres_cursor(
-    pool: &PgPool,
-    archive_jid: &BareJid,
-    cursor_id: &str,
-) -> Result<ArchiveOrdinal, MamStorageError> {
-    let mut builder = QueryBuilder::<Postgres>::new(format!(
-        "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
-    ));
-    builder.push_bind(archive_jid.to_string());
-    builder.push(" AND id = ").push_bind(cursor_id);
-
-    let row = builder.build().fetch_optional(pool).await?;
-    let cursor = row
-        .as_ref()
-        .map(decode_postgres_message_row)
-        .transpose()?
-        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))?;
-    cursor_position(&cursor)
-}
-
-pub(super) async fn ensure_sqlite_requested_ids_exist(
-    pool: &SqlitePool,
-    archive_jid: &BareJid,
-    requested_ids: &[String],
-) -> Result<(), MamStorageError> {
-    if requested_ids.is_empty() {
-        return Ok(());
-    }
-
-    let mut builder = QueryBuilder::<Sqlite>::new("SELECT id FROM mam_messages WHERE room_jid = ");
-    builder.push_bind(archive_jid.to_string());
-    builder.push(" AND id IN (");
-    let mut ids = builder.separated(", ");
-    for id in requested_ids {
-        ids.push_bind(id.as_str());
-    }
-    ids.push_unseparated(")");
-
-    let available_ids = builder
-        .build_query_scalar::<String>()
-        .fetch_all(pool)
-        .await?;
-    let available_ids = available_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    if let Some(missing_id) = missing_requested_id_in_set(&available_ids, requested_ids) {
-        return Err(MamStorageError::NotFound(missing_id));
-    }
-
-    Ok(())
-}
-
-pub(super) async fn ensure_postgres_requested_ids_exist(
-    pool: &PgPool,
-    archive_jid: &BareJid,
-    requested_ids: &[String],
-) -> Result<(), MamStorageError> {
-    if requested_ids.is_empty() {
-        return Ok(());
-    }
-
-    let mut builder =
-        QueryBuilder::<Postgres>::new("SELECT id FROM mam_messages WHERE room_jid = ");
-    builder.push_bind(archive_jid.to_string());
-    builder.push(" AND id IN (");
-    let mut ids = builder.separated(", ");
-    for id in requested_ids {
-        ids.push_bind(id.as_str());
-    }
-    ids.push_unseparated(")");
-
-    let available_ids = builder
-        .build_query_scalar::<String>()
-        .fetch_all(pool)
-        .await?;
-    let available_ids = available_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    if let Some(missing_id) = missing_requested_id_in_set(&available_ids, requested_ids) {
-        return Err(MamStorageError::NotFound(missing_id));
-    }
-
-    Ok(())
 }

@@ -1,24 +1,13 @@
 use crate::mam::MamArchiveKind;
 use async_trait::async_trait;
 use jid::BareJid;
-use sqlx::postgres::PgRow;
-use sqlx::sqlite::SqliteRow;
-use sqlx::{Postgres, QueryBuilder, Sqlite};
 use tracing::{instrument, Span};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 use waddle_xmpp_core::xep0359::OriginId;
 
-use crate::mam::storage::query_semantics::{finalize_result, uses_backward_pagination};
 use crate::mam::storage::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use crate::muc::RoomClaimFenceContext;
 
-use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
-use super::query::{
-    ensure_postgres_requested_ids_exist, ensure_sqlite_requested_ids_exist, escape_like_pattern,
-    fetch_postgres_cursor, fetch_sqlite_cursor, push_postgres_mam_filters, push_sqlite_mam_filters,
-    WithFilter,
-};
-use super::schema::SELECT_COLUMNS;
 use super::{MamDatabaseBackend, SqlxMamStorage};
 
 #[async_trait]
@@ -70,170 +59,27 @@ impl MamStorage for SqlxMamStorage {
         archive_kind: MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
-        let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
-        // XEP-0313 §4.3.1 `with` filter: an owner-equivalent `with`
-        // requires both endpoints to match the owner's bare JID. Otherwise,
-        // a bare `with` matches the
-        // bare form of the archived sender/recipient (so the row's
-        // resource can be anything, or absent); a full `with` matches
-        // only the exact full JID. The strings are stable for sqlx's
-        // bind lifetime requirements.
-        //
-        // NOTE: the previous shape was `LIKE '{with}%'` (a single
-        // textual prefix bind). That collided across JID structure —
-        // `alice@example.com` would match `alice@example.com.evil/...`
-        // because the prefix overlaps. The corrected shape is exact
-        // equality plus a `LIKE 'bare/%'` for the resource form.
-        let with_filter = query
-            .with
-            .as_ref()
-            .map(|with| WithFilter::new(archive_jid, archive_kind, with));
-        let archive_jid_str = archive_jid.to_string();
-
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let filter_before_cursor = match query.filter_before_id.as_deref() {
-                    Some(before_id) => {
-                        Some(fetch_sqlite_cursor(pool, archive_jid, before_id).await?)
-                    }
-                    None => None,
-                };
-                let filter_after_cursor = match query.filter_after_id.as_deref() {
-                    Some(after_id) => Some(fetch_sqlite_cursor(pool, archive_jid, after_id).await?),
-                    None => None,
-                };
-                ensure_sqlite_requested_ids_exist(pool, archive_jid, &query.ids).await?;
-
-                let mut count_builder = QueryBuilder::<Sqlite>::new(
-                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
-                );
-                push_sqlite_mam_filters(
-                    &mut count_builder,
-                    archive_jid_str.as_str(),
+                let mut conn = pool.acquire().await?;
+                super::query_connection::query_sqlite_connection(
+                    &mut conn,
+                    archive_jid,
+                    archive_kind,
                     query,
-                    with_filter.as_ref(),
-                    filter_before_cursor,
-                    filter_after_cursor,
-                );
-                let count = count_builder
-                    .build_query_scalar::<i64>()
-                    .fetch_one(pool)
-                    .await?;
-
-                let mut builder = QueryBuilder::<Sqlite>::new(format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
-                ));
-                push_sqlite_mam_filters(
-                    &mut builder,
-                    archive_jid_str.as_str(),
-                    query,
-                    with_filter.as_ref(),
-                    filter_before_cursor,
-                    filter_after_cursor,
-                );
-                if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
-                    let cursor = fetch_sqlite_cursor(pool, archive_jid, before_id).await?;
-                    builder
-                        .push(" AND archive_seq < ")
-                        .push_bind(cursor.to_storage());
-                }
-                if let Some(after_id) = query.after_id.as_deref() {
-                    let cursor = fetch_sqlite_cursor(pool, archive_jid, after_id).await?;
-                    builder
-                        .push(" AND archive_seq > ")
-                        .push_bind(cursor.to_storage());
-                }
-                // XEP-0313 §archive_order follows the committed per-archive ordinal.
-                builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY archive_seq DESC"
-                } else {
-                    " ORDER BY archive_seq ASC"
-                });
-                builder.push(" LIMIT ").push_bind(limit);
-
-                let rows: Vec<SqliteRow> = builder.build().fetch_all(pool).await?;
-                let messages = rows
-                    .iter()
-                    .map(decode_sqlite_message_row)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(finalize_result(
-                    messages,
-                    query,
-                    Some(u32::try_from(count).unwrap_or(u32::MAX)),
-                ))
+                )
+                .await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let filter_before_cursor = match query.filter_before_id.as_deref() {
-                    Some(before_id) => {
-                        Some(fetch_postgres_cursor(pool, archive_jid, before_id).await?)
-                    }
-                    None => None,
-                };
-                let filter_after_cursor = match query.filter_after_id.as_deref() {
-                    Some(after_id) => {
-                        Some(fetch_postgres_cursor(pool, archive_jid, after_id).await?)
-                    }
-                    None => None,
-                };
-                ensure_postgres_requested_ids_exist(pool, archive_jid, &query.ids).await?;
-
-                let mut count_builder = QueryBuilder::<Postgres>::new(
-                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
-                );
-                push_postgres_mam_filters(
-                    &mut count_builder,
-                    archive_jid_str.as_str(),
+                let mut conn = pool.acquire().await?;
+                super::query_connection::query_postgres_connection(
+                    &mut conn,
+                    None,
+                    archive_jid,
+                    archive_kind,
                     query,
-                    with_filter.as_ref(),
-                    filter_before_cursor,
-                    filter_after_cursor,
-                );
-                let count = count_builder
-                    .build_query_scalar::<i64>()
-                    .fetch_one(pool)
-                    .await?;
-
-                let mut builder = QueryBuilder::<Postgres>::new(format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
-                ));
-                push_postgres_mam_filters(
-                    &mut builder,
-                    archive_jid_str.as_str(),
-                    query,
-                    with_filter.as_ref(),
-                    filter_before_cursor,
-                    filter_after_cursor,
-                );
-                if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
-                    let cursor = fetch_postgres_cursor(pool, archive_jid, before_id).await?;
-                    builder
-                        .push(" AND archive_seq < ")
-                        .push_bind(cursor.to_storage());
-                }
-                if let Some(after_id) = query.after_id.as_deref() {
-                    let cursor = fetch_postgres_cursor(pool, archive_jid, after_id).await?;
-                    builder
-                        .push(" AND archive_seq > ")
-                        .push_bind(cursor.to_storage());
-                }
-                // XEP-0313 §archive_order follows the committed per-archive ordinal.
-                builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY archive_seq DESC"
-                } else {
-                    " ORDER BY archive_seq ASC"
-                });
-                builder.push(" LIMIT ").push_bind(limit);
-
-                let rows: Vec<PgRow> = builder.build().fetch_all(pool).await?;
-                let messages = rows
-                    .iter()
-                    .map(decode_postgres_message_row)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(finalize_result(
-                    messages,
-                    query,
-                    Some(u32::try_from(count).unwrap_or(u32::MAX)),
-                ))
+                )
+                .await
             }
         }
     }
@@ -245,20 +91,12 @@ impl MamStorage for SqlxMamStorage {
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let mut builder = QueryBuilder::<Sqlite>::new(format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE id = "
-                ));
-                builder.push_bind(archive_id);
-                let row = builder.build().fetch_optional(pool).await?;
-                row.as_ref().map(decode_sqlite_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_sqlite(&mut conn, archive_id).await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let mut builder = QueryBuilder::<Postgres>::new(format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE id = "
-                ));
-                builder.push_bind(archive_id);
-                let row = builder.build().fetch_optional(pool).await?;
-                row.as_ref().map(decode_postgres_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_postgres(&mut conn, None, archive_id).await
             }
         }
     }
@@ -268,28 +106,15 @@ impl MamStorage for SqlxMamStorage {
         archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (stanza_id = ? OR origin_id = ?) ORDER BY archive_seq DESC LIMIT 1"
-                ))
-                .bind(archive_jid_str.as_str())
-                .bind(stanza_id)
-                .bind(stanza_id)
-                .fetch_optional(pool)
-                .await?;
-                row.as_ref().map(decode_sqlite_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_sqlite_by_stanza_id(&mut conn, archive_jid, stanza_id).await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (stanza_id = $2 OR origin_id = $2) ORDER BY archive_seq DESC LIMIT 1"
-                ))
-                .bind(archive_jid_str.as_str())
-                .bind(stanza_id)
-                .fetch_optional(pool)
-                .await?;
-                row.as_ref().map(decode_postgres_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_postgres_by_stanza_id(&mut conn, None, archive_jid, stanza_id)
+                    .await
             }
         }
     }
@@ -299,27 +124,15 @@ impl MamStorage for SqlxMamStorage {
         archive_jid: &BareJid,
         message_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND stanza_id = ? ORDER BY archive_seq DESC LIMIT 1"
-                ))
-                .bind(archive_jid_str.as_str())
-                .bind(message_id)
-                .fetch_optional(pool)
-                .await?;
-                row.as_ref().map(decode_sqlite_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_sqlite_by_message_id(&mut conn, archive_jid, message_id).await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND stanza_id = $2 ORDER BY archive_seq DESC LIMIT 1"
-                ))
-                .bind(archive_jid_str.as_str())
-                .bind(message_id)
-                .fetch_optional(pool)
-                .await?;
-                row.as_ref().map(decode_postgres_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_postgres_by_message_id(&mut conn, None, archive_jid, message_id)
+                    .await
             }
         }
     }
@@ -331,72 +144,29 @@ impl MamStorage for SqlxMamStorage {
         sender: &jid::Jid,
         origin_id: &OriginId,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid = archive_jid.to_string();
-        let sender_full = sender.to_string();
-        let sender_bare = sender.to_bare().to_string();
-        let sender_resource_prefix = format!("{}/%", escape_like_pattern(&sender_bare));
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let mut builder = QueryBuilder::<Sqlite>::new(format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
-                ));
-                builder
-                    .push_bind(archive_jid.as_str())
-                    .push(" AND (origin_id = ")
-                    .push_bind(origin_id.as_str())
-                    .push(" OR stanza_id = ")
-                    .push_bind(origin_id.as_str())
-                    .push(") AND ");
-                match archive_kind {
-                    MamArchiveKind::Personal => {
-                        builder
-                            .push("(from_jid = ")
-                            .push_bind(sender_bare.as_str())
-                            .push(" OR from_jid LIKE ")
-                            .push_bind(sender_resource_prefix.as_str())
-                            .push(" ESCAPE '\\')");
-                    }
-                    MamArchiveKind::Room => {
-                        builder.push("from_jid = ").push_bind(sender_full.as_str());
-                    }
-                }
-                builder
-                    .push(" ORDER BY CASE WHEN origin_id = ")
-                    .push_bind(origin_id.as_str())
-                    .push(" THEN 0 ELSE 1 END, archive_seq ASC LIMIT 1");
-                let row = builder.build().fetch_optional(pool).await?;
-                row.as_ref().map(decode_sqlite_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_sqlite_by_sender_and_origin_id(
+                    &mut conn,
+                    archive_jid,
+                    archive_kind,
+                    sender,
+                    origin_id,
+                )
+                .await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let mut builder = QueryBuilder::<Postgres>::new(format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
-                ));
-                builder
-                    .push_bind(archive_jid.as_str())
-                    .push(" AND (origin_id = ")
-                    .push_bind(origin_id.as_str())
-                    .push(" OR stanza_id = ")
-                    .push_bind(origin_id.as_str())
-                    .push(") AND ");
-                match archive_kind {
-                    MamArchiveKind::Personal => {
-                        builder
-                            .push("(from_jid = ")
-                            .push_bind(sender_bare.as_str())
-                            .push(" OR from_jid LIKE ")
-                            .push_bind(sender_resource_prefix.as_str())
-                            .push(" ESCAPE '\\')");
-                    }
-                    MamArchiveKind::Room => {
-                        builder.push("from_jid = ").push_bind(sender_full.as_str());
-                    }
-                }
-                builder
-                    .push(" ORDER BY CASE WHEN origin_id = ")
-                    .push_bind(origin_id.as_str())
-                    .push(" THEN 0 ELSE 1 END, archive_seq ASC LIMIT 1");
-                let row = builder.build().fetch_optional(pool).await?;
-                row.as_ref().map(decode_postgres_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::get_postgres_by_sender_and_origin_id(
+                    &mut conn,
+                    None,
+                    archive_jid,
+                    archive_kind,
+                    sender,
+                    origin_id,
+                )
+                .await
             }
         }
     }
@@ -420,25 +190,16 @@ impl MamStorage for SqlxMamStorage {
 
     #[instrument(skip(self, room_jid), fields(room = %room_jid))]
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
-        let room_jid_str = room_jid.to_string();
-        let count = match &self.backend {
+        match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let mut builder = QueryBuilder::<Sqlite>::new(
-                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
-                );
-                builder.push_bind(room_jid_str.as_str());
-                builder.build_query_scalar::<i64>().fetch_one(pool).await?
+                let mut conn = pool.acquire().await?;
+                super::query_connection::count_sqlite_connection(&mut conn, room_jid).await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let mut builder = QueryBuilder::<Postgres>::new(
-                    "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ",
-                );
-                builder.push_bind(room_jid_str.as_str());
-                builder.build_query_scalar::<i64>().fetch_one(pool).await?
+                let mut conn = pool.acquire().await?;
+                super::query_connection::count_postgres_connection(&mut conn, None, room_jid).await
             }
-        };
-
-        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+        }
     }
 
     #[instrument(skip(self, tombstone))]

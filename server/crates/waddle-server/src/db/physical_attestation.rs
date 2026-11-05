@@ -142,6 +142,14 @@ impl AttestedPostgresWriterCapability {
         self.config.postgres()
     }
 
+    pub(crate) fn definer_role(&self) -> &PgRoleName {
+        &self.config.definer_role
+    }
+
+    pub(crate) fn installer_role(&self) -> &PgRoleName {
+        &self.config.installer_login
+    }
+
     pub(crate) fn belongs_to(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.binding, &other.binding)
     }

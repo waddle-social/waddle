@@ -10,6 +10,10 @@ const LOCK: &str = "INSERT INTO mam_archive_sequences (archive_jid, next_seq) VA
 
 const ALLOCATE: &str = "INSERT INTO mam_archive_sequences (archive_jid, next_seq) VALUES ($1, 1) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = mam_archive_sequences.next_seq + 1 RETURNING next_seq";
 
+const SQLITE_LOCK: &str = "INSERT INTO main.mam_archive_sequences (archive_jid, next_seq) VALUES ($1, 0) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = next_seq";
+
+const SQLITE_ALLOCATE: &str = "INSERT INTO main.mam_archive_sequences (archive_jid, next_seq) VALUES ($1, 1) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = next_seq + 1 RETURNING next_seq";
+
 pub async fn lock_archive_sequence_on_connection(
     conn: &mut PgConnection,
     archive: &BareJid,
@@ -40,7 +44,7 @@ pub async fn lock_archive_sequence_on_sqlite_connection(
     conn: &mut SqliteConnection,
     archive: &BareJid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(LOCK)
+    sqlx::query(SQLITE_LOCK)
         .bind(archive.to_string())
         .execute(conn)
         .await?;
@@ -73,7 +77,7 @@ pub(super) async fn allocate_sqlite(
     archive: &BareJid,
 ) -> Result<ArchiveOrdinal, sqlx::Error> {
     decode_ordinal(
-        sqlx::query_scalar(ALLOCATE)
+        sqlx::query_scalar(SQLITE_ALLOCATE)
             .bind(archive.to_string())
             .fetch_one(conn)
             .await?,
@@ -97,7 +101,7 @@ pub(super) async fn preserve_sqlite(
     archive: &BareJid,
     ordinal: ArchiveOrdinal,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO mam_archive_sequences (archive_jid, next_seq) VALUES ($1, $2) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = MAX(mam_archive_sequences.next_seq, excluded.next_seq)")
+    sqlx::query("INSERT INTO main.mam_archive_sequences (archive_jid, next_seq) VALUES ($1, $2) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = MAX(next_seq, excluded.next_seq)")
         .bind(archive.to_string()).bind(ordinal.to_storage()).execute(conn).await?;
     Ok(())
 }

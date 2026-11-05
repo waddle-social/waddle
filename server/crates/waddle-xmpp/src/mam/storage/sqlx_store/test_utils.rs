@@ -31,7 +31,7 @@ impl SqlxMamStorage {
         let mut tx = pool.begin().await?;
         let ordinal = super::allocation::allocate_sqlite(&mut tx, archive_jid).await?;
         sqlx::query(
-            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, ?, ?)",
+            "INSERT INTO main.mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, ?, ?)",
         )
         .bind(archive_id)
         .bind(archive_jid_str.as_str())
@@ -74,7 +74,7 @@ impl SqlxMamStorage {
         let mut tx = pool.begin().await?;
         let ordinal = super::allocation::allocate_sqlite(&mut tx, archive_jid).await?;
         sqlx::query(
-            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?)",
+            "INSERT INTO main.mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?)",
         )
         .bind(archive_id)
         .bind(archive_jid_str.as_str())
@@ -115,7 +115,7 @@ impl SqlxMamStorage {
         let mut tx = pool.begin().await?;
         let ordinal = super::allocation::allocate_sqlite(&mut tx, archive_jid).await?;
         sqlx::query(
-            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?)",
+            "INSERT INTO main.mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?)",
         )
         .bind(archive_id)
         .bind(archive_jid_str.as_str())
@@ -159,7 +159,7 @@ impl SqlxMamStorage {
         let mut tx = pool.begin().await?;
         let ordinal = super::allocation::allocate_sqlite(&mut tx, archive_jid).await?;
         sqlx::query(
-            "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?)",
+            "INSERT INTO main.mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?)",
         )
         .bind(archive_id)
         .bind(archive_jid_str.as_str())

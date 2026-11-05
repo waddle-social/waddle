@@ -8,8 +8,9 @@ use super::MamDatabaseBackend;
 use crate::mam::storage::tombstone::origin_id_tombstone_match;
 use crate::mam::storage::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use crate::muc::RoomClaimFenceContext;
+use crate::ownership::EntityType;
 use jid::BareJid;
-use sqlx::{PgConnection, Postgres, QueryBuilder, Sqlite, SqliteConnection, Transaction};
+use sqlx::{Connection as _, PgConnection, Postgres, QueryBuilder, Sqlite, SqliteConnection};
 use tracing::debug;
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{
@@ -21,58 +22,31 @@ pub(super) async fn store_message(
     archive_jid: &BareJid,
     message: &ArchivedMessage,
 ) -> Result<StoreOutcome, MamStorageError> {
-    let rich_payload = encode_rich_payload(message)?;
-    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
-    let archive_id = if message.id.is_empty() {
-        Uuid::now_v7().to_string()
-    } else {
-        message.id.clone()
-    };
-    let insert = |ordinal| MessageInsert {
-        archive_id: &archive_id,
-        archive_jid,
-        message,
-        rich_payload: rich_payload.as_deref(),
-        nickname_generation,
-        ordinal,
-    };
-    let ordinal = match backend {
+    match backend {
         MamDatabaseBackend::Postgres(pool) => {
-            let mut conn = pool.begin().await?;
-            if let Some(id) =
-                find_origin_tombstone_postgres(&mut conn, archive_jid, message, None).await?
-            {
-                return Ok(StoreOutcome::TombstoneHit(id));
+            let mut tx = pool.begin().await?;
+            let outcome =
+                store_message_postgres_connection(&mut tx, None, archive_jid, message).await?;
+            if matches!(&outcome, StoreOutcome::TombstoneHit(_)) {
+                tx.rollback().await?;
+            } else {
+                tx.commit().await?;
             }
-            let ordinal = allocate_postgres(&mut conn, archive_jid, None).await?;
-            insert_postgres_message_on_connection(
-                &mut conn,
-                insert(ordinal),
-                InsertConflict::Error,
-                None,
-            )
-            .await?;
-            conn.commit().await?;
-            ordinal
+            Ok(outcome)
         }
         MamDatabaseBackend::Sqlite(pool) => {
             // Acquire the write reservation before tombstone reads: a deferred
             // WAL transaction cannot upgrade a snapshot after another writer commits.
-            let mut conn = pool.begin_with("BEGIN IMMEDIATE").await?;
-            if let Some(id) = find_origin_tombstone_sqlite(&mut conn, archive_jid, message).await? {
-                return Ok(StoreOutcome::TombstoneHit(id));
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+            let outcome = store_message_sqlite_connection(&mut tx, archive_jid, message).await?;
+            if matches!(&outcome, StoreOutcome::TombstoneHit(_)) {
+                tx.rollback().await?;
+            } else {
+                tx.commit().await?;
             }
-            let ordinal = allocate_sqlite(&mut conn, archive_jid).await?;
-            insert_sqlite_message_on_connection(&mut conn, insert(ordinal), InsertConflict::Error)
-                .await?;
-            conn.commit().await?;
-            ordinal
+            Ok(outcome)
         }
-    };
-    Ok(StoreOutcome::Stored {
-        stanza_id: archive_id,
-        ordinal,
-    })
+    }
 }
 
 pub(super) async fn store_message_fenced(
@@ -85,16 +59,81 @@ pub(super) async fn store_message_fenced(
         return store_message(backend, archive_jid, message).await;
     };
     let mut tx = pool.begin().await?;
-    if !claim_fence_is_held(&mut tx, fence).await? {
-        tx.rollback().await?;
-        return Err(MamStorageError::NotOwner {
-            entity: fence.entity.clone(),
-        });
+    match store_message_fenced_postgres_connection(&mut tx, None, None, archive_jid, message, fence)
+        .await
+    {
+        Ok(outcome) => {
+            tx.commit().await?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
     }
-    if let Some(id) = find_origin_tombstone_postgres(&mut tx, archive_jid, message, None).await? {
-        tx.commit().await?;
-        return Ok(StoreOutcome::TombstoneHit(id));
+}
+
+impl super::SqlxMamStorage {
+    /// Store a message in a caller-owned PostgreSQL transaction.
+    pub async fn store_message_on_postgres_connection_in_schema(
+        conn: &mut PgConnection,
+        mam_schema: &str,
+        archive: &BareJid,
+        message: &ArchivedMessage,
+    ) -> Result<StoreOutcome, MamStorageError> {
+        store_message_postgres_connection(conn, Some(mam_schema), archive, message).await
     }
+
+    /// Store a message in a caller-owned SQLite transaction.
+    pub async fn store_message_on_sqlite_connection(
+        conn: &mut SqliteConnection,
+        archive: &BareJid,
+        message: &ArchivedMessage,
+    ) -> Result<StoreOutcome, MamStorageError> {
+        store_message_sqlite_connection(conn, archive, message).await
+    }
+
+    /// Check a claim and store its room message on one caller-owned PostgreSQL
+    /// transaction. Both schema names are quoted independently.
+    pub async fn store_message_fenced_on_postgres_connection_in_schema(
+        conn: &mut PgConnection,
+        mam_schema: &str,
+        claim_schema: &str,
+        archive: &BareJid,
+        message: &ArchivedMessage,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<StoreOutcome, MamStorageError> {
+        store_message_fenced_postgres_connection(
+            conn,
+            Some(mam_schema),
+            Some(claim_schema),
+            archive,
+            message,
+            fence,
+        )
+        .await
+    }
+
+    /// SQLite has no cluster claim relation, matching the pool-backed
+    /// implementation's portable fallback to ordinary archive storage.
+    pub async fn store_message_fenced_on_sqlite_connection(
+        conn: &mut SqliteConnection,
+        archive: &BareJid,
+        message: &ArchivedMessage,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<StoreOutcome, MamStorageError> {
+        let _ = fence;
+        store_message_sqlite_connection(conn, archive, message).await
+    }
+}
+
+pub(super) async fn store_message_postgres_connection(
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+) -> Result<StoreOutcome, MamStorageError> {
+    require_transaction(conn.is_in_transaction())?;
     let rich_payload = encode_rich_payload(message)?;
     let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
     let archive_id = if message.id.is_empty() {
@@ -102,9 +141,12 @@ pub(super) async fn store_message_fenced(
     } else {
         message.id.clone()
     };
-    let ordinal = allocate_postgres(&mut tx, archive_jid, None).await?;
+    if let Some(id) = find_origin_tombstone_postgres(conn, archive_jid, message, schema).await? {
+        return Ok(StoreOutcome::TombstoneHit(id));
+    }
+    let ordinal = allocate_postgres(conn, archive_jid, schema).await?;
     insert_postgres_message_on_connection(
-        &mut tx,
+        conn,
         MessageInsert {
             archive_id: &archive_id,
             archive_jid,
@@ -114,17 +156,88 @@ pub(super) async fn store_message_fenced(
             ordinal,
         },
         InsertConflict::Error,
-        None,
+        schema,
     )
     .await?;
-    tx.commit().await?;
     Ok(StoreOutcome::Stored {
         stanza_id: archive_id,
         ordinal,
     })
 }
+
+pub(super) async fn store_message_sqlite_connection(
+    conn: &mut SqliteConnection,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+) -> Result<StoreOutcome, MamStorageError> {
+    require_transaction(conn.is_in_transaction())?;
+    let rich_payload = encode_rich_payload(message)?;
+    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
+    let archive_id = if message.id.is_empty() {
+        Uuid::now_v7().to_string()
+    } else {
+        message.id.clone()
+    };
+    if let Some(id) = find_origin_tombstone_sqlite(conn, archive_jid, message).await? {
+        return Ok(StoreOutcome::TombstoneHit(id));
+    }
+    let ordinal = allocate_sqlite(conn, archive_jid).await?;
+    insert_sqlite_message_on_connection(
+        conn,
+        MessageInsert {
+            archive_id: &archive_id,
+            archive_jid,
+            message,
+            rich_payload: rich_payload.as_deref(),
+            nickname_generation,
+            ordinal,
+        },
+        InsertConflict::Error,
+    )
+    .await?;
+    Ok(StoreOutcome::Stored {
+        stanza_id: archive_id,
+        ordinal,
+    })
+}
+
+pub(super) async fn store_message_fenced_postgres_connection(
+    conn: &mut PgConnection,
+    mam_schema: Option<&str>,
+    claim_schema: Option<&str>,
+    archive_jid: &BareJid,
+    message: &ArchivedMessage,
+    fence: &RoomClaimFenceContext,
+) -> Result<StoreOutcome, MamStorageError> {
+    if fence.entity.entity_type != EntityType::RoomActor
+        || fence.entity.id != archive_jid.to_string()
+    {
+        return Err(MamStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        });
+    }
+    require_transaction(conn.is_in_transaction())?;
+    if !claim_fence_is_held(conn, claim_schema, fence).await? {
+        return Err(MamStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        });
+    }
+    store_message_postgres_connection(conn, mam_schema, archive_jid, message).await
+}
+
+fn require_transaction(in_transaction: bool) -> Result<(), MamStorageError> {
+    if in_transaction {
+        Ok(())
+    } else {
+        Err(MamStorageError::Database(
+            "MAM write requires a caller-owned transaction".to_owned(),
+        ))
+    }
+}
+
 async fn claim_fence_is_held(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut PgConnection,
+    claim_schema: Option<&str>,
     fence: &RoomClaimFenceContext,
 ) -> Result<bool, MamStorageError> {
     let entity_key = format!(
@@ -132,16 +245,18 @@ async fn claim_fence_is_held(
         fence.entity.entity_type.as_db_str(),
         fence.entity.id
     );
-    Ok(sqlx::query(
-        "SELECT 1 FROM clustering_claims WHERE entity = $1 AND node_id = $2 AND node_epoch = $3 AND claim_epoch = $4 FOR SHARE",
-    )
-    .bind(&entity_key)
-    .bind(&fence.owner.node_id)
-    .bind(&fence.owner.node_epoch)
-    .bind(fence.epoch.0)
-    .fetch_optional(&mut **tx)
-    .await?
-    .is_some())
+    let relation = super::postgres_relation(claim_schema, "clustering_claims");
+    let query = format!(
+        "SELECT 1 FROM {relation} WHERE entity = $1 AND node_id = $2 AND node_epoch = $3 AND claim_epoch = $4 FOR SHARE"
+    );
+    Ok(sqlx::query(&query)
+        .bind(&entity_key)
+        .bind(&fence.owner.node_id)
+        .bind(&fence.owner.node_epoch)
+        .bind(fence.epoch.0)
+        .fetch_optional(conn)
+        .await?
+        .is_some())
 }
 
 pub(super) enum InsertConflict {
@@ -259,7 +374,7 @@ pub(super) async fn insert_sqlite_message_on_connection(
     let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
 
     let mut query = QueryBuilder::<Sqlite>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) ",
+        "INSERT INTO main.mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) ",
     );
     query.push_values(std::iter::once(()), |mut builder, _| {
         builder
@@ -361,7 +476,7 @@ pub(super) async fn find_origin_tombstone_sqlite(
     let mut query = QueryBuilder::<Sqlite>::new("SELECT ");
     query
         .push(SELECT_COLUMNS)
-        .push(" FROM mam_messages WHERE room_jid = ")
+        .push(" FROM main.mam_messages WHERE room_jid = ")
         .push_bind(archive.to_string())
         .push(" AND origin_id = ")
         .push_bind(origin.as_str())
@@ -380,40 +495,16 @@ pub(super) async fn replace_with_tombstone(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone)?;
-
-    // XEP-0424 §Tombstones / XEP-0425 §Tombstones: drop the body
-    // entirely on tombstone. With wire-fidelity body semantics, SQL NULL
-    // means "no body element" and `''` remains distinct.
-    let rows = match backend {
+    match backend {
         MamDatabaseBackend::Sqlite(pool) => {
-            let mut builder = QueryBuilder::<Sqlite>::new(
-                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
-            );
-            builder
-                .push_bind(encoded.as_str())
-                .push(" WHERE id = ")
-                .push_bind(archive_id);
-            builder.build().execute(pool).await?.rows_affected()
+            let mut conn = pool.acquire().await?;
+            replace_with_tombstone_sqlite_connection(&mut conn, archive_id, tombstone).await
         }
         MamDatabaseBackend::Postgres(pool) => {
-            let mut builder = QueryBuilder::<Postgres>::new(
-                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
-            );
-            builder
-                .push_bind(encoded.as_str())
-                .push(" WHERE id = ")
-                .push_bind(archive_id);
-            builder.build().execute(pool).await?.rows_affected()
+            let mut conn = pool.acquire().await?;
+            replace_with_tombstone_postgres_connection(&mut conn, None, archive_id, tombstone).await
         }
-    };
-
-    debug!(
-        archive_id = %archive_id,
-        rows_affected = rows,
-        "Replaced archived message with tombstone"
-    );
-    Ok(rows > 0)
+    }
 }
 
 pub(super) async fn replace_with_terminal_tombstone(
@@ -421,31 +512,119 @@ pub(super) async fn replace_with_terminal_tombstone(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone)?;
+    match backend {
+        MamDatabaseBackend::Sqlite(pool) => {
+            let mut conn = pool.acquire().await?;
+            replace_with_terminal_tombstone_sqlite_connection(&mut conn, archive_id, tombstone)
+                .await
+        }
+        MamDatabaseBackend::Postgres(pool) => {
+            let mut conn = pool.acquire().await?;
+            replace_with_terminal_tombstone_postgres_connection(
+                &mut conn, None, archive_id, tombstone,
+            )
+            .await
+        }
+    }
+}
 
+impl super::SqlxMamStorage {
+    pub async fn replace_with_tombstone_on_postgres_connection_in_schema(
+        conn: &mut PgConnection,
+        schema: &str,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        replace_with_tombstone_postgres_connection(conn, Some(schema), archive_id, tombstone).await
+    }
+
+    pub async fn replace_with_tombstone_on_sqlite_connection(
+        conn: &mut SqliteConnection,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<bool, MamStorageError> {
+        replace_with_tombstone_sqlite_connection(conn, archive_id, tombstone).await
+    }
+
+    pub async fn replace_with_terminal_tombstone_on_postgres_connection_in_schema(
+        conn: &mut PgConnection,
+        schema: &str,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+        replace_with_terminal_tombstone_postgres_connection(
+            conn,
+            Some(schema),
+            archive_id,
+            tombstone,
+        )
+        .await
+    }
+
+    pub async fn replace_with_terminal_tombstone_on_sqlite_connection(
+        conn: &mut SqliteConnection,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+        replace_with_terminal_tombstone_sqlite_connection(conn, archive_id, tombstone).await
+    }
+}
+
+pub(super) async fn replace_with_tombstone_postgres_connection(
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    archive_id: &str,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<bool, MamStorageError> {
+    let encoded = encode_tombstone_payload(tombstone)?;
+    let relation = super::postgres_relation(schema, "mam_messages");
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
+        "UPDATE {relation} SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = "
+    ));
+    builder
+        .push_bind(encoded.as_str())
+        .push(" WHERE id = ")
+        .push_bind(archive_id);
+    let rows = builder.build().execute(conn).await?.rows_affected();
+    debug!(archive_id = %archive_id, rows_affected = rows, "Replaced archived message with tombstone");
+    Ok(rows > 0)
+}
+
+pub(super) async fn replace_with_tombstone_sqlite_connection(
+    conn: &mut SqliteConnection,
+    archive_id: &str,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<bool, MamStorageError> {
+    let encoded = encode_tombstone_payload(tombstone)?;
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "UPDATE main.mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+    );
+    builder
+        .push_bind(encoded.as_str())
+        .push(" WHERE id = ")
+        .push_bind(archive_id);
+    let rows = builder.build().execute(conn).await?.rows_affected();
+    debug!(archive_id = %archive_id, rows_affected = rows, "Replaced archived message with tombstone");
+    Ok(rows > 0)
+}
+
+pub(super) async fn replace_with_terminal_tombstone_postgres_connection(
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    archive_id: &str,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+    let encoded = encode_tombstone_payload(tombstone)?;
+    let relation = super::postgres_relation(schema, "mam_messages");
     loop {
-        let current_rich_payload: Option<Option<String>> = match backend {
-            MamDatabaseBackend::Sqlite(pool) => {
-                let mut builder = QueryBuilder::<Sqlite>::new(
-                    "SELECT rich_payload FROM mam_messages WHERE id = ",
-                );
-                builder.push_bind(archive_id);
-                builder
-                    .build_query_scalar::<Option<String>>()
-                    .fetch_optional(pool)
-                    .await?
-            }
-            MamDatabaseBackend::Postgres(pool) => {
-                let mut builder = QueryBuilder::<Postgres>::new(
-                    "SELECT rich_payload FROM mam_messages WHERE id = ",
-                );
-                builder.push_bind(archive_id);
-                builder
-                    .build_query_scalar::<Option<String>>()
-                    .fetch_optional(pool)
-                    .await?
-            }
-        };
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "SELECT rich_payload FROM {relation} WHERE id = "
+        ));
+        query.push_bind(archive_id);
+        let current_rich_payload = query
+            .build_query_scalar::<Option<String>>()
+            .fetch_optional(&mut *conn)
+            .await?;
         let Some(current_rich_payload) = current_rich_payload else {
             return Ok(TerminalTombstoneOutcome::NotFound);
         };
@@ -457,41 +636,58 @@ pub(super) async fn replace_with_terminal_tombstone(
             return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
         }
 
-        // Compare-and-swap the exact raw rich projection observed above. If a
-        // concurrent XEP-0425 moderation wins first, its different tombstone
-        // projection makes this update affect zero rows; the next iteration
-        // decodes that typed terminal state and preserves its metadata.
-        let rows = match backend {
-            MamDatabaseBackend::Sqlite(pool) => {
-                let mut builder = QueryBuilder::<Sqlite>::new(
-                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
-                );
-                builder
-                    .push_bind(encoded.as_str())
-                    .push(" WHERE id = ")
-                    .push_bind(archive_id)
-                    .push(" AND rich_payload IS ")
-                    .push_bind(current_rich_payload.as_deref());
-                builder.build().execute(pool).await?.rows_affected()
-            }
-            MamDatabaseBackend::Postgres(pool) => {
-                let mut builder = QueryBuilder::<Postgres>::new(
-                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
-                );
-                builder
-                    .push_bind(encoded.as_str())
-                    .push(" WHERE id = ")
-                    .push_bind(archive_id)
-                    .push(" AND rich_payload IS NOT DISTINCT FROM ")
-                    .push_bind(current_rich_payload.as_deref());
-                builder.build().execute(pool).await?.rows_affected()
-            }
+        let mut update = QueryBuilder::<Postgres>::new(format!(
+            "UPDATE {relation} SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = "
+        ));
+        update
+            .push_bind(encoded.as_str())
+            .push(" WHERE id = ")
+            .push_bind(archive_id)
+            .push(" AND rich_payload IS NOT DISTINCT FROM ")
+            .push_bind(current_rich_payload.as_deref());
+        if update.build().execute(&mut *conn).await?.rows_affected() > 0 {
+            debug!(archive_id = %archive_id, "Replaced live archived message with terminal tombstone");
+            return Ok(TerminalTombstoneOutcome::Replaced);
+        }
+    }
+}
+
+pub(super) async fn replace_with_terminal_tombstone_sqlite_connection(
+    conn: &mut SqliteConnection,
+    archive_id: &str,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+    let encoded = encode_tombstone_payload(tombstone)?;
+    loop {
+        let mut query =
+            QueryBuilder::<Sqlite>::new("SELECT rich_payload FROM main.mam_messages WHERE id = ");
+        query.push_bind(archive_id);
+        let current_rich_payload = query
+            .build_query_scalar::<Option<String>>()
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some(current_rich_payload) = current_rich_payload else {
+            return Ok(TerminalTombstoneOutcome::NotFound);
         };
-        if rows > 0 {
-            debug!(
-                archive_id = %archive_id,
-                "Replaced live archived message with terminal tombstone"
-            );
+        let current_rich = decode_rich_payload(current_rich_payload.as_deref())?;
+        if current_rich
+            .as_ref()
+            .is_some_and(ArchivedRichMessage::is_tombstoned)
+        {
+            return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
+        }
+
+        let mut update = QueryBuilder::<Sqlite>::new(
+            "UPDATE main.mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
+        );
+        update
+            .push_bind(encoded.as_str())
+            .push(" WHERE id = ")
+            .push_bind(archive_id)
+            .push(" AND rich_payload IS ")
+            .push_bind(current_rich_payload.as_deref());
+        if update.build().execute(&mut *conn).await?.rows_affected() > 0 {
+            debug!(archive_id = %archive_id, "Replaced live archived message with terminal tombstone");
             return Ok(TerminalTombstoneOutcome::Replaced);
         }
     }
