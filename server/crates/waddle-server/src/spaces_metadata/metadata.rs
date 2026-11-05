@@ -109,7 +109,7 @@ const SPACES_METADATA_INDEXES: &[IndexContract] = &[
     },
 ];
 
-const SPACES_METADATA_CONTRACT: TableContract = TableContract {
+pub(crate) const SPACES_METADATA_CONTRACT: TableContract = TableContract {
     name: "spaces_metadata",
     columns: SPACES_METADATA_COLUMNS,
     primary_key: &["space_node"],
@@ -122,8 +122,9 @@ impl DatabaseSpacesMetadataStore {
     }
 
     /// Open (or create) the spaces-metadata storage at `database_url`.
-    /// When `None`, an ephemeral in-memory SQLite database is used; this
-    /// mirrors the inbox storage so tests can spin up without a DSN.
+    /// When `None`, an ephemeral in-memory SQLite database is used. PostgreSQL
+    /// uses the legacy raw initializer and invalidates the restricted-runtime
+    /// preparation marker before changing schema.
     pub async fn open(database_url: Option<&str>) -> Result<Self, SpacesMetadataError> {
         let db = match database_url {
             Some(url) => super::open_database(url).await?,
@@ -134,9 +135,10 @@ impl DatabaseSpacesMetadataStore {
         Self::initialize_owner(db).await
     }
 
-    /// Initialize the spaces-metadata schema using this exact owner database
-    /// handle. This avoids reopening a URL when several owner-prepared stores
-    /// share one database.
+    /// Run the legacy raw initializer using this exact database handle.
+    /// PostgreSQL changes invalidate the paired-store preparation marker in
+    /// the same gated transaction. Restricted runtime preparation must use
+    /// [`crate::spaces_metadata::prepare_space_stores_owner`] instead.
     pub async fn initialize_owner(db: Database) -> Result<Self, SpacesMetadataError> {
         let store = Self { db };
         schema::initialize(&store).await?;

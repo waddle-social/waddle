@@ -109,7 +109,7 @@ const CHANNEL_SPACE_LINK_INDEXES: &[IndexContract] = &[
     },
 ];
 
-const CHANNEL_SPACE_LINK_CONTRACT: TableContract = TableContract {
+pub(crate) const CHANNEL_SPACE_LINK_CONTRACT: TableContract = TableContract {
     name: "channel_space_links",
     columns: CHANNEL_SPACE_LINK_COLUMNS,
     primary_key: &["channel_jid"],
@@ -122,8 +122,9 @@ impl DatabaseChannelSpaceLinkStore {
     }
 
     /// Open (or create) the link storage at `database_url`. When `None`,
-    /// an ephemeral in-memory SQLite database is used — this mirrors the
-    /// spaces-metadata storage so tests can spin up without a DSN.
+    /// an ephemeral in-memory SQLite database is used. PostgreSQL uses the
+    /// legacy raw initializer and invalidates the paired-store preparation
+    /// marker before changing schema.
     pub async fn open(database_url: Option<&str>) -> Result<Self, ChannelSpaceLinkError> {
         let db = match database_url {
             Some(url) => super::open_database(url).await?,
@@ -134,9 +135,10 @@ impl DatabaseChannelSpaceLinkStore {
         Self::initialize_owner(db).await
     }
 
-    /// Initialize the channel-space link schema using this exact owner
-    /// database handle. This avoids reopening a URL when owner-prepared
-    /// stores share one database.
+    /// Run the legacy raw initializer using this exact database handle.
+    /// PostgreSQL changes invalidate the paired-store preparation marker in
+    /// the same gated transaction. Restricted runtime preparation must use
+    /// [`crate::spaces_metadata::prepare_space_stores_owner`] instead.
     pub async fn initialize_owner(db: Database) -> Result<Self, ChannelSpaceLinkError> {
         let store = Self { db };
         schema::initialize(&store).await?;
