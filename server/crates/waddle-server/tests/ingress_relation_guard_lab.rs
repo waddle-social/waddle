@@ -7,12 +7,15 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool};
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, Row as _};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 
 const CANDIDATE: &str =
     include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
+const DEFINER_API_CANDIDATE: &str =
+    include_str!("../src/db/migrations/owner/ingress_definer_api_candidate.sql");
 const TABLES: [&str; 13] = [
     "ingress_archive_dispatch",
     "ingress_carbon_receipts",
@@ -38,6 +41,7 @@ struct Fixture {
     owner: String,
     migrator: String,
     runtime: String,
+    extra_roles: Vec<String>,
 }
 
 impl Fixture {
@@ -141,6 +145,7 @@ impl Fixture {
             owner,
             migrator,
             runtime,
+            extra_roles: Vec::new(),
         })
     }
 
@@ -164,7 +169,9 @@ impl Fixture {
             .execute(&self.admin)
             .await
             .expect("drop isolated database");
-        for role in [&self.runtime, &self.migrator, &self.owner] {
+        let mut roles = vec![self.runtime, self.migrator, self.owner];
+        roles.extend(self.extra_roles);
+        for role in roles {
             sqlx::query(&format!("DROP ROLE {role}"))
                 .execute(&self.admin)
                 .await
@@ -233,8 +240,18 @@ async fn commit(connection: &mut PgConnection) {
 }
 
 async fn proof(connection: &mut PgConnection, epoch: i64) {
-    sqlx::query("SELECT set_config('waddle.protocol_epoch', $1, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)")
+    sqlx::query("SELECT pg_catalog.set_config('waddle.protocol_epoch', $1, true), pg_catalog.set_config('waddle.protocol_epoch_xid', pg_catalog.pg_current_xact_id()::pg_catalog.text, true)")
         .bind(epoch.to_string()).execute(connection).await.expect("install transaction proof");
+}
+
+async fn forged_proof(connection: &mut PgConnection) {
+    sqlx::query(
+        "SELECT pg_catalog.set_config('waddle.protocol_epoch', '999', true), \
+                pg_catalog.set_config('waddle.protocol_epoch_xid', 'forged', true)",
+    )
+    .execute(connection)
+    .await
+    .expect("install forged transaction proof");
 }
 
 async fn first_column(connection: &mut PgConnection, table: &str) -> String {
@@ -889,5 +906,1003 @@ async fn candidate_temp_shadowing_requires_drain_and_qualified_writes() {
         .await
         .expect("rollback missing proof");
     drop((fresh, owner, admin));
+    fixture.cleanup().await;
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn render_definer_api_candidate(schema: &str, api_owner: &str, runtime: &str) -> String {
+    let schema = quote_identifier(schema);
+    let api_owner_ident = quote_identifier(api_owner);
+    let runtime_ident = quote_identifier(runtime);
+    DEFINER_API_CANDIDATE
+        .replace("__SCHEMA_PATH__", &schema)
+        .replace("__SCHEMA__", &schema)
+        .replace("__API_OWNER_LITERAL__", &api_owner.replace('\'', "''"))
+        .replace("__RUNTIME_ROLE_LITERAL__", &runtime.replace('\'', "''"))
+        .replace("__API_OWNER_IDENT__", &api_owner_ident)
+        .replace("__RUNTIME_ROLE_IDENT__", &runtime_ident)
+}
+
+fn alias_hash(sender: &str, target_jid: &str, target_kind: i32, origin_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"waddle:ingress-alias-key:v1\0");
+    for part in [sender, target_jid, origin_id] {
+        hasher.update(
+            u32::try_from(part.len())
+                .expect("fixture alias field length")
+                .to_be_bytes(),
+        );
+        hasher.update(part.as_bytes());
+    }
+    hasher.update(target_kind.to_be_bytes());
+    hasher.finalize().into()
+}
+
+struct OriginRequest<'a> {
+    message_key: uuid::Uuid,
+    hash: [u8; 32],
+    sender: &'a str,
+    target_jid: &'a str,
+    origin_id: &'a str,
+    digest: [u8; 32],
+    source_context: Option<uuid::Uuid>,
+    source_sm_ingress_id: Option<uuid::Uuid>,
+}
+
+async fn resolve_origin(
+    connection: &mut PgConnection,
+    request: OriginRequest<'_>,
+) -> (Option<uuid::Uuid>, String, Option<i32>, Option<Vec<u8>>) {
+    let OriginRequest {
+        message_key,
+        hash,
+        sender,
+        target_jid,
+        origin_id,
+        digest,
+        source_context,
+        source_sm_ingress_id,
+    } = request;
+    let source_bare = source_context.map(|_| sender.to_owned());
+    let source_context_version = source_context.map(|_| 1_i64);
+    let source_auth_epoch = source_context.map(|_| 1_i64);
+    let source_ingress_ordinal = source_sm_ingress_id.map(|_| 1_i64);
+    let row = sqlx::query(
+        "SELECT canonical_message_key, outcome, stored_digest_version, stored_digest \
+         FROM guarded.waddle_ingress_resolve_origin(\
+           $1::pg_catalog.uuid, $2::pg_catalog.int4, $3::pg_catalog.bytea, \
+           $4::pg_catalog.bytea, $5::pg_catalog.text, $6::pg_catalog.int4, \
+           $7::pg_catalog.text, $8::pg_catalog.text, $9::pg_catalog.text, \
+           $10::pg_catalog.uuid, $11::pg_catalog.int8, $12::pg_catalog.int8, \
+           $13::pg_catalog.uuid, $14::pg_catalog.numeric)",
+    )
+    .bind(message_key)
+    .bind(1_i32)
+    .bind(digest.to_vec())
+    .bind(hash.to_vec())
+    .bind(sender)
+    .bind(1_i32)
+    .bind(target_jid)
+    .bind(origin_id)
+    .bind(source_bare)
+    .bind(source_context)
+    .bind(source_context_version)
+    .bind(source_auth_epoch)
+    .bind(source_sm_ingress_id)
+    .bind(source_ingress_ordinal)
+    .fetch_one(connection)
+    .await
+    .expect("invoke operation-specific definer function");
+    (
+        row.try_get(0).expect("canonical message key"),
+        row.try_get(1).expect("operation outcome"),
+        row.try_get(2).expect("stored digest version"),
+        row.try_get(3).expect("stored digest"),
+    )
+}
+
+async fn assert_no_guarded_dml(connection: &mut PgConnection, runtime: &str) {
+    for table in TABLES {
+        let relation = format!(
+            "{}.{}",
+            quote_identifier("guarded"),
+            quote_identifier(table)
+        );
+        let can_write: bool = sqlx::query_scalar(
+            "SELECT pg_catalog.has_table_privilege($1, $2, 'INSERT') \
+               OR pg_catalog.has_table_privilege($1, $2, 'UPDATE') \
+               OR pg_catalog.has_table_privilege($1, $2, 'DELETE') \
+               OR pg_catalog.has_table_privilege($1, $2, 'TRUNCATE')",
+        )
+        .bind(runtime)
+        .bind(relation)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("inspect guarded DML privileges");
+        assert!(!can_write, "runtime unexpectedly has DML on {table}");
+    }
+}
+
+#[tokio::test]
+async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
+    let Some(mut fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut version_check = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("connect disposable PostgreSQL database");
+    let server_version: i32 =
+        sqlx::query_scalar("SELECT pg_catalog.current_setting('server_version_num')::integer")
+            .fetch_one(&mut version_check)
+            .await
+            .expect("read PostgreSQL version");
+    drop(version_check);
+    if server_version < 170_000 {
+        eprintln!("skipping definer API pilot: requires PostgreSQL 17, found {server_version}");
+        fixture.cleanup().await;
+        return;
+    }
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let api_owner = format!("guard_api_{suffix}");
+    fixture.extra_roles.push(api_owner.clone());
+    sqlx::query(&format!(
+        "CREATE ROLE {api_owner} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create dedicated API owner");
+
+    let sender = format!("definer{suffix}@example.test");
+    let username = format!("definer{suffix}");
+    let context_a = uuid::Uuid::new_v4();
+    let context_b = uuid::Uuid::new_v4();
+    let expired_context = uuid::Uuid::new_v4();
+    let mut owner = fixture.owner().await;
+    sqlx::query(
+        "INSERT INTO guarded.users \
+         (jid, username, xmpp_localpart, localpart_key, created_at, updated_at) \
+         VALUES ($1, $2, $2, $2, '2026-11-05T00:00:00Z', '2026-11-05T00:00:00Z')",
+    )
+    .bind(&sender)
+    .bind(&username)
+    .execute(&mut owner)
+    .await
+    .expect("seed source principal user");
+    for (index, context) in [context_a, context_b].into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO guarded.sessions \
+             (id, user_jid, token_hash, auth_context_id, auth_context_version, \
+              principal_auth_epoch, created_at, last_used_at) \
+             VALUES ($1, $2, $3, $4, 1, 1, '2026-11-05T00:00:00Z', '2026-11-05T00:00:00Z')",
+        )
+        .bind(format!("session-{index}-{suffix}"))
+        .bind(&sender)
+        .bind(format!("token-{index}-{suffix}"))
+        .bind(context.to_string())
+        .execute(&mut owner)
+        .await
+        .expect("seed valid principal session");
+    }
+    sqlx::query(
+        "INSERT INTO guarded.sessions \
+         (id, user_jid, token_hash, auth_context_id, auth_context_version, \
+          principal_auth_epoch, created_at, last_used_at, expires_at) \
+         VALUES ($1, $2, $3, $4, 1, 1, '2020-01-01T00:00:00Z', \
+                 '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z')",
+    )
+    .bind(format!("expired-session-{suffix}"))
+    .bind(&sender)
+    .bind(format!("expired-token-{suffix}"))
+    .bind(expired_context.to_string())
+    .execute(&mut owner)
+    .await
+    .expect("seed expired principal session");
+
+    // Preserve a pre-boundary legacy alias with no source tuple. Its replay
+    // remains valid after the definer API is installed.
+    let legacy_origin = format!("legacy-{suffix}");
+    let legacy_hash = alias_hash(&sender, "target@example.test", 1, &legacy_origin);
+    let legacy_key = uuid::Uuid::new_v4();
+    let legacy_digest = [34_u8; 32];
+    begin(&mut owner).await;
+    writer_lock(&mut owner).await;
+    proof(&mut owner, 0).await;
+    sqlx::query(
+        "INSERT INTO guarded.ingress_messages (message_key, digest_version, digest) \
+         VALUES ($1, 1, $2)",
+    )
+    .bind(legacy_key)
+    .bind(legacy_digest.to_vec())
+    .execute(&mut owner)
+    .await
+    .expect("seed legacy unbound message before API boundary");
+    sqlx::query(
+        "INSERT INTO guarded.ingress_origin_aliases \
+         (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) \
+         VALUES ($1, $2, 1, 'target@example.test', $3, $4)",
+    )
+    .bind(legacy_hash.to_vec())
+    .bind(&sender)
+    .bind(&legacy_origin)
+    .bind(legacy_key)
+    .execute(&mut owner)
+    .await
+    .expect("seed legacy unbound alias before API boundary");
+    commit(&mut owner).await;
+
+    let candidate_sql = render_definer_api_candidate("guarded", &api_owner, &fixture.runtime);
+    assert!(!candidate_sql.contains("__SCHEMA_"));
+    assert!(!candidate_sql.contains("__API_OWNER_"));
+    assert!(!candidate_sql.contains("__RUNTIME_ROLE_"));
+
+    // Use the disposable test administrator only for the fixture's ownership
+    // transfer; production provider-managed ownership and role provisioning
+    // remain a separate rollout prerequisite.
+    let mut transition_admin = fixture.observer().await;
+
+    // Model the boundary change as one epoch-exclusive transaction: old
+    // direct DML grants are removed as the two trigger functions are swapped.
+    sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut transition_admin)
+        .await
+        .expect("begin isolated transition");
+    sqlx::query("LOCK TABLE ONLY guarded.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut transition_admin)
+        .await
+        .expect("take epoch transition barrier first");
+    for table in TABLES {
+        sqlx::query(&format!(
+            "REVOKE ALL PRIVILEGES ON TABLE guarded.{table} FROM {}",
+            fixture.runtime
+        ))
+        .execute(&mut transition_admin)
+        .await
+        .expect("remove runtime table access");
+    }
+    sqlx::query(&format!(
+        "GRANT SELECT ON guarded.ingress_protocol_epoch TO {}",
+        fixture.runtime
+    ))
+    .execute(&mut transition_admin)
+    .await
+    .expect("allow runtime epoch prelock");
+    for statement in [
+        format!("GRANT USAGE, CREATE ON SCHEMA guarded TO {api_owner}"),
+        format!("GRANT SELECT ON guarded.ingress_protocol_epoch TO {api_owner}"),
+        format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_messages TO {api_owner}"),
+        format!("GRANT UPDATE (message_key) ON guarded.ingress_messages TO {api_owner}"),
+        format!("GRANT SELECT, INSERT ON guarded.ingress_origin_aliases TO {api_owner}"),
+        format!("GRANT SELECT ON guarded.sessions TO {api_owner}"),
+        format!("GRANT UPDATE (id) ON guarded.sessions TO {api_owner}"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut transition_admin)
+            .await
+            .expect("grant API owner its bounded privileges");
+    }
+    sqlx::raw_sql(&candidate_sql)
+        .execute(&mut transition_admin)
+        .await
+        .expect("install dark two-table definer boundary");
+    sqlx::query(&format!("REVOKE CREATE ON SCHEMA guarded FROM {api_owner}"))
+        .execute(&mut transition_admin)
+        .await
+        .expect("remove API schema creation privilege");
+    sqlx::query("COMMIT")
+        .execute(&mut transition_admin)
+        .await
+        .expect("commit atomic guard and ACL transition");
+    drop(transition_admin);
+
+    assert_no_guarded_dml(&mut owner, &fixture.runtime).await;
+    let api_role_restricted: bool = sqlx::query_scalar(
+        "SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND \
+                NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit \
+         FROM pg_catalog.pg_roles WHERE rolname = $1",
+    )
+    .bind(&api_owner)
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect API owner role");
+    assert!(api_role_restricted);
+    let owner_is_function_owner: bool = sqlx::query_scalar(
+        "SELECT r.rolname = $1 FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_roles r ON r.oid = p.proowner \
+         WHERE p.oid = pg_catalog.to_regprocedure(\
+           'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,bigint,bigint,uuid,numeric)')",
+    )
+    .bind(&api_owner)
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect definer function owner");
+    assert!(owner_is_function_owner);
+    let (security_definer, safe_search_path, runtime_execute): (bool, bool, bool) = sqlx::query_as(
+        "SELECT p.prosecdef, \
+           'search_path=pg_catalog, pg_temp' = ANY(p.proconfig), \
+           pg_catalog.has_function_privilege($1, p.oid, 'EXECUTE') \
+         FROM pg_catalog.pg_proc p \
+         WHERE p.oid = pg_catalog.to_regprocedure(\
+           'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,bigint,bigint,uuid,numeric)')",
+    )
+    .bind(&fixture.runtime)
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect definer security and execution ACL");
+    assert!(security_definer);
+    assert!(safe_search_path);
+    assert!(runtime_execute);
+    let (trigger_security_definer, trigger_safe_search_path): (bool, bool) = sqlx::query_as(
+        "SELECT p.prosecdef, \
+           'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) \
+         FROM pg_catalog.pg_proc p \
+         WHERE p.oid = pg_catalog.to_regprocedure(\
+           'guarded.waddle_ingress_definer_epoch_guard()')",
+    )
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect invoker trigger function path");
+    assert!(!trigger_security_definer);
+    assert!(trigger_safe_search_path);
+    let function_execute_grantees: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            pg_catalog.array_agg(
+                COALESCE(r.rolname::text, 'PUBLIC')
+                ORDER BY COALESCE(r.rolname::text, 'PUBLIC')
+            ),
+            ARRAY[]::text[]
+        )
+        FROM pg_catalog.pg_proc p
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
+        ) acl
+        LEFT JOIN pg_catalog.pg_roles r ON r.oid = acl.grantee
+        WHERE p.oid = pg_catalog.to_regprocedure(
+            'guarded.waddle_ingress_resolve_origin(uuid,integer,bytea,bytea,text,integer,text,text,text,uuid,bigint,bigint,uuid,numeric)'
+        )
+          AND acl.privilege_type = 'EXECUTE'
+        "#,
+    )
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect exact function EXECUTE grantees");
+    let mut expected_execute_grantees = vec![api_owner.clone(), fixture.runtime.clone()];
+    expected_execute_grantees.sort();
+    assert_eq!(function_execute_grantees, expected_execute_grantees);
+    let can_set_owner: bool = sqlx::query_scalar("SELECT pg_catalog.pg_has_role($1, $2, 'MEMBER')")
+        .bind(&fixture.runtime)
+        .bind(&api_owner)
+        .fetch_one(&mut owner)
+        .await
+        .expect("inspect runtime owner membership");
+    assert!(!can_set_owner);
+    let api_has_any_membership: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_auth_members m
+            WHERE m.roleid = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = $1)
+               OR m.member = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = $1)
+        )
+        "#,
+    )
+    .bind(&api_owner)
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect API owner role memberships");
+    assert!(!api_has_any_membership);
+
+    // Leave a malicious same-named type in this backend's pg_temp before the
+    // first function call. The fixed function path must resolve built-in TEXT
+    // from pg_catalog ahead of PostgreSQL's implicit temporary-type lookup.
+    sqlx::query(&format!(
+        "GRANT TEMPORARY ON DATABASE {} TO {}",
+        fixture.database, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("temporarily grant runtime TEMP for type shadow");
+    let mut runtime = fixture.runtime().await;
+    sqlx::query("CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (VALUE IS NULL)")
+        .execute(&mut runtime)
+        .await
+        .expect("create hostile temporary text domain before API call");
+    let has_temp_text_domain: bool =
+        sqlx::query_scalar("SELECT pg_catalog.to_regtype('pg_temp.text') IS NOT NULL")
+            .fetch_one(&mut runtime)
+            .await
+            .expect("confirm hostile temporary text domain exists");
+    assert!(has_temp_text_domain);
+    sqlx::query(&format!(
+        "REVOKE TEMPORARY ON DATABASE {} FROM {}",
+        fixture.database, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke runtime TEMP while retaining type shadow");
+
+    // A function call without the prepared epoch lock fails before it can
+    // create either canonical row.
+    let no_lock_origin = format!("no-lock-{suffix}");
+    let no_lock_hash = alias_hash(&sender, "target@example.test", 1, &no_lock_origin);
+    let no_lock_key = uuid::Uuid::new_v4();
+    begin(&mut runtime).await;
+    let no_lock_error = sqlx::query(
+        "SELECT * FROM guarded.waddle_ingress_resolve_origin(\
+           $1, 1, $2, $3, $4, 1, 'target@example.test', $5, \
+           $4, $6, 1, 1, NULL, NULL)",
+    )
+    .bind(no_lock_key)
+    .bind(vec![7_u8; 32])
+    .bind(no_lock_hash.to_vec())
+    .bind(&sender)
+    .bind(&no_lock_origin)
+    .bind(context_a)
+    .execute(&mut runtime)
+    .await
+    .expect_err("function must require epoch-first prelock");
+    assert!(no_lock_error
+        .to_string()
+        .contains("epoch ACCESS SHARE prelock"));
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback missing-prelock call");
+    let no_lock_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM guarded.ingress_messages WHERE message_key = $1) + \
+                (SELECT count(*) FROM guarded.ingress_origin_aliases WHERE alias_key_hash = $2)",
+    )
+    .bind(no_lock_key)
+    .bind(no_lock_hash.to_vec())
+    .fetch_one(&mut owner)
+    .await
+    .expect("check missing-prelock call has no row effects");
+    assert_eq!(no_lock_rows, 0);
+
+    // A caller-selected source tuple is not accepted merely because its
+    // fields are well-formed: its durable session must still be live.
+    let expired_origin = format!("expired-principal-{suffix}");
+    let expired_hash = alias_hash(&sender, "target@example.test", 1, &expired_origin);
+    let expired_key = uuid::Uuid::new_v4();
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (expired_returned, expired_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: expired_key,
+            hash: expired_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &expired_origin,
+            digest: [33_u8; 32],
+            source_context: Some(expired_context),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(expired_returned, None);
+    assert_eq!(expired_outcome, "principal_assertion_failed");
+    commit(&mut runtime).await;
+    let expired_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM guarded.ingress_messages WHERE message_key = $1) + \
+                (SELECT count(*) FROM guarded.ingress_origin_aliases WHERE alias_key_hash = $2)",
+    )
+    .bind(expired_key)
+    .bind(expired_hash.to_vec())
+    .fetch_one(&mut owner)
+    .await
+    .expect("check expired-principal call has no row effects");
+    assert_eq!(expired_rows, 0);
+
+    // Prepare TEMP shadows under a temporary grant, then revoke TEMP while
+    // retaining them in this session. Function and trigger SQL must still hit
+    // the schema-qualified real relations with a hostile search_path.
+    sqlx::query(&format!(
+        "GRANT TEMPORARY ON DATABASE {} TO {}",
+        fixture.database, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("temporarily grant runtime TEMP");
+    sqlx::query("CREATE TEMP TABLE ingress_protocol_epoch (id integer, epoch bigint)")
+        .execute(&mut runtime)
+        .await
+        .expect("create hostile epoch shadow");
+    sqlx::query("INSERT INTO pg_temp.ingress_protocol_epoch VALUES (1, 999)")
+        .execute(&mut runtime)
+        .await
+        .expect("seed hostile epoch shadow");
+    sqlx::query(
+        "CREATE TEMP TABLE ingress_messages (message_key uuid, digest_version int, digest bytea)",
+    )
+    .execute(&mut runtime)
+    .await
+    .expect("create hostile message shadow");
+    sqlx::query(
+        "CREATE TEMP TABLE ingress_origin_aliases (alias_key_hash bytea, message_key uuid)",
+    )
+    .execute(&mut runtime)
+    .await
+    .expect("create hostile alias shadow");
+    sqlx::query(&format!(
+        "REVOKE TEMPORARY ON DATABASE {} FROM {}",
+        fixture.database, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke TEMP with old session shadows intact");
+
+    let origin = format!("valid-{suffix}");
+    let hash = alias_hash(&sender, "target@example.test", 1, &origin);
+    let digest = [31_u8; 32];
+    let key = uuid::Uuid::new_v4();
+    begin(&mut runtime).await;
+    sqlx::query("SET LOCAL search_path = pg_temp, guarded")
+        .execute(&mut runtime)
+        .await
+        .expect("prefer TEMP shadows");
+    writer_lock(&mut runtime).await;
+    forged_proof(&mut runtime).await;
+    let (inserted_key, outcome, digest_version, stored_digest) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: key,
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &origin,
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(inserted_key, Some(key));
+    assert_eq!(outcome, "inserted");
+    assert_eq!(digest_version, Some(1));
+    assert_eq!(stored_digest, Some(digest.to_vec()));
+    let mut observer = fixture.observer().await;
+    let visible_before_commit: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM guarded.ingress_messages WHERE message_key = $1")
+            .bind(key)
+            .fetch_one(&mut observer)
+            .await
+            .expect("check outer transaction visibility");
+    assert_eq!(
+        visible_before_commit, 0,
+        "function must not commit internally"
+    );
+    commit(&mut runtime).await;
+    let visible_after_commit: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM guarded.ingress_messages WHERE message_key = $1")
+            .bind(key)
+            .fetch_one(&mut observer)
+            .await
+            .expect("check caller commit visibility");
+    assert_eq!(visible_after_commit, 1);
+
+    // The same alias and digest replay to the original key. A changed digest,
+    // source principal or raw identity is classified without a partial write.
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (replay_key, replay_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &origin,
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(replay_key, Some(key));
+    assert_eq!(replay_outcome, "existing");
+    commit(&mut runtime).await;
+
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (_, digest_outcome, conflict_version, conflict_digest) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &origin,
+            digest: [32_u8; 32],
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(digest_outcome, "digest_conflict");
+    assert_eq!(conflict_version, Some(1));
+    assert_eq!(conflict_digest, Some(digest.to_vec()));
+    commit(&mut runtime).await;
+
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (_, source_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &origin,
+            digest,
+            source_context: Some(context_b),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(source_outcome, "source_binding_conflict");
+    commit(&mut runtime).await;
+
+    // Omitting source data cannot turn a previously bound alias into an
+    // unbound replay. The legacy unbound fixture below remains replayable.
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (_, omitted_bound_source_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &origin,
+            digest,
+            source_context: None,
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(omitted_bound_source_outcome, "source_binding_conflict");
+    commit(&mut runtime).await;
+
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (legacy_replay_key, legacy_replay_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash: legacy_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &legacy_origin,
+            digest: legacy_digest,
+            source_context: None,
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(legacy_replay_key, Some(legacy_key));
+    assert_eq!(legacy_replay_outcome, "existing");
+    commit(&mut runtime).await;
+
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let sm_without_principal = sqlx::query(
+        "SELECT * FROM guarded.waddle_ingress_resolve_origin(\
+           $1, 1, $2, $3, $4, 1, 'target@example.test', $5, \
+           NULL, NULL, NULL, NULL, $6, 1)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(digest.to_vec())
+    .bind(hash.to_vec())
+    .bind(&sender)
+    .bind(&origin)
+    .bind(uuid::Uuid::new_v4());
+    let sm_error = sm_without_principal
+        .fetch_one(&mut runtime)
+        .await
+        .expect_err("SM occurrence without principal must be rejected");
+    assert!(sm_error
+        .to_string()
+        .contains("incomplete canonical source binding"));
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback malformed source call");
+
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (_, identity_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: "different-origin",
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(identity_outcome, "alias_identity_conflict");
+    commit(&mut runtime).await;
+
+    // An explicit caller rollback undoes both rows created by the API.
+    let rolled_origin = format!("rolled-back-{suffix}");
+    let rolled_hash = alias_hash(&sender, "target@example.test", 1, &rolled_origin);
+    let rolled_key = uuid::Uuid::new_v4();
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (rolled_returned, rolled_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: rolled_key,
+            hash: rolled_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &rolled_origin,
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(rolled_returned, Some(rolled_key));
+    assert_eq!(rolled_outcome, "inserted");
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("caller rollback");
+    let rolled_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM guarded.ingress_messages WHERE message_key = $1) + \
+                (SELECT count(*) FROM guarded.ingress_origin_aliases WHERE alias_key_hash = $2)",
+    )
+    .bind(rolled_key)
+    .bind(rolled_hash.to_vec())
+    .fetch_one(&mut observer)
+    .await
+    .expect("check rolled-back rows");
+    assert_eq!(rolled_rows, 0);
+
+    // Two simultaneous first writers converge on one alias; the loser removes
+    // its unreferenced message candidate after PostgreSQL resolves uniqueness.
+    let race_origin = format!("race-{suffix}");
+    let race_hash = alias_hash(&sender, "target@example.test", 1, &race_origin);
+    let winner_key = uuid::Uuid::new_v4();
+    let loser_key = uuid::Uuid::new_v4();
+    let race_sender = sender.clone();
+    let race_origin_task = race_origin.clone();
+    let mut winner = fixture.runtime().await;
+    begin(&mut winner).await;
+    writer_lock(&mut winner).await;
+    proof(&mut winner, 0).await;
+    let (winner_result, winner_outcome, _, _) = resolve_origin(
+        &mut winner,
+        OriginRequest {
+            message_key: winner_key,
+            hash: race_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &race_origin,
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(winner_result, Some(winner_key));
+    assert_eq!(winner_outcome, "inserted");
+
+    let mut loser = fixture.runtime().await;
+    begin(&mut loser).await;
+    writer_lock(&mut loser).await;
+    proof(&mut loser, 0).await;
+    let loser_pid = pid(&mut loser).await;
+    let winner_pid = pid(&mut winner).await;
+    let mut wait_observer = fixture.observer().await;
+    let loser_task = tokio::spawn(async move {
+        let result = resolve_origin(
+            &mut loser,
+            OriginRequest {
+                message_key: loser_key,
+                hash: race_hash,
+                sender: &race_sender,
+                target_jid: "target@example.test",
+                origin_id: &race_origin_task,
+                digest,
+                source_context: Some(context_a),
+                source_sm_ingress_id: None,
+            },
+        )
+        .await;
+        commit(&mut loser).await;
+        (loser, result)
+    });
+    wait_blocked(&mut wait_observer, loser_pid, winner_pid).await;
+    commit(&mut winner).await;
+    let (loser, (loser_result, loser_outcome, _, _)) =
+        loser_task.await.expect("join concurrent alias loser");
+    assert_eq!(loser_result, Some(winner_key));
+    assert_eq!(loser_outcome, "existing");
+    let race_counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM guarded.ingress_messages WHERE message_key IN ($1, $2)), \
+                (SELECT count(*) FROM guarded.ingress_origin_aliases WHERE alias_key_hash = $3)",
+    )
+    .bind(winner_key)
+    .bind(loser_key)
+    .bind(race_hash.to_vec())
+    .fetch_one(&mut observer)
+    .await
+    .expect("check concurrency winner rows");
+    assert_eq!(race_counts, (1, 1));
+
+    // Ordinary runtime lacks DML, even after a forged proof and an actual
+    // epoch lock. With temporary DML, the invoker trigger independently
+    // rejects the same runtime identity inside the guard.
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    forged_proof(&mut runtime).await;
+    let acl_denial = sqlx::query(
+        "INSERT INTO guarded.ingress_messages (message_key, digest_version, digest) \
+         VALUES ($1, 1, $2)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(digest.to_vec())
+    .execute(&mut runtime)
+    .await
+    .expect_err("runtime has no direct DML grant");
+    assert_eq!(
+        acl_denial
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("42501")
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback direct DML ACL denial");
+
+    for table in ["ingress_messages", "ingress_origin_aliases"] {
+        sqlx::query(&format!(
+            "GRANT INSERT, UPDATE, DELETE ON guarded.{table} TO {}",
+            fixture.runtime
+        ))
+        .execute(&mut owner)
+        .await
+        .expect("temporarily grant direct DML for invoker trigger probe");
+    }
+    let direct_statements = [
+        (
+            "message-insert",
+            "INSERT INTO guarded.ingress_messages (message_key, digest_version, digest) VALUES ($1, 1, $2)",
+        ),
+        (
+            "message-update",
+            "UPDATE guarded.ingress_messages SET digest = ''::bytea WHERE false",
+        ),
+        ("message-delete", "DELETE FROM guarded.ingress_messages WHERE false"),
+        (
+            "alias-insert",
+            "INSERT INTO guarded.ingress_origin_aliases (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) VALUES ($1, 'x@example.test', 1, 'target@example.test', 'x', $2)",
+        ),
+        (
+            "alias-update",
+            "UPDATE guarded.ingress_origin_aliases SET origin_id = 'replacement' WHERE false",
+        ),
+        ("alias-delete", "DELETE FROM guarded.ingress_origin_aliases WHERE false"),
+    ];
+    for (case, statement) in direct_statements {
+        begin(&mut runtime).await;
+        writer_lock(&mut runtime).await;
+        forged_proof(&mut runtime).await;
+        let result = match case {
+            "message-insert" => {
+                sqlx::query(statement)
+                    .bind(uuid::Uuid::new_v4())
+                    .bind(digest.to_vec())
+                    .execute(&mut runtime)
+                    .await
+            }
+            "alias-insert" => {
+                sqlx::query(statement)
+                    .bind(vec![11_u8; 32])
+                    .bind(uuid::Uuid::new_v4())
+                    .execute(&mut runtime)
+                    .await
+            }
+            _ => sqlx::query(statement).execute(&mut runtime).await,
+        };
+        let error = result.expect_err("direct runtime statement must hit invoker identity guard");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|database_error| database_error.code())
+                .as_deref(),
+            Some("42501"),
+            "{case}: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("canonical ingress writes require the API owner"),
+            "{case}: {error}"
+        );
+        sqlx::query("ROLLBACK")
+            .execute(&mut runtime)
+            .await
+            .expect("rollback denied direct DML");
+    }
+    for table in ["ingress_messages", "ingress_origin_aliases"] {
+        sqlx::query(&format!(
+            "REVOKE INSERT, UPDATE, DELETE ON guarded.{table} FROM {}",
+            fixture.runtime
+        ))
+        .execute(&mut owner)
+        .await
+        .expect("restore runtime DML denial");
+    }
+    assert_no_guarded_dml(&mut owner, &fixture.runtime).await;
+
+    // An epoch-first API writer drains before the transition's AX lock and
+    // both transactions complete without upgrading from a target-table lock.
+    let barrier_origin = format!("barrier-{suffix}");
+    let barrier_hash = alias_hash(&sender, "target@example.test", 1, &barrier_origin);
+    let mut barrier_writer = fixture.runtime().await;
+    begin(&mut barrier_writer).await;
+    writer_lock(&mut barrier_writer).await;
+    proof(&mut barrier_writer, 0).await;
+    let barrier_key = uuid::Uuid::new_v4();
+    let (barrier_result, barrier_outcome, _, _) = resolve_origin(
+        &mut barrier_writer,
+        OriginRequest {
+            message_key: barrier_key,
+            hash: barrier_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &barrier_origin,
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(barrier_result, Some(barrier_key));
+    assert_eq!(barrier_outcome, "inserted");
+    let writer_pid = pid(&mut barrier_writer).await;
+    let mut transition = fixture.owner().await;
+    let transition_pid = pid(&mut transition).await;
+    let transition_task = tokio::spawn(async move {
+        begin(&mut transition).await;
+        owner_lock(&mut transition).await;
+        advance(&mut transition).await;
+        commit(&mut transition).await;
+    });
+    let mut barrier_observer = fixture.observer().await;
+    wait_blocked(&mut barrier_observer, transition_pid, writer_pid).await;
+    commit(&mut barrier_writer).await;
+    transition_task.await.expect("join AX epoch transition");
+    let transitioned_epoch: i64 =
+        sqlx::query_scalar("SELECT epoch FROM guarded.ingress_protocol_epoch WHERE id = 1")
+            .fetch_one(&mut observer)
+            .await
+            .expect("read transitioned epoch");
+    assert_eq!(transitioned_epoch, 1);
+
+    drop((runtime, owner, observer, wait_observer, loser));
     fixture.cleanup().await;
 }
