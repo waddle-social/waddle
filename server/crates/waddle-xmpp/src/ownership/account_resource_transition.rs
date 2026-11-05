@@ -172,7 +172,7 @@ fn escaped_xml_bytes(value: &str, attribute_context: bool) -> Option<usize> {
 /// serializer. The conservative upper bound counts actual escaped bytes,
 /// duplicated element names, repeated explicit/generated prefixes, and fixed
 /// XML syntax per bounded item. It can reject a payload whose serialized form
-/// would fit; every accepted tree is still guaranteed to serialize to no more
+/// would fit; the estimated upper bound for any serialized output is no more
 /// than the snapshot's 32 KiB payload limit. This path is panic-free for
 /// hostile namespace maps and builder-created invalid XML characters.
 fn presence_payloads_within_serialized_upper_bound(payloads: &[Element]) -> bool {
