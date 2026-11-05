@@ -6,6 +6,7 @@ use crate::db::DatabaseDriver;
 use crate::db::DatabaseError;
 use crate::db::Row;
 use crate::db::Transaction;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_substrate::ALIAS_RETENTION;
 use crate::ingress_uow::DbRetryClass;
 use crate::ingress_uow::EffectDescendantRepository;
@@ -632,6 +633,15 @@ pub(super) async fn prune_publish_jobs_tx(
     node: &str,
     limit: i64,
 ) -> Result<(), XmppError> {
+    prune_publish_jobs_with_api(tx, None, node, limit).await
+}
+
+pub(super) async fn prune_publish_jobs_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
+    node: &str,
+    limit: i64,
+) -> Result<(), XmppError> {
     let mut count = tx
         .query(
             "SELECT COUNT(*) FROM push_publish_jobs WHERE node = ?",
@@ -678,9 +688,16 @@ pub(super) async fn prune_publish_jobs_tx(
             .is_some()
     };
     let ancestry_guard = if has_foundation {
-        "AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = push_publish_jobs.ancestry_job_id)"
+        if let Some(api) = api {
+            format!(
+                "AND NOT {}(push_publish_jobs.ancestry_job_id, FALSE)",
+                api.qualified_function("waddle_ingress_descendant_exists")
+            )
+        } else {
+            "AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = push_publish_jobs.ancestry_job_id)".to_owned()
+        }
     } else {
-        ""
+        String::new()
     };
     let cutoff = crate::time::now_ms().saturating_sub(ALIAS_RETENTION.num_milliseconds());
     tx.execute(
@@ -778,6 +795,13 @@ pub(crate) async fn acknowledge_completed_outbox_tx(
 pub(super) async fn pending_notification_custody_sql(
     tx: &mut Transaction<'_>,
 ) -> Result<String, XmppError> {
+    pending_notification_custody_sql_with_api(tx, None).await
+}
+
+pub(super) async fn pending_notification_custody_sql_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
+) -> Result<String, XmppError> {
     let sql = if tx.driver() == DatabaseDriver::Postgres {
         "SELECT to_regclass('notification_outbox_lineage') IS NOT NULL, to_regclass('ingress_effect_descendants') IS NOT NULL"
     } else {
@@ -798,12 +822,16 @@ pub(super) async fn pending_notification_custody_sql(
     let foundation: bool = row
         .get(1)
         .map_err(|error| XmppError::internal(error.to_string()))?;
-    let mut guards = Vec::new();
+    let mut guards: Vec<String> = Vec::new();
     if lineage {
-        guards.push("EXISTS (SELECT 1 FROM notification_outbox_lineage WHERE job_id = push_publish_jobs.ancestry_job_id AND settled_at_ms IS NULL)");
+        guards.push("EXISTS (SELECT 1 FROM notification_outbox_lineage WHERE job_id = push_publish_jobs.ancestry_job_id AND settled_at_ms IS NULL)".to_owned());
     }
     if foundation {
-        guards.push("EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = push_publish_jobs.ancestry_job_id AND settled_at IS NULL)");
+        guards.push(if let Some(api) = api {
+            format!("{}(push_publish_jobs.ancestry_job_id, TRUE)", api.qualified_function("waddle_ingress_descendant_exists"))
+        } else {
+            "EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = push_publish_jobs.ancestry_job_id AND settled_at IS NULL)".to_owned()
+        });
     }
     Ok(if guards.is_empty() {
         "FALSE".to_owned()
