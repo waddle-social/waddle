@@ -8,6 +8,8 @@ use super::Ordering;
 use super::Stanza;
 use super::{BareJid, FullJid};
 use super::{ConnectionEntry, LocalConnectionBindingId, PresenceState};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::registry::ActorProvisionalConnectionEntry;
 
 /// Actor that manages per-user connection state and stanza delivery.
 ///
@@ -50,6 +52,9 @@ impl UserActor {
 
     /// Remove all state associated with a resource.
     pub(in crate::registry::user_actor) fn remove_resource(&mut self, jid: &FullJid) {
+        if let Some(entry) = self.connections.get(jid) {
+            entry.seal_actor_binding_if_any();
+        }
         self.connections.remove(jid);
         self.presence_states.remove(jid);
     }
@@ -105,6 +110,9 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering connection");
+        if let Some(entry) = self.connections.get(&msg.jid) {
+            entry.seal_actor_binding_if_any();
+        }
         self.connections.insert(msg.jid, msg.entry);
     }
 }
@@ -139,8 +147,116 @@ impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
             return false;
         }
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering owner-gated connection");
+        if let Some(entry) = self.connections.get(&msg.jid) {
+            entry.seal_actor_binding_if_any();
+        }
         self.connections.insert(msg.jid, msg.entry);
         true
+    }
+}
+
+/// Mirror a still-provisional local actor binding only if the exact
+/// predecessor remains. This message never activates its endpoint.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct RegisterProvisionalConnectionIfExpected {
+    pub jid: FullJid,
+    pub candidate: ActorProvisionalConnectionEntry,
+    pub expected: Option<LocalConnectionBindingId>,
+}
+
+/// Test-only mailbox barrier for ambiguous provisional mirror outcomes.
+#[cfg(feature = "test-utils")]
+pub struct HoldUserActorForPublication {
+    pub entered: tokio::sync::oneshot::Sender<()>,
+    pub release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "test-utils")]
+impl kameo::message::Message<HoldUserActorForPublication> for UserActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HoldUserActorForPublication,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = msg.entered.send(());
+        let _ = msg.release.await;
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl kameo::message::Message<RegisterProvisionalConnectionIfExpected> for UserActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: RegisterProvisionalConnectionIfExpected,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if msg.jid.to_bare() != self.bare_jid
+            || msg.candidate.jid() != &msg.jid
+            || !msg.candidate.is_provisional()
+            || msg.candidate.binding_ref().is_none()
+            || self
+                .connections
+                .get(&msg.jid)
+                .map(ConnectionEntry::binding_id)
+                != msg.expected
+        {
+            return false;
+        }
+        if let Some(previous) = self.connections.get(&msg.jid) {
+            previous.seal_actor_binding_if_any();
+        }
+        self.connections
+            .insert(msg.jid, msg.candidate.entry_for_publication());
+        true
+    }
+}
+
+/// The actor can mint this only while its exact provisional mirror is still
+/// current. A later replacement seals the shared endpoint before publishing.
+#[derive(Debug, Clone, kameo::Reply)]
+#[cfg(any(test, feature = "test-utils"))]
+pub struct ConfirmedProvisionalMirror {
+    jid: FullJid,
+    entry: ConnectionEntry,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl ConfirmedProvisionalMirror {
+    pub(in crate::registry) fn matches(&self, candidate: &ActorProvisionalConnectionEntry) -> bool {
+        candidate.jid() == &self.jid && candidate.matches_entry(&self.entry)
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub struct ConfirmProvisionalConnection {
+    pub jid: FullJid,
+    pub candidate: ActorProvisionalConnectionEntry,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl kameo::message::Message<ConfirmProvisionalConnection> for UserActor {
+    type Reply = Option<ConfirmedProvisionalMirror>;
+
+    async fn handle(
+        &mut self,
+        msg: ConfirmProvisionalConnection,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if msg.candidate.jid() != &msg.jid || msg.jid.to_bare() != self.bare_jid {
+            return None;
+        }
+        self.connections.get(&msg.jid).and_then(|entry| {
+            msg.candidate
+                .matches_entry(entry)
+                .then(|| ConfirmedProvisionalMirror {
+                    jid: msg.jid.clone(),
+                    entry: entry.clone(),
+                })
+        })
     }
 }
 

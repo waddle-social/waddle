@@ -561,6 +561,9 @@ pub(crate) trait WriteAuthority: Send + Sync {
         stop: &StopSignal,
         attempt: Box<dyn FnOnce() + '_>,
     ) -> bool;
+    fn completed(&self);
+    #[cfg(feature = "test-support")]
+    fn after_attempt(&self) -> futures::future::BoxFuture<'_, ()>;
 }
 
 impl<T> Drop for WriteRequest<T> {
@@ -3474,6 +3477,10 @@ where
         return SendOutcome::IoFailure(error);
     }
     progress.attempted();
+    #[cfg(feature = "test-support")]
+    if let Some(authority) = authority.as_deref() {
+        authority.after_attempt().await;
+    }
 
     let flushed = tokio::select! {
         biased;
@@ -3487,6 +3494,9 @@ where
     match flushed {
         Ok(()) => {
             progress.completed();
+            if let Some(authority) = authority.as_deref() {
+                authority.completed();
+            }
             SendOutcome::Sent
         }
         Err(error) if is_send_after_close(&error) => {

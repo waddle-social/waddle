@@ -114,7 +114,11 @@ registration callers untouched.
    it. Local flush completion is not client acknowledgement or an SM/durable
    custody transfer. Activation remains
    test-only; the harness exercises full envelope metadata through the entire
-   path but cannot acknowledge or settle external obligations as durable.
+   path but cannot acknowledge or settle external obligations as durable. The
+   physical owner and actor queue compile in the default server build;
+   provisional registry/UserActor publication and activation require the
+   fixture-only `test-utils`/`test-support` features. A default release build
+   cannot publish the actor candidate into a serving map.
 5. Seal before stop, prevent further commits of reserved permits, interrupt
    stalled writes and atomically transfer all accepted IDs/envelopes into a
    bounded terminal inventory. Join both pumps before reporting local
@@ -129,12 +133,13 @@ registration callers untouched.
    relay until production replacements are authoritative.
 
 The local publication lock order is **per-JID bind gate → registry shard →
-endpoint admission**; release shard and admission locks before any UserActor
-ask, storage operation or socket await. The UserActor handler may lock its
-entry's endpoint admission while executing its mailbox turn, but must not
-call back into the bind gate or registry. A bounded mirror ask occurs while
-the independent startup owner retains the bind gate and cleanup ticket;
-its reply is evidence to recheck, not the activation linearization point.
+endpoint admission**; release all local locks before any UserActor ask,
+storage operation or socket await. The UserActor handler may lock its entry's
+endpoint admission while executing its mailbox turn, but must not call back
+into the bind gate or registry. A bounded mirror ask occurs while the
+independent startup owner retains the cleanup ticket, then it reacquires the
+bind gate and rechecks both maps; the reply is evidence to recheck, not the
+activation linearization point.
 Activation revalidates the current lease and exact tuple before entering the
 registry shard/admission critical section. A replacement that races after
 the mirror reply must seal the candidate before its own publication. Timeout
@@ -176,8 +181,10 @@ PR. Document any unavoidable overlap before implementation.
 - Barrier tests cover a held capacity permit racing seal, cancellation before
   and after split, actor panic, reader/writer panic, stalled `poll_ready` and
   post-`start_send` flush, lease loss, shutdown deadline and both task joins.
-  Check count and byte budgets separately and verify control responsiveness
-  with all 256 actor data slots occupied.
+  Check count and byte budgets separately. Existing actor-lab saturation
+  tests characterize control responsiveness; the extracted dark physical
+  owner has no Kameo data mailbox, so full 256-slot owner integration belongs
+  to the coupled production actor cutover.
 - Exercise local registry and UserActor mirrors with the same candidate
   object. Assert no provisional stanza reaches the receiver, no archive
   frontier advances on refusal, and an old cleanup cannot remove a successor.
@@ -199,6 +206,9 @@ PR. Document any unavoidable overlap before implementation.
 Before selecting this owner from `/ws`, complete full inbound stanza routing,
 pre-bind/auth, bind/rebind, SM replay and contiguous handled-prefix parity,
 including paced-batch acknowledgement handling and replay-before-live output.
+Prove control responsiveness with all 256 data mailbox slots occupied in the
+integrated owner before cutover; the existing actor-lab test is characterization
+of a separate fixture.
 Every mutable protocol field must have one owner; remove the corresponding
 `LiveSocketState`/`WsConnState` loop writers in the same cutover. Close direct,
 peer, pending, ordered and remote-proxy enqueue bypasses with exact-binding

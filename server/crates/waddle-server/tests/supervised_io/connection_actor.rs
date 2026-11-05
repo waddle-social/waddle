@@ -1,16 +1,28 @@
+use axum::extract::{ws::WebSocketUpgrade, State};
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::serve::Listener;
+use axum::Router;
 use futures::{Sink, SinkExt, StreamExt};
+use kameo::actor::Spawn;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+use tokio::io::DuplexStream;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use waddle_server::clustering::NodeLifecycle;
+use waddle_server::test_support::actor_local_endpoint::{
+    ActorEndpointCleanupIndex, ActorLocalEndpointError, ActorLocalEndpointOwner,
+    ActorLocalPublishError, ActorLocalWriteError, ActorPublicationProbe,
+};
 use waddle_server::test_support::connection_actor::{
     start_connection_actor, start_connection_actor_with_effect, start_connection_actor_with_hooks,
     CompleteHandledInbound, CompleteHandledInboundAtLifecycleGate,
@@ -26,8 +38,18 @@ use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
     OutboundTerminal, ReservedIoStartConfig, ShutdownProtocol, StopReason, TransportLimits,
 };
+use waddle_server::websocket_transport::{
+    ActorWriteProbe, TestSocketAdmission, WebSocketInput, WebSocketOutput,
+};
+use waddle_xmpp::ownership::BindingRef;
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::protocol::frame::{parse_frame_with_metadata, InboundFrame, ParseError};
+use waddle_xmpp::registry::user_actor::{GetResources, HoldUserActorForPublication, UserActor};
+use waddle_xmpp::registry::{
+    ActorOutboundStage, ActorSocketOutboundEndpoint, ArchiveDispatchRefusalReason, ConnectionEntry,
+    ConnectionRegistry, LocalRetryDispatchOutcome, LocalRetryRefusal, OutboundStanza,
+    OutboundWriteAcceptance, TrySendDirectWithCustody,
+};
 use waddle_xmpp::stream_management::{SmAck, SmRequest, SmStanza};
 use xmpp_parsers::minidom::Element;
 
@@ -516,6 +538,832 @@ async fn actor_ack(
         .await
         .expect("connection actor remains addressable")
         .0
+}
+
+struct ActorOwnerDuplexListener(Option<DuplexStream>);
+
+impl Listener for ActorOwnerDuplexListener {
+    type Io = DuplexStream;
+    type Addr = ();
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self.0.take() {
+            Some(stream) => (stream, ()),
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(())
+    }
+}
+
+type StartedActorOwner = (
+    ActorLocalEndpointOwner,
+    WebSocketInput<axum::Error>,
+    WebSocketOutput<axum::Error>,
+);
+
+struct ActorOwnerRoute {
+    lifecycle: NodeLifecycle,
+    inventory: IoCustodianInventory,
+    index: ActorEndpointCleanupIndex,
+    write_probe: Option<Arc<ActorWriteProbe>>,
+    started: mpsc::Sender<(
+        ConnectionRef,
+        Result<StartedActorOwner, ActorLocalEndpointError>,
+    )>,
+}
+
+async fn actor_owner_route(
+    State(route): State<Arc<ActorOwnerRoute>>,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let admission = TestSocketAdmission::standalone(
+        &route.lifecycle,
+        &route.inventory,
+        tokio_util::sync::CancellationToken::new(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("standalone socket admission");
+    let admission = match &route.write_probe {
+        Some(probe) => admission.with_actor_write_probe(Arc::clone(probe)),
+        None => admission,
+    };
+    let connection = admission.connection_ref().clone();
+    upgrade
+        .protocols(["xmpp"])
+        .on_upgrade(move |socket| async move {
+            let started = admission
+                .start_actor_local_endpoint(
+                    socket,
+                    test_transport_limits(8, 2048, 2, 4096),
+                    TEST_TIMEOUT,
+                    &route.index,
+                    2,
+                    4096,
+                )
+                .await;
+            let _ = route.started.send((connection, started)).await;
+        })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_socket_actor_owner_keeps_exact_envelope_until_joined_terminal_settlement() {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("terminal inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerRoute {
+        lifecycle: NodeLifecycle::new(),
+        inventory: inventory.clone(),
+        index: index.clone(),
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner", get(actor_owner_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (mut peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (_, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner started");
+    let (mut owner, input, mut output) = started.expect("production physical start path");
+    let connection = owner.connection_ref().clone();
+    let (_, mut outsider_receiver, _) =
+        ActorSocketOutboundEndpoint::channel(connection.clone(), 2, 4096)
+            .expect("independent actor channel");
+    assert!(matches!(
+        owner
+            .write_next_direct(&mut outsider_receiver, &mut output)
+            .await,
+        Err(ActorLocalWriteError::WrongOwner)
+    ));
+    let (failed_endpoint, failed_receiver) = owner.new_binding_channel().expect("first channel");
+    let failed_binding = BindingRef::fresh(connection.clone());
+    let jid: jid::FullJid = "alice@example.test/phone".parse().expect("full JID");
+    let failed_candidate = ConnectionEntry::new_actor_provisional_for_binding(
+        failed_endpoint,
+        failed_binding.clone(),
+        jid.clone(),
+    )
+    .expect("first owner channel and binding match");
+    let registry = Arc::new(ConnectionRegistry::new());
+    let actor = UserActor::spawn(UserActor::new(jid.to_bare()));
+    assert!(matches!(
+        owner
+            .publish_binding(
+                Arc::clone(&registry),
+                actor.clone(),
+                jid.clone(),
+                failed_candidate,
+                Some(waddle_xmpp::registry::LocalConnectionBindingId::fresh()),
+                TEST_TIMEOUT,
+            )
+            .await,
+        Err(ActorLocalPublishError::RegistryConflict)
+    ));
+    assert!(failed_receiver.custody().is_sealed());
+    assert!(failed_receiver.custody().terminal_ids().is_some());
+    assert!(registry.entry(&jid).is_none());
+    drop(failed_receiver);
+    let (endpoint, mut receiver) = timeout(TEST_TIMEOUT, async {
+        loop {
+            match owner.new_binding_channel() {
+                Ok(channel) => break channel,
+                Err(ActorLocalEndpointError::PriorBindingActive) => tokio::task::yield_now().await,
+                Err(error) => panic!("fresh binding channel failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("failed binding retired before fresh channel");
+    let binding = BindingRef::fresh(connection.clone());
+    assert_ne!(binding, failed_binding);
+    let candidate =
+        ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
+            .expect("fresh owner channel and binding match");
+    let publication_probe = Arc::new(ActorPublicationProbe::default());
+    owner.install_publication_probe(Arc::clone(&publication_probe));
+    let publishing_registry = Arc::clone(&registry);
+    let publishing_actor = actor.clone();
+    let publishing_jid = jid.clone();
+    let publishing_candidate = candidate.clone();
+    let publishing = tokio::spawn(async move {
+        let result = owner
+            .publish_binding(
+                publishing_registry,
+                publishing_actor,
+                publishing_jid,
+                publishing_candidate,
+                None,
+                TEST_TIMEOUT,
+            )
+            .await;
+        (owner, result)
+    });
+    timeout(TEST_TIMEOUT, publication_probe.wait_for_mirror())
+        .await
+        .expect("both maps hold provisional candidate");
+    let (refused_acceptance, mut refused_accepted) = OutboundWriteAcceptance::new();
+    let refused_stanza = waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None));
+    let mut refused_outbound =
+        OutboundStanza::with_write_acceptance(refused_stanza.clone(), refused_acceptance);
+    refused_outbound.pending_row_id = Some(waddle_xmpp::pending_delivery::PendingRowId::new(
+        "provisional-refusal-row",
+    ));
+    let LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::Enqueue {
+        owner: refused_owner,
+        reason: ArchiveDispatchRefusalReason::Provisional,
+        outbound: refused_outbound,
+        ..
+    }) = actor
+        .ask(TrySendDirectWithCustody {
+            jid: jid.clone(),
+            outbound: refused_outbound,
+        })
+        .await
+        .expect("provisional mirror refuses")
+    else {
+        panic!("expected exact provisional refusal");
+    };
+    assert_eq!(refused_owner, candidate.binding_id());
+    assert_eq!(
+        refused_outbound.stanza.to_element(),
+        refused_stanza.to_element()
+    );
+    assert_eq!(
+        refused_outbound
+            .pending_row_id
+            .as_ref()
+            .map(|row| row.as_str()),
+        Some("provisional-refusal-row")
+    );
+    assert!(refused_outbound.write_acceptance.is_some());
+    assert!(matches!(
+        refused_accepted.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(receiver.try_recv().is_err());
+    publication_probe.release();
+    let (mut owner, publication_result) = timeout(TEST_TIMEOUT, publishing)
+        .await
+        .expect("publication resumes")
+        .expect("publication task returns");
+    publication_result.expect("independently owned publication");
+    assert!(matches!(
+        owner
+            .publish_binding(
+                Arc::clone(&registry),
+                actor.clone(),
+                jid.clone(),
+                candidate.clone(),
+                None,
+                TEST_TIMEOUT,
+            )
+            .await,
+        Err(ActorLocalPublishError::RegistryConflict)
+    ));
+    assert_eq!(
+        registry
+            .entry(&jid)
+            .expect("first publication remains")
+            .binding_id(),
+        candidate.binding_id()
+    );
+
+    let (acknowledgement, mut acknowledged) = OutboundWriteAcceptance::new();
+    let stanza = waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None));
+    assert!(matches!(
+        acknowledged.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(receiver.try_recv().is_err());
+    let accepted = actor
+        .ask(TrySendDirectWithCustody {
+            jid: jid.clone(),
+            outbound: OutboundStanza::with_write_acceptance(stanza.clone(), acknowledgement),
+        })
+        .await
+        .expect("active dispatch");
+    assert!(matches!(
+        accepted,
+        LocalRetryDispatchOutcome::AcceptedOrSettled
+    ));
+    let id = owner
+        .write_next_direct(&mut receiver, &mut output)
+        .await
+        .expect("local direct write")
+        .expect("one ID");
+    assert_eq!(
+        receiver.custody().stage(&id),
+        Some(ActorOutboundStage::Flushed)
+    );
+    assert!(matches!(
+        acknowledged.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let frame = timeout(TEST_TIMEOUT, peer.next())
+        .await
+        .expect("peer read deadline")
+        .expect("peer open")
+        .expect("valid frame");
+    let Message::Text(xml) = frame else {
+        panic!("expected one direct XMPP frame");
+    };
+    let received: Element = xml.as_str().parse().expect("typed outbound XML");
+    assert_eq!(received, stanza.to_element());
+
+    drop(id);
+    let observer = inventory.observe(&connection).expect("physical observer");
+    owner.request_stop(StopReason::Requested);
+    assert!(matches!(
+        owner.new_binding_channel(),
+        Err(ActorLocalEndpointError::PriorBindingActive)
+    ));
+    assert!(matches!(
+        owner
+            .publish_binding(
+                Arc::clone(&registry),
+                actor.clone(),
+                jid.clone(),
+                candidate,
+                None,
+                TEST_TIMEOUT,
+            )
+            .await,
+        Err(ActorLocalPublishError::CallerCancelled)
+    ));
+    drop(output);
+    drop(input);
+    drop(owner);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("pump joins"),
+        CustodianState::Joined
+    );
+    assert!(observer.terminal_summary().is_some());
+    let terminal = timeout(TEST_TIMEOUT, async {
+        loop {
+            if let Some(terminal) = index.drain_joined_terminal(&connection) {
+                break terminal;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal inventory transfer");
+    assert_eq!(terminal.len(), 1);
+    let (_, retained, stage) = terminal.into_iter().next().expect("one retained envelope");
+    assert_eq!(stage, ActorOutboundStage::Flushed);
+    assert_eq!(retained.stanza.to_element(), stanza.to_element());
+    assert!(retained.write_acceptance.is_some());
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publication retirement and terminal slot release");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actor_cleanup_index_full_stops_split_pumps_under_independent_inventory() {
+    let inventory = IoCustodianInventory::new(2).expect("two physical reservations");
+    let index = ActorEndpointCleanupIndex::new(1).expect("one actor cleanup slot");
+    let (started, mut ready) = mpsc::channel(2);
+    let route = Arc::new(ActorOwnerRoute {
+        lifecycle: NodeLifecycle::new(),
+        inventory: inventory.clone(),
+        index: index.clone(),
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner", get(actor_owner_route))
+        .with_state(route);
+
+    let (first_server_socket, first_client_socket) = tokio::io::duplex(64 * 1024);
+    let first_server = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let _ = axum::serve(ActorOwnerDuplexListener(Some(first_server_socket)), app).await;
+        }
+    });
+    let (_first_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner", first_client_socket)
+            .await
+            .expect("first real WebSocket upgrade");
+    let (first_connection, first_started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("first owner start deadline")
+        .expect("first owner event");
+    let (first_owner, first_input, first_output) = first_started.expect("first owner starts");
+
+    let (second_server_socket, second_client_socket) = tokio::io::duplex(64 * 1024);
+    let second_server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(second_server_socket)), app).await;
+    });
+    let (_second_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner", second_client_socket)
+            .await
+            .expect("second real WebSocket upgrade");
+    let (second_connection, second_started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("second owner start deadline")
+        .expect("second owner event");
+    assert!(matches!(
+        second_started,
+        Err(ActorLocalEndpointError::InventoryFull)
+    ));
+    assert!(!index.contains(&second_connection));
+    let second_observer = inventory
+        .observe(&second_connection)
+        .expect("split pumps remain independently indexed");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, second_observer.wait_until_joined())
+            .await
+            .expect("failed owner pumps join"),
+        CustodianState::Joined
+    );
+    assert!(second_observer.terminal_summary().is_some());
+
+    let first_observer = inventory
+        .observe(&first_connection)
+        .expect("first physical owner remains indexed");
+    first_owner.request_stop(StopReason::Requested);
+    drop(first_output);
+    drop(first_input);
+    drop(first_owner);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, first_observer.wait_until_joined())
+            .await
+            .expect("first owner pumps join"),
+        CustodianState::Joined
+    );
+    first_server.abort();
+    second_server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actor_owner_panic_keeps_unwritten_envelope_in_app_held_terminal_inventory() {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let app_index = ActorEndpointCleanupIndex::new(1).expect("app terminal inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerRoute {
+        lifecycle: NodeLifecycle::new(),
+        inventory: inventory.clone(),
+        index: app_index.clone(),
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner", get(actor_owner_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) = tokio_tungstenite::client_async("ws://localhost/actor-owner", client_socket)
+        .await
+        .expect("real WebSocket upgrade");
+    let (_, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (mut owner, input, output) = started.expect("physical owner starts");
+    let connection = owner.connection_ref().clone();
+    let observer = inventory
+        .observe(&connection)
+        .expect("independent observer");
+    let (endpoint, mut receiver) = owner.new_binding_channel().expect("actor queue");
+    let jid: jid::FullJid = "alice@example.test/phone".parse().expect("full JID");
+    let candidate = ConnectionEntry::new_actor_provisional_for_binding(
+        endpoint,
+        BindingRef::fresh(connection.clone()),
+        jid.clone(),
+    )
+    .expect("binding matches socket");
+    let registry = Arc::new(ConnectionRegistry::new());
+    let actor = UserActor::spawn(UserActor::new(jid.to_bare()));
+    owner
+        .publish_binding(
+            registry,
+            actor.clone(),
+            jid.clone(),
+            candidate,
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect("test-only activation");
+    let (acceptance, mut acknowledged) = OutboundWriteAcceptance::new();
+    let stanza = waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None));
+    assert!(matches!(
+        actor
+            .ask(TrySendDirectWithCustody {
+                jid,
+                outbound: OutboundStanza::with_write_acceptance(stanza.clone(), acceptance),
+            })
+            .await
+            .expect("local dispatch"),
+        LocalRetryDispatchOutcome::AcceptedOrSettled
+    ));
+    let id = receiver.try_recv().expect("accepted ID");
+    drop(id);
+    drop(receiver);
+    let panicked_actor = tokio::spawn(async move {
+        let _owned = owner;
+        panic!("synthetic actor owner panic");
+    });
+    assert!(panicked_actor
+        .await
+        .expect_err("owner task panicked")
+        .is_panic());
+    drop(input);
+    drop(output);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("both pumps join after actor panic"),
+        CustodianState::Joined
+    );
+    let terminal = timeout(TEST_TIMEOUT, async {
+        loop {
+            if let Some(terminal) = app_index.drain_joined_terminal(&connection) {
+                break terminal;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("app retrieves lost actor IDs");
+    assert_eq!(terminal.len(), 1);
+    let (_, retained, stage) = terminal.into_iter().next().expect("one envelope");
+    assert_eq!(stage, ActorOutboundStage::NotAttempted);
+    assert_eq!(retained.stanza.to_element(), stanza.to_element());
+    assert!(retained.write_acceptance.is_some());
+    assert!(matches!(
+        acknowledged.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    server.abort();
+}
+
+async fn real_socket_stop_at_physical_attempt(after_attempt: bool) {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let app_index = ActorEndpointCleanupIndex::new(1).expect("app terminal inventory");
+    let probe = Arc::new(ActorWriteProbe::default());
+    if after_attempt {
+        probe.pause_after_attempt();
+    } else {
+        probe.pause_next();
+    }
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerRoute {
+        lifecycle: NodeLifecycle::new(),
+        inventory: inventory.clone(),
+        index: app_index.clone(),
+        write_probe: Some(Arc::clone(&probe)),
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner", get(actor_owner_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) = tokio_tungstenite::client_async("ws://localhost/actor-owner", client_socket)
+        .await
+        .expect("real WebSocket upgrade");
+    let (_, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (mut owner, input, mut output) = started.expect("physical owner starts");
+    let connection = owner.connection_ref().clone();
+    let observer = inventory.observe(&connection).expect("physical observer");
+    let (endpoint, mut receiver) = owner.new_binding_channel().expect("actor queue");
+    let custody = Arc::clone(receiver.custody());
+    let jid: jid::FullJid = "alice@example.test/phone".parse().expect("full JID");
+    let candidate = ConnectionEntry::new_actor_provisional_for_binding(
+        endpoint,
+        BindingRef::fresh(connection.clone()),
+        jid.clone(),
+    )
+    .expect("binding matches socket");
+    let actor = UserActor::spawn(UserActor::new(jid.to_bare()));
+    owner
+        .publish_binding(
+            Arc::new(ConnectionRegistry::new()),
+            actor.clone(),
+            jid.clone(),
+            candidate,
+            None,
+            TEST_TIMEOUT,
+        )
+        .await
+        .expect("test-only activation");
+    let (acceptance, mut acknowledged) = OutboundWriteAcceptance::new();
+    let stanza = waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None));
+    assert!(matches!(
+        actor
+            .ask(TrySendDirectWithCustody {
+                jid,
+                outbound: OutboundStanza::with_write_acceptance(stanza.clone(), acceptance),
+            })
+            .await
+            .expect("local dispatch"),
+        LocalRetryDispatchOutcome::AcceptedOrSettled
+    ));
+    let owner = Arc::new(owner);
+    let writing_owner = Arc::clone(&owner);
+    let write = tokio::spawn(async move {
+        let result = writing_owner
+            .write_next_direct(&mut receiver, &mut output)
+            .await;
+        (result, receiver, output)
+    });
+    if after_attempt {
+        timeout(TEST_TIMEOUT, probe.wait_for_after_attempt())
+            .await
+            .expect("writer reached stalled flush boundary");
+    } else {
+        timeout(TEST_TIMEOUT, probe.wait_for_entry())
+            .await
+            .expect("writer reached physical attempt gate");
+    }
+    owner.request_stop(StopReason::Requested);
+    if after_attempt {
+        probe.release_after_attempt();
+    } else {
+        probe.release();
+    }
+    let (write_result, receiver, output) = timeout(TEST_TIMEOUT, write)
+        .await
+        .expect("blocked writer exits")
+        .expect("writer task returns");
+    assert!(write_result.is_err());
+    let expected_stage = if after_attempt {
+        ActorOutboundStage::AttemptedUncertain
+    } else {
+        ActorOutboundStage::NotAttempted
+    };
+    assert_eq!(probe.attempts(), u64::from(after_attempt));
+    let ids = custody.terminal_ids().expect("stop sealed custody");
+    assert_eq!(ids.len(), 1);
+    assert_eq!(custody.stage(&ids[0]), Some(expected_stage));
+    drop(receiver);
+    drop(output);
+    drop(input);
+    drop(owner);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("both pumps join"),
+        CustodianState::Joined
+    );
+    let terminal = timeout(TEST_TIMEOUT, async {
+        loop {
+            if let Some(terminal) = app_index.drain_joined_terminal(&connection) {
+                break terminal;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("joined app inventory");
+    assert_eq!(terminal.len(), 1);
+    let (_, retained, stage) = terminal.into_iter().next().expect("one envelope");
+    assert_eq!(stage, expected_stage);
+    assert_eq!(retained.stanza.to_element(), stanza.to_element());
+    assert!(retained.write_acceptance.is_some());
+    assert!(matches!(
+        acknowledged.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_socket_stop_before_physical_attempt_recovers_exact_unwritten_envelope() {
+    real_socket_stop_at_physical_attempt(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_socket_stop_during_stalled_flush_keeps_attempt_uncertain() {
+    real_socket_stop_at_physical_attempt(true).await;
+}
+
+#[derive(Clone, Copy)]
+enum PublicationLoss {
+    MirrorTimeout,
+    CallerCancelled,
+    LeaseRevoked,
+}
+
+async fn real_socket_publication_loss_compensates_exact_candidate(loss: PublicationLoss) {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let app_index = ActorEndpointCleanupIndex::new(1).expect("app terminal inventory");
+    let lifecycle = NodeLifecycle::new();
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerRoute {
+        lifecycle: lifecycle.clone(),
+        inventory: inventory.clone(),
+        index: app_index.clone(),
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner", get(actor_owner_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) = tokio_tungstenite::client_async("ws://localhost/actor-owner", client_socket)
+        .await
+        .expect("real WebSocket upgrade");
+    let (_, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (mut owner, input, output) = started.expect("physical owner starts");
+    let connection = owner.connection_ref().clone();
+    let observer = inventory.observe(&connection).expect("physical observer");
+    let (endpoint, mut receiver) = owner.new_binding_channel().expect("actor queue");
+    let jid: jid::FullJid = "alice@example.test/phone".parse().expect("full JID");
+    let candidate = ConnectionEntry::new_actor_provisional_for_binding(
+        endpoint,
+        BindingRef::fresh(connection.clone()),
+        jid.clone(),
+    )
+    .expect("binding matches socket");
+    let registry = Arc::new(ConnectionRegistry::new());
+    let actor = UserActor::spawn(UserActor::new(jid.to_bare()));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let mut release_tx = Some(release_tx);
+    actor
+        .tell(HoldUserActorForPublication {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .await
+        .expect("hold actor mailbox");
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("actor barrier deadline")
+        .expect("actor entered barrier");
+    let owner = Arc::new(owner);
+    let publishing_owner = Arc::clone(&owner);
+    let publishing_registry = Arc::clone(&registry);
+    let publishing_actor = actor.clone();
+    let publishing_jid = jid.clone();
+    let publishing_candidate = candidate.clone();
+    let deadline = if matches!(loss, PublicationLoss::MirrorTimeout) {
+        Duration::from_millis(30)
+    } else {
+        TEST_TIMEOUT
+    };
+    let publish = tokio::spawn(async move {
+        publishing_owner
+            .publish_binding(
+                publishing_registry,
+                publishing_actor,
+                publishing_jid,
+                publishing_candidate,
+                None,
+                deadline,
+            )
+            .await
+    });
+    timeout(TEST_TIMEOUT, async {
+        while registry.entry(&jid).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provisional registry publication");
+    assert!(receiver.try_recv().is_err());
+    match loss {
+        PublicationLoss::MirrorTimeout => {
+            assert!(matches!(
+                timeout(TEST_TIMEOUT, publish)
+                    .await
+                    .expect("mirror deadline completes")
+                    .expect("publisher task returns"),
+                Err(ActorLocalPublishError::MirrorUncertain)
+            ));
+        }
+        PublicationLoss::CallerCancelled => {
+            publish.abort();
+            assert!(publish.await.expect_err("caller cancelled").is_cancelled());
+        }
+        PublicationLoss::LeaseRevoked => {
+            lifecycle.begin_drain();
+            let _ = release_tx.take().expect("release actor once").send(());
+            assert!(timeout(TEST_TIMEOUT, publish)
+                .await
+                .expect("revoked publication completes")
+                .expect("publisher task returns")
+                .is_err());
+        }
+    }
+    if !matches!(loss, PublicationLoss::LeaseRevoked) {
+        let _ = release_tx.take().expect("release actor once").send(());
+    }
+    timeout(TEST_TIMEOUT, async {
+        loop {
+            let resources = actor.ask(GetResources).await.expect("mirror inspection");
+            if registry.entry(&jid).is_none() && resources.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("exact registry and mirror compensation");
+    assert!(receiver.custody().is_sealed());
+    assert_eq!(receiver.custody().retained_count(), 0);
+    owner.request_stop(StopReason::Requested);
+    drop(receiver);
+    drop(input);
+    drop(output);
+    drop(owner);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("both pumps join"),
+        CustodianState::Joined
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_socket_mirror_timeout_compensates_exact_provisional_binding() {
+    real_socket_publication_loss_compensates_exact_candidate(PublicationLoss::MirrorTimeout).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_socket_cancelled_publisher_compensates_exact_provisional_binding() {
+    real_socket_publication_loss_compensates_exact_candidate(PublicationLoss::CallerCancelled)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_socket_lease_revocation_compensates_exact_provisional_binding() {
+    real_socket_publication_loss_compensates_exact_candidate(PublicationLoss::LeaseRevoked).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
