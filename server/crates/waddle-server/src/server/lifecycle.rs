@@ -11,6 +11,7 @@ use super::Arc;
 use super::DatabasePool;
 use super::DatabaseSpacesMetadataStore;
 use super::PermissionActor;
+use super::ResolvedXmppDatabaseUrl;
 use super::Result;
 use super::ServerConfig;
 use super::SocketAddr;
@@ -162,24 +163,17 @@ pub async fn start_with_config(
     let inbox_database_storage = inbox_startup.storage().clone();
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
-    let spaces_metadata_database_store = Arc::new(
-        DatabaseSpacesMetadataStore::open(xmpp_config.spaces_metadata_database_url.as_deref())
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
-            })?,
-    );
+    let (spaces_metadata_database_store, channel_space_link_database_store, space_stores_attached) =
+        create_space_stores(
+            db_pool.global(),
+            &xmpp_config.spaces_metadata_database_url,
+            &xmpp_config.channel_space_links_database_url,
+        )
+        .await?;
+    let spaces_metadata_database_store = Arc::new(spaces_metadata_database_store);
     let spaces_metadata_store: Arc<dyn crate::spaces_metadata::SpacesMetadataStore> =
         spaces_metadata_database_store.clone();
-    let channel_space_link_database_store = Arc::new(
-        crate::channel_space_links::DatabaseChannelSpaceLinkStore::open(
-            xmpp_config.channel_space_links_database_url.as_deref(),
-        )
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("Failed to initialize channel-space link storage: {}", error)
-        })?,
-    );
+    let channel_space_link_database_store = Arc::new(channel_space_link_database_store);
     let channel_space_link_store: Arc<dyn crate::channel_space_links::ChannelSpaceLinkStore> =
         channel_space_link_database_store.clone();
     // Build the shared XEP-0060 PubSub/PEP storage and the MUC
@@ -347,18 +341,29 @@ pub async fn start_with_config(
         );
     }
     register_inbox_lineage(&state, &inbox_startup).await?;
-    bootstrap_and_register_store_lineage(
-        &state,
-        crate::db::lineage::DurableStore::SpacesMetadata,
-        spaces_metadata_database_store.database(),
-    )
-    .await?;
-    bootstrap_and_register_store_lineage(
-        &state,
-        crate::db::lineage::DurableStore::ChannelSpaceLinks,
-        channel_space_link_database_store.database(),
-    )
-    .await?;
+    if space_stores_attached {
+        state.register_lineage_alias(
+            crate::db::lineage::DurableStore::SpacesMetadata,
+            crate::db::lineage::DurableStore::Global,
+        );
+        state.register_lineage_alias(
+            crate::db::lineage::DurableStore::ChannelSpaceLinks,
+            crate::db::lineage::DurableStore::Global,
+        );
+    } else {
+        bootstrap_and_register_store_lineage(
+            &state,
+            crate::db::lineage::DurableStore::SpacesMetadata,
+            spaces_metadata_database_store.database(),
+        )
+        .await?;
+        bootstrap_and_register_store_lineage(
+            &state,
+            crate::db::lineage::DurableStore::ChannelSpaceLinks,
+            channel_space_link_database_store.database(),
+        )
+        .await?;
+    }
     bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Pubsub,
@@ -488,6 +493,53 @@ pub async fn start_with_config(
             "critical actor service terminated; node fenced and drained: {failure:?}"
         )),
         None => result.map(|()| metrics_flush),
+    }
+}
+
+/// Select both space stores together so a restricted runtime cannot attach
+/// one store while opening a separate owner-capable pool for the other.
+pub(crate) async fn create_space_stores(
+    global: &crate::db::Database,
+    spaces_location: &ResolvedXmppDatabaseUrl,
+    links_location: &ResolvedXmppDatabaseUrl,
+) -> Result<(
+    DatabaseSpacesMetadataStore,
+    crate::channel_space_links::DatabaseChannelSpaceLinkStore,
+    bool,
+)> {
+    if global.uses_attested_postgres_pool() {
+        if !matches!(spaces_location, ResolvedXmppDatabaseUrl::InheritedGlobal(_))
+            || !matches!(links_location, ResolvedXmppDatabaseUrl::InheritedGlobal(_))
+        {
+            anyhow::bail!(
+                "restricted space stores require both database locations to inherit the global pool"
+            );
+        }
+        let spaces = DatabaseSpacesMetadataStore::attach_existing(global.clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to attach spaces metadata storage: {error}")
+            })?;
+        let links = crate::channel_space_links::DatabaseChannelSpaceLinkStore::attach_existing(
+            global.clone(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to attach channel-space link storage: {error}"))?;
+        Ok((spaces, links, true))
+    } else {
+        let spaces = DatabaseSpacesMetadataStore::open(spaces_location.as_deref())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize spaces metadata storage: {error}")
+            })?;
+        let links = crate::channel_space_links::DatabaseChannelSpaceLinkStore::open(
+            links_location.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to initialize channel-space link storage: {error}")
+        })?;
+        Ok((spaces, links, false))
     }
 }
 
