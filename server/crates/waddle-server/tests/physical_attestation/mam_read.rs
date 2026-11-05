@@ -2,14 +2,25 @@
 
 use super::{
     attested_pool, install, test_url, url_with_schema, Database, DatabaseConfig, DatabaseDriver,
-    Duration, Fixture, PgConnection, PgRoleName, CATALOG_GRANT_LOCK,
+    Duration, Fixture, PgConnection, PgRoleName, PgSchemaName, CATALOG_GRANT_LOCK,
 };
 use sqlx::Connection;
-use waddle_server::mam_runtime::{DarkMamReadError, DarkMamReader};
-use waddle_xmpp::mam::{
-    MamArchiveKind, MamQuery, MamSchemaVerificationError, MamStorageError, SqlxMamStorage,
+use waddle_server::mam_runtime::{
+    DarkMamReadError, DarkMamReader, DatabaseMamStorage, DatabaseMamStorageError,
 };
+use waddle_xmpp::mam::{
+    MamArchiveKind, MamQuery, MamSchemaVerificationError, MamStorage, MamStorageError,
+    SqlxMamStorage, StoreOutcome,
+};
+use waddle_xmpp_core::mam::ArchivedMessage;
 use waddle_xmpp_core::xep0359::StanzaId;
+
+#[cfg(feature = "clustering")]
+use waddle_server::clustering::claims::initialize_fresh_claims_owner;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::muc::RoomClaimFenceContext;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 
 #[tokio::test]
 async fn mam_reader_uses_attested_main_database_and_rejects_drift() {
@@ -408,4 +419,294 @@ async fn mam_reader_uses_attested_main_database_and_rejects_drift() {
     drop(unattested);
     drop(sqlite);
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_grants() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let cluster_url = url.clone();
+    let fixture = Fixture::new(url).await;
+    // The attestation definer cannot own the target schema: ownership would
+    // confer CREATE and make the restricted physical installer reject it.
+    let mam_owner = format!("mam_owner_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE ROLE {mam_owner} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"))
+        .execute(&fixture.cluster_admin)
+        .await
+        .expect("provision separate MAM owner");
+    let owner_role = PgRoleName::new(mam_owner.clone()).expect("valid MAM owner role");
+    let schema = PgSchemaName(fixture.target.clone());
+
+    sqlx::query(&format!(
+        "ALTER SCHEMA {} OWNER TO {}",
+        fixture.target, mam_owner
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("assign isolated schema to non-login owner");
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {mam_owner}"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("allow owner to verify physical identity");
+    let mut owner_connection = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("connect provisioning role");
+    sqlx::query(&format!("SET ROLE {mam_owner}"))
+        .execute(&mut owner_connection)
+        .await
+        .expect("assume non-login schema owner");
+    owner_connection = SqlxMamStorage::bootstrap_postgres_schema_on_owned_connection(
+        owner_connection,
+        &fixture.target,
+        &mam_owner,
+    )
+    .await
+    .expect("owner prepares MAM schema");
+
+    #[cfg(feature = "clustering")]
+    {
+        sqlx::query(&format!(
+            "CREATE TABLE {}.xmpp_occupancy_authority (full_jid TEXT PRIMARY KEY, generation TEXT NOT NULL)",
+            fixture.target
+        ))
+        .execute(&mut owner_connection)
+        .await
+        .expect("prepare exact occupancy table");
+        let identity = fixture
+            .lineage
+            .postgres_identity
+            .as_ref()
+            .expect("PostgreSQL fixture identity")
+            .clone();
+        let mut owner_url = url::Url::parse(&fixture.base_url).expect("owner URL");
+        let retained: Vec<_> = owner_url
+            .query_pairs()
+            .filter(|(key, _)| key != "options")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        owner_url
+            .query_pairs_mut()
+            .clear()
+            .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+            .append_pair(
+                "options",
+                &format!(
+                    "-c role={} -c search_path={},public",
+                    mam_owner, fixture.target
+                ),
+            );
+        let mut owner_config = DatabaseConfig::new(DatabaseDriver::Postgres, owner_url.to_string());
+        owner_config.pool_size = 1;
+        let owner_database = Database::from_config("MAM claim owner", &owner_config)
+            .await
+            .expect("open non-login claim owner lane");
+        initialize_fresh_claims_owner(&owner_database, &identity)
+            .await
+            .expect("prepare exact claim schema");
+        drop(owner_database);
+    }
+
+    for statement in [
+        format!(
+            "GRANT SELECT, INSERT ON {}.mam_messages TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT UPDATE (body, stanza_xml, thread_id, parent_thread_id, reply_to_id, reply_to_jid, rich_payload) ON {}.mam_messages TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT ON {}.mam_archive_sequences TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT UPDATE (next_seq) ON {}.mam_archive_sequences TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut owner_connection)
+            .await
+            .expect("grant exact MAM runtime columns");
+    }
+    #[cfg(feature = "clustering")]
+    for statement in [
+        format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.clustering_claims TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON {}.xmpp_occupancy_authority TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, USAGE ON SEQUENCE {}.clustering_claim_epoch_seq TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut owner_connection)
+            .await
+            .expect("grant exact main claim runtime profile");
+    }
+
+    let attestation = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestor");
+    let database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "MAM writer main lane",
+        attested_pool(
+            fixture.runtime_options.clone(),
+            attestation,
+            1,
+            Duration::from_secs(8),
+        )
+        .expect("one-slot attested pool"),
+    );
+
+    sqlx::query(&format!(
+        "GRANT UPDATE ON {}.mam_messages TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&mut owner_connection)
+    .await
+    .expect("inject unsafe table-wide message update");
+    assert!(matches!(
+        DatabaseMamStorage::attach(&database, owner_role.clone(), schema.clone()).await,
+        Err(DatabaseMamStorageError::UnsafeMamPrivileges)
+    ));
+    sqlx::query(&format!(
+        "REVOKE UPDATE ON {}.mam_messages FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&mut owner_connection)
+    .await
+    .expect("revoke unsafe table-wide message update");
+    // PostgreSQL also clears column UPDATE ACLs with a table-wide REVOKE.
+    sqlx::query(&format!(
+        "GRANT UPDATE (body, stanza_xml, thread_id, parent_thread_id, reply_to_id, reply_to_jid, rich_payload) ON {}.mam_messages TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&mut owner_connection)
+    .await
+    .expect("restore exact tombstone columns after broad revoke");
+
+    let storage = DatabaseMamStorage::attach(&database, owner_role, schema)
+        .await
+        .expect("attach exact MAM writer");
+    let archive: jid::BareJid = "room@example.test".parse().expect("archive JID");
+    let message = ArchivedMessage {
+        id: "one-slot-message".to_owned(),
+        body: Some("stored through the main transaction".to_owned()),
+        ..ArchivedMessage::for_test(
+            "alice@example.test/device".parse().expect("sender JID"),
+            archive.clone().into(),
+        )
+    };
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            storage.store_message(&archive, &message)
+        )
+        .await
+        .expect("one-slot MAM write does not reacquire a pool connection")
+        .expect("store through attested main slot"),
+        StoreOutcome::Stored { .. }
+    ));
+    let loaded = tokio::time::timeout(Duration::from_secs(3), storage.get_message(&message.id))
+        .await
+        .expect("one-slot MAM read does not reacquire a pool connection")
+        .expect("load through attested main slot")
+        .expect("stored message exists");
+    assert_eq!(
+        loaded.body.as_deref(),
+        Some("stored through the main transaction")
+    );
+    let page = tokio::time::timeout(
+        Duration::from_secs(3),
+        storage.query_messages(&archive, MamArchiveKind::Room, &MamQuery::default()),
+    )
+    .await
+    .expect("one-slot query does not reacquire a pool connection")
+    .expect("query through attested main slot");
+    assert_eq!(page.messages.len(), 1);
+
+    #[cfg(feature = "clustering")]
+    {
+        let entity = Entity::new(EntityType::RoomActor, archive.to_string());
+        let owner = NodeIdentity::new("mam-test-node", "mam-test-epoch");
+        let encoded_entity = entity.to_string();
+        let claim_epoch: i64 = sqlx::query_scalar(&format!(
+            "INSERT INTO {}.clustering_claims (entity, entity_type, node_id, node_epoch) \
+             VALUES ($1, $2, $3, $4) RETURNING claim_epoch",
+            fixture.target
+        ))
+        .bind(encoded_entity)
+        .bind(EntityType::RoomActor.as_db_str())
+        .bind(&owner.node_id)
+        .bind(&owner.node_epoch)
+        .fetch_one(&mut owner_connection)
+        .await
+        .expect("seed exact room claim");
+        let fence =
+            RoomClaimFenceContext::new(entity.clone(), owner.clone(), ClaimEpoch(claim_epoch));
+        let fenced_message = ArchivedMessage {
+            id: "fenced-one-slot-message".to_owned(),
+            ..ArchivedMessage::for_test(
+                "alice@example.test/device".parse().expect("sender JID"),
+                archive.clone().into(),
+            )
+        };
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                storage.store_message_fenced(&archive, &fenced_message, &fence)
+            )
+            .await
+            .expect("one-slot fenced write stays on pinned transaction")
+            .expect("fenced MAM write"),
+            StoreOutcome::Stored { .. }
+        ));
+        let stale_fence = RoomClaimFenceContext::new(entity, owner, ClaimEpoch(claim_epoch + 1));
+        let rejected_message = ArchivedMessage {
+            id: "stale-one-slot-message".to_owned(),
+            ..ArchivedMessage::for_test(
+                "alice@example.test/device".parse().expect("sender JID"),
+                archive.clone().into(),
+            )
+        };
+        assert!(matches!(
+            storage
+                .store_message_fenced(&archive, &rejected_message, &stale_fence)
+                .await,
+            Err(MamStorageError::NotOwner { .. })
+        ));
+        assert!(storage
+            .get_message(&rejected_message.id)
+            .await
+            .expect("read after stale fence")
+            .is_none());
+    }
+
+    owner_connection
+        .close()
+        .await
+        .expect("close owner provisioning connection");
+    drop(storage);
+    drop(database);
+    fixture.cleanup().await;
+    let cluster_admin = sqlx::PgPool::connect(&cluster_url)
+        .await
+        .expect("reconnect cluster administrator for owner cleanup");
+    sqlx::query(&format!("DROP ROLE {mam_owner}"))
+        .execute(&cluster_admin)
+        .await
+        .expect("drop separate MAM owner");
+    cluster_admin.close().await;
 }

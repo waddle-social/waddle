@@ -286,7 +286,7 @@ pub async fn store_archived_message_on_sqlite_connection(
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
     let existing = sqlx::query(&format!(
-        "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE id = $1"
+        "SELECT {SELECT_COLUMNS} FROM main.mam_messages WHERE id = $1"
     ))
     .bind(&stanza_id.id)
     .fetch_optional(&mut *conn)

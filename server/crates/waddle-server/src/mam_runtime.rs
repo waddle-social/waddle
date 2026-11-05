@@ -1,8 +1,9 @@
-//! Dark, read-only MAM adapter bound to an attested PostgreSQL database.
+//! Dark MAM adapters bound to an attested PostgreSQL database.
 //!
-//! This is not a complete `MamStorage` implementation and is not wired into
-//! startup or protocol routing. Trusted writers, owner DDL, role membership,
-//! and ACL changes must be quiescent while the snapshot is inspected and used.
+//! `DarkMamReader` provides read-only snapshots, while `DatabaseMamStorage`
+//! implements `MamStorage` on the same admitted main-database transactions.
+//! Neither adapter is wired into startup or protocol routing. Trusted writers,
+//! owner DDL, role membership, and ACL changes must be quiescent while attached.
 
 use crate::db::physical_attestation::{
     quote_identifier, AttestedPostgresWriterCapability, PgRoleName,
@@ -14,6 +15,9 @@ use waddle_xmpp::mam::{
     MamStorageError, SqlxMamStorage,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
+
+mod database_storage;
+pub use database_storage::{DatabaseMamStorage, DatabaseMamStorageError};
 
 /// Failure to attach or read through the dark MAM adapter.
 #[derive(Debug, thiserror::Error)]

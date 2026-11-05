@@ -2,11 +2,11 @@ use chrono::{DateTime, Utc};
 use jid::BareJid;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, SqliteConnection};
-use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage};
+use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedTombstone, MamQuery};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::SqlxMamStorage;
-use crate::mam::storage::{MamStorage, MamStorageError};
+use crate::mam::storage::{MamArchiveKind, MamStorage, MamStorageError, StoreOutcome};
 
 struct Fixture<'a> {
     id: &'a str,
@@ -259,6 +259,127 @@ async fn sqlite_lookup_uses_pinned_connection_and_preserves_decode_contract() {
         .await
         .expect("lookup after rollback")
         .is_none());
+}
+
+#[tokio::test]
+async fn sqlite_connection_helpers_ignore_temp_archive_shadows() {
+    let storage = SqlxMamStorage::open_in_memory().await.expect("schema");
+    let pool = storage.sqlite_pool().expect("SQLite pool");
+    let mut tx = pool.begin().await.expect("transaction");
+    sqlx::query("CREATE TEMP TABLE mam_messages AS SELECT * FROM main.mam_messages WHERE 0")
+        .execute(&mut *tx)
+        .await
+        .expect("temporary message shadow");
+    sqlx::query(
+        "CREATE TEMP TABLE mam_archive_sequences AS SELECT * FROM main.mam_archive_sequences WHERE 0",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("temporary sequence shadow");
+
+    let archive: BareJid = "main-shadow@rooms.example".parse().expect("archive");
+    let message_id = uuid::Uuid::now_v7().to_string();
+    let message = ArchivedMessage {
+        id: message_id.clone(),
+        body: Some("persistent archive row".to_owned()),
+        stanza_id: Some(StanzaId::new("main-shadow-wire", archive.clone().into())),
+        ..ArchivedMessage::for_test(
+            "alice@example.com/device".parse().expect("sender"),
+            archive.clone().into(),
+        )
+    };
+    assert!(matches!(
+        SqlxMamStorage::store_message_on_sqlite_connection(&mut tx, &archive, &message)
+            .await
+            .expect("store in main"),
+        StoreOutcome::Stored { stanza_id, .. } if stanza_id == message_id
+    ));
+
+    let page = SqlxMamStorage::query_on_sqlite_connection(
+        &mut tx,
+        &archive,
+        MamArchiveKind::Room,
+        &MamQuery::default(),
+    )
+    .await
+    .expect("query main");
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].id, message_id);
+    let mut cursor_query = MamQuery::default();
+    cursor_query.before_id = Some(message_id.clone());
+    assert!(SqlxMamStorage::query_on_sqlite_connection(
+        &mut tx,
+        &archive,
+        MamArchiveKind::Room,
+        &cursor_query,
+    )
+    .await
+    .expect("query cursor in main")
+    .messages
+    .is_empty());
+    assert_eq!(
+        SqlxMamStorage::count_messages_on_sqlite_connection(&mut tx, &archive)
+            .await
+            .expect("count main"),
+        1
+    );
+    assert_eq!(
+        SqlxMamStorage::get_message_by_archive_or_stanza_id_on_sqlite_connection(
+            &mut tx,
+            &archive,
+            "main-shadow-wire",
+        )
+        .await
+        .expect("lookup main")
+        .expect("persistent message")
+        .id,
+        message_id
+    );
+    assert!(SqlxMamStorage::replace_with_tombstone_on_sqlite_connection(
+        &mut tx,
+        &message_id,
+        ArchivedTombstone {
+            retraction_id: None,
+            stamp: Utc::now(),
+            moderation: None,
+            sender_scope: None,
+        },
+    )
+    .await
+    .expect("tombstone main row"));
+    assert!(
+        SqlxMamStorage::get_message_on_sqlite_connection(&mut tx, &message_id)
+            .await
+            .expect("read tombstoned main row")
+            .expect("persistent row")
+            .body
+            .is_none()
+    );
+
+    let main_messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM main.mam_messages")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("main row count");
+    let temp_messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp.mam_messages")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("temporary row count");
+    let next_ordinal: i64 =
+        sqlx::query_scalar("SELECT next_seq FROM main.mam_archive_sequences WHERE archive_jid = ?")
+            .bind(archive.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .expect("main sequence");
+    let temp_sequences: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp.mam_archive_sequences")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("temporary sequence count");
+    assert_eq!(main_messages, 1);
+    assert_eq!(temp_messages, 0);
+    assert_eq!(next_ordinal, 1);
+    assert_eq!(temp_sequences, 0);
+
+    tx.rollback().await.expect("rollback");
 }
 
 #[tokio::test]
