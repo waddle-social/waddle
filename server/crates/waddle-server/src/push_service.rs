@@ -23,7 +23,7 @@ mod pubsub_backing;
 mod registration;
 #[cfg(test)]
 mod retirement_scope_tests;
-mod runtime_attach;
+pub(crate) mod runtime_attach;
 #[cfg(all(test, feature = "test-support"))]
 mod runtime_attach_tests;
 mod secrets;

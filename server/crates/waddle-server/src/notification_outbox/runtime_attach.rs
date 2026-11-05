@@ -187,9 +187,25 @@ pub(super) async fn attach_existing(
             }
         })?;
 
-    // A fresh READ COMMITTED snapshot is taken after this lock returns. The
-    // owner holds the matching transaction-level exclusive gate across DDL and
-    // every ancestry/identity adoption batch.
+    lock_runtime_attach_relations_tx(&mut tx, schema).await?;
+
+    capability.attest_transaction(&mut tx).await?;
+    verify_runtime_attach_tx(&mut tx, identity).await?;
+    tx.rollback().await?;
+    Ok(super::NotificationOutboxStore {
+        db,
+        owner_preparation: None,
+    })
+}
+
+/// Acquire the notification outbox schema gate and qualified catalog-stable
+/// relation locks on a caller-owned transaction. Joint custody diagnostics
+/// use this before acquiring the Push Service gate so owner ancestry adoption
+/// and runtime inspection share the same lock order.
+pub(crate) async fn lock_runtime_attach_relations_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), NotificationOutboxRuntimeAttachError> {
     tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock_shared(?::integer, ?::integer)",
         crate::db_params![OUTBOX_SCHEMA_GATE.0, OUTBOX_SCHEMA_GATE.1],
@@ -210,59 +226,52 @@ pub(super) async fn attach_existing(
     tx.execute(&marker_lock, ())
         .await
         .map_err(NotificationOutboxRuntimeAttachError::RelationLock)?;
+    Ok(())
+}
 
-    capability.attest_transaction(&mut tx).await?;
-    verify_active_schema(&mut tx, schema, i64::from(schema_identity.oid)).await?;
-    verify_relation(&mut tx, schema, "notification_candidates", 3).await?;
-    verify_relation(&mut tx, schema, "notification_outbox", 3).await?;
-    verify_relation(&mut tx, schema, "notification_outbox_lineage", 0).await?;
-    verify_relation(&mut tx, schema, OUTBOX_OWNER_STATE_TABLE, 2).await?;
-    verify_columns(
-        &mut tx,
-        schema,
-        "notification_candidates",
-        CANDIDATE_COLUMNS,
-    )
-    .await?;
-    verify_columns(&mut tx, schema, "notification_outbox", OUTBOX_COLUMNS).await?;
-    verify_columns(
-        &mut tx,
-        schema,
-        "notification_outbox_lineage",
-        LINEAGE_COLUMNS,
-    )
-    .await?;
-    verify_columns(
-        &mut tx,
-        schema,
-        OUTBOX_OWNER_STATE_TABLE,
-        OWNER_STATE_COLUMNS,
-    )
-    .await?;
-    verify_constraints(&mut tx, schema).await?;
+/// Verify the already locked outbox relations and owner marker on the same
+/// transaction that holds the outbox gate. Does not open or end the caller's
+/// transaction.
+pub(crate) async fn verify_runtime_attach_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), NotificationOutboxRuntimeAttachError> {
+    let schema = identity.schema.name.0.as_str();
+    let schema_oid = i64::from(identity.schema.oid);
+    let qschema = crate::db::physical_attestation::quote_identifier(schema);
+    verify_active_schema(tx, schema, schema_oid).await?;
+    verify_relation(tx, schema, "notification_candidates", 3).await?;
+    verify_relation(tx, schema, "notification_outbox", 3).await?;
+    verify_relation(tx, schema, "notification_outbox_lineage", 0).await?;
+    verify_relation(tx, schema, OUTBOX_OWNER_STATE_TABLE, 2).await?;
+    verify_columns(tx, schema, "notification_candidates", CANDIDATE_COLUMNS).await?;
+    verify_columns(tx, schema, "notification_outbox", OUTBOX_COLUMNS).await?;
+    verify_columns(tx, schema, "notification_outbox_lineage", LINEAGE_COLUMNS).await?;
+    verify_columns(tx, schema, OUTBOX_OWNER_STATE_TABLE, OWNER_STATE_COLUMNS).await?;
+    verify_constraints(tx, schema).await?;
     verify_indexes(
-        &mut tx,
+        tx,
         schema,
         "notification_candidates",
         &NOTIFICATION_CANDIDATES_INDEXES,
     )
     .await?;
     verify_indexes(
-        &mut tx,
+        tx,
         schema,
         "notification_outbox",
         &NOTIFICATION_OUTBOX_INDEXES,
     )
     .await?;
     verify_indexes(
-        &mut tx,
+        tx,
         schema,
         "notification_outbox_lineage",
         &["idx_notification_outbox_lineage_job"],
     )
     .await?;
-    verify_indexes(&mut tx, schema, OUTBOX_OWNER_STATE_TABLE, &[]).await?;
-    verify_runtime_acl(&mut tx, schema).await?;
+    verify_indexes(tx, schema, OUTBOX_OWNER_STATE_TABLE, &[]).await?;
+    verify_runtime_acl(tx, schema).await?;
 
     let marker_sql = format!(
         "SELECT prepared_revision FROM {qschema}.\"{OUTBOX_OWNER_STATE_TABLE}\" WHERE singleton = 1"
@@ -277,12 +286,7 @@ pub(super) async fn attach_existing(
     if revision != Some(OUTBOX_OWNER_PREPARED_REVISION) {
         return Err(NotificationOutboxRuntimeAttachError::OwnerPreparationIncomplete);
     }
-
-    tx.rollback().await?;
-    Ok(super::NotificationOutboxStore {
-        db,
-        owner_preparation: None,
-    })
+    Ok(())
 }
 
 /// Check a completed outbox marker from an existing PostgreSQL owner

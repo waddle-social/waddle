@@ -280,25 +280,14 @@ pub(crate) async fn verify_attested_table(
     crate::db::physical_attestation::validate_identifier(schema, "notification-store schema")
         .map_err(|_| DurableStoreAttachError::InvalidSchema)?;
     let activity_contract = contract.name == ACTIVITY_CONTRACT.name;
-    let qualified = format!(
-        "{}.\"{}\"",
-        crate::db::physical_attestation::quote_identifier(schema),
-        contract.name
-    );
 
     let mut tx = db.begin().await?;
-    if activity_contract {
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (),
-        )
-        .await?;
-    } else {
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (),
-        )
-        .await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await?;
+    if !activity_contract {
         tx.execute(
             "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
             (),
@@ -316,6 +305,26 @@ pub(crate) async fn verify_attested_table(
             }
         })?;
 
+    lock_attested_table_tx(&mut tx, schema, contract).await?;
+
+    // The attestation covers the same connection that holds the qualified
+    // relation locks and performs every catalog inspection below. Activity
+    // uses READ COMMITTED for a fresh post-lock catalog snapshot; non-Activity
+    // contracts keep their existing REPEATABLE READ attachment isolation.
+    capability.attest_transaction(&mut tx).await?;
+    verify_attested_table_tx(&mut tx, identity, contract).await?;
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// Acquire the contract relation lock and, for notification activity, the
+/// shared owner gate and completed-marker lock on a caller-owned transaction.
+pub(crate) async fn lock_attested_table_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    contract: &TableContract,
+) -> Result<(), DurableStoreAttachError> {
+    let activity_contract = contract.name == ACTIVITY_CONTRACT.name;
     if activity_contract {
         let mut rows = tx
             .query(
@@ -341,6 +350,11 @@ pub(crate) async fn verify_attested_table(
         }
         drop(rows);
     }
+    let qualified = format!(
+        "{}.\"{}\"",
+        crate::db::physical_attestation::quote_identifier(schema),
+        contract.name
+    );
     tx.execute(
         &format!("LOCK TABLE {qualified} IN SHARE UPDATE EXCLUSIVE MODE"),
         (),
@@ -376,18 +390,26 @@ pub(crate) async fn verify_attested_table(
         })?;
     }
 
-    // The attestation covers the same connection that holds the qualified
-    // relation locks and performs every catalog inspection below. READ
-    // COMMITTED gives the first post-lock catalog query a fresh snapshot.
-    capability.attest_transaction(&mut tx).await?;
-    verify_active_schema(&mut tx, schema, i64::from(identity.schema.oid)).await?;
-    verify_table(&mut tx, schema, contract).await?;
-    verify_columns(&mut tx, schema, contract).await?;
-    verify_constraints(&mut tx, schema, contract).await?;
-    verify_indexes(&mut tx, schema, contract).await?;
-    verify_runtime_acl(&mut tx, schema, contract.name, contract.runtime_delete).await?;
+    Ok(())
+}
+
+/// Validate the locked notification table contract, runtime ACL, and activity
+/// owner marker in the caller's transaction without opening another snapshot.
+pub(crate) async fn verify_attested_table_tx(
+    tx: &mut Transaction<'_>,
+    identity: &PgIdentity,
+    contract: &TableContract,
+) -> Result<(), DurableStoreAttachError> {
+    let schema = &identity.schema.name.0;
+    let activity_contract = contract.name == ACTIVITY_CONTRACT.name;
+    verify_active_schema(tx, schema, i64::from(identity.schema.oid)).await?;
+    verify_table(tx, schema, contract).await?;
+    verify_columns(tx, schema, contract).await?;
+    verify_constraints(tx, schema, contract).await?;
+    verify_indexes(tx, schema, contract).await?;
+    verify_runtime_acl(tx, schema, contract.name, contract.runtime_delete).await?;
     if activity_contract {
-        verify_table(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+        verify_table(tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
             .await
             .map_err(|error| match error {
                 DurableStoreAttachError::InvalidTable { .. }
@@ -397,13 +419,13 @@ pub(crate) async fn verify_attested_table(
                 }
                 error => error,
             })?;
-        verify_columns(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+        verify_columns(tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
             .await
             .map_err(|_| DurableStoreAttachError::InvalidOwnerMarker)?;
-        verify_constraints(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+        verify_constraints(tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
             .await
             .map_err(|_| DurableStoreAttachError::InvalidOwnerMarker)?;
-        verify_indexes(&mut tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
+        verify_indexes(tx, schema, &ACTIVITY_OWNER_STATE_CONTRACT)
             .await
             .map_err(|error| match error {
                 DurableStoreAttachError::InvalidTable { .. }
@@ -413,11 +435,9 @@ pub(crate) async fn verify_attested_table(
                 }
                 error => error,
             })?;
-        verify_runtime_owner_state_acl(&mut tx, schema).await?;
-        verify_owner_state(&mut tx, schema, identity).await?;
+        verify_runtime_owner_state_acl(tx, schema).await?;
+        verify_owner_state(tx, schema, identity).await?;
     }
-
-    tx.rollback().await?;
     Ok(())
 }
 

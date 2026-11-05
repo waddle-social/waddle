@@ -392,13 +392,8 @@ pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError
         .ok_or(PubSubRuntimeAttachError::AttestedPostgresRequired)?;
     db.verify_attested_pg_writer_capability(&capability)
         .map_err(DatabaseError::from)?;
-    let schema = &capability.identity().schema.name.0;
-    let quoted = crate::db::physical_attestation::quote_identifier(schema);
+    let identity = capability.identity();
     let mut tx = db.begin().await?;
-    // The advisory gate and definer helper run before relation locks. Keep
-    // READ COMMITTED so later catalog checks get a fresh snapshot after any
-    // owner transaction that held the gate; the helper's SUE locks then keep
-    // DDL stable through every verification query.
     tx.execute(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
         (),
@@ -408,34 +403,27 @@ pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError
         .await
         .map_err(|_| PubSubRuntimeAttachError::ReadBounds)?;
     capability.attest_transaction(&mut tx).await?;
-    tx.query(
+    lock_runtime_attach_relations_tx(&mut tx, identity).await?;
+    verify_runtime_attach_tx(&mut tx, identity).await?;
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// Acquire the PubSub owner gate and its owner-controlled qualified relation
+/// locks on a caller-owned transaction. The lock helper is checked before it
+/// executes; diagnostic callers attest the transaction before invoking this.
+pub(crate) async fn lock_runtime_attach_relations_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let schema = &identity.schema.name.0;
+    tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
         crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
     )
     .await?;
-    let mut active = tx
-        .query(
-            "SELECT n.oid::bigint = ? AND n.nspname = pg_catalog.current_schema() \
-         AND COALESCE((pg_catalog.current_schemas(false))[1]::text,'') = n.nspname \
-         AND pg_catalog.cardinality(pg_catalog.current_schemas(false)) <= 2 \
-         AND (pg_catalog.cardinality(pg_catalog.current_schemas(false)) = 1 \
-           OR pg_catalog.left((pg_catalog.current_schemas(false))[2]::text,8) = 'pg_temp_') \
-         AND db.oid::bigint = ? AND db.datname = ? \
-         FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_database db \
-           ON db.datname = pg_catalog.current_database() WHERE n.nspname = ?",
-            crate::db_params![
-                i64::from(capability.identity().schema.oid),
-                i64::from(capability.identity().database.oid),
-                capability.identity().database.name.0.clone(),
-                schema
-            ],
-        )
-        .await?;
-    if !matches!(active.next().await?, Some(row) if row.get::<bool>(0)?) {
-        return Err(PubSubRuntimeAttachError::ActiveSchemaMismatch);
-    }
-    verify_runtime_role(&mut tx, schema).await?;
-    verify_attach_lock_function(&mut tx, capability.identity()).await?;
+    verify_attach_lock_function(tx, identity).await?;
+    let quoted = crate::db::physical_attestation::quote_identifier(schema);
     let attach_lock = format!(
         "{}.{}",
         quoted,
@@ -454,14 +442,48 @@ pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError
         return Err(PubSubRuntimeAttachError::InvalidAttachLock);
     }
     drop(locked);
-    for table in TABLES {
-        verify_table(&mut tx, schema, table).await?;
-        verify_columns(&mut tx, schema, table).await?;
-        verify_constraints(&mut tx, schema, table).await?;
-        verify_indexes(&mut tx, schema, table).await?;
-        verify_table_acl(&mut tx, schema, table).await?;
+    Ok(())
+}
+
+/// Validate the already locked PubSub schema and owner marker within the
+/// caller's transaction. No store handle is constructed or returned.
+pub(crate) async fn verify_runtime_attach_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let schema = &identity.schema.name.0;
+    let quoted = crate::db::physical_attestation::quote_identifier(schema);
+    let mut active = tx
+        .query(
+            "SELECT n.oid::bigint = ? AND n.nspname = pg_catalog.current_schema() \
+         AND COALESCE((pg_catalog.current_schemas(false))[1]::text,'') = n.nspname \
+         AND pg_catalog.cardinality(pg_catalog.current_schemas(false)) <= 2 \
+         AND (pg_catalog.cardinality(pg_catalog.current_schemas(false)) = 1 \
+           OR pg_catalog.left((pg_catalog.current_schemas(false))[2]::text,8) = 'pg_temp_') \
+         AND db.oid::bigint = ? AND db.datname = ? \
+         FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_database db \
+           ON db.datname = pg_catalog.current_database() WHERE n.nspname = ?",
+            crate::db_params![
+                i64::from(identity.schema.oid),
+                i64::from(identity.database.oid),
+                identity.database.name.0.clone(),
+                schema
+            ],
+        )
+        .await?;
+    if !matches!(active.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(PubSubRuntimeAttachError::ActiveSchemaMismatch);
     }
-    if !verify_marker_shape_and_data_tx(&mut tx, capability.identity()).await? {
+    verify_runtime_role(tx, schema).await?;
+    verify_attach_lock_function(tx, identity).await?;
+    for table in TABLES {
+        verify_table(tx, schema, table).await?;
+        verify_columns(tx, schema, table).await?;
+        verify_constraints(tx, schema, table).await?;
+        verify_indexes(tx, schema, table).await?;
+        verify_table_acl(tx, schema, table).await?;
+    }
+    if !verify_marker_shape_and_data_tx(tx, identity).await? {
         return Err(PubSubRuntimeAttachError::InvalidMarker);
     }
     let mut versions = tx
@@ -477,22 +499,21 @@ pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError
     if version != Some(PUBSUB_SCHEMA_VERSION) || versions.next().await?.is_some() {
         return Err(PubSubRuntimeAttachError::InvalidVersion);
     }
-    verify_sequence(&mut tx, schema, &quoted).await?;
+    verify_sequence(tx, schema, &quoted).await?;
     verify_counter(
-        &mut tx,
+        tx,
         &quoted,
         "dnd_projection_source_version",
         "dnd_projection",
     )
     .await?;
     verify_counter(
-        &mut tx,
+        tx,
         &quoted,
         "notification_settings_projection_source_version",
         "notification_settings_projection",
     )
     .await?;
-    tx.rollback().await?;
     Ok(())
 }
 
@@ -1155,11 +1176,13 @@ async fn verify_counter(
     counter: &'static str,
     projection: &'static str,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    let sql = format!("SELECT (SELECT count(*) FROM {quoted}.\"{counter}\") <= 1 \
+    let sql = format!(
+        "SELECT (SELECT count(*) FROM {quoted}.\"{counter}\") <= 1 \
         AND NOT EXISTS (SELECT 1 FROM {quoted}.\"{counter}\" WHERE id <> 1 OR current_version < 0 \
           OR current_version = 9223372036854775807) \
         AND NOT EXISTS (SELECT 1 FROM {quoted}.\"{projection}\" WHERE source_version < 1 \
-          OR source_version > COALESCE((SELECT current_version FROM {quoted}.\"{counter}\" WHERE id = 1), 0))");
+          OR source_version > COALESCE((SELECT current_version FROM {quoted}.\"{counter}\" WHERE id = 1), 0))"
+    );
     let mut rows = tx.query(&sql, ()).await?;
     if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
         return Err(PubSubRuntimeAttachError::InvalidCounter { component: counter });

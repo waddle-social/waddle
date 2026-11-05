@@ -34,7 +34,7 @@ mod observability;
 mod payload;
 mod prune;
 mod publish;
-mod runtime_attach;
+pub(crate) mod runtime_attach;
 #[cfg(all(test, feature = "test-support"))]
 #[path = "notification_outbox/runtime_attach_tests.rs"]
 mod runtime_attach_tests;

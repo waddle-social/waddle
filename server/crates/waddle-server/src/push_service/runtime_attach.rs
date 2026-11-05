@@ -773,12 +773,30 @@ const DEVICE_CHECKS: &[Check] = &[
     },
 ];
 const PUBLISH_JOB_CHECKS: &[Check] = &[
-    Check { name: "push_publish_jobs_acceptance_scope_check", definition: "acceptance_scope = ANY (ARRAY['legacy'::text, 'wire'::text, 'canonical'::text])" },
-    Check { name: "push_publish_jobs_backing_state_check", definition: "backing_state = ANY (ARRAY['pending'::text, 'published'::text, 'superseded'::text, 'not-configured'::text])" },
-    Check { name: "push_publish_jobs_uncertain_send_check", definition: "uncertain_send = ANY (ARRAY[0, 1])" },
-    Check { name: "push_publish_jobs_terminal_disposition_check", definition: "terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'" },
-    Check { name: "push_publish_jobs_upstream_completed_check", definition: "upstream_completed = ANY (ARRAY[0, 1])" },
-    Check { name: "push_publish_jobs_status_check", definition: "status = ANY (ARRAY['queued'::text, 'in-progress'::text, 'published'::text, 'failed'::text])" },
+    Check {
+        name: "push_publish_jobs_acceptance_scope_check",
+        definition: "acceptance_scope = ANY (ARRAY['legacy'::text, 'wire'::text, 'canonical'::text])",
+    },
+    Check {
+        name: "push_publish_jobs_backing_state_check",
+        definition: "backing_state = ANY (ARRAY['pending'::text, 'published'::text, 'superseded'::text, 'not-configured'::text])",
+    },
+    Check {
+        name: "push_publish_jobs_uncertain_send_check",
+        definition: "uncertain_send = ANY (ARRAY[0, 1])",
+    },
+    Check {
+        name: "push_publish_jobs_terminal_disposition_check",
+        definition: "terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'",
+    },
+    Check {
+        name: "push_publish_jobs_upstream_completed_check",
+        definition: "upstream_completed = ANY (ARRAY[0, 1])",
+    },
+    Check {
+        name: "push_publish_jobs_status_check",
+        definition: "status = ANY (ARRAY['queued'::text, 'in-progress'::text, 'published'::text, 'failed'::text])",
+    },
 ];
 const MARKER_CHECKS: &[Check] = &[
     Check {
@@ -988,8 +1006,6 @@ pub(super) async fn verify(db: &Database) -> Result<(), PushServiceAttachError> 
     let schema = &identity.schema.name.0;
     crate::db::physical_attestation::validate_identifier(schema, "Push Service runtime schema")
         .map_err(|_| PushServiceAttachError::ActiveSchemaMismatch)?;
-    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
-
     let mut tx = db.begin().await?;
     tx.execute(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
@@ -1007,19 +1023,28 @@ pub(super) async fn verify(db: &Database) -> Result<(), PushServiceAttachError> 
             }
         })?;
 
-    // Serialize restricted attachers with each other and with the owner/raw
-    // migration paths before taking nonblocking relation locks. Otherwise
-    // two healthy nodes race for SUE and one reports a schema change.
-    tx.query(
+    lock_runtime_attach_relations_tx(&mut tx, schema).await?;
+    capability.attest_transaction(&mut tx).await?;
+    verify_runtime_attach_tx(&mut tx, identity).await?;
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// Serialize with Push Service owner phases and lock the base relations before
+/// catalog inspection on a caller-owned transaction.
+pub(crate) async fn lock_runtime_attach_relations_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PushServiceAttachError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
         crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
     )
     .await?;
 
-    // Hold catalog-stable locks before inspection. Read committed avoids an
-    // old snapshot making a concurrent index build wait on this transaction.
-    // SUE blocks concurrent regular and concurrent index builds while allowing
-    // ordinary Push Service row writers to proceed.
+    // SUE blocks concurrent regular and concurrent index builds while
+    // allowing ordinary Push Service row writers to proceed.
     for table in TABLES {
         let qualified = format!("{quoted_schema}.{}", quote_static_identifier(table));
         if let Err(source) = tx
@@ -1046,19 +1071,58 @@ pub(super) async fn verify(db: &Database) -> Result<(), PushServiceAttachError> 
             table: MARKER_TABLE,
             source,
         })?;
-    capability.attest_transaction(&mut tx).await?;
-    verify_active_schema(&mut tx, identity).await?;
-    verify_runtime_role(&mut tx, schema).await?;
-    if !verify_marker_shape_and_data_tx(&mut tx, identity).await? {
+    Ok(())
+}
+
+/// Lock VAPID key and marker relations after the caller holds the Push
+/// Service advisory gate. `ACCESS SHARE` keeps reads safe from owner DDL while
+/// permitting regular provider operation.
+pub(crate) async fn lock_vapid_runtime_attach_relations_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), VapidRuntimeAttachError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    for table in [VAPID_TABLE_NAME, VAPID_MARKER_TABLE_NAME, MARKER_TABLE] {
+        let qualified = format!("{quoted_schema}.{}", quote_static_identifier(table));
+        if let Err(source) = tx
+            .execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
+            .await
+        {
+            if matches!(
+                &source,
+                DatabaseError::Internal(sqlx::Error::Database(error))
+                    if error.code().as_deref() == Some("42P01")
+            ) {
+                return Err(if table == VAPID_MARKER_TABLE_NAME {
+                    VapidRuntimeAttachError::InvalidMarker
+                } else {
+                    VapidRuntimeAttachError::InvalidSchema
+                });
+            }
+            return Err(VapidRuntimeAttachError::Relation(source));
+        }
+    }
+    Ok(())
+}
+
+/// Verify the locked Push Service base tables, owner marker and effective
+/// runtime grants in the caller's transaction.
+pub(crate) async fn verify_runtime_attach_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), PushServiceAttachError> {
+    let schema = &identity.schema.name.0;
+    verify_active_schema(tx, identity).await?;
+    verify_runtime_role(tx, schema).await?;
+    if !verify_marker_shape_and_data_tx(tx, identity).await? {
         return Err(PushServiceAttachError::InvalidMarker);
     }
-    verify_table(&mut tx, schema, &MARKER).await?;
-    verify_table_acl(&mut tx, schema, &MARKER).await?;
+    verify_table(tx, schema, &MARKER).await?;
+    verify_table_acl(tx, schema, &MARKER).await?;
     for table in PUSH_TABLES {
-        verify_table(&mut tx, schema, table).await?;
-        verify_table_acl(&mut tx, schema, table).await?;
+        verify_table(tx, schema, table).await?;
+        verify_table_acl(tx, schema, table).await?;
     }
-    tx.rollback().await?;
     Ok(())
 }
 
@@ -1082,8 +1146,6 @@ pub(super) async fn load_vapid_key_record(
     let schema = &identity.schema.name.0;
     crate::db::physical_attestation::validate_identifier(schema, "VAPID runtime schema")
         .map_err(|_| VapidRuntimeAttachError::ActiveSchemaMismatch)?;
-    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
-
     let mut tx = db.begin().await?;
     tx.execute(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
@@ -1100,56 +1162,59 @@ pub(super) async fn load_vapid_key_record(
                 VapidRuntimeAttachError::Database(error)
             }
         })?;
-    tx.query(
+    tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
         crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
     )
     .await?;
-    for table in [VAPID_TABLE_NAME, VAPID_MARKER_TABLE_NAME, MARKER_TABLE] {
-        let qualified = format!("{quoted_schema}.{}", quote_static_identifier(table));
-        if let Err(source) = tx
-            .execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
-            .await
-        {
-            if matches!(
-                &source,
-                DatabaseError::Internal(sqlx::Error::Database(error))
-                    if error.code().as_deref() == Some("42P01")
-            ) {
-                return Err(if table == VAPID_MARKER_TABLE_NAME {
-                    VapidRuntimeAttachError::InvalidMarker
-                } else {
-                    VapidRuntimeAttachError::InvalidSchema
-                });
-            }
-            return Err(VapidRuntimeAttachError::Relation(source));
-        }
-    }
+    lock_vapid_runtime_attach_relations_tx(&mut tx, schema).await?;
     capability.attest_transaction(&mut tx).await?;
-    verify_active_schema(&mut tx, identity).await?;
-    if !verify_marker_shape_and_data_tx(&mut tx, identity).await? {
+    let record = verify_vapid_runtime_attach_tx(&mut tx, identity).await?;
+    tx.rollback().await?;
+    Ok(record)
+}
+
+/// Verify the locked VAPID marker, effective ACLs, active key, and the
+/// unsealed private/public pair in the caller's read-only transaction. The
+/// key record and signer are not returned.
+pub(crate) async fn verify_vapid_custody_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+    root_key: &[u8],
+) -> Result<(), VapidRuntimeAttachError> {
+    let record = verify_vapid_runtime_attach_tx(tx, identity).await?;
+    super::vapid_storage::verify_persisted_key_for_attachment(root_key, &record)?;
+    Ok(())
+}
+
+async fn verify_vapid_runtime_attach_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<VapidKeyRecord, VapidRuntimeAttachError> {
+    let schema = &identity.schema.name.0;
+    verify_active_schema(tx, identity).await?;
+    if !verify_marker_shape_and_data_tx(tx, identity).await? {
         return Err(VapidRuntimeAttachError::PushServiceNotReady);
     }
-    verify_runtime_role(&mut tx, schema).await?;
-    verify_vapid_table_shape_tx(&mut tx, schema).await?;
-    verify_table_acl(&mut tx, schema, &VAPID_KEYS).await?;
-    verify_vapid_marker_shape_tx(&mut tx, schema).await?;
-    verify_table_acl(&mut tx, schema, &VAPID_MARKER).await?;
-    let marked_kid = verify_vapid_marker_data_tx(&mut tx, identity).await?;
-    let active_count = count_active_vapid_keys_tx(&mut tx, schema).await?;
+    verify_runtime_role(tx, schema).await?;
+    verify_vapid_table_shape_tx(tx, schema).await?;
+    verify_table_acl(tx, schema, &VAPID_KEYS).await?;
+    verify_vapid_marker_shape_tx(tx, schema).await?;
+    verify_table_acl(tx, schema, &VAPID_MARKER).await?;
+    let marked_kid = verify_vapid_marker_data_tx(tx, identity).await?;
+    let active_count = count_active_vapid_keys_tx(tx, schema).await?;
     if active_count == 0 {
         return Err(VapidRuntimeAttachError::ActiveKeyMismatch);
     }
     if active_count > 1 {
         return Err(VapidRuntimeAttachError::MultipleActiveKeys);
     }
-    let record = select_vapid_active_key_tx(&mut tx, schema)
+    let record = select_vapid_active_key_tx(tx, schema)
         .await?
         .ok_or(VapidRuntimeAttachError::ActiveKeyMismatch)?;
     if record.kid != marked_kid {
         return Err(VapidRuntimeAttachError::ActiveKeyMismatch);
     }
-    tx.rollback().await?;
     Ok(record)
 }
 
