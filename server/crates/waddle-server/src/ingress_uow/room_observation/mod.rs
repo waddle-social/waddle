@@ -28,6 +28,11 @@ use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
 pub(crate) use retention::ObserverRetentionBatch;
 pub use schema::initialize_room_observations;
+pub use schema::{
+    prepare_dark_room_observation_schema, verify_attested_room_observation_schema,
+    RoomObservationSchemaError, RoomObservationSchemaEvidence, ROOM_OBSERVATION_OWNER_STATE_TABLE,
+    ROOM_OBSERVATION_SCHEMA_REVISION,
+};
 
 /// No provider body, message text, key, JID, or raw SQL diagnostic is exposed
 /// through this error's `Display` or `Debug` representation.

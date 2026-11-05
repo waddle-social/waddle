@@ -16,7 +16,7 @@ use super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
 use super::MigrationRunner;
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, LINEAGE_ADVISORY_LOCK_KEY};
-use crate::db::physical_attestation::PgRoleName;
+use crate::db::physical_attestation::{quote_identifier, PgRoleName};
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_substrate::supported_protocol_epoch;
 
@@ -45,6 +45,30 @@ const COMMIT_DEADLINE: Duration = Duration::from_secs(15);
 const OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 const LOCK_TIMEOUT: &str = "3s";
 const STATEMENT_TIMEOUT: &str = "30s";
+
+/// Verify the registered V1023 ledger entry without bootstrapping or applying
+/// migrations. The caller sets the target schema as `current_schema()` and
+/// holds this transaction through its schema observation.
+pub(crate) async fn verify_room_observation_migration_v1023_in_transaction(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), DatabaseError> {
+    let mut lock = tx
+        .query(
+            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+            crate::db_params![MIGRATION_LEDGER_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+    lock.next().await?.ok_or(DatabaseError::QueryFailed(
+        "migration ledger lock returned no row".to_owned(),
+    ))?;
+    drop(lock);
+
+    let ledger = format!("{}._migrations", quote_identifier(schema));
+    MigrationRunner::single()
+        .verify_applied_through_in_transaction(tx, DatabaseDriver::Postgres, &ledger, 1023)
+        .await
+}
 
 /// The independent identity and separately provisioned roles for the lab.
 #[derive(Clone, Debug)]

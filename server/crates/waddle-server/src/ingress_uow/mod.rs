@@ -28,6 +28,11 @@ pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
     initialize_room_observations, CapturedRoomSource, ObservationWork, RoomObservationRepository,
 };
+pub use room_observation::{
+    prepare_dark_room_observation_schema, verify_attested_room_observation_schema,
+    RoomObservationSchemaError, RoomObservationSchemaEvidence, ROOM_OBSERVATION_OWNER_STATE_TABLE,
+    ROOM_OBSERVATION_SCHEMA_REVISION,
+};
 pub use room_observation::{ObservationError, RoomPublication};
 mod pending_receipts;
 mod policy_discard;
