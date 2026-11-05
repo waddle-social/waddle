@@ -818,6 +818,15 @@ pub(super) async fn verify(db: &Database) -> Result<(), PushServiceAttachError> 
             }
         })?;
 
+    // Serialize restricted attachers with each other and with the owner/raw
+    // migration paths before taking nonblocking relation locks. Otherwise
+    // two healthy nodes race for SUE and one reports a schema change.
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
+    )
+    .await?;
+
     // Hold catalog-stable locks before inspection. Read committed avoids an
     // old snapshot making a concurrent index build wait on this transaction.
     // SUE blocks concurrent regular and concurrent index builds while allowing
