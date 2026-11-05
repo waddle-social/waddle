@@ -496,6 +496,10 @@ impl NotificationOutboxPruneOutcome {
 
 #[derive(Debug, Error)]
 pub enum NotificationOutboxError {
+    #[error("notification outbox owner preparation requires a trusted non-attested handle")]
+    OwnerPreparationRequiresTrustedHandle,
+    #[error("notification outbox owner identity or database role is unsafe")]
+    UnsafeOwnerBoundary,
     #[error("invalid durable notification delivery identity")]
     InvalidDeliveryIdentity,
     #[error("invalid frozen notification payload")]

@@ -542,7 +542,10 @@ async fn postgres_gate_timeout_closes_detached_session_and_preserves_custody() {
         .await
         .expect("schema");
     let (database, tag) = tagged_database(&f, 1).await;
-    let store = NotificationOutboxStore { db: database };
+    let store = NotificationOutboxStore {
+        db: database,
+        owner_preparation: None,
+    };
     retain_unknown_work(&f).await;
     let before = snapshot(&f.db).await;
     let held = detached_gate(&f).await;

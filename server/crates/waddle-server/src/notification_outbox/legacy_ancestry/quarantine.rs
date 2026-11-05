@@ -69,6 +69,7 @@ impl NotificationOutboxStore {
         let thread: String = candidate_row.get(3)?;
         let class: String = candidate_row.get(6)?;
         let mut tx = begin_bounded(&self.db).await?;
+        self.verify_owner_transaction(&mut tx).await?;
         if !lock_scanned_parent(&mut tx, recorded).await? {
             tx.commit().await?;
             return Ok(());
