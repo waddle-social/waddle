@@ -1,7 +1,9 @@
 # P3.1 actor-owned driver task and retained completion custody
 
-Status: implemented dark package on branch `codex/2137-owner-task-custody`, based on hosted
-main `cddd3870c786a20fd16fab2be3cf9c54c6517713`.
+Status: dark driver and endpoint cleanup integration implemented on branch
+`codex/2137-lifecycle-custody` in draft PR #2211, based on hosted main
+`ff88ae7ca5b9077d1d0d0bf0b1aa47f77cf61823`. This does not activate the
+driver in `/ws`.
 
 ## Objective
 
@@ -29,19 +31,23 @@ or losing its eventual typed result.
   admission immediately but do not interrupt an effectful handler.
 - Carry a monotonic operation ID and exact `ConnectionRef` through admission,
   completion lookup, acknowledgement, and task cleanup. The task handle can
-  reacquire an unresolved operation by exact reference and ID. Dropping a
-  ticket alone does not lose custody; recovery after dropping the task handle
-  is not established because this package adds no app-lifetime lookup index.
+  reacquire an unresolved operation by exact reference and ID. Once attached,
+  the app-owned endpoint record resolves lookup and acknowledgement after the
+  caller handle is dropped; dropping that attached handle does not stop work.
+  A standalone, unattached handle still requests stop when dropped.
 - Keep the typed input and completion in an independently retained custody
   record. A late stop or authority loss after handler return retains its result
   as `CompletionUnknown`; a forced worker abort retains the source input and
   records that no result was observed. Queued work that never started is
   represented separately.
-- The detached supervisor retains and joins this task's worker handle, and all
-  ledger entries carry the exact `ConnectionRef`. This package does not yet
-  register that join with the existing `ActorLocalEndpointOwner`/IoCustodian
-  cleanup inventory; connecting those lifetimes is required before activation.
-  The direct-stanza queue remains separate because it cannot represent
+- The detached supervisor retains and joins this task's worker handle. The
+  existing app-owned `ActorEndpointCleanupIndex` retains the driver cleanup
+  handle beside the physical IoCustodian under one exact-`ConnectionRef`
+  record; this composes with the existing record instead of adding a second
+  index. Attachment and endpoint shutdown share one record lock, so a late
+  attachment is rejected. The record is not joined or pruned until both the
+  worker supervisor and physical pumps join and retained work is settled. The
+  direct-stanza queue remains separate because it cannot represent
   `ResponseBatch` or `DriveOutcome` custody.
 
 ## Boundaries and activation gates
@@ -60,48 +66,4 @@ inputs remain `NotStarted`. This package does not claim process-crash recovery.
 
 The data command accepts already-parsed `ParsedFrame` values and a typed
 `jid::BareJid`. Its producer must parse at the I/O boundary and pass the
-original wire byte length, which is checked against `MAX_FRAME_SIZE`; the
-actor does not accept raw XML strings. This API is dark and unselected, so the
-size check does not prove a future `/ws` adapter passes the measured wire size.
-The typed command currently covers RFC 7395/SASL/classic stanzas and peer
-recipient-pass work. XEP-0198 nonzas and malformed-frame response mapping still
-need typed commands before the driver can cover the live `/ws` input surface.
-
-## Endpoint cleanup integration tranche
-
-The existing app-owned `ActorEndpointCleanupIndex` in
-`actor_local_endpoint.rs` remains the lifecycle authority for a physical
-connection. Extend its exact-`ConnectionRef` record with the driver task's
-operation ledger and retain the driver's independent supervisor/join on that
-same record. Do not add a second per-connection index. Recovery and
-acknowledgement must remain available after caller and task handles are dropped;
-stale connection references and successor operations must not alias.
-
-Stop and lease-loss seal admission immediately. A configured shutdown grace
-allows accepted work to finish; at its deadline, abort and join the worker,
-retaining the active input as `CompletionUnknown` and queued inputs as
-`NotStarted`. Keep the cleanup record until both driver and physical-pump
-cleanup have joined and retained work is settled. Preserve exact operation
-identity and never replay from caller cancellation.
-
-Characterize handle-independent lookup/ack, single handler execution, stale
-references, duplicate/full admission, lease loss, panic, deadline abort,
-stalled pump, successor fencing, and control responsiveness behind a stalled
-handler. Keep `/ws` selection, endpoint publication, stream-management
-advancement, wire behavior, workflow files, P2 custody, and the remaining
-XEP-0198/malformed-frame paths out of this tranche.
-
-## Verification plan
-
-- Deterministically cancel a caller wait while a handler is paused; retrieve
-  the same completion by operation ID and prove the handler ran once.
-- Fill the data mailbox and retained ledger to the 256-operation limit; prove a
-  further operation returns typed overload while the separate control path
-  remains available. Separately revoke authority during a stalled operation
-  and prove out-of-band admission sealing.
-- Revoke authority during a handler and force worker shutdown during another;
-  verify returned, unknown, and never-started custody remains distinguishable and
-  the detached supervisor joins the worker. Registering that join with endpoint
-  and I/O cleanup remains an activation gate.
-- Run focused actor-owner tests, default and clustering server checks, format,
-  and scoped Clippy with warnings denied.
+original wire byte length, which is checked against `MAX_FRAME_SI
