@@ -74,6 +74,9 @@ the active database and main lane, required relation and index shape, effective
 runtime grants and expected ownership under a bounded read-only transaction.
 Missing or changed shape, wrong pool identity and excess runtime privileges
 fail closed. Startup must retain the existing node identity.
+If an existing outbox relation belongs to a different login, the trusted
+provisioner must transfer it to the NOLOGIN schema owner before owner
+preparation; the initializer will not silently reassign ownership.
 
 Room-effect outbox attachment currently returns an opaque verification marker,
 not a functional store. That type must remain non-mutating until lifecycle and
