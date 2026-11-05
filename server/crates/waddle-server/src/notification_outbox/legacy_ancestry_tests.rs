@@ -592,7 +592,9 @@ async fn scanned_parent_collected_before_adoption(fixture: IngressFixture) {
         }
     }
     let now = chrono::Utc::now();
-    let recorded = load_page(&fixture.db, None).await.expect("startup scan");
+    let recorded = load_page(&fixture.db, None, None)
+        .await
+        .expect("startup scan");
     assert_eq!(recorded.len(), 2);
     let collected = crate::ingress_substrate::gc_expired_aliases(&fixture.db, now, budget())
         .await
@@ -787,7 +789,7 @@ async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
         )
         .await
         .expect("operator repair after startup scan");
-    let recorded = load_page(&fixture.db, None)
+    let recorded = load_page(&fixture.db, None, None)
         .await
         .expect("recorded authority");
     let first_recorded = recorded

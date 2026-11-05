@@ -7,11 +7,13 @@ use crate::db::Transaction;
 
 // Database-local two-key namespace. All outbox schemas share this gate so
 // different search_paths cannot split ownership of the same resolved tables.
-const OUTBOX_SCHEMA_GATE: (i32, i32) = (0x5744444c, 0x4e4f5449);
-const OUTBOX_SCHEMA_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-const COALESCE_INDEX_NAME: &str = "idx_notification_outbox_queued_coalesce";
+pub(super) const OUTBOX_SCHEMA_GATE: (i32, i32) = (0x5744444c, 0x4e4f5449);
+pub(super) const OUTBOX_SCHEMA_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(super) const OUTBOX_OWNER_PREPARED_REVISION: i64 = 1;
+pub(super) const OUTBOX_OWNER_STATE_TABLE: &str = "notification_outbox_owner_state";
+pub(super) const COALESCE_INDEX_NAME: &str = "idx_notification_outbox_queued_coalesce";
 const LEGACY_COALESCE_INDEX_NAME: &str = "idx_notification_outbox_active_coalesce";
-const COALESCE_COLUMNS: [&str; 6] = [
+pub(super) const COALESCE_COLUMNS: [&str; 6] = [
     "recipient_bare_jid",
     "push_service_jid",
     "node",
@@ -19,11 +21,12 @@ const COALESCE_COLUMNS: [&str; 6] = [
     "thread_id",
     "class",
 ];
-const COALESCE_PREDICATE: &str =
+pub(super) const COALESCE_PREDICATE: &str =
     "status = 'queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist = 0";
 
-const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str = "notification_candidates_reason_check";
-const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
+pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str =
+    "notification_candidates_reason_check";
+pub(super) const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
     "offline_dm",
     "offline_dm_mention",
     "groupchat_personal_mention",
@@ -32,8 +35,9 @@ const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
     "groupchat_notify_all",
 ];
 pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
-const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str = "notification_candidates_class_check";
-const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str =
+    "notification_candidates_class_check";
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
     "dm",
     "dm_mention",
     "personal_mention",
@@ -42,7 +46,7 @@ const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
     "notify_all",
 ];
 pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
-const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
+pub(super) const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
 const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
     "dm",
     "dm_mention",
@@ -52,7 +56,7 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
     "notify_all",
 ];
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
+pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
 pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 15] = [
     "xep0357_self",
@@ -72,13 +76,13 @@ pub(super) const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 15] = 
     "xep0444_reaction",
 ];
 const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded', 'unread_zero_at_publish', 'policy_retries_exhausted', 'xep0444_reaction')";
-const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
+pub(super) const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
     "idx_notification_candidates_pending_worker",
     "idx_notification_candidates_outboxed_prune",
 ];
-const NOTIFICATION_OUTBOX_INDEXES: [&str; 4] = [
+pub(super) const NOTIFICATION_OUTBOX_INDEXES: [&str; 4] = [
     "idx_notification_outbox_queued_coalesce",
     "idx_notification_outbox_conversation_status",
     "idx_notification_outbox_status_next_attempt",
@@ -234,6 +238,38 @@ fn notification_candidates_suppressed_reason_constraint_matches_expected(definit
 
 impl NotificationOutboxStore {
     pub(super) async fn initialize(&self) -> Result<(), NotificationOutboxError> {
+        self.validate_typed_schema_contract()?;
+        if self.db.driver() == DatabaseDriver::Postgres {
+            if self.db.uses_attested_postgres_pool() {
+                return Err(NotificationOutboxError::OwnerPreparationRequiresTrustedHandle);
+            }
+            // Compatibility path for the existing startup wiring. It retains
+            // legacy DDL behavior but cannot certify owner preparation; if a
+            // trusted marker already exists, invalidate it before any work.
+            let mut store = self.clone();
+            store.owner_preparation = Some(super::OwnerPreparationProof {
+                identity: None,
+                probe_key: super::fresh_owner_probe_key(),
+                schema_identity: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            });
+            tokio::spawn(async move {
+                store
+                    .initialize_postgres_schema(OUTBOX_SCHEMA_GATE_WAIT)
+                    .await
+            })
+            .await
+            .map_err(|error| {
+                DatabaseError::QueryFailed(format!("outbox schema task failed: {error}"))
+            })??;
+        } else {
+            self.initialize_schema().await?;
+            self.adopt_legacy_candidate_ids().await?;
+            self.adopt_legacy_ancestry().await?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_typed_schema_contract(&self) -> Result<(), NotificationOutboxError> {
         // Startup invariant: every closed-set typed `SuppressedReason`
         // db value MUST round-trip through `from_db_value`. This is a
         // typed sanity check that the enum, its db values, the schema
@@ -250,30 +286,27 @@ impl NotificationOutboxStore {
                 )));
             }
         }
-        if self.db.driver() == DatabaseDriver::Postgres {
-            // Dropping a caller must not release the session gate while a
-            // separately pooled DDL statement is still executing.
-            let store = self.clone();
-            tokio::spawn(async move {
-                store
-                    .initialize_postgres_schema(OUTBOX_SCHEMA_GATE_WAIT)
-                    .await
-            })
-            .await
-            .map_err(|error| {
-                DatabaseError::QueryFailed(format!("outbox schema task failed: {error}"))
-            })??;
-        } else {
-            self.initialize_schema().await?;
-        }
-        self.adopt_legacy_candidate_ids().await?;
-        self.adopt_legacy_ancestry().await?;
         Ok(())
     }
 
     async fn initialize_postgres_schema(
         &self,
         wait: std::time::Duration,
+    ) -> Result<(), NotificationOutboxError> {
+        self.initialize_postgres_preparation(wait, false).await
+    }
+
+    pub(super) async fn initialize_postgres_prepared_owner(
+        &self,
+        wait: std::time::Duration,
+    ) -> Result<(), NotificationOutboxError> {
+        self.initialize_postgres_preparation(wait, true).await
+    }
+
+    async fn initialize_postgres_preparation(
+        &self,
+        wait: std::time::Duration,
+        trusted_owner: bool,
     ) -> Result<(), NotificationOutboxError> {
         use sqlx::Connection;
         let mut connection =
@@ -285,23 +318,344 @@ impl NotificationOutboxStore {
                     )
                 })??;
         let result = async {
-            sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+            sqlx::query("BEGIN")
+                .execute(&mut connection)
+                .await
+                .map_err(DatabaseError::from)?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
                 .bind(format!("{}ms", wait.as_millis()))
                 .execute(&mut connection)
                 .await
                 .map_err(DatabaseError::from)?;
-            sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            sqlx::query("SELECT pg_advisory_xact_lock($1::integer, $2::integer)")
                 .bind(OUTBOX_SCHEMA_GATE.0)
                 .bind(OUTBOX_SCHEMA_GATE.1)
                 .execute(&mut connection)
                 .await
                 .map_err(DatabaseError::from)?;
-            self.initialize_schema().await
+            let proof = self
+                .owner_preparation
+                .as_ref()
+                .ok_or(NotificationOutboxError::UnsafeOwnerBoundary)?;
+            if let Some(identity) = proof.identity.as_ref() {
+                self.verify_owner_gate_connection(&mut connection, identity)
+                    .await?;
+            } else if trusted_owner {
+                return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+            }
+            let schema_identity = self.capture_owner_gate_schema(&mut connection).await?;
+            *proof.schema_identity.lock().await = Some(schema_identity);
+            sqlx::query("SELECT pg_advisory_xact_lock($1::integer, $2::integer)")
+                .bind(proof.probe_key.0)
+                .bind(proof.probe_key.1)
+                .execute(&mut connection)
+                .await
+                .map_err(DatabaseError::from)?;
+            if trusted_owner {
+                self.invalidate_owner_preparation().await?;
+            } else {
+                self.invalidate_owner_preparation_if_present().await?;
+            }
+            self.initialize_schema().await?;
+            self.adopt_legacy_candidate_ids().await?;
+            self.adopt_legacy_ancestry().await?;
+            if trusted_owner {
+                self.complete_owner_preparation().await?;
+            }
+            Ok(())
         }
         .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut connection)
+                    .await
+                    .map_err(DatabaseError::from)?;
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut connection).await;
+                let _ = connection.close().await;
+                return Err(error);
+            }
+        }
         let close = connection.close().await.map_err(DatabaseError::from);
-        result?;
         close?;
+        Ok(())
+    }
+
+    async fn verify_owner_gate_connection(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        expected: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), NotificationOutboxError> {
+        use sqlx::Row as SqlxRow;
+
+        let schema = &expected.schema.name.0;
+        crate::db::physical_attestation::validate_identifier(
+            schema,
+            "notification outbox owner schema",
+        )
+        .map_err(|_| NotificationOutboxError::UnsafeOwnerBoundary)?;
+        let row = sqlx::query(
+            "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+             db.oid::bigint, db.datname::text, n.oid::bigint, n.nspname::text, \
+             n.nspname = pg_catalog.current_schema() AND owner.rolname = current_user \
+             AND NOT pg_catalog.pg_is_in_recovery() \
+             AND NOT owner.rolcanlogin AND NOT owner.rolsuper AND NOT owner.rolcreatedb \
+             AND NOT owner.rolcreaterole AND NOT owner.rolreplication AND NOT owner.rolbypassrls \
+             AND owner.oid <> db.datdba \
+             AND NOT pg_catalog.has_database_privilege(owner.oid, db.oid, 'CREATE,TEMP') \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = owner.oid) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+               WHERE c.relnamespace = pg_catalog.pg_my_temp_schema()) \
+             FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
+             JOIN pg_catalog.pg_database db ON db.datname = pg_catalog.current_database() \
+             WHERE n.nspname = $1",
+        )
+        .bind(schema)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+        let valid = if let Some(row) = row {
+            let system: String = row.try_get(0).map_err(DatabaseError::from)?;
+            system
+                .parse::<crate::db::lineage::PgSystemIdentifier>()
+                .ok()
+                == Some(expected.system_identifier)
+                && row.try_get::<i64, _>(1).map_err(DatabaseError::from)?
+                    == i64::from(expected.database.oid)
+                && row.try_get::<String, _>(2).map_err(DatabaseError::from)?
+                    == expected.database.name.0
+                && row.try_get::<i64, _>(3).map_err(DatabaseError::from)?
+                    == i64::from(expected.schema.oid)
+                && row.try_get::<String, _>(4).map_err(DatabaseError::from)? == *schema
+                && row.try_get::<bool, _>(5).map_err(DatabaseError::from)?
+        } else {
+            false
+        };
+        if !valid {
+            return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn verify_owner_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+    ) -> Result<(), DatabaseError> {
+        let Some(proof) = self.owner_preparation.as_ref() else {
+            return Ok(());
+        };
+        if tx.driver() != DatabaseDriver::Postgres {
+            return Err(DatabaseError::QueryFailed(
+                "notification outbox owner transaction left PostgreSQL".to_owned(),
+            ));
+        }
+        let mut rows = tx
+            .query(
+                "SELECT pg_catalog.pg_try_advisory_xact_lock_shared(?::integer, ?::integer)",
+                crate::db_params![proof.probe_key.0, proof.probe_key.1],
+            )
+            .await?;
+        let acquired_probe = rows
+            .next()
+            .await?
+            .map(|row| row.get::<bool>(0))
+            .transpose()?
+            .unwrap_or(true);
+        drop(rows);
+        if acquired_probe {
+            return Err(DatabaseError::QueryFailed(
+                "notification outbox transaction escaped its pinned advisory-lock domain"
+                    .to_owned(),
+            ));
+        }
+        if let Some(identity) = proof.identity.as_ref() {
+            self.verify_owner_transaction_identity(tx, identity).await?;
+        }
+        let expected_schema = proof.schema_identity.lock().await.clone().ok_or_else(|| {
+            DatabaseError::QueryFailed(
+                "notification outbox gate schema was not captured".to_owned(),
+            )
+        })?;
+        self.verify_owner_transaction_schema(tx, &expected_schema)
+            .await?;
+        Ok(())
+    }
+
+    async fn capture_owner_gate_schema(
+        &self,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<super::OwnerSchemaIdentity, NotificationOutboxError> {
+        use sqlx::Row as SqlxRow;
+
+        let row = sqlx::query(
+            "SELECT n.oid::bigint, n.nspname::text, \
+                    pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text, \
+                    pg_catalog.pg_my_temp_schema()::bigint \
+             FROM pg_catalog.pg_namespace n \
+             WHERE n.nspname = pg_catalog.current_schema()",
+        )
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+        let Some(row) = row else {
+            return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+        };
+        let identity = super::OwnerSchemaIdentity {
+            oid: row.try_get(0).map_err(DatabaseError::from)?,
+            name: row.try_get(1).map_err(DatabaseError::from)?,
+            search_path_json: row.try_get(2).map_err(DatabaseError::from)?,
+            temp_schema_oid: row.try_get(3).map_err(DatabaseError::from)?,
+        };
+        if identity.temp_schema_oid != 0 {
+            return Err(NotificationOutboxError::UnsafeOwnerBoundary);
+        }
+        Ok(identity)
+    }
+
+    async fn verify_owner_transaction_schema(
+        &self,
+        tx: &mut Transaction<'_>,
+        expected: &super::OwnerSchemaIdentity,
+    ) -> Result<(), DatabaseError> {
+        let mut rows = tx
+            .query(
+                "SELECT n.oid::bigint, n.nspname::text, \
+                        pg_catalog.array_to_json(pg_catalog.current_schemas(false))::text, \
+                        pg_catalog.pg_my_temp_schema()::bigint \
+                 FROM pg_catalog.pg_namespace n \
+                 WHERE n.nspname = pg_catalog.current_schema()",
+                (),
+            )
+            .await?;
+        let valid = match rows.next().await? {
+            Some(row) => {
+                row.get::<i64>(0)? == expected.oid
+                    && row.get::<String>(1)? == expected.name
+                    && row.get::<String>(2)? == expected.search_path_json
+                    && row.get::<i64>(3)? == expected.temp_schema_oid
+            }
+            None => false,
+        };
+        if !valid {
+            return Err(DatabaseError::QueryFailed(
+                "notification outbox transaction changed its gate schema".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_owner_transaction_identity(
+        &self,
+        tx: &mut Transaction<'_>,
+        expected: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), DatabaseError> {
+        let schema = &expected.schema.name.0;
+        let mut rows = tx
+            .query(
+                "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+                 db.oid::bigint, db.datname::text, n.oid::bigint, n.nspname::text, \
+                 n.nspname = pg_catalog.current_schema() AND owner.rolname = current_user \
+                 AND NOT pg_catalog.pg_is_in_recovery() \
+                 AND NOT owner.rolcanlogin AND NOT owner.rolsuper AND NOT owner.rolcreatedb \
+                 AND NOT owner.rolcreaterole AND NOT owner.rolreplication AND NOT owner.rolbypassrls \
+                 AND owner.oid <> db.datdba \
+                 AND NOT pg_catalog.has_database_privilege(owner.oid, db.oid, 'CREATE,TEMP') \
+                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = owner.oid) \
+                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                   WHERE c.relnamespace = pg_catalog.pg_my_temp_schema()) \
+                 FROM pg_catalog.pg_namespace n \
+                 JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
+                 JOIN pg_catalog.pg_database db ON db.datname = pg_catalog.current_database() \
+                 WHERE n.nspname = ?",
+                crate::db_params![schema],
+            )
+            .await?;
+        let valid = match rows.next().await? {
+            Some(row) => {
+                let system: String = row.get(0)?;
+                system
+                    .parse::<crate::db::lineage::PgSystemIdentifier>()
+                    .ok()
+                    == Some(expected.system_identifier)
+                    && row.get::<i64>(1)? == i64::from(expected.database.oid)
+                    && row.get::<String>(2)? == expected.database.name.0
+                    && row.get::<i64>(3)? == i64::from(expected.schema.oid)
+                    && row.get::<String>(4)? == *schema
+                    && row.get::<bool>(5)?
+            }
+            None => false,
+        };
+        if !valid {
+            return Err(DatabaseError::QueryFailed(
+                "notification outbox owner transaction failed its identity and role check"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn invalidate_owner_preparation_if_present(&self) -> Result<(), NotificationOutboxError> {
+        let mut tx = self.db.begin().await?;
+        self.verify_owner_transaction(&mut tx).await?;
+        let mut rows = tx
+            .query(
+                "SELECT pg_catalog.to_regclass('notification_outbox_owner_state') IS NOT NULL",
+                (),
+            )
+            .await?;
+        let exists = rows
+            .next()
+            .await?
+            .map(|row| row.get::<bool>(0))
+            .transpose()?
+            .unwrap_or(false);
+        drop(rows);
+        if exists {
+            tx.execute(
+                "UPDATE notification_outbox_owner_state SET prepared_revision = 0 WHERE singleton = 1",
+                (),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn invalidate_owner_preparation(&self) -> Result<(), NotificationOutboxError> {
+        let mut tx = self.db.begin_immediate().await?;
+        self.verify_owner_transaction(&mut tx).await?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS notification_outbox_owner_state (\
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                prepared_revision BIGINT NOT NULL CHECK (prepared_revision >= 0)\
+             )",
+            (),
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO notification_outbox_owner_state (singleton, prepared_revision) \
+             VALUES (1, 0) \
+             ON CONFLICT (singleton) DO UPDATE SET prepared_revision = 0",
+            (),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn complete_owner_preparation(&self) -> Result<(), NotificationOutboxError> {
+        let mut tx = self.db.begin_immediate().await?;
+        self.verify_owner_transaction(&mut tx).await?;
+        tx.execute(
+            "UPDATE notification_outbox_owner_state SET prepared_revision = ? \
+             WHERE singleton = 1",
+            crate::db_params![OUTBOX_OWNER_PREPARED_REVISION],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -450,6 +804,7 @@ impl NotificationOutboxStore {
 
     async fn migrate_coalescing_index(&self) -> Result<(), NotificationOutboxError> {
         let mut tx = self.db.begin_immediate().await?;
+        self.verify_owner_transaction(&mut tx).await?;
         let result = migrate_coalescing_index_tx(&mut tx).await;
         match result {
             Ok(()) => {
@@ -477,6 +832,7 @@ impl NotificationOutboxStore {
         };
         loop {
             let mut tx = self.db.begin_immediate().await?;
+            self.verify_owner_transaction(&mut tx).await?;
             if self.db.driver() == DatabaseDriver::Postgres {
                 tx.execute("SET LOCAL lock_timeout = '100ms'", ()).await?;
                 tx.execute("SET LOCAL statement_timeout = '500ms'", ())
@@ -1010,7 +1366,7 @@ fn quoted_identifier(value: &str) -> String {
 
 // Compare tokens rather than deleting whitespace inside SQL identifiers or
 // literals. PostgreSQL adds harmless parentheses and text casts when rendering.
-fn predicate_tokens(sql: &str) -> Vec<String> {
+pub(super) fn predicate_tokens(sql: &str) -> Vec<String> {
     let chars: Vec<char> = sql.chars().collect();
     let mut tokens = Vec::new();
     let mut index = 0;
@@ -1459,7 +1815,10 @@ mod tests {
         // value) AND `offline_dm_mention` (new reason value) — Postgres
         // enforces every constraint on the row, so leaving either
         // anonymous CHECK in place will reject the insert.
-        let store = NotificationOutboxStore { db: db.clone() };
+        let store = NotificationOutboxStore {
+            db: db.clone(),
+            owner_preparation: None,
+        };
         let class_migrate = store
             .migrate_postgres_check_constraint_on_column(
                 &table,

@@ -61,6 +61,7 @@ impl NotificationOutboxStore {
         phase: AdoptionPhase,
     ) -> Result<(), NotificationOutboxError> {
         let mut tx = begin_bounded(&self.db).await?;
+        self.verify_owner_transaction(&mut tx).await?;
         if !has_table(&mut tx, "ingress_effect_descendants").await? {
             tx.commit().await?;
             return Ok(());
@@ -68,7 +69,7 @@ impl NotificationOutboxStore {
         tx.commit().await?;
         let mut cursor: Option<(MessageKey, i32, Vec<u8>)> = None;
         loop {
-            let recorded = load_page(&self.db, cursor.as_ref()).await?;
+            let recorded = load_page(&self.db, cursor.as_ref(), Some(self)).await?;
             if recorded.is_empty() {
                 return Ok(());
             }
@@ -150,6 +151,7 @@ impl NotificationOutboxStore {
             return Ok(Vec::new());
         };
         let mut tx = begin_bounded(&self.db).await?;
+        self.verify_owner_transaction(&mut tx).await?;
         if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
             tx.commit().await?;
             return Ok(Vec::new());
@@ -199,6 +201,7 @@ impl NotificationOutboxStore {
             .delivery_id
             .ok_or(IngressUowError::EffectIntentConflict)?;
         let mut tx = begin_bounded(&self.db).await?;
+        self.verify_owner_transaction(&mut tx).await?;
         if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
             tx.commit().await?;
             return Ok(CandidateBridge::Unmatched);
@@ -265,6 +268,7 @@ impl NotificationOutboxStore {
         let mut cursor = String::new();
         loop {
             let mut tx = begin_bounded(&self.db).await?;
+            self.verify_owner_transaction(&mut tx).await?;
             let mut rows = tx.query("SELECT job_id FROM notification_outbox_lineage WHERE candidate_delivery_id = ? AND settled_at_ms IS NULL AND job_id > ? ORDER BY job_id LIMIT ?", crate::db_params![id.to_string(), &cursor, PAGE]).await?;
             let mut jobs = Vec::new();
             while let Some(row) = rows.next().await? {
@@ -303,6 +307,7 @@ impl NotificationOutboxStore {
         let mut ambiguous = false;
         loop {
             let mut tx = begin_bounded(&self.db).await?;
+            self.verify_owner_transaction(&mut tx).await?;
             if !quarantine::lock_scanned_parent(&mut tx, recorded).await?
                 || !Self::lock_unquarantined_candidate(&mut tx, candidate).await?
             {
@@ -361,6 +366,7 @@ impl NotificationOutboxStore {
                 .ok_or(IngressUowError::EffectIntentConflict)?;
             run_with_retry(5, || async {
                 let mut tx = begin_bounded(&self.db).await?;
+                self.verify_owner_transaction(&mut tx).await?;
                 if !quarantine::lock_scanned_parent(&mut tx, recorded).await?
                     || !Self::lock_unquarantined_candidate(&mut tx, candidate).await?
                 {
@@ -403,6 +409,7 @@ impl NotificationOutboxStore {
         require_context_match: bool,
     ) -> Result<bool, IngressUowError> {
         let mut tx = begin_bounded(&self.db).await?;
+        self.verify_owner_transaction(&mut tx).await?;
         if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
             tx.commit().await?;
             return Ok(false);
@@ -591,8 +598,12 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn source_matches(
 pub(in crate::notification_outbox::legacy_ancestry) async fn load_page(
     db: &Database,
     cursor: Option<&(MessageKey, i32, Vec<u8>)>,
+    owner_store: Option<&NotificationOutboxStore>,
 ) -> Result<Vec<Recorded>, IngressUowError> {
     let mut tx = begin_bounded(db).await?;
+    if let Some(store) = owner_store {
+        store.verify_owner_transaction(&mut tx).await?;
+    }
     let mut rows = match (tx.driver(),cursor) {
         (DatabaseDriver::Postgres,Some((key,kind,hash))) => tx.query("SELECT message_key::text,kind::int,semantic_identity_hash,payload_version::int,payload FROM ingress_effect_intents WHERE kind IN (7,21) AND (message_key,kind,semantic_identity_hash) > (?::uuid,?,?) ORDER BY message_key,kind,semantic_identity_hash LIMIT ?",crate::db_params![key.to_storage().to_string(),*kind,hash.clone(),PAGE]).await?,
         (DatabaseDriver::Sqlite,Some((key,kind,hash))) => tx.query("SELECT message_key,kind,semantic_identity_hash,payload_version,payload FROM ingress_effect_intents WHERE kind IN (7,21) AND (message_key,kind,semantic_identity_hash) > (?,?,?) ORDER BY message_key,kind,semantic_identity_hash LIMIT ?",crate::db_params![key.to_storage().to_string(),*kind,hash.clone(),PAGE]).await?,

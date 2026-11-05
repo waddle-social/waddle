@@ -16,12 +16,16 @@ mod fcm_dispatch;
 mod nodes;
 pub(crate) mod observability;
 mod operator_inventory;
+mod owner;
 mod publish;
 mod publish_jobs;
 mod pubsub_backing;
 mod registration;
 #[cfg(test)]
 mod retirement_scope_tests;
+mod runtime_attach;
+#[cfg(all(test, feature = "test-support"))]
+mod runtime_attach_tests;
 mod secrets;
 mod settlement;
 mod store;
@@ -35,8 +39,10 @@ pub use apns_config::{ApnsConfig, ApnsConfigError, ApnsConfigVar};
 pub use fcm_config::{FcmConfig, FcmConfigError, FcmConfigVar, FcmTokenSourceLoadError};
 pub use observability::{PushLocalRegistrationObservation, PushProviderQueueObservation};
 pub use operator_inventory::{PushOperatorInventory, PushOperatorNode, PushOperatorNodeStatus};
+pub use owner::PushServiceOwnerError;
 pub(crate) use publish_jobs::acknowledge_completed_outbox_tx;
 pub use pubsub_backing::ensure_xep0060_push_node;
+pub use runtime_attach::PushServiceAttachError;
 pub(crate) use secrets::PushSecretCipher;
 pub use store::DatabasePushServiceStore;
 pub(crate) use types::{CanonicalNotificationTerminalProof, PushQueueAcceptanceError};
