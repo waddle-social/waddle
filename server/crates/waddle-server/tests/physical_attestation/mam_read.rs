@@ -559,15 +559,84 @@ async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_gra
     )
     .await
     .expect("install attestor");
-    let database = waddle_server::test_support::database_from_attested_postgres_pool(
-        "MAM writer main lane",
+    let pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "MAM writer main and ingress lanes",
         attested_pool(
             fixture.runtime_options.clone(),
             attestation,
-            1,
+            2,
             Duration::from_secs(8),
         )
-        .expect("one-slot attested pool"),
+        .expect("attested main and ingress pool"),
+        1,
+        1,
+    )
+    .await
+    .expect("separate one-slot main and ingress lanes");
+    let database = pool.global().clone();
+
+    let owner_handoff =
+        waddle_server::server::MamOwnerClaimHandoff::new(owner_role.clone(), schema.clone())
+            .expect("typed MAM owner handoff");
+    let inherited =
+        waddle_server::server::ResolvedXmppDatabaseUrl::InheritedGlobal(fixture.base_url.clone());
+    let clustering = cfg!(feature = "clustering");
+    assert_eq!(
+        waddle_server::test_support::select_mam_storage_for_test(
+            &inherited,
+            Some(&owner_handoff),
+            clustering,
+            clustering,
+            &database,
+        )
+        .await
+        .expect("select MAM from exact global main handle"),
+        (true, Some(waddle_server::db::lineage::DurableStore::Global)),
+        "attested MAM selection must alias the already-attested global boundary"
+    );
+
+    // The provenance rejection happens before a main-lane checkout. Use the
+    // same URL bytes as the inherited case to distinguish provenance from
+    // URL equality.
+    let held_main = database.begin().await.expect("hold global main slot");
+    for selection in [
+        waddle_server::server::ResolvedXmppDatabaseUrl::Explicit(fixture.base_url.clone()),
+        waddle_server::server::ResolvedXmppDatabaseUrl::EphemeralFallback,
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_millis(150),
+            waddle_server::test_support::select_mam_storage_for_test(
+                &selection,
+                Some(&owner_handoff),
+                clustering,
+                clustering,
+                &database,
+            ),
+        )
+        .await
+        .expect("unsupported provenance must fail before main checkout")
+        .expect_err("attested MAM requires inherited global provenance");
+        assert!(error
+            .to_string()
+            .contains("must inherit WADDLE_DATABASE_URL"));
+    }
+    held_main
+        .rollback()
+        .await
+        .expect("release global main slot");
+
+    let ingress_database = pool.ingress();
+    assert!(
+        waddle_server::test_support::select_mam_storage_for_test(
+            &inherited,
+            Some(&owner_handoff),
+            clustering,
+            clustering,
+            &ingress_database,
+        )
+        .await
+        .is_err(),
+        "MAM must reject the reserved ingress handle"
     );
 
     sqlx::query(&format!(
@@ -597,6 +666,10 @@ async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_gra
     .await
     .expect("restore exact tombstone columns after broad revoke");
 
+    let ingress_hold = ingress_database
+        .begin()
+        .await
+        .expect("occupy reserved ingress slot");
     let storage = DatabaseMamStorage::attach(&database, owner_role, schema)
         .await
         .expect("attach exact MAM writer");
@@ -636,6 +709,10 @@ async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_gra
     .expect("one-slot query does not reacquire a pool connection")
     .expect("query through attested main slot");
     assert_eq!(page.messages.len(), 1);
+    ingress_hold
+        .rollback()
+        .await
+        .expect("release reserved ingress slot");
 
     #[cfg(feature = "clustering")]
     {
@@ -699,7 +776,11 @@ async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_gra
         .await
         .expect("close owner provisioning connection");
     drop(storage);
+    drop(ingress_database);
     drop(database);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
     fixture.cleanup().await;
     let cluster_admin = sqlx::PgPool::connect(&cluster_url)
         .await

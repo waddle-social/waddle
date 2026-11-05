@@ -25,6 +25,7 @@ use crate::ingress::IngressAuthority;
 #[cfg(feature = "clustering")]
 use crate::ingress::IngressStartupError;
 use crate::ingress_uow::IngressUnitOfWork;
+use crate::mam_runtime::DatabaseMamStorage;
 use crate::notification_activity::NotificationActivityStore;
 use crate::notification_outbox::NotificationOutboxStore;
 use crate::notification_settings_projection::NotificationSettingsProjectionStore;
@@ -73,7 +74,7 @@ use crate::server::session_janitors::{
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
-use crate::server::{AppState, ResolvedXmppDatabaseUrl, XmppConfig};
+use crate::server::{AppState, MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppConfig};
 use crate::threads::storage::InboxBackedThreadsStorage;
 use crate::vcard::VCardStore;
 use anyhow::{Context, Result};
@@ -286,6 +287,13 @@ enum IngressColocationError {
     AttestedStoreRequiresInheritedGlobal { store: &'static str },
     #[error("clustered SM cannot yet attach to an attested PostgreSQL runtime database")]
     AttestedClusteredSmUnsupported,
+    #[error("attested MAM storage must inherit WADDLE_DATABASE_URL without an explicit override")]
+    AttestedMamRequiresInheritedGlobal,
+    #[error("attested MAM storage requires an independent operator owner/claim-schema handoff")]
+    AttestedMamOwnerHandoffRequired,
+    #[cfg(feature = "clustering")]
+    #[error("attested MAM storage requires live clustering claim handles in clustering builds")]
+    AttestedMamClaimsUnavailable,
     #[cfg(feature = "clustering")]
     #[error("clustered pending delivery requires live claim handles")]
     AttestedPendingClaimsUnavailable,
@@ -465,6 +473,93 @@ pub(crate) async fn create_websocket_mam_storage(
     Ok(Arc::new(storage.with_cluster_fencing(
         clustering_enabled && clustering_claim_pair_live,
     )))
+}
+
+/// Selected MAM attachment for startup. The legacy branch retains its
+/// independently opened `SqlxMamStorage`; the attested branch retains the
+/// adapter on the exact supplied main `Database` handle.
+pub(crate) enum MamStartupStorage {
+    Legacy(Arc<SqlxMamStorage>),
+    Attested(Arc<DatabaseMamStorage>),
+}
+
+impl MamStartupStorage {
+    pub(crate) fn as_mam_storage(&self) -> Arc<dyn MamStorage> {
+        match self {
+            Self::Legacy(storage) => storage.clone(),
+            Self::Attested(storage) => storage.clone(),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn is_attested(&self) -> bool {
+        matches!(self, Self::Attested(_))
+    }
+
+    pub(crate) fn lineage_alias_target(&self) -> Option<crate::db::lineage::DurableStore> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Attested(_) => Some(crate::db::lineage::DurableStore::Global),
+        }
+    }
+}
+
+/// Select MAM storage while retaining URL provenance through the attested
+/// branch. Explicit overrides and ephemeral fallbacks are rejected before
+/// any raw PostgreSQL probe or child-pool construction.
+pub(crate) async fn select_websocket_mam_storage(
+    selection: &ResolvedXmppDatabaseUrl,
+    owner_handoff: Option<&MamOwnerClaimHandoff>,
+    clustering_enabled: bool,
+    clustering_claim_pair_live: bool,
+    global_db: &Database,
+) -> Result<MamStartupStorage> {
+    if global_db.uses_attested_postgres_pool() {
+        if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+            return Err(IngressColocationError::AttestedMamRequiresInheritedGlobal.into());
+        }
+        let owner_handoff =
+            owner_handoff.ok_or(IngressColocationError::AttestedMamOwnerHandoffRequired)?;
+        #[cfg(feature = "clustering")]
+        if !clustering_enabled || !clustering_claim_pair_live {
+            return Err(IngressColocationError::AttestedMamClaimsUnavailable.into());
+        }
+        let storage = DatabaseMamStorage::attach(
+            global_db,
+            owner_handoff.mam_owner.clone(),
+            owner_handoff.claim_schema.clone(),
+        )
+        .await?;
+        return Ok(MamStartupStorage::Attested(Arc::new(storage)));
+    }
+
+    let storage = create_websocket_mam_storage(
+        selection.clone_resolved_url(),
+        clustering_enabled,
+        clustering_claim_pair_live,
+        global_db,
+    )
+    .await?;
+    Ok(MamStartupStorage::Legacy(storage))
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn select_mam_storage_for_test(
+    selection: &ResolvedXmppDatabaseUrl,
+    owner_handoff: Option<&MamOwnerClaimHandoff>,
+    clustering_enabled: bool,
+    clustering_claim_pair_live: bool,
+    global_db: &Database,
+) -> Result<(bool, Option<crate::db::lineage::DurableStore>)> {
+    select_websocket_mam_storage(
+        selection,
+        owner_handoff,
+        clustering_enabled,
+        clustering_claim_pair_live,
+        global_db,
+    )
+    .await
+    .map(|storage| (storage.is_attested(), storage.lineage_alias_target()))
 }
 
 /// Explicit dependency bundle for [`create_router`]. Grouped into a
