@@ -33,9 +33,13 @@
 //!    negative-priority resources.
 
 use super::UserActor;
+use crate::ownership::BindingRef;
 use crate::pending_delivery::PendingRowId;
 use crate::registry::connection_registry::endpoint::EndpointEnqueueRejection;
-use crate::registry::{BroadcastOutcome, ConnectionEntry, OutboundStanza};
+use crate::registry::{
+    ArchiveDispatchRefusalReason, BroadcastOutcome, ConnectionEntry, DeliveryKind,
+    LocalConnectionBindingId, OutboundStanza,
+};
 use crate::stream_management::SmRelayedAppendObligation;
 use crate::Stanza;
 use jid::FullJid;
@@ -84,6 +88,97 @@ impl UserActor {
                 BroadcastOutcome::NotConnected
             }
         }
+    }
+
+    /// Dark P3.1 local-only dispatch surface. Unlike the legacy actor API,
+    /// every proven pre-enqueue refusal keeps the exact envelope and the
+    /// local binding evidence needed for a caller-controlled retry decision.
+    /// This deliberately does not route to remote mirrors, offline storage,
+    /// pending delivery, or another resource.
+    fn try_deliver_with_custody(
+        &mut self,
+        jid: &FullJid,
+        outbound: OutboundStanza,
+    ) -> LocalRetryDispatchOutcome {
+        let Some(entry) = self.connections.get(jid) else {
+            return LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::NoResource {
+                outbound: Box::new(outbound),
+            });
+        };
+        if !entry.is_locally_hosted() {
+            return LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::NotLocallyHosted {
+                outbound: Box::new(outbound),
+            });
+        }
+        let owner = entry.binding_id();
+        let Some(binding_ref) = entry.binding_ref().cloned() else {
+            return LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::MissingBindingRef {
+                owner,
+                outbound: Box::new(outbound),
+            });
+        };
+        match entry.try_send_archive_ordered_with_refusal(outbound) {
+            Ok(()) => LocalRetryDispatchOutcome::AcceptedOrSettled,
+            Err(refusal) => LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::Enqueue {
+                owner,
+                binding_ref,
+                reason: refusal.reason,
+                outbound: refusal.outbound,
+            }),
+        }
+    }
+}
+
+/// Outcome of a dark local direct/peer dispatch that retains proven refusal
+/// custody. `AcceptedOrSettled` means the local archive dispatch accepted the
+/// envelope or settled it under its existing duplicate/suppression rules; it
+/// does not prove that the socket wrote it to the wire.
+#[derive(Debug, kameo::Reply)]
+pub enum LocalRetryDispatchOutcome {
+    AcceptedOrSettled,
+    Refused(LocalRetryRefusal),
+}
+
+/// A local direct/peer dispatch refusal. `Enqueue` carries both the exact
+/// local binding attempt and the untouched envelope; the other variants
+/// preserve the envelope when there is no eligible local binding to attest.
+#[derive(Debug)]
+pub enum LocalRetryRefusal {
+    NoResource {
+        outbound: Box<OutboundStanza>,
+    },
+    NotLocallyHosted {
+        outbound: Box<OutboundStanza>,
+    },
+    MissingBindingRef {
+        owner: LocalConnectionBindingId,
+        outbound: Box<OutboundStanza>,
+    },
+    DeliveryKindMismatch {
+        expected: DeliveryKind,
+        actual: DeliveryKind,
+        outbound: Box<OutboundStanza>,
+    },
+    Enqueue {
+        owner: LocalConnectionBindingId,
+        binding_ref: BindingRef,
+        reason: ArchiveDispatchRefusalReason,
+        outbound: Box<OutboundStanza>,
+    },
+}
+
+fn check_delivery_kind(
+    expected: DeliveryKind,
+    outbound: OutboundStanza,
+) -> Result<OutboundStanza, LocalRetryRefusal> {
+    if outbound.kind == expected {
+        Ok(outbound)
+    } else {
+        Err(LocalRetryRefusal::DeliveryKindMismatch {
+            expected,
+            actual: outbound.kind,
+            outbound: Box::new(outbound),
+        })
     }
 }
 
@@ -161,6 +256,52 @@ pub struct TrySendPeer {
     /// Recorded ingress identity preserved until the socket owns its replay entry.
     pub ingress_append: Option<SmRelayedAppendObligation>,
     pub original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Dark P3.1 direct-frame entry point that retains the complete outbound
+/// envelope if local enqueue is proven not to have happened. It has no
+/// production callers and does not activate provisional bindings.
+pub struct TrySendDirectWithCustody {
+    pub jid: FullJid,
+    pub outbound: OutboundStanza,
+}
+
+impl kameo::message::Message<TrySendDirectWithCustody> for UserActor {
+    type Reply = LocalRetryDispatchOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: TrySendDirectWithCustody,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match check_delivery_kind(DeliveryKind::DirectFrame, msg.outbound) {
+            Ok(outbound) => self.try_deliver_with_custody(&msg.jid, outbound),
+            Err(refusal) => LocalRetryDispatchOutcome::Refused(refusal),
+        }
+    }
+}
+
+/// Dark P3.1 peer-stanza entry point that retains the complete outbound
+/// envelope if local enqueue is proven not to have happened. It has no
+/// production callers and does not activate provisional bindings.
+pub struct TrySendPeerWithCustody {
+    pub jid: FullJid,
+    pub outbound: OutboundStanza,
+}
+
+impl kameo::message::Message<TrySendPeerWithCustody> for UserActor {
+    type Reply = LocalRetryDispatchOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: TrySendPeerWithCustody,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match check_delivery_kind(DeliveryKind::PeerStanza, msg.outbound) {
+            Ok(outbound) => self.try_deliver_with_custody(&msg.jid, outbound),
+            Err(refusal) => LocalRetryDispatchOutcome::Refused(refusal),
+        }
+    }
 }
 
 impl kameo::message::Message<TrySendPeer> for UserActor {
