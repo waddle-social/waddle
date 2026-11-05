@@ -280,6 +280,22 @@ impl BindingOutboundEndpoint {
         self.admit().map(operation)
     }
 
+    /// Hold binding admission while an operation owns an outbound envelope.
+    /// If admission refuses before the closure runs, return that same envelope
+    /// to the caller instead of dropping the closure and its captured value.
+    pub(super) fn with_active_outbound<T, E>(
+        &self,
+        outbound: OutboundStanza,
+        refused: impl FnOnce(EndpointEnqueueRejection, OutboundStanza) -> E,
+        operation: impl FnOnce(AdmittedOutboundEndpoint<'_>, OutboundStanza) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let admitted = match self.admit() {
+            Ok(admitted) => admitted,
+            Err(reason) => return Err(refused(reason, outbound)),
+        };
+        operation(admitted, outbound)
+    }
+
     fn admit(&self) -> Result<AdmittedOutboundEndpoint<'_>, EndpointEnqueueRejection> {
         let admission = self
             .admission

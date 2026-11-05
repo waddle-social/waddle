@@ -29,6 +29,7 @@ mod state;
 mod subscriptions;
 mod write_interruption;
 
+pub use archive_dispatch::{ArchiveDispatchRefusal, ArchiveDispatchRefusalReason};
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
 pub use endpoint::{BindingAdmissionState, SocketOutboundEndpoint};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};

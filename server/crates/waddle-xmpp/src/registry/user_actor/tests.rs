@@ -11,7 +11,11 @@ use super::{
 };
 use crate::pending_delivery::PendingRowId;
 use crate::registry::connection_registry::{
-    BroadcastOutcome, ConnectionEntry, DeliveryKind, OutboundStanza,
+    ArchiveDispatchRefusalReason, BroadcastOutcome, ConnectionEntry, DeliveryKind, OutboundStanza,
+    OutboundWriteAcceptance, SocketOutboundEndpoint,
+};
+use crate::registry::{
+    LocalRetryDispatchOutcome, LocalRetryRefusal, TrySendDirectWithCustody, TrySendPeerWithCustody,
 };
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
@@ -42,6 +46,41 @@ fn any_stanza() -> Stanza {
     Stanza::Presence(xmpp_parsers::presence::Presence::new(
         xmpp_parsers::presence::Type::None,
     ))
+}
+
+fn retry_envelope(
+    jid: &FullJid,
+    kind: DeliveryKind,
+    write_acceptance: OutboundWriteAcceptance,
+) -> OutboundStanza {
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.clone().into()));
+    message.id = Some(xmpp_parsers::message::Id("custody-envelope".to_owned()));
+    let stanza = Stanza::Message(message);
+    let mut outbound = match kind {
+        DeliveryKind::DirectFrame => OutboundStanza::new(stanza),
+        DeliveryKind::PeerStanza => OutboundStanza::peer_stanza(stanza),
+    };
+
+    let receipt_at = chrono::Utc::now();
+    outbound.pending_row_id = Some(PendingRowId::new("custody-row"));
+    outbound.original_receipt_at = Some(receipt_at);
+    outbound.write_acceptance = Some(write_acceptance);
+    outbound.ingress_append = Some(crate::stream_management::SmRelayedAppendObligation {
+        key: crate::stream_management::SmIngressAppendKey {
+            message_key: crate::ingress::MessageKey::new(),
+            kind: crate::stream_management::SmIngressReceiptKind::from_storage(1),
+            semantic_identity_hash: [0x21; 32],
+            resource: jid.clone(),
+        },
+        sender_bare: "alice@example.com".parse().expect("valid sender bare JID"),
+        received_at: Some(receipt_at),
+        archive_positions: vec![crate::stream_management::ArchiveDispatchPosition {
+            archive: jid.to_bare(),
+            ordinal: crate::mam::ArchiveOrdinal::from_storage(17).expect("valid archive ordinal"),
+        }],
+        dispatch_stream: None,
+    });
+    outbound
 }
 
 struct HoldMailboxUntilReleased {
@@ -713,6 +752,213 @@ async fn delivery_preserves_direct_vs_peer_kind() {
         .expect("peer");
     assert_eq!(outcome, BroadcastOutcome::Delivered);
     assert_eq!(rx.try_recv().expect("frame").kind, DeliveryKind::PeerStanza);
+}
+
+/// Dark P3.1 refusal custody must identify the replacement binding attempt,
+/// even when it shares the failed-resume transport with the displaced attempt.
+#[tokio::test]
+async fn local_direct_refusal_retains_replacement_binding_and_exact_envelope() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    let transport = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    );
+    let failed_resume = crate::ownership::BindingRef::fresh(transport.clone());
+    let fresh_bind = crate::ownership::BindingRef::fresh(transport);
+    assert_ne!(failed_resume, fresh_bind);
+
+    let (old_endpoint, mut old_rx) = SocketOutboundEndpoint::channel(1);
+    let old_entry = ConnectionEntry::new_for_binding(old_endpoint, failed_resume.clone());
+    let old_owner = old_entry.binding_id();
+    register(&actor, jid.clone(), old_entry).await;
+
+    let (replacement_endpoint, mut replacement_rx) = SocketOutboundEndpoint::channel(1);
+    let replacement = ConnectionEntry::new_for_binding(replacement_endpoint, fresh_bind.clone());
+    let replacement_owner = replacement.binding_id();
+    assert!(replacement.seal_binding(replacement_owner, &fresh_bind));
+    register(&actor, jid.clone(), replacement).await;
+
+    let (acceptance, mut acceptance_rx) = OutboundWriteAcceptance::new();
+    let expected = retry_envelope(&jid, DeliveryKind::DirectFrame, acceptance.clone());
+    let expected_ingress = expected
+        .ingress_append
+        .clone()
+        .expect("test envelope ingress identity");
+    let expected_row = expected.pending_row_id.clone();
+    let expected_receipt_at = expected.original_receipt_at;
+
+    let outcome: LocalRetryDispatchOutcome = actor
+        .ask(TrySendDirectWithCustody {
+            jid,
+            outbound: expected,
+        })
+        .await
+        .expect("direct custody request");
+    let LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::Enqueue {
+        owner,
+        binding_ref,
+        reason,
+        outbound,
+    }) = outcome
+    else {
+        panic!("sealed local binding should return its exact refusal custody");
+    };
+    assert_eq!(owner, replacement_owner);
+    assert_ne!(owner, old_owner);
+    assert_eq!(binding_ref, fresh_bind);
+    assert_ne!(binding_ref, failed_resume);
+    assert_eq!(reason, ArchiveDispatchRefusalReason::Sealed);
+    assert_eq!(outbound.kind, DeliveryKind::DirectFrame);
+    assert_eq!(outbound.pending_row_id, expected_row);
+    assert_eq!(outbound.original_receipt_at, expected_receipt_at);
+    assert_eq!(outbound.ingress_append, Some(expected_ingress));
+    let Stanza::Message(message) = &outbound.stanza else {
+        panic!("expected message envelope");
+    };
+    assert_eq!(
+        message.id.as_ref().map(|id| id.0.as_str()),
+        Some("custody-envelope")
+    );
+    assert!(
+        old_rx.try_recv().is_err(),
+        "displaced binding receives nothing"
+    );
+    assert!(
+        replacement_rx.try_recv().is_err(),
+        "sealed binding receives nothing"
+    );
+    assert!(matches!(
+        acceptance_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("the original callback stays with the envelope")
+        .acknowledge();
+    acceptance_rx
+        .await
+        .expect("returned callback remains the original callback");
+}
+
+#[tokio::test]
+async fn local_peer_refusal_retains_exact_envelope() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "tablet");
+    let binding_ref = crate::ownership::BindingRef::fresh(crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    ));
+    let (endpoint, mut receiver) = SocketOutboundEndpoint::channel(1);
+    let entry = ConnectionEntry::new_for_binding(endpoint, binding_ref.clone());
+    let owner = entry.binding_id();
+    assert_eq!(
+        entry.try_send_archive_ordered(OutboundStanza::new(any_stanza())),
+        Ok(()),
+        "fill the local queue before the custody attempt"
+    );
+    register(&actor, jid.clone(), entry).await;
+
+    let (acceptance, mut acceptance_rx) = OutboundWriteAcceptance::new();
+    let expected = retry_envelope(&jid, DeliveryKind::PeerStanza, acceptance.clone());
+    let expected_ingress = expected
+        .ingress_append
+        .clone()
+        .expect("test envelope ingress identity");
+    let expected_row = expected.pending_row_id.clone();
+    let expected_receipt_at = expected.original_receipt_at;
+    let outcome: LocalRetryDispatchOutcome = actor
+        .ask(TrySendPeerWithCustody {
+            jid,
+            outbound: expected,
+        })
+        .await
+        .expect("peer custody request");
+    let LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::Enqueue {
+        owner: actual_owner,
+        binding_ref: actual_binding,
+        reason,
+        outbound,
+    }) = outcome
+    else {
+        panic!("full local queue should return its exact refusal custody");
+    };
+    assert_eq!(actual_owner, owner);
+    assert_eq!(actual_binding, binding_ref);
+    assert_eq!(reason, ArchiveDispatchRefusalReason::Full);
+    assert_eq!(outbound.kind, DeliveryKind::PeerStanza);
+    assert_eq!(outbound.pending_row_id, expected_row);
+    assert_eq!(outbound.original_receipt_at, expected_receipt_at);
+    assert_eq!(outbound.ingress_append, Some(expected_ingress));
+    let Stanza::Message(message) = &outbound.stanza else {
+        panic!("expected message envelope");
+    };
+    assert_eq!(
+        message.id.as_ref().map(|id| id.0.as_str()),
+        Some("custody-envelope")
+    );
+    assert!(
+        receiver.try_recv().is_ok(),
+        "the preexisting frame stays queued"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "refused frame does not join the queue"
+    );
+    assert!(matches!(
+        acceptance_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("the original callback stays with the envelope")
+        .acknowledge();
+    acceptance_rx
+        .await
+        .expect("returned callback remains the original callback");
+}
+
+#[tokio::test]
+async fn local_retry_api_preserves_envelope_without_remote_or_offline_fallback() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "remote");
+    let (endpoint, mut receiver) = SocketOutboundEndpoint::channel(1);
+    register(
+        &actor,
+        jid.clone(),
+        ConnectionEntry::remote_hosted(endpoint),
+    )
+    .await;
+
+    let (acceptance, mut acceptance_rx) = OutboundWriteAcceptance::new();
+    let expected = retry_envelope(&jid, DeliveryKind::DirectFrame, acceptance.clone());
+    let expected_ingress = expected
+        .ingress_append
+        .clone()
+        .expect("test envelope ingress identity");
+    let outcome: LocalRetryDispatchOutcome = actor
+        .ask(TrySendDirectWithCustody {
+            jid,
+            outbound: expected,
+        })
+        .await
+        .expect("direct custody request");
+    let LocalRetryDispatchOutcome::Refused(LocalRetryRefusal::NotLocallyHosted { outbound }) =
+        outcome
+    else {
+        panic!("remote mirror must be refused by the local-only API");
+    };
+    assert_eq!(outbound.kind, DeliveryKind::DirectFrame);
+    assert_eq!(outbound.ingress_append, Some(expected_ingress));
+    assert!(
+        receiver.try_recv().is_err(),
+        "remote mirror receives nothing"
+    );
+    assert!(matches!(
+        acceptance_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
 }
 
 /// Invariant 1 + 5: a full channel drops non-blocking as `DroppedFull`; an
