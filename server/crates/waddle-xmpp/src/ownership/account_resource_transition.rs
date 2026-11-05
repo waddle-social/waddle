@@ -15,6 +15,7 @@
 
 use jid::FullJid;
 use minidom::Element;
+use std::io::{self, Write};
 use uuid::Uuid;
 use xmpp_parsers::presence::Show;
 
@@ -30,6 +31,42 @@ pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOADS: usize = 64;
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES: usize = 32 * 1024;
 /// Maximum status text length retained in one snapshot.
 pub const ACCOUNT_RESOURCE_MAX_STATUS_BYTES: usize = 4 * 1024;
+
+/// Counts serialized bytes without retaining them and refuses any write that
+/// would exceed the aggregate snapshot payload limit.
+#[derive(Debug)]
+struct CappedByteCounter {
+    bytes_written: usize,
+    limit: usize,
+}
+
+impl CappedByteCounter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes_written: 0,
+            limit,
+        }
+    }
+}
+
+impl Write for CappedByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let remaining = self.limit - self.bytes_written;
+        if buffer.len() > remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "serialized account-resource payload exceeds its limit",
+            ));
+        }
+
+        self.bytes_written += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Monotonic revision of this single full-JID resource slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,14 +125,10 @@ impl AccountResourceSnapshot {
             return false;
         }
 
+        let mut counter = CappedByteCounter::new(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES);
         self.presence_payloads
             .iter()
-            .try_fold(0_usize, |total, payload| {
-                let mut bytes = Vec::new();
-                payload.write_to(&mut bytes).ok()?;
-                total.checked_add(bytes.len())
-            })
-            .is_some_and(|total| total <= ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES)
+            .all(|payload| payload.write_to(&mut counter).is_ok())
     }
 }
 
@@ -2023,9 +2056,9 @@ mod tests {
             None,
         );
         let oversized_operation = operation(AccountResourceMutation::UpdateSnapshot {
-            claim_identity,
+            claim_identity: claim_identity.clone(),
             expected_revision: slot.revision(),
-            binding_ref,
+            binding_ref: binding_ref.clone(),
             snapshot: oversized,
         });
         let before_oversized = slot.revision();
@@ -2036,6 +2069,50 @@ mod tests {
         assert_eq!(slot.revision(), before_oversized);
         assert_eq!(
             slot.lookup(&oversized_operation),
+            AccountResourceOperationLookup::Unknown
+        );
+        assert_eq!(slot.snapshot(), Some(&original));
+
+        let oversized_payload_xml = format!(
+            "<payload xmlns='urn:example'>{}</payload>",
+            "x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1)
+        );
+        let oversized_payload: Element = oversized_payload_xml
+            .parse()
+            .expect("large XML payload remains well formed");
+        let mut capped_counter =
+            CappedByteCounter::new(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES);
+        assert!(oversized_payload.write_to(&mut capped_counter).is_err());
+        assert!(
+            capped_counter.bytes_written <= ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES,
+            "the counting sink must never accept bytes beyond its cap"
+        );
+
+        let oversized_payload_snapshot = snapshot(
+            true,
+            None,
+            None,
+            0,
+            vec![oversized_payload],
+            false,
+            false,
+            false,
+            None,
+        );
+        let oversized_payload_operation = operation(AccountResourceMutation::UpdateSnapshot {
+            claim_identity: claim_identity.clone(),
+            expected_revision: slot.revision(),
+            binding_ref: binding_ref.clone(),
+            snapshot: oversized_payload_snapshot,
+        });
+        let before_oversized_payload = slot.revision();
+        assert_eq!(
+            slot.execute(oversized_payload_operation.clone()),
+            Err(AccountResourceExecuteError::SnapshotTooLarge)
+        );
+        assert_eq!(slot.revision(), before_oversized_payload);
+        assert_eq!(
+            slot.lookup(&oversized_payload_operation),
             AccountResourceOperationLookup::Unknown
         );
         assert_eq!(slot.snapshot(), Some(&original));
