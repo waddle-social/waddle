@@ -8,7 +8,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 VOLATILE
 SECURITY INVOKER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     live_epoch BIGINT;
@@ -72,7 +72,7 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     live_epoch BIGINT;
@@ -251,9 +251,9 @@ BEGIN
             stored_digest_version, stored_digest;
         RETURN;
     END IF;
-    IF p_source_bare_jid IS NOT NULL
-       AND stored_source_version IS NOT NULL
-       AND (stored_source_version <> 1
+    IF stored_source_version IS NOT NULL
+       AND (p_source_bare_jid IS NULL
+            OR stored_source_version <> 1
             OR stored_source_bare_jid IS DISTINCT FROM p_source_bare_jid
             OR stored_source_context_id IS DISTINCT FROM p_source_auth_context_id
             OR stored_source_context_version IS DISTINCT FROM p_source_auth_context_version

@@ -11,8 +11,10 @@ credentials, or runtime call sites.
   operation-specific canonical-message/origin-alias write function, including
   the optional immutable source-principal binding supported by the staged
   source-aware repository path.
-- Give the function a fixed safe `search_path`, schema-qualified table and
-  helper references, and no dynamic SQL or caller-selected relation names.
+- Give both functions a fixed `search_path` of `pg_catalog, pg_temp`, keeping
+  PostgreSQL's implicit temporary-schema type lookup behind built-in types.
+  Schema-qualify table and helper references; use no dynamic SQL or
+  caller-selected relation names.
 - Keep the relation guard `SECURITY INVOKER`; it accepts writes only while
   `current_user` is the dedicated API owner. The API function establishes the
   existing epoch/xid transaction-local values inside the caller's transaction.

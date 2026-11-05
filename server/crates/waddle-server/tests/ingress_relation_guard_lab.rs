@@ -240,7 +240,7 @@ async fn commit(connection: &mut PgConnection) {
 }
 
 async fn proof(connection: &mut PgConnection, epoch: i64) {
-    sqlx::query("SELECT set_config('waddle.protocol_epoch', $1, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)")
+    sqlx::query("SELECT pg_catalog.set_config('waddle.protocol_epoch', $1, true), pg_catalog.set_config('waddle.protocol_epoch_xid', pg_catalog.pg_current_xact_id()::pg_catalog.text, true)")
         .bind(epoch.to_string()).execute(connection).await.expect("install transaction proof");
 }
 
@@ -973,9 +973,11 @@ async fn resolve_origin(
     let row = sqlx::query(
         "SELECT canonical_message_key, outcome, stored_digest_version, stored_digest \
          FROM guarded.waddle_ingress_resolve_origin(\
-           $1::uuid, $2::integer, $3::bytea, $4::bytea, $5::text, $6::integer, \
-           $7::text, $8::text, $9::text, $10::uuid, $11::bigint, $12::bigint, \
-           $13::uuid, $14::numeric)",
+           $1::pg_catalog.uuid, $2::pg_catalog.int4, $3::pg_catalog.bytea, \
+           $4::pg_catalog.bytea, $5::pg_catalog.text, $6::pg_catalog.int4, \
+           $7::pg_catalog.text, $8::pg_catalog.text, $9::pg_catalog.text, \
+           $10::pg_catalog.uuid, $11::pg_catalog.int8, $12::pg_catalog.int8, \
+           $13::pg_catalog.uuid, $14::pg_catalog.numeric)",
     )
     .bind(message_key)
     .bind(1_i32)
@@ -1100,6 +1102,38 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .await
     .expect("seed expired principal session");
 
+    // Preserve a pre-boundary legacy alias with no source tuple. Its replay
+    // remains valid after the definer API is installed.
+    let legacy_origin = format!("legacy-{suffix}");
+    let legacy_hash = alias_hash(&sender, "target@example.test", 1, &legacy_origin);
+    let legacy_key = uuid::Uuid::new_v4();
+    let legacy_digest = [34_u8; 32];
+    begin(&mut owner).await;
+    writer_lock(&mut owner).await;
+    proof(&mut owner, 0).await;
+    sqlx::query(
+        "INSERT INTO guarded.ingress_messages (message_key, digest_version, digest) \
+         VALUES ($1, 1, $2)",
+    )
+    .bind(legacy_key)
+    .bind(legacy_digest.to_vec())
+    .execute(&mut owner)
+    .await
+    .expect("seed legacy unbound message before API boundary");
+    sqlx::query(
+        "INSERT INTO guarded.ingress_origin_aliases \
+         (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) \
+         VALUES ($1, $2, 1, 'target@example.test', $3, $4)",
+    )
+    .bind(legacy_hash.to_vec())
+    .bind(&sender)
+    .bind(&legacy_origin)
+    .bind(legacy_key)
+    .execute(&mut owner)
+    .await
+    .expect("seed legacy unbound alias before API boundary");
+    commit(&mut owner).await;
+
     let candidate_sql = render_definer_api_candidate("guarded", &api_owner, &fixture.runtime);
     assert!(!candidate_sql.contains("__SCHEMA_"));
     assert!(!candidate_sql.contains("__API_OWNER_"));
@@ -1188,7 +1222,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     assert!(owner_is_function_owner);
     let (security_definer, safe_search_path, runtime_execute): (bool, bool, bool) = sqlx::query_as(
         "SELECT p.prosecdef, \
-           'search_path=pg_catalog' = ANY(p.proconfig), \
+           'search_path=pg_catalog, pg_temp' = ANY(p.proconfig), \
            pg_catalog.has_function_privilege($1, p.oid, 'EXECUTE') \
          FROM pg_catalog.pg_proc p \
          WHERE p.oid = pg_catalog.to_regprocedure(\
@@ -1201,6 +1235,18 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     assert!(security_definer);
     assert!(safe_search_path);
     assert!(runtime_execute);
+    let (trigger_security_definer, trigger_safe_search_path): (bool, bool) = sqlx::query_as(
+        "SELECT p.prosecdef, \
+           'search_path=pg_catalog, pg_temp' = ANY(p.proconfig) \
+         FROM pg_catalog.pg_proc p \
+         WHERE p.oid = pg_catalog.to_regprocedure(\
+           'guarded.waddle_ingress_definer_epoch_guard()')",
+    )
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect invoker trigger function path");
+    assert!(!trigger_security_definer);
+    assert!(trigger_safe_search_path);
     let function_execute_grantees: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT COALESCE(
@@ -1250,12 +1296,40 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .expect("inspect API owner role memberships");
     assert!(!api_has_any_membership);
 
+    // Leave a malicious same-named type in this backend's pg_temp before the
+    // first function call. The fixed function path must resolve built-in TEXT
+    // from pg_catalog ahead of PostgreSQL's implicit temporary-type lookup.
+    sqlx::query(&format!(
+        "GRANT TEMPORARY ON DATABASE {} TO {}",
+        fixture.database, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("temporarily grant runtime TEMP for type shadow");
+    let mut runtime = fixture.runtime().await;
+    sqlx::query("CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (VALUE IS NULL)")
+        .execute(&mut runtime)
+        .await
+        .expect("create hostile temporary text domain before API call");
+    let has_temp_text_domain: bool =
+        sqlx::query_scalar("SELECT pg_catalog.to_regtype('pg_temp.text') IS NOT NULL")
+            .fetch_one(&mut runtime)
+            .await
+            .expect("confirm hostile temporary text domain exists");
+    assert!(has_temp_text_domain);
+    sqlx::query(&format!(
+        "REVOKE TEMPORARY ON DATABASE {} FROM {}",
+        fixture.database, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke runtime TEMP while retaining type shadow");
+
     // A function call without the prepared epoch lock fails before it can
     // create either canonical row.
     let no_lock_origin = format!("no-lock-{suffix}");
     let no_lock_hash = alias_hash(&sender, "target@example.test", 1, &no_lock_origin);
     let no_lock_key = uuid::Uuid::new_v4();
-    let mut runtime = fixture.runtime().await;
     begin(&mut runtime).await;
     let no_lock_error = sqlx::query(
         "SELECT * FROM guarded.waddle_ingress_resolve_origin(\
@@ -1475,6 +1549,49 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     )
     .await;
     assert_eq!(source_outcome, "source_binding_conflict");
+    commit(&mut runtime).await;
+
+    // Omitting source data cannot turn a previously bound alias into an
+    // unbound replay. The legacy unbound fixture below remains replayable.
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (_, omitted_bound_source_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &origin,
+            digest,
+            source_context: None,
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(omitted_bound_source_outcome, "source_binding_conflict");
+    commit(&mut runtime).await;
+
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let (legacy_replay_key, legacy_replay_outcome, _, _) = resolve_origin(
+        &mut runtime,
+        OriginRequest {
+            message_key: uuid::Uuid::new_v4(),
+            hash: legacy_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &legacy_origin,
+            digest: legacy_digest,
+            source_context: None,
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(legacy_replay_key, Some(legacy_key));
+    assert_eq!(legacy_replay_outcome, "existing");
     commit(&mut runtime).await;
 
     begin(&mut runtime).await;
