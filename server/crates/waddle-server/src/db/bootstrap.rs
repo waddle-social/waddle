@@ -9,12 +9,19 @@ use std::time::Duration;
 use sqlx::postgres::PgConnectOptions;
 use thiserror::Error;
 use tracing::info;
+use waddle_xmpp::mam::{MamSchemaBootstrapError, SqlxMamStorage};
+use waddle_xmpp::XmppError;
 
 use crate::config::LineageConfig;
+use crate::notification_outbox::{NotificationOutboxError, NotificationOutboxStore};
+use crate::push_service::DatabasePushServiceStore;
 
 use super::lineage::{self, AttestedLineage, LineageAction, LineageError, LineageUuid};
 use super::physical_attestation::{attested_pool, PhysicalAttestationConfig};
-use super::{Database, DatabaseDriver, DatabaseError, MigrationRunner, Transaction};
+use super::{
+    Database, DatabaseConfig, DatabaseDriver, DatabaseError, DatabasePool, MigrationRunner,
+    Transaction,
+};
 
 #[derive(Debug, Error)]
 pub enum OwnerBootstrapError {
@@ -37,6 +44,89 @@ pub enum OwnerBootstrapError {
     PreMigrationLineage(#[source] DatabaseError),
     #[error("failed to run migrations")]
     Migrations(#[source] DatabaseError),
+}
+
+#[derive(Debug, Error)]
+pub enum SharedOwnerBootstrapError {
+    #[error("shared owner startup requires PostgreSQL")]
+    PostgresRequired,
+    #[error("shared owner pool capacity exceeds the supported range")]
+    CapacityExceeded,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+    #[error(transparent)]
+    Global(#[from] OwnerBootstrapError),
+    #[error("legacy MAM owner preparation failed and may have changed schema")]
+    Mam(#[source] MamSchemaBootstrapError),
+    #[error("legacy Push Service owner preparation failed")]
+    Push(#[source] XmppError),
+    #[error("legacy notification outbox owner preparation failed")]
+    NotificationOutbox(#[source] NotificationOutboxError),
+}
+
+/// Bootstrap the ordinary owner path, then seal its one physical PostgreSQL
+/// pool into main and ingress admission classes before any handle escapes.
+/// MAM uses the current legacy initializer, on an owned connection detached
+/// from this pool. This path makes no restricted-role or attestation claim.
+pub async fn bootstrap_shared_owner_postgres(
+    mut config: DatabaseConfig,
+    lineage: &LineageConfig,
+    clustering_enabled: bool,
+    push_secret_key: &[u8],
+    main_budget: u32,
+    ingress_budget: u32,
+) -> Result<(DatabasePool, Option<LineageUuid>, NotificationOutboxStore), SharedOwnerBootstrapError>
+{
+    if config.driver != DatabaseDriver::Postgres {
+        return Err(SharedOwnerBootstrapError::PostgresRequired);
+    }
+    if main_budget == 0 {
+        return Err(DatabaseError::PoolSizeZero { which: "main" }.into());
+    }
+    if ingress_budget == 0 {
+        return Err(DatabaseError::PoolSizeZero { which: "ingress" }.into());
+    }
+    let physical = main_budget
+        .checked_add(ingress_budget)
+        .ok_or(DatabaseError::PoolSizeOverflow)?;
+    let total = physical
+        .checked_add(config.control_plane_pool.map_or(0, |pool| pool.size))
+        .ok_or(DatabaseError::PoolSizeOverflow)?;
+    if total > MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS {
+        return Err(SharedOwnerBootstrapError::CapacityExceeded);
+    }
+    config.pool_size = physical;
+    let database = Database::from_config("global", &config).await?;
+    let global_adopt_matched =
+        bootstrap_global_owner(&database, lineage, clustering_enabled).await?;
+
+    let session = database.detached_postgres_startup_connection().await?;
+    let session = SqlxMamStorage::bootstrap_legacy_postgres_schema_on_owned_connection(session)
+        .await
+        .map_err(SharedOwnerBootstrapError::Mam)?;
+    drop(session);
+
+    // Outbox ancestry adoption reads Push Service publish jobs. Preserve the
+    // legacy startup order before outbox takes its detached schema-gate
+    // session. Neither temporary store may escape with unlaned admission.
+    let push = DatabasePushServiceStore::new_with_secret_key(database.clone(), push_secret_key)
+        .await
+        .map_err(SharedOwnerBootstrapError::Push)?;
+    drop(push);
+    let prepared_outbox = NotificationOutboxStore::prepare_legacy_owner_shared(&database)
+        .await
+        .map_err(SharedOwnerBootstrapError::NotificationOutbox)?;
+
+    let database = database.seal_owner_postgres_lanes(main_budget, ingress_budget)?;
+    let outbox =
+        NotificationOutboxStore::attach_prepared_shared_owner(database.clone(), prepared_outbox)
+            .await
+            .map_err(SharedOwnerBootstrapError::NotificationOutbox)?;
+    Ok((
+        DatabasePool::from_database(database),
+        global_adopt_matched,
+        outbox,
+    ))
 }
 
 #[derive(Debug, Error)]

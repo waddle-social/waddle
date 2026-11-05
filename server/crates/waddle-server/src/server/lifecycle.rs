@@ -64,6 +64,28 @@ pub async fn start_with_config(
     server_config: ServerConfig,
     lineage_config: crate::config::LineageConfig,
     global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
+    inherited: Option<waddle_ecdysis::ListenerSet>,
+) -> Result<crate::telemetry::MetricsFlush> {
+    start_with_config_and_owner_outbox(
+        db_pool,
+        xmpp_config,
+        server_config,
+        lineage_config,
+        global_adopt_matched,
+        None,
+        inherited,
+    )
+    .await
+}
+
+/// Start with the outbox prepared on this exact owner pool before lane seal.
+pub async fn start_with_config_and_owner_outbox(
+    db_pool: DatabasePool,
+    xmpp_config: XmppConfig,
+    server_config: ServerConfig,
+    lineage_config: crate::config::LineageConfig,
+    global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
+    owner_outbox: Option<crate::notification_outbox::NotificationOutboxStore>,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
     // Several constructors below still initialize owner schemas or open
@@ -72,6 +94,13 @@ pub async fn start_with_config(
     // verified same-pool attachment. Do not try them with the runtime role.
     if db_pool.global().uses_attested_postgres_pool() {
         return Err(RestrictedStartupError::UnconvertedStores.into());
+    }
+    let shared_owner = db_pool.global().ingress_pool_size().is_some();
+    let matching_outbox = owner_outbox
+        .as_ref()
+        .is_some_and(|outbox| outbox.belongs_to_shared_owner_main(db_pool.global()));
+    if (shared_owner && !matching_outbox) || (!shared_owner && owner_outbox.is_some()) {
+        anyhow::bail!("shared owner startup requires its prepared outbox on the exact main pool");
     }
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
@@ -414,6 +443,7 @@ pub async fn start_with_config(
             xmpp_config: http_xmpp_config,
             mam_storage: http_mam_storage,
             pubsub_database_storage: http_pubsub_database_storage,
+            owner_outbox,
             acme_http01_challenge_service,
             listener: http_listener,
             shutdown_handle: http_shutdown_handle,
@@ -516,6 +546,16 @@ pub async fn create_pubsub_storage(
             .await
             .map_err(|error| anyhow::anyhow!("failed to attach PubSub storage: {error}"))?;
         Ok((Arc::new(storage), true))
+    } else if global.ingress_pool_size().is_some() {
+        if !matches!(location, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+            anyhow::bail!("shared owner PubSub storage must inherit the global database location");
+        }
+        let storage = crate::pubsub::DatabasePubSubStorage::initialize_shared_owner(global.clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize shared PubSub storage: {error}")
+            })?;
+        Ok((Arc::new(storage), true))
     } else {
         let storage = crate::pubsub::build_database_pubsub_storage(location.clone_resolved_url())
             .await
@@ -553,6 +593,18 @@ pub(crate) async fn create_space_stores(
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to attach channel-space link storage: {error}"))?;
+        Ok((spaces, links, true))
+    } else if global.ingress_pool_size().is_some() {
+        if !matches!(spaces_location, ResolvedXmppDatabaseUrl::InheritedGlobal(_))
+            || !matches!(links_location, ResolvedXmppDatabaseUrl::InheritedGlobal(_))
+        {
+            anyhow::bail!("shared owner space stores must inherit the global database location");
+        }
+        let spaces = DatabaseSpacesMetadataStore::initialize_owner(global.clone()).await?;
+        let links = crate::channel_space_links::DatabaseChannelSpaceLinkStore::initialize_owner(
+            global.clone(),
+        )
+        .await?;
         Ok((spaces, links, true))
     } else {
         let spaces = DatabaseSpacesMetadataStore::open(spaces_location.as_deref())
@@ -650,7 +702,7 @@ pub(in crate::server) async fn bootstrap_mam_lineage(
         return Ok(());
     }
     let MamStartupStorage::Legacy(storage) = storage else {
-        unreachable!("attested MAM storage returns before legacy lineage handling")
+        unreachable!("shared MAM storage returns before legacy lineage handling")
     };
     if let Some(pool) = storage.sqlite_pool() {
         let in_memory = crate::db::lineage::sqlite_pool_is_in_memory(pool).await?;

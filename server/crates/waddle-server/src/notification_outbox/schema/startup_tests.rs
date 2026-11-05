@@ -623,6 +623,49 @@ async fn postgres_canceled_caller_keeps_gate_until_outstanding_schema_work_finis
 }
 
 #[tokio::test]
+async fn postgres_shared_owner_cancellation_releases_unlaned_clone_and_gate() {
+    let Some(f) = IngressFixture::postgres("shared_owner_cancel").await else {
+        return;
+    };
+    NotificationOutboxStore::try_new(f.db.clone())
+        .await
+        .expect("prepared fixture schema");
+    let mut held = f.db.begin_immediate().await.expect("hold table");
+    held.execute(
+        "LOCK TABLE notification_candidates IN ACCESS EXCLUSIVE MODE",
+        (),
+    )
+    .await
+    .expect("hold relation");
+    let (database, tag) = tagged_database(&f, 2).await;
+    let preparing = database.clone();
+    let caller = tokio::spawn(async move {
+        NotificationOutboxStore::prepare_legacy_owner_shared(&preparing).await
+    });
+    let blocked = format!(
+        "SELECT COUNT(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+         WHERE a.application_name='{tag}' AND l.relation=to_regclass('notification_candidates') \
+         AND NOT l.granted"
+    );
+    wait_scalar(&f.db, &blocked, 1).await;
+    caller.abort();
+    assert!(caller.await.expect_err("cancelled caller").is_cancelled());
+    let gate = format!(
+        "SELECT COUNT(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+         WHERE a.application_name='{tag}' AND l.locktype='advisory' \
+         AND l.classid={}::oid AND l.objid={}::oid AND l.granted",
+        OUTBOX_SCHEMA_GATE.0, OUTBOX_SCHEMA_GATE.1
+    );
+    wait_scalar(&f.db, &gate, 0).await;
+    database
+        .seal_owner_postgres_lanes(1, 1)
+        .expect("cancelled preparation released every unlaned Database clone");
+    held.rollback().await.expect("release table");
+    assert_gate_free(&f).await;
+    f.close().await;
+}
+
+#[tokio::test]
 async fn postgres_resolved_index_namespace_preserves_same_name_decoy() {
     let Some(f) = IngressFixture::postgres("index_namespace").await else {
         return;

@@ -100,6 +100,7 @@ pub(crate) struct HttpServerDeps {
     /// re-opening it. The trait-object view lives on
     /// [`AppState::pubsub_storage`] for the rest of the WebSocket graph.
     pub(crate) pubsub_database_storage: Arc<DatabasePubSubStorage>,
+    pub(crate) owner_outbox: Option<NotificationOutboxStore>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) listener: tokio::net::TcpListener,
     /// Ecdysis shutdown view: carries the stop token that gates the
@@ -179,6 +180,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         xmpp_config,
         mam_storage,
         pubsub_database_storage,
+        owner_outbox,
         acme_http01_challenge_service,
         listener,
         shutdown_handle,
@@ -197,6 +199,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         xmpp_config,
         mam_storage,
         pubsub_database_storage,
+        owner_outbox,
         acme_http01_challenge_service,
         shutdown_handle,
         drain_complete: drain_complete.clone(),
@@ -277,6 +280,8 @@ enum IngressColocationError {
          use a supported shared-pool store handle"
     )]
     AttestedChildPoolUnsupported,
+    #[error("a shared owner PostgreSQL pool cannot open an independent MAM child pool")]
+    SharedOwnerChildPoolUnsupported,
     #[error(
         "an attested PostgreSQL inbox must inherit WADDLE_DATABASE_URL without an explicit inbox override"
     )]
@@ -289,6 +294,8 @@ enum IngressColocationError {
     AttestedClusteredSmUnsupported,
     #[error("attested MAM storage must inherit WADDLE_DATABASE_URL without an explicit override")]
     AttestedMamRequiresInheritedGlobal,
+    #[error("shared owner PostgreSQL {store} storage must inherit WADDLE_DATABASE_URL")]
+    SharedOwnerRequiresInheritedGlobal { store: &'static str },
     #[error("attested MAM storage requires an independent operator owner/claim-schema handoff")]
     AttestedMamOwnerHandoffRequired,
     #[cfg(feature = "clustering")]
@@ -358,6 +365,16 @@ pub(crate) async fn create_ingress_inbox_storage(
                 }
                 let storage = DatabaseInboxStorage::attach_runtime_postgres(global.clone()).await?;
                 return Ok(InboxStartup::AttachedGlobal(Arc::new(storage)));
+            }
+            if global.ingress_pool_size().is_some() {
+                if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+                    return Err(IngressColocationError::SharedOwnerRequiresInheritedGlobal {
+                        store: "inbox",
+                    }
+                    .into());
+                }
+                let storage = DatabaseInboxStorage::from_database(global.clone()).await?;
+                return Ok(InboxStartup::OwnerInitialized(Arc::new(storage)));
             }
             let database_url = database_url.unwrap_or_else(|| global.database_url());
             // Opening inbox storage mutates its schema. Check the live identity
@@ -451,6 +468,9 @@ pub(crate) async fn create_websocket_mam_storage(
                 // main/ingress pool yet.
                 return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
             }
+            if global_db.ingress_pool_size().is_some() {
+                return Err(IngressColocationError::SharedOwnerChildPoolUnsupported.into());
+            }
             let database_url = database_url
                 .as_deref()
                 .unwrap_or_else(|| global_db.database_url());
@@ -475,19 +495,19 @@ pub(crate) async fn create_websocket_mam_storage(
     )))
 }
 
-/// Selected MAM attachment for startup. The legacy branch retains its
-/// independently opened `SqlxMamStorage`; the attested branch retains the
-/// adapter on the exact supplied main `Database` handle.
+/// Selected MAM attachment for startup. The old legacy branch owns a child
+/// pool; both shared branches retain the exact supplied main `Database`.
 pub(crate) enum MamStartupStorage {
     Legacy(Arc<SqlxMamStorage>),
     Attested(Arc<DatabaseMamStorage>),
+    OwnerShared(Arc<DatabaseMamStorage>),
 }
 
 impl MamStartupStorage {
     pub(crate) fn as_mam_storage(&self) -> Arc<dyn MamStorage> {
         match self {
             Self::Legacy(storage) => storage.clone(),
-            Self::Attested(storage) => storage.clone(),
+            Self::Attested(storage) | Self::OwnerShared(storage) => storage.clone(),
         }
     }
 
@@ -499,7 +519,9 @@ impl MamStartupStorage {
     pub(crate) fn lineage_alias_target(&self) -> Option<crate::db::lineage::DurableStore> {
         match self {
             Self::Legacy(_) => None,
-            Self::Attested(_) => Some(crate::db::lineage::DurableStore::Global),
+            Self::Attested(_) | Self::OwnerShared(_) => {
+                Some(crate::db::lineage::DurableStore::Global)
+            }
         }
     }
 }
@@ -531,6 +553,22 @@ pub(crate) async fn select_websocket_mam_storage(
         )
         .await?;
         return Ok(MamStartupStorage::Attested(Arc::new(storage)));
+    }
+
+    if global_db.ingress_pool_size().is_some() {
+        if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+            return Err(IngressColocationError::SharedOwnerRequiresInheritedGlobal {
+                store: "MAM",
+            }
+            .into());
+        }
+        let storage = DatabaseMamStorage::attach_legacy_owner(
+            global_db,
+            clustering_enabled,
+            clustering_claim_pair_live,
+        )
+        .await?;
+        return Ok(MamStartupStorage::OwnerShared(Arc::new(storage)));
     }
 
     let storage = create_websocket_mam_storage(
@@ -572,6 +610,7 @@ pub(crate) struct RouterDeps {
     pub(crate) xmpp_config: XmppConfig,
     pub(crate) mam_storage: Arc<dyn MamStorage>,
     pub(crate) pubsub_database_storage: Arc<DatabasePubSubStorage>,
+    pub(crate) owner_outbox: Option<NotificationOutboxStore>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
@@ -589,6 +628,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         xmpp_config,
         mam_storage,
         pubsub_database_storage,
+        owner_outbox,
         acme_http01_challenge_service,
         shutdown_handle,
         drain_complete,
@@ -610,8 +650,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         &server_config,
         &xmpp_config,
         Arc::clone(&auth_state),
-        mam_storage,
-        pubsub_database_storage,
+        WebSocketStorageDeps {
+            mam_storage,
+            pubsub_database_storage,
+            owner_outbox,
+        },
         shutdown_handle,
     )
     .await?;
@@ -861,6 +904,16 @@ async fn create_ingress_authority(
         )
         .await;
     }
+    if pool.ingress().is_ingress_lane() {
+        return IngressAuthority::try_new_with_owner_shared_database(
+            config.clone(),
+            pool.ingress(),
+            lineage.clone(),
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await;
+    }
     IngressAuthority::try_new(
         config.clone(),
         pool.global().clone(),
@@ -887,15 +940,25 @@ pub(crate) async fn create_ingress_authority_for_test(
     .await
 }
 
+struct WebSocketStorageDeps {
+    mam_storage: Arc<dyn MamStorage>,
+    pubsub_database_storage: Arc<DatabasePubSubStorage>,
+    owner_outbox: Option<NotificationOutboxStore>,
+}
+
 async fn create_websocket_state(
     state: Arc<AppState>,
     server_config: &ServerConfig,
     xmpp_config: &XmppConfig,
     auth_state: Arc<AuthState>,
-    mam_storage: Arc<dyn MamStorage>,
-    pubsub_database_storage: Arc<DatabasePubSubStorage>,
+    storage: WebSocketStorageDeps,
     shutdown_handle: waddle_ecdysis::ShutdownHandle,
 ) -> Result<Arc<WebSocketState>> {
+    let WebSocketStorageDeps {
+        mam_storage,
+        pubsub_database_storage,
+        owner_outbox,
+    } = storage;
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
     // ADR-0017 Phase 3 Slice 6: complete the cross-node resume bridge
@@ -1378,13 +1441,14 @@ async fn create_websocket_state(
         xmpp_domain.parse()?,
     )
     .await;
-    let notification_outbox = Arc::new(
-        NotificationOutboxStore::try_new(state.db_pool.global().clone())
+    let notification_outbox = Arc::new(match owner_outbox {
+        Some(outbox) => outbox,
+        None => NotificationOutboxStore::try_new(state.db_pool.global().clone())
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
             })?,
-    );
+    });
     // Push initialization precedes outbox schema/adoption. Rebind only exact
     // accepted target tuples once canonical ancestry is available.
     push_service
@@ -1956,11 +2020,18 @@ fn ingress_store_url<'a>(
     global: &Database,
     store: &'static str,
 ) -> Result<Option<&'a str>> {
-    if global.uses_attested_postgres_pool() {
+    if global.uses_attested_postgres_pool() || global.ingress_pool_size().is_some() {
         return match selection {
             ResolvedXmppDatabaseUrl::InheritedGlobal(_) => Ok(None),
             ResolvedXmppDatabaseUrl::Explicit(_) | ResolvedXmppDatabaseUrl::EphemeralFallback => {
-                Err(IngressColocationError::AttestedStoreRequiresInheritedGlobal { store }.into())
+                if global.uses_attested_postgres_pool() {
+                    Err(
+                        IngressColocationError::AttestedStoreRequiresInheritedGlobal { store }
+                            .into(),
+                    )
+                } else {
+                    Err(IngressColocationError::SharedOwnerRequiresInheritedGlobal { store }.into())
+                }
             }
         };
     }
@@ -2012,6 +2083,9 @@ async fn ensure_ingress_storage_colocation(
                 // hook-bearing connection options. With no URL, the
                 // downstream SM/pending store uses the same Database handle.
                 return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+            }
+            if global.ingress_pool_size().is_some() && database_url.is_some() {
+                return Err(IngressColocationError::SharedOwnerChildPoolUnsupported.into());
             }
             if let Some(database_url) = database_url {
                 if !database_url.starts_with("postgres://")

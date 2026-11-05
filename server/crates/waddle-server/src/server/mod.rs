@@ -96,4 +96,5 @@ pub(crate) use lifecycle::create_space_stores;
 pub(crate) use lifecycle::register_inbox_lineage;
 pub use lifecycle::start;
 pub use lifecycle::start_with_config;
+pub use lifecycle::start_with_config_and_owner_outbox;
 pub use lifecycle::RestrictedStartupError;

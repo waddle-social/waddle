@@ -52,6 +52,8 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
     let server_config = ServerConfig::from_env()
         .map_err(|e| anyhow::anyhow!("Failed to load server configuration: {}", e))?;
     server_config.log_config();
+    let xmpp_config = server::XmppConfig::from_env()
+        .map_err(|error| anyhow::anyhow!("Failed to load XMPP configuration: {error}"))?;
 
     // Initialize database (driver + DSN contract)
     let db_runtime = config::DatabaseRuntimeConfig::from_env()
@@ -62,64 +64,85 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
         driver = ?db_runtime.driver,
         "Using configured database runtime"
     );
-    let (db_pool, global_adopt_matched) = match std::env::var_os("WADDLE_DB_RUNTIME_ATTESTATION") {
-        Some(document) => {
-            if db_runtime.driver != db::DatabaseDriver::Postgres {
-                anyhow::bail!("restricted runtime attestation requires PostgreSQL");
-            }
-            let document = document
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("invalid runtime attestation document"))?;
-            let identity =
-                db::runtime_startup::RuntimeStartupIdentity::from_json(&document, &lineage_config)?;
-            let limits = db::bootstrap::RuntimePoolLimits {
-                main_connections: db_runtime.pool_size,
-                ingress_connections: server_config.ingress.pool_size,
-                acquire_timeout: db_runtime.acquire_timeout,
-            };
-            let control_plane =
-                server_config
-                    .clustering
-                    .enabled
-                    .then_some(db::bootstrap::ControlPlanePoolLimits {
+    let (db_pool, global_adopt_matched, owner_outbox) =
+        match std::env::var_os("WADDLE_DB_RUNTIME_ATTESTATION") {
+            Some(document) => {
+                if db_runtime.driver != db::DatabaseDriver::Postgres {
+                    anyhow::bail!("restricted runtime attestation requires PostgreSQL");
+                }
+                let document = document
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("invalid runtime attestation document"))?;
+                let identity = db::runtime_startup::RuntimeStartupIdentity::from_json(
+                    &document,
+                    &lineage_config,
+                )?;
+                let limits = db::bootstrap::RuntimePoolLimits {
+                    main_connections: db_runtime.pool_size,
+                    ingress_connections: server_config.ingress.pool_size,
+                    acquire_timeout: db_runtime.acquire_timeout,
+                };
+                let control_plane = server_config.clustering.enabled.then_some(
+                    db::bootstrap::ControlPlanePoolLimits {
                         connections: db_runtime.control_plane_pool_size,
                         acquire_timeout: db::CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
-                    });
-            let pool = identity
-                .attach(&db_runtime.database_url, limits, control_plane)
-                .await?;
-            info!("Restricted database attached with physical and ledger verification");
-            (pool, None)
-        }
-        None => {
-            // The existing owner startup remains for SQLite and legacy
-            // deployments until their separately provisioned role handoff
-            // and remaining runtime attachments are complete.
-            let mut db_config = db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
-            db_config.pool_size = db_runtime.pool_size;
-            db_config.acquire_timeout = db_runtime.acquire_timeout;
-            if db_runtime.driver == db::DatabaseDriver::Postgres && server_config.clustering.enabled
-            {
-                db_config = db_config.with_control_plane_pool(db_runtime.control_plane_pool_size);
+                    },
+                );
+                let pool = identity
+                    .attach(&db_runtime.database_url, limits, control_plane)
+                    .await?;
+                info!("Restricted database attached with physical and ledger verification");
+                (pool, None, None)
             }
-            let pool = db::DatabasePool::try_new(db_config, db::PoolConfig).await?;
-            let matched = db::bootstrap::bootstrap_global_owner(
-                pool.global(),
-                &lineage_config,
-                server_config.clustering.enabled,
-            )
-            .await?;
-            info!("Database initialized and migrations complete");
-            (pool, matched)
-        }
-    };
+            None => {
+                // The existing owner startup remains for SQLite and legacy
+                // deployments until their separately provisioned role handoff
+                // and remaining runtime attachments are complete.
+                let mut db_config =
+                    db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
+                db_config.pool_size = db_runtime.pool_size;
+                db_config.acquire_timeout = db_runtime.acquire_timeout;
+                if db_runtime.driver == db::DatabaseDriver::Postgres
+                    && server_config.clustering.enabled
+                {
+                    db_config =
+                        db_config.with_control_plane_pool(db_runtime.control_plane_pool_size);
+                }
+                let (pool, matched, outbox) = if db_runtime.driver == db::DatabaseDriver::Postgres {
+                    xmpp_config.validate_shared_owner_locations()?;
+                    db::bootstrap::bootstrap_shared_owner_postgres(
+                        db_config,
+                        &lineage_config,
+                        server_config.clustering.enabled,
+                        server_config.session_key.as_bytes(),
+                        db_runtime.pool_size,
+                        server_config.ingress.pool_size,
+                    )
+                    .await
+                    .map(|(pool, matched, outbox)| (pool, matched, Some(outbox)))?
+                } else {
+                    let pool = db::DatabasePool::try_new(db_config, db::PoolConfig).await?;
+                    let matched = db::bootstrap::bootstrap_global_owner(
+                        pool.global(),
+                        &lineage_config,
+                        server_config.clustering.enabled,
+                    )
+                    .await?;
+                    (pool, matched, None)
+                };
+                info!("Database initialized and migrations complete");
+                (pool, matched, outbox)
+            }
+        };
 
     // Start the server
-    let metrics_flush = server::start(
+    let metrics_flush = server::start_with_config_and_owner_outbox(
         db_pool,
+        xmpp_config,
         server_config,
         lineage_config,
         global_adopt_matched,
+        owner_outbox,
         inherited,
     )
     .await?;

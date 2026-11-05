@@ -1,12 +1,10 @@
-//! Dark `MamStorage` adapter over one admitted, physically attested main
-//! database transaction per operation.
+//! `MamStorage` adapter over one admitted main database transaction per
+//! operation. Restricted and legacy owner attachments have separate gates.
 //!
-//! This adapter is deliberately not selected by server startup. Its caller
-//! must supply the MAM schema owner and the claim schema from an independent
-//! owner handoff, and keep schema DDL, ACL changes, and trusted writers
-//! quiescent while it is attached. PostgreSQL identifiers are validated and
-//! each relation is schema-qualified; no standalone MAM pool is opened or
-//! reacquired.
+//! The attested attachment requires an independent owner handoff and checks
+//! each transaction's physical capability. The legacy owner attachment uses
+//! the current owner session and makes no restricted authority claim. Both
+//! schema-qualify relations and avoid a standalone MAM pool.
 
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
@@ -39,7 +37,9 @@ const MESSAGE_TOMBSTONE_UPDATE_COLUMNS: &str =
 pub enum DatabaseMamStorageError {
     #[error("DatabaseMamStorage requires an attested PostgreSQL main-lane database")]
     AttestedMainDatabaseRequired,
-    #[error("the attested MAM or claim schema name is invalid")]
+    #[error("owner MAM attachment requires a non-attested shared PostgreSQL main lane")]
+    OwnerMainDatabaseRequired,
+    #[error("the MAM or claim schema name is invalid")]
     InvalidSchema,
     #[error("the MAM runtime role or column privileges are unsafe")]
     UnsafeMamPrivileges,
@@ -56,25 +56,31 @@ pub enum DatabaseMamStorageError {
     Schema(#[from] MamSchemaVerificationError),
 }
 
-/// Owner-prepared MAM storage using only the exact attested main database.
+/// MAM storage on the supplied main database without an independent pool.
 ///
-/// [`Self::attach`] does not initialize or repair any schema. The MAM schema
-/// comes from the database's physical attestation capability; the claim
-/// schema is separately supplied and independently quoted for fenced writes.
-/// Every trait operation opens exactly one `Database::begin()` transaction,
-/// attests that transaction, and runs all MAM SQL on its pinned connection.
-///
-/// This is dark runtime code: startup continues to use
-/// [`SqlxMamStorage`] and keeps refusing attested child-pool construction.
+/// [`Self::attach`] is the strict, dark attested path. The legacy owner
+/// constructor is separate and cannot accept an attested handle. Every trait
+/// operation opens one `Database::begin()` transaction and runs on its pinned
+/// connection; only the attested path claims physical transaction authority.
 pub struct DatabaseMamStorage {
     database: Database,
-    capability: AttestedPostgresWriterCapability,
+    authority: MamAuthority,
     mam_schema: String,
     mam_owner: PgRoleName,
     #[cfg(feature = "clustering")]
     claim_schema: String,
-    #[cfg(feature = "clustering")]
-    claim_authority: VerifiedMainClaimOccupancy,
+}
+
+enum MamAuthority {
+    Attested {
+        capability: Box<AttestedPostgresWriterCapability>,
+        #[cfg(feature = "clustering")]
+        claim_authority: Box<VerifiedMainClaimOccupancy>,
+    },
+    LegacyOwner {
+        #[cfg(feature = "clustering")]
+        fencing_enabled: bool,
+    },
 }
 
 impl DatabaseMamStorage {
@@ -117,14 +123,95 @@ impl DatabaseMamStorage {
 
         let storage = Self {
             database: database.clone(),
-            capability,
+            authority: MamAuthority::Attested {
+                capability: Box::new(capability),
+                #[cfg(feature = "clustering")]
+                claim_authority: Box::new(claim_authority),
+            },
             mam_schema,
             mam_owner,
             #[cfg(feature = "clustering")]
             claim_schema: claim_schema.0,
-            #[cfg(feature = "clustering")]
-            claim_authority,
         };
+        storage.verify_attachment().await?;
+        Ok(storage)
+    }
+
+    /// Attach ordinary owner MAM to the sealed shared main lane. This uses
+    /// the current owner credential and schema rather than an independent
+    /// runtime handoff; it cannot accept an attested restricted handle.
+    pub async fn attach_legacy_owner(
+        database: &Database,
+        clustering_enabled: bool,
+        claims_live: bool,
+    ) -> Result<Self, DatabaseMamStorageError> {
+        if database.driver() != DatabaseDriver::Postgres
+            || !database.is_main_lane()
+            || database.ingress_pool_size().is_none()
+            || database.uses_attested_postgres_pool()
+        {
+            return Err(DatabaseMamStorageError::OwnerMainDatabaseRequired);
+        }
+        let mut transaction = database.begin().await?;
+        transaction
+            .execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+                (),
+            )
+            .await?;
+        crate::db::read_only_timeout::bound_postgres_waits(&mut transaction)
+            .await
+            .map_err(|_| DatabaseMamStorageError::ReadBounds)?;
+        let mut identity = transaction
+            .query(
+                "SELECT pg_catalog.current_schema()::text, CURRENT_USER::text",
+                (),
+            )
+            .await?;
+        let row = identity
+            .next()
+            .await?
+            .ok_or(DatabaseMamStorageError::OwnerMainDatabaseRequired)?;
+        let mam_schema = row.get::<String>(0)?;
+        let mam_owner = PgRoleName::new(row.get::<String>(1)?)
+            .map_err(|_| DatabaseMamStorageError::InvalidSchema)?;
+        validate_identifier(&mam_schema, "MAM schema")
+            .map_err(|_| DatabaseMamStorageError::InvalidSchema)?;
+        #[cfg(feature = "clustering")]
+        if clustering_enabled && claims_live {
+            let mut claims = transaction
+                .query(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                     JOIN pg_catalog.pg_roles r ON r.oid = c.relowner \
+                     WHERE n.nspname = ? AND c.relname = 'clustering_claims' \
+                     AND c.relkind = 'r' AND c.relpersistence = 'p' AND r.rolname = ?)",
+                    crate::db_params![mam_schema.clone(), mam_owner.as_str().to_owned()],
+                )
+                .await?;
+            let present = claims
+                .next()
+                .await?
+                .ok_or(DatabaseMamStorageError::UnsafeClaimPrivileges)?
+                .get::<bool>(0)?;
+            if !present {
+                return Err(DatabaseMamStorageError::UnsafeClaimPrivileges);
+            }
+        }
+        transaction.rollback().await?;
+        let storage = Self {
+            database: database.clone(),
+            authority: MamAuthority::LegacyOwner {
+                #[cfg(feature = "clustering")]
+                fencing_enabled: clustering_enabled && claims_live,
+            },
+            mam_schema: mam_schema.clone(),
+            mam_owner,
+            #[cfg(feature = "clustering")]
+            claim_schema: mam_schema,
+        };
+        #[cfg(not(feature = "clustering"))]
+        let _ = (clustering_enabled, claims_live);
         storage.verify_attachment().await?;
         Ok(storage)
     }
@@ -163,9 +250,17 @@ impl DatabaseMamStorage {
         write: bool,
         check_claim_schema: bool,
     ) -> Result<Transaction<'_>, DatabaseMamStorageError> {
-        self.database
-            .verify_attested_pg_writer_capability(&self.capability)
-            .map_err(DatabaseError::from)?;
+        match &self.authority {
+            MamAuthority::Attested { capability, .. } => self
+                .database
+                .verify_attested_pg_writer_capability(capability)
+                .map_err(DatabaseError::from)?,
+            MamAuthority::LegacyOwner { .. } => {
+                if self.database.uses_attested_postgres_pool() {
+                    return Err(DatabaseMamStorageError::OwnerMainDatabaseRequired);
+                }
+            }
+        }
         let mut transaction = self.database.begin().await?;
         let mode = if write { "READ WRITE" } else { "READ ONLY" };
         let second_isolation = if write {
@@ -190,8 +285,18 @@ impl DatabaseMamStorage {
             .map_err(|_| DatabaseMamStorageError::ReadBounds)?;
 
         #[cfg(feature = "clustering")]
-        if check_claim_schema && !self.claim_authority.belongs_to_main_pool(&self.database) {
-            return Err(DatabaseMamStorageError::UnsafeClaimPrivileges);
+        if check_claim_schema {
+            match &self.authority {
+                MamAuthority::Attested {
+                    claim_authority, ..
+                } if !claim_authority.belongs_to_main_pool(&self.database) => {
+                    return Err(DatabaseMamStorageError::UnsafeClaimPrivileges);
+                }
+                MamAuthority::LegacyOwner {
+                    fencing_enabled: false,
+                } => return Err(DatabaseMamStorageError::UnsafeClaimPrivileges),
+                _ => {}
+            }
         }
         #[cfg(not(feature = "clustering"))]
         let _ = check_claim_schema;
@@ -220,18 +325,20 @@ impl DatabaseMamStorage {
                 .await?;
         }
 
-        self.capability.attest_transaction(&mut transaction).await?;
-        let connection = transaction
-            .postgres_connection()
-            .ok_or(DatabaseMamStorageError::AttestedMainDatabaseRequired)?;
-        verify_mam_writer_privileges(
-            connection,
-            self.mam_schema(),
-            &self.mam_owner,
-            self.capability.definer_role(),
-            self.capability.installer_role(),
-        )
-        .await?;
+        if let MamAuthority::Attested { capability, .. } = &self.authority {
+            capability.attest_transaction(&mut transaction).await?;
+            let connection = transaction
+                .postgres_connection()
+                .ok_or(DatabaseMamStorageError::AttestedMainDatabaseRequired)?;
+            verify_mam_writer_privileges(
+                connection,
+                self.mam_schema(),
+                &self.mam_owner,
+                capability.definer_role(),
+                capability.installer_role(),
+            )
+            .await?;
+        }
         Ok(transaction)
     }
 
@@ -303,6 +410,14 @@ impl MamStorage for DatabaseMamStorage {
     ) -> Result<StoreOutcome, MamStorageError> {
         #[cfg(feature = "clustering")]
         {
+            if matches!(
+                &self.authority,
+                MamAuthority::LegacyOwner {
+                    fencing_enabled: false
+                }
+            ) {
+                return self.store_message(archive_jid, message).await;
+            }
             run_operation!(self, true, true, connection => {
                 SqlxMamStorage::store_message_fenced_on_postgres_connection_in_schema(
                     connection,

@@ -220,6 +220,30 @@ fn derived_muc_domain(xmpp_domain: &str) -> anyhow::Result<DomainPart> {
 }
 
 impl XmppConfig {
+    /// One-main-pool owner startup cannot honor per-store URL overrides.
+    /// Check them before the owner performs any schema mutation.
+    pub fn validate_shared_owner_locations(&self) -> anyhow::Result<()> {
+        for (name, location) in [
+            ("MAM", &self.mam_database_url),
+            ("inbox", &self.inbox_database_url),
+            ("PubSub", &self.pubsub_database_url),
+            ("spaces metadata", &self.spaces_metadata_database_url),
+            (
+                "channel-space links",
+                &self.channel_space_links_database_url,
+            ),
+            ("SM", &self.sm_database_url),
+            ("pending delivery", &self.pending_delivery_database_url),
+        ] {
+            if !matches!(location, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+                anyhow::bail!(
+                    "shared owner PostgreSQL startup requires inherited global {name} storage"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Load XMPP configuration from environment variables.
     ///
     /// Returns an error when `WADDLE_SPACES_JID` or `WADDLE_MUC_DOMAIN`

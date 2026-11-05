@@ -10,6 +10,23 @@ use crate::db::lineage::PgIdentity;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
 impl DatabasePubSubStorage {
+    /// Run the existing legacy owner initializer on the supplied shared main
+    /// handle, without opening a child pool or claiming restricted authority.
+    pub async fn initialize_shared_owner(db: Database) -> Result<Self, XmppError> {
+        if db.driver() != DatabaseDriver::Postgres
+            || db.uses_attested_postgres_pool()
+            || !db.is_main_lane()
+            || db.ingress_pool_size().is_none()
+        {
+            return Err(XmppError::internal(
+                "shared PubSub owner initialization requires an owner main lane".to_owned(),
+            ));
+        }
+        let storage = Self { db };
+        storage.initialize().await?;
+        Ok(storage)
+    }
+
     pub async fn open(database_url: Option<&str>) -> Result<Self, XmppError> {
         let db = match database_url {
             Some(database_url) => open_database(database_url).await?,

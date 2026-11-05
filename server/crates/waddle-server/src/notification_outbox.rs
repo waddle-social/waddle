@@ -86,6 +86,13 @@ pub struct NotificationOutboxStore {
     owner_preparation: Option<OwnerPreparationProof>,
 }
 
+/// Proof that this exact URL-opened owner pool completed the legacy outbox
+/// initializer before its admission lanes were sealed. It holds no pool.
+#[derive(Debug)]
+pub(crate) struct PreparedLegacyOwnerOutbox {
+    pool_identity: std::sync::Weak<()>,
+}
+
 #[derive(Clone)]
 struct OwnerSchemaIdentity {
     oid: i64,
@@ -109,6 +116,99 @@ impl NotificationOutboxStore {
         };
         store.initialize().await?;
         Ok(store)
+    }
+
+    pub(crate) async fn prepare_legacy_owner_shared(
+        db: &Database,
+    ) -> Result<PreparedLegacyOwnerOutbox, NotificationOutboxError> {
+        if db.driver() != crate::db::DatabaseDriver::Postgres
+            || !db.is_main_lane()
+            || db.ingress_pool_size().is_some()
+            || db.uses_attested_postgres_pool()
+        {
+            return Err(NotificationOutboxError::SharedOwnerMainLaneRequired);
+        }
+        let identity = db
+            .owner_startup_identity()
+            .ok_or(NotificationOutboxError::SharedOwnerMainLaneRequired)?;
+        let temporary = Self {
+            db: db.clone(),
+            owner_preparation: None,
+        };
+        temporary.initialize_legacy_postgres_inline().await?;
+        drop(temporary);
+        Ok(PreparedLegacyOwnerOutbox {
+            pool_identity: identity,
+        })
+    }
+
+    /// Bind the already prepared legacy outbox to sealed owner admission.
+    /// The only production sealing path completes the legacy initializer before it
+    /// publishes the pool. This check performs no owner DDL or adoption.
+    pub(crate) async fn attach_prepared_shared_owner(
+        db: Database,
+        prepared: PreparedLegacyOwnerOutbox,
+    ) -> Result<Self, NotificationOutboxError> {
+        if db.driver() != crate::db::DatabaseDriver::Postgres
+            || !db.is_main_lane()
+            || db.ingress_pool_size().is_none()
+            || db.uses_attested_postgres_pool()
+        {
+            return Err(NotificationOutboxError::SharedOwnerMainLaneRequired);
+        }
+        let identity = db
+            .owner_startup_identity()
+            .ok_or(NotificationOutboxError::SharedOwnerMainLaneRequired)?;
+        if !std::sync::Weak::ptr_eq(&identity, &prepared.pool_identity) {
+            return Err(NotificationOutboxError::SharedOwnerMainLaneRequired);
+        }
+        let store = Self {
+            db,
+            owner_preparation: None,
+        };
+        store.validate_typed_schema_contract()?;
+        let mut tx = store.db.begin().await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+            (),
+        )
+        .await?;
+        let mut rows = tx
+            .query("SELECT pg_catalog.current_schema()::text", ())
+            .await?;
+        let schema = rows
+            .next()
+            .await?
+            .ok_or(NotificationOutboxError::SharedOwnerMainLaneRequired)?
+            .get::<String>(0)?;
+        drop(rows);
+        crate::db::physical_attestation::validate_identifier(
+            &schema,
+            "legacy notification outbox schema",
+        )
+        .map_err(|_| NotificationOutboxError::UnsafeOwnerBoundary)?;
+        let qualified = crate::db::physical_attestation::quote_identifier(&schema);
+        for table in [
+            "notification_candidates",
+            "notification_outbox_lineage",
+            "notification_outbox",
+        ] {
+            let sql = format!("SELECT 1 FROM {qualified}.\"{table}\" LIMIT 0");
+            let rows = tx.query(&sql, ()).await?;
+            drop(rows);
+        }
+        tx.rollback().await?;
+        Ok(store)
+    }
+
+    pub(crate) fn belongs_to_shared_owner_main(&self, main: &Database) -> bool {
+        self.db.is_main_lane()
+            && self.db.ingress_pool_size().is_some()
+            && self
+                .db
+                .owner_startup_identity()
+                .zip(main.owner_startup_identity())
+                .is_some_and(|(left, right)| std::sync::Weak::ptr_eq(&left, &right))
     }
 
     /// Bootstrap or upgrade the notification outbox with a trusted owner

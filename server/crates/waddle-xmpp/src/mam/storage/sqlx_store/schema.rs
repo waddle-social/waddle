@@ -441,6 +441,17 @@ pub enum MamSchemaBootstrapError {
 }
 
 impl SqlxMamStorage {
+    /// Run the same owner schema preparation as legacy `open` on a supplied
+    /// autocommit session. This has no physical-attestation or role-handoff
+    /// claim. The connection is consumed so an error or cancelled future
+    /// discards a session that may still hold the MAM advisory lock.
+    pub async fn bootstrap_legacy_postgres_schema_on_owned_connection(
+        mut conn: PgConnection,
+    ) -> Result<PgConnection, MamSchemaBootstrapError> {
+        bootstrap_postgres_connection(&mut conn, None).await?;
+        Ok(conn)
+    }
+
     /// Bootstrap the internally selected MAM schema on an exclusively owned,
     /// direct PostgreSQL connection. The caller must already have established
     /// the physical identity, owner role, lineage, ledger, and their lock order.

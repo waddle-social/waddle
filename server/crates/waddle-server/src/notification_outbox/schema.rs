@@ -237,6 +237,23 @@ fn notification_candidates_suppressed_reason_constraint_matches_expected(definit
 }
 
 impl NotificationOutboxStore {
+    /// The shared owner builder must not leave a spawned unlaned clone
+    /// running after its bootstrap future is cancelled.
+    pub(in crate::notification_outbox) async fn initialize_legacy_postgres_inline(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        self.validate_typed_schema_contract()?;
+        let mut store = self.clone();
+        store.owner_preparation = Some(super::OwnerPreparationProof {
+            identity: None,
+            probe_key: super::fresh_owner_probe_key(),
+            schema_identity: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        store
+            .initialize_postgres_schema(OUTBOX_SCHEMA_GATE_WAIT)
+            .await
+    }
+
     pub(super) async fn initialize(&self) -> Result<(), NotificationOutboxError> {
         self.validate_typed_schema_contract()?;
         if self.db.driver() == DatabaseDriver::Postgres {
@@ -246,21 +263,12 @@ impl NotificationOutboxStore {
             // Compatibility path for the existing startup wiring. It retains
             // legacy DDL behavior but cannot certify owner preparation; if a
             // trusted marker already exists, invalidate it before any work.
-            let mut store = self.clone();
-            store.owner_preparation = Some(super::OwnerPreparationProof {
-                identity: None,
-                probe_key: super::fresh_owner_probe_key(),
-                schema_identity: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            });
-            tokio::spawn(async move {
-                store
-                    .initialize_postgres_schema(OUTBOX_SCHEMA_GATE_WAIT)
-                    .await
-            })
-            .await
-            .map_err(|error| {
-                DatabaseError::QueryFailed(format!("outbox schema task failed: {error}"))
-            })??;
+            let store = self.clone();
+            tokio::spawn(async move { store.initialize_legacy_postgres_inline().await })
+                .await
+                .map_err(|error| {
+                    DatabaseError::QueryFailed(format!("outbox schema task failed: {error}"))
+                })??;
         } else {
             self.initialize_schema().await?;
             self.adopt_legacy_candidate_ids().await?;

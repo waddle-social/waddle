@@ -500,6 +500,8 @@ pub enum NotificationOutboxError {
     OwnerPreparationRequiresTrustedHandle,
     #[error("notification outbox owner identity or database role is unsafe")]
     UnsafeOwnerBoundary,
+    #[error("notification outbox shared-owner attachment requires the sealed owner main lane")]
+    SharedOwnerMainLaneRequired,
     #[error("invalid durable notification delivery identity")]
     InvalidDeliveryIdentity,
     #[error("invalid frozen notification payload")]
