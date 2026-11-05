@@ -26,6 +26,10 @@ mod owner_rejection_grants;
 #[cfg(feature = "test-support")]
 mod transition_lab;
 
+// Keep this deliberately dark PostgreSQL boundary in the production compile
+// without registering or installing it through the migration runner.
+const _: &str = include_str!("owner/ingress_definer_api_candidate.sql");
+
 pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
 pub use mam::{bootstrap_dark_postgres_mam_owner, DarkMamOwnerError};
 pub use owner_rejection_grants::{
