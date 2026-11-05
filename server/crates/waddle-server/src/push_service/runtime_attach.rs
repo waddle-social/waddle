@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
 const MARKER_TABLE: &str = "push_service_schema_marker";
+pub(super) const VAPID_TABLE_NAME: &str = "push_service_vapid_keys";
+pub(super) const VAPID_MARKER_TABLE_NAME: &str = "push_service_vapid_schema_marker";
 const SCHEMA_VERSION: i64 = 1;
 const TABLES: [&str; 7] = [
     "push_owner_locks",
@@ -56,6 +58,193 @@ pub enum PushServiceAttachError {
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
+
+/// Read-only VAPID signer attachment through the physically attested main
+/// pool. This proof covers the VAPID relation and its owner-written marker in
+/// one transaction; it does not authorize database writes.
+#[derive(Debug, thiserror::Error)]
+pub enum VapidRuntimeAttachError {
+    #[error("VAPID runtime attachment requires PostgreSQL")]
+    PostgresRequired,
+    #[error("VAPID runtime attachment requires the main database lane")]
+    MainLaneRequired,
+    #[error("VAPID runtime attachment requires an attested main pool")]
+    AttestedPoolRequired,
+    #[error("VAPID attachment found a different active database or schema")]
+    ActiveSchemaMismatch,
+    #[error("VAPID owner-preparation marker is missing, malformed, or incompatible")]
+    InvalidMarker,
+    #[error("Push Service owner marker is incomplete")]
+    PushServiceNotReady,
+    #[error("VAPID key relation is missing or malformed")]
+    InvalidSchema,
+    #[error("VAPID owner-prepared key is missing or differs from its completion marker")]
+    ActiveKeyMismatch,
+    #[error("VAPID storage has more than one active key")]
+    MultipleActiveKeys,
+    #[error("VAPID owner-prepared key has an unsupported root-key version")]
+    UnknownRootKeyVersion,
+    #[error("VAPID owner-prepared key could not be unsealed ({0:?})")]
+    Unseal(waddle_xmpp::push::types::VapidUnsealErrorKind),
+    #[error("VAPID owner-prepared private key is malformed")]
+    InvalidPrivateKey,
+    #[error("VAPID persisted public key does not match its private key")]
+    PublicKeyMismatch,
+    #[error("VAPID stored key identifier is malformed")]
+    InvalidKid,
+    #[error("VAPID signer initialization failed")]
+    SignerInit,
+    #[error("VAPID key relation is inaccessible or has an unexpected shape")]
+    Relation(#[source] DatabaseError),
+    #[error("could not verify the PostgreSQL {setting} bound for VAPID attachment")]
+    InvalidTimeoutSetting { setting: &'static str },
+    #[error(transparent)]
+    Schema(#[from] PushServiceAttachError),
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+pub(super) struct VapidKeyRecord {
+    pub kid: String,
+    pub sealed_private_key: String,
+    pub public_key: Vec<u8>,
+    pub root_key_version: i64,
+}
+
+const VAPID_KEY_COLUMNS: &[Column] = &[
+    Column {
+        name: "kid",
+        kind: "text",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "sealed_private_key",
+        kind: "text",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "public_key",
+        kind: "bytea",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "root_key_version",
+        kind: "bigint",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "created_at_ms",
+        kind: "bigint",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "retired_at_ms",
+        kind: "bigint",
+        not_null: false,
+        default: None,
+    },
+];
+const VAPID_KEY_INDEXES: &[Index] = &[
+    Index::primary("push_service_vapid_keys_pkey", &["kid"]),
+    Index::ordinary(
+        "idx_push_service_vapid_keys_active",
+        &["retired_at_ms", "created_at_ms"],
+    ),
+];
+const VAPID_KEYS: Table = Table {
+    name: VAPID_TABLE_NAME,
+    columns: VAPID_KEY_COLUMNS,
+    primary_key: &["kid"],
+    checks: &[],
+    unique_constraints: &[],
+    indexes: VAPID_KEY_INDEXES,
+    foreign_keys: &[],
+    insert: false,
+    update: false,
+    delete: false,
+};
+
+const VAPID_MARKER_COLUMNS: &[Column] = &[
+    Column {
+        name: "marker_id",
+        kind: "integer",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "version",
+        kind: "bigint",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "system_identifier",
+        kind: "text",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "database_oid",
+        kind: "bigint",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "database_name",
+        kind: "text",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "schema_oid",
+        kind: "bigint",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "schema_name",
+        kind: "text",
+        not_null: true,
+        default: None,
+    },
+    Column {
+        name: "initial_kid",
+        kind: "text",
+        not_null: true,
+        default: None,
+    },
+];
+const VAPID_MARKER_CHECKS: &[Check] = &[
+    Check {
+        name: "push_service_vapid_schema_marker_marker_id_check",
+        definition: "marker_id = 1",
+    },
+    Check {
+        name: "push_service_vapid_schema_marker_version_check",
+        definition: "version = 1",
+    },
+];
+const VAPID_MARKER_INDEXES: &[Index] = &[Index::primary(
+    "push_service_vapid_schema_marker_pkey",
+    &["marker_id"],
+)];
+const VAPID_MARKER: Table = Table {
+    name: VAPID_MARKER_TABLE_NAME,
+    columns: VAPID_MARKER_COLUMNS,
+    primary_key: &["marker_id"],
+    checks: VAPID_MARKER_CHECKS,
+    unique_constraints: &[],
+    indexes: VAPID_MARKER_INDEXES,
+    foreign_keys: &[],
+    insert: false,
+    update: false,
+    delete: false,
+};
 
 #[derive(Clone, Copy)]
 struct Column {
@@ -871,6 +1060,242 @@ pub(super) async fn verify(db: &Database) -> Result<(), PushServiceAttachError> 
     }
     tx.rollback().await?;
     Ok(())
+}
+
+/// Verify and read the owner-prepared VAPID key on one bounded, read-only
+/// transaction through the exact physically attested main-lane pool.
+pub(super) async fn load_vapid_key_record(
+    db: &Database,
+) -> Result<VapidKeyRecord, VapidRuntimeAttachError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(VapidRuntimeAttachError::PostgresRequired);
+    }
+    if !db.is_main_lane() {
+        return Err(VapidRuntimeAttachError::MainLaneRequired);
+    }
+    let capability = db
+        .attested_pg_writer_capability()
+        .ok_or(VapidRuntimeAttachError::AttestedPoolRequired)?;
+    db.verify_attested_pg_writer_capability(&capability)
+        .map_err(DatabaseError::from)?;
+    let identity = capability.identity();
+    let schema = &identity.schema.name.0;
+    crate::db::physical_attestation::validate_identifier(schema, "VAPID runtime schema")
+        .map_err(|_| VapidRuntimeAttachError::ActiveSchemaMismatch)?;
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await?;
+    crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+        .await
+        .map_err(|error| match error {
+            crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
+                VapidRuntimeAttachError::InvalidTimeoutSetting { setting }
+            }
+            crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                VapidRuntimeAttachError::Database(error)
+            }
+        })?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
+    )
+    .await?;
+    for table in [VAPID_TABLE_NAME, VAPID_MARKER_TABLE_NAME, MARKER_TABLE] {
+        let qualified = format!("{quoted_schema}.{}", quote_static_identifier(table));
+        if let Err(source) = tx
+            .execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
+            .await
+        {
+            if matches!(
+                &source,
+                DatabaseError::Internal(sqlx::Error::Database(error))
+                    if error.code().as_deref() == Some("42P01")
+            ) {
+                return Err(if table == VAPID_MARKER_TABLE_NAME {
+                    VapidRuntimeAttachError::InvalidMarker
+                } else {
+                    VapidRuntimeAttachError::InvalidSchema
+                });
+            }
+            return Err(VapidRuntimeAttachError::Relation(source));
+        }
+    }
+    capability.attest_transaction(&mut tx).await?;
+    verify_active_schema(&mut tx, identity).await?;
+    if !verify_marker_shape_and_data_tx(&mut tx, identity).await? {
+        return Err(VapidRuntimeAttachError::PushServiceNotReady);
+    }
+    verify_runtime_role(&mut tx, schema).await?;
+    verify_vapid_table_shape_tx(&mut tx, schema).await?;
+    verify_table_acl(&mut tx, schema, &VAPID_KEYS).await?;
+    verify_vapid_marker_shape_tx(&mut tx, schema).await?;
+    verify_table_acl(&mut tx, schema, &VAPID_MARKER).await?;
+    let marked_kid = verify_vapid_marker_data_tx(&mut tx, identity).await?;
+    let active_count = count_active_vapid_keys_tx(&mut tx, schema).await?;
+    if active_count == 0 {
+        return Err(VapidRuntimeAttachError::ActiveKeyMismatch);
+    }
+    if active_count > 1 {
+        return Err(VapidRuntimeAttachError::MultipleActiveKeys);
+    }
+    let record = select_vapid_active_key_tx(&mut tx, schema)
+        .await?
+        .ok_or(VapidRuntimeAttachError::ActiveKeyMismatch)?;
+    if record.kid != marked_kid {
+        return Err(VapidRuntimeAttachError::ActiveKeyMismatch);
+    }
+    tx.rollback().await?;
+    Ok(record)
+}
+
+pub(super) async fn vapid_relation_exists_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    relation: &str,
+) -> Result<bool, DatabaseError> {
+    let mut rows = tx
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class relation \
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+             WHERE namespace.nspname = ? AND relation.relname = ?)",
+            crate::db_params![schema, relation],
+        )
+        .await?;
+    Ok(matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?))
+}
+
+pub(super) async fn verify_vapid_table_shape_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PushServiceAttachError> {
+    verify_table(tx, schema, &VAPID_KEYS).await
+}
+
+pub(super) async fn verify_vapid_marker_shape_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PushServiceAttachError> {
+    verify_table(tx, schema, &VAPID_MARKER).await
+}
+
+pub(super) async fn verify_vapid_marker_data_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<String, VapidRuntimeAttachError> {
+    let schema = &identity.schema.name.0;
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let quoted_table = quote_static_identifier(VAPID_MARKER_TABLE_NAME);
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT version, system_identifier, database_oid, database_name, schema_oid, schema_name, initial_kid \
+                 FROM {quoted_schema}.{quoted_table} WHERE marker_id = 1"
+            ),
+            (),
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(VapidRuntimeAttachError::InvalidMarker)?;
+    let version = row.get::<i64>(0)?;
+    let system_identifier = row.get::<String>(1)?;
+    let database_oid = row.get::<i64>(2)?;
+    let database_name = row.get::<String>(3)?;
+    let schema_oid = row.get::<i64>(4)?;
+    let schema_name = row.get::<String>(5)?;
+    let initial_kid = row.get::<String>(6)?;
+    drop(rows);
+    if version != 1
+        || system_identifier != identity.system_identifier.to_string()
+        || database_oid != i64::from(identity.database.oid)
+        || database_name != identity.database.name.0
+        || schema_oid != i64::from(identity.schema.oid)
+        || schema_name != identity.schema.name.0
+    {
+        return Err(VapidRuntimeAttachError::InvalidMarker);
+    }
+    let mut rows = tx
+        .query(
+            &format!("SELECT count(*)::bigint FROM {quoted_schema}.{quoted_table}"),
+            (),
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<i64>(0)? == 1) {
+        return Err(VapidRuntimeAttachError::InvalidMarker);
+    }
+    Ok(initial_kid)
+}
+
+pub(super) async fn select_vapid_active_key_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<VapidKeyRecord>, DatabaseError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let quoted_table = quote_static_identifier(VAPID_TABLE_NAME);
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT kid, sealed_private_key, public_key, root_key_version \
+                 FROM {quoted_schema}.{quoted_table} WHERE retired_at_ms IS NULL \
+                 ORDER BY created_at_ms DESC, kid DESC LIMIT 1"
+            ),
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some(VapidKeyRecord {
+        kid: row.get(0)?,
+        sealed_private_key: row.get(1)?,
+        public_key: row.get(2)?,
+        root_key_version: row.get(3)?,
+    }))
+}
+
+pub(super) async fn count_vapid_keys_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<i64, DatabaseError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let quoted_table = quote_static_identifier(VAPID_TABLE_NAME);
+    let mut rows = tx
+        .query(
+            &format!("SELECT count(*)::bigint FROM {quoted_schema}.{quoted_table}"),
+            (),
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => row.get(0),
+        None => Ok(0),
+    }
+}
+
+pub(super) async fn count_active_vapid_keys_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<i64, DatabaseError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let quoted_table = quote_static_identifier(VAPID_TABLE_NAME);
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT count(*)::bigint FROM {quoted_schema}.{quoted_table} \
+                 WHERE retired_at_ms IS NULL"
+            ),
+            (),
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => row.get(0),
+        None => Ok(0),
+    }
 }
 
 pub(super) async fn verify_marker_shape_and_data_tx(

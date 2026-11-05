@@ -1,4 +1,5 @@
 use super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY;
+use super::vapid_storage::{VapidOwnerError, VapidRuntimeAttachError, VapidStorage};
 use super::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration, PushServiceAttachError,
     PushServiceOwnerError,
@@ -249,6 +250,11 @@ impl Fixture {
             bail!("local owner preparation did not leave an incomplete marker");
         }
         let secret = [7_u8; 32];
+        match VapidStorage::prepare_owner(&owner_database, &identity, &secret).await {
+            Err(VapidOwnerError::PushServiceNotReady) => {}
+            Err(error) => bail!("VAPID owner prep before Push readiness had wrong error: {error}"),
+            Ok(()) => bail!("VAPID owner prep succeeded before the Push marker completed"),
+        }
         grant_push_runtime_privileges(&self.admin, &self.target, &self.runtime).await?;
         assert_invalid_marker(
             DatabasePushServiceStore::attach_existing_without_pubsub(
@@ -297,6 +303,135 @@ impl Fixture {
         if marker_phase(&self.admin, &self.target).await? != 1 {
             bail!("cross-store owner adoption did not complete the marker");
         }
+        VapidStorage::prepare_owner(&owner_database, &identity, &secret).await?;
+        let vapid_kid: String = sqlx::query_scalar(&format!(
+            "SELECT initial_kid FROM {}.push_service_vapid_schema_marker WHERE marker_id = 1",
+            self.target
+        ))
+        .fetch_one(&self.admin)
+        .await?;
+        let vapid_key_count: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*)::bigint FROM {}.push_service_vapid_keys WHERE retired_at_ms IS NULL",
+            self.target
+        ))
+        .fetch_one(&self.admin)
+        .await?;
+        if vapid_key_count != 1 {
+            bail!("VAPID owner prep must create exactly one active key");
+        }
+        VapidStorage::prepare_owner(&owner_database, &identity, &secret).await?;
+        let repeated_kid: String = sqlx::query_scalar(&format!(
+            "SELECT initial_kid FROM {}.push_service_vapid_schema_marker WHERE marker_id = 1",
+            self.target
+        ))
+        .fetch_one(&self.admin)
+        .await?;
+        if repeated_kid != vapid_kid {
+            bail!("repeated VAPID owner prep rotated the initial key");
+        }
+        grant_vapid_runtime_privileges(&self.admin, &self.target, &self.runtime).await?;
+        let vapid_signer = VapidStorage::load_attested(runtime_database.clone(), &secret).await?;
+        if vapid_signer.current_kid().to_string() != vapid_kid {
+            bail!("attested VAPID load returned a different persisted kid");
+        }
+        match VapidStorage::prepare_owner(&runtime_database, &identity, &secret).await {
+            Err(VapidOwnerError::OwnerHandleRequired) => {}
+            Err(error) => bail!("attested VAPID owner prep had wrong error: {error}"),
+            Ok(()) => bail!("attested VAPID runtime performed owner preparation"),
+        }
+
+        sqlx::query(&format!(
+            "GRANT INSERT ON {}.push_service_vapid_keys TO {}",
+            self.target, self.runtime
+        ))
+        .execute(&self.admin)
+        .await?;
+        match VapidStorage::load_attested(runtime_database.clone(), &secret).await {
+            Err(VapidRuntimeAttachError::Schema(
+                PushServiceAttachError::UnsafeRuntimePrivileges {
+                    component: "push_service_vapid_keys",
+                },
+            )) => {}
+            Err(error) => bail!("unsafe VAPID table ACL had wrong error: {error}"),
+            Ok(_) => bail!("VAPID attach accepted runtime INSERT privilege"),
+        }
+        sqlx::query(&format!(
+            "REVOKE INSERT ON {}.push_service_vapid_keys FROM {}",
+            self.target, self.runtime
+        ))
+        .execute(&self.admin)
+        .await?;
+
+        let public_key: Vec<u8> = sqlx::query_scalar(&format!(
+            "SELECT public_key FROM {}.push_service_vapid_keys WHERE kid = $1",
+            self.target
+        ))
+        .bind(&vapid_kid)
+        .fetch_one(&self.admin)
+        .await?;
+        let mut mismatched_public_key = public_key.clone();
+        mismatched_public_key[1] ^= 1;
+        sqlx::query(&format!(
+            "UPDATE {}.push_service_vapid_keys SET public_key = $1 WHERE kid = $2",
+            self.target
+        ))
+        .bind(&mismatched_public_key)
+        .bind(&vapid_kid)
+        .execute(&self.admin)
+        .await?;
+        match VapidStorage::load_attested(runtime_database.clone(), &secret).await {
+            Err(VapidRuntimeAttachError::PublicKeyMismatch) => {}
+            Err(error) => bail!("mismatched persisted VAPID public key had wrong error: {error}"),
+            Ok(_) => bail!("VAPID attach accepted a mismatched public key"),
+        }
+        sqlx::query(&format!(
+            "UPDATE {}.push_service_vapid_keys SET public_key = $1 WHERE kid = $2",
+            self.target
+        ))
+        .bind(&public_key)
+        .bind(&vapid_kid)
+        .execute(&self.admin)
+        .await?;
+
+        let extra_kid = uuid::Uuid::new_v4().to_string();
+        sqlx::query(&format!(
+            "INSERT INTO {}.push_service_vapid_keys \
+             (kid, sealed_private_key, public_key, root_key_version, created_at_ms) \
+             SELECT $1, sealed_private_key, public_key, root_key_version, created_at_ms + 1 \
+             FROM {}.push_service_vapid_keys WHERE kid = $2",
+            self.target, self.target
+        ))
+        .bind(&extra_kid)
+        .bind(&vapid_kid)
+        .execute(&self.admin)
+        .await?;
+        match VapidStorage::load_attested(runtime_database.clone(), &secret).await {
+            Err(VapidRuntimeAttachError::MultipleActiveKeys) => {}
+            Err(error) => bail!("multiple active VAPID keys had wrong error: {error}"),
+            Ok(_) => bail!("VAPID attach accepted multiple active keys"),
+        }
+        sqlx::query(&format!(
+            "DELETE FROM {}.push_service_vapid_keys WHERE kid = $1",
+            self.target
+        ))
+        .bind(&extra_kid)
+        .execute(&self.admin)
+        .await?;
+
+        sqlx::query(&format!(
+            "DROP TABLE {}.push_service_vapid_schema_marker",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        match VapidStorage::load_attested(runtime_database.clone(), &secret).await {
+            Err(VapidRuntimeAttachError::InvalidMarker) => {}
+            Err(error) => bail!("missing VAPID marker had wrong error: {error}"),
+            Ok(_) => bail!("VAPID attach accepted a missing owner marker"),
+        }
+        VapidStorage::prepare_owner(&owner_database, &identity, &secret).await?;
+        grant_vapid_runtime_privileges(&self.admin, &self.target, &self.runtime).await?;
+        VapidStorage::load_attested(runtime_database.clone(), &secret).await?;
         verify_marker_temp_shadow_is_rejected_and_qualified(
             &temp_test_database,
             &self.admin,
@@ -797,6 +932,18 @@ async fn grant_push_runtime_privileges(admin: &PgPool, schema: &str, runtime: &s
         ))
         .execute(admin)
         .await?;
+    }
+    Ok(())
+}
+
+async fn grant_vapid_runtime_privileges(admin: &PgPool, schema: &str, runtime: &str) -> Result<()> {
+    for table in [
+        "push_service_vapid_keys",
+        "push_service_vapid_schema_marker",
+    ] {
+        sqlx::query(&format!("GRANT SELECT ON {schema}.{table} TO {runtime}"))
+            .execute(admin)
+            .await?;
     }
     Ok(())
 }

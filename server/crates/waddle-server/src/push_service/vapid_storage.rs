@@ -19,6 +19,7 @@
 //! boot, once the key is stored. See `docs/operations/vapid-bootstrap.md`.
 
 use crate::db::DatabaseDriver;
+use crate::db::DatabaseError;
 use crate::db::Rows;
 use std::env;
 use std::sync::Arc;
@@ -41,7 +42,45 @@ use waddle_xmpp::push::vapid::{InProcessVapidSigner, VapidSigner};
 use waddle_xmpp::XmppError;
 use zeroize::Zeroizing;
 
-use crate::db::{Database, IntoParams};
+use crate::db::{Database, IntoParams, Transaction};
+
+pub use super::runtime_attach::VapidRuntimeAttachError;
+
+/// Failure while the trusted schema owner prepares the first durable VAPID
+/// signer. This operation is idempotent and does not rotate an existing key.
+#[derive(Debug, thiserror::Error)]
+pub enum VapidOwnerError {
+    #[error("VAPID owner preparation requires PostgreSQL")]
+    PostgresRequired,
+    #[error("VAPID owner preparation cannot use an attested runtime handle")]
+    OwnerHandleRequired,
+    #[error("the Push Service owner schema is not complete")]
+    PushServiceNotReady,
+    #[error("VAPID owner preparation found an invalid completion marker")]
+    InvalidMarker,
+    #[error("VAPID owner preparation found an unexpected relation shape")]
+    InvalidSchema,
+    #[error("VAPID owner preparation refuses to create a replacement for retired keys")]
+    RotationRequired,
+    #[error("VAPID owner preparation found more than one active key")]
+    MultipleActiveKeys,
+    #[error("VAPID bootstrap environment value is not valid UTF-8")]
+    InvalidBootstrapEnvironment,
+    #[error("VAPID persisted key failed integrity validation")]
+    InvalidStoredKey,
+    #[error("VAPID private key sealing failed")]
+    SealFailed,
+    #[error(transparent)]
+    PushService(#[from] super::PushServiceOwnerError),
+    #[error(transparent)]
+    Schema(#[from] super::runtime_attach::PushServiceAttachError),
+    #[error(transparent)]
+    Load(#[from] VapidLoadError),
+    #[error(transparent)]
+    RuntimeAttach(#[from] VapidRuntimeAttachError),
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
 
 const VAPID_ENV_VAR: &str = "WADDLE_VAPID_PRIVATE_KEY";
 const AAD_LABEL: &[u8] = b"waddle:push-service:vapid-key:v1";
@@ -65,6 +104,51 @@ pub struct VapidStorage {
 }
 
 impl VapidStorage {
+    /// Prepare the VAPID table and its first durable signer through the exact
+    /// Push Service schema-owner handle. The owner marker is committed last in
+    /// the same transaction, so runtime attachment can distinguish complete
+    /// preparation from an absent or interrupted owner phase.
+    pub async fn prepare_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+        root_key: &[u8],
+    ) -> Result<(), VapidOwnerError> {
+        super::owner::prepare_vapid_owner(db, identity, root_key).await
+    }
+
+    /// Load the owner-prepared signer through a bounded, read-only transaction
+    /// on the physically attested main pool. This path never runs DDL, reads
+    /// the bootstrap environment variable, provisions a replacement key, or
+    /// opens another database connection.
+    pub async fn load_attested(
+        db: Database,
+        root_key: &[u8],
+    ) -> Result<Arc<dyn VapidSigner>, VapidRuntimeAttachError> {
+        let record = super::runtime_attach::load_vapid_key_record(&db).await?;
+        if record.root_key_version != i64::from(CURRENT_ROOT_KEY_VERSION) {
+            return Err(VapidRuntimeAttachError::UnknownRootKeyVersion);
+        }
+        let kid_uuid = record
+            .kid
+            .parse::<Uuid>()
+            .map_err(|_| VapidRuntimeAttachError::InvalidKid)?;
+        let kid = Kid(kid_uuid);
+        let cipher = VapidKeyCipher::new(root_key);
+        let scalar = cipher
+            .open(&record.sealed_private_key, AAD_LABEL, kid.as_bytes())
+            .map_err(VapidRuntimeAttachError::Unseal)?;
+        let secret_key = p256::SecretKey::from_slice(scalar.as_slice())
+            .map_err(|_| VapidRuntimeAttachError::InvalidPrivateKey)?;
+        if secret_key.public_key().to_encoded_point(false).as_bytes()
+            != record.public_key.as_slice()
+        {
+            return Err(VapidRuntimeAttachError::PublicKeyMismatch);
+        }
+        let signer = InProcessVapidSigner::try_new(kid, secret_key)
+            .map_err(|_| VapidRuntimeAttachError::SignerInit)?;
+        Ok(Arc::new(signer))
+    }
+
     /// Read-only variant for a node whose startup lineage attestation failed
     /// (#1652): never write into an unattested database — not the env-var
     /// bootstrap persist, not a fresh-keypair persist. The node is
@@ -327,6 +411,213 @@ impl VapidStorage {
         // `scalar` is `Zeroizing<Vec<u8>>` and zeroes here.
         Ok(Some((kid, secret_key)))
     }
+}
+
+/// Owner-phase implementation. The caller holds the existing Push schema
+/// advisory lock and has proved that the Push Service owner marker is ready.
+pub(super) async fn prepare_vapid_owner_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+    root_key: &[u8],
+) -> Result<(), VapidOwnerError> {
+    let schema = &identity.schema.name.0;
+    let table_exists = super::runtime_attach::vapid_relation_exists_tx(
+        tx,
+        schema,
+        super::runtime_attach::VAPID_TABLE_NAME,
+    )
+    .await?;
+    let marker_exists = super::runtime_attach::vapid_relation_exists_tx(
+        tx,
+        schema,
+        super::runtime_attach::VAPID_MARKER_TABLE_NAME,
+    )
+    .await?;
+    if marker_exists && !table_exists {
+        return Err(VapidOwnerError::InvalidSchema);
+    }
+
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    if !table_exists {
+        let table = crate::db::physical_attestation::quote_identifier(
+            super::runtime_attach::VAPID_TABLE_NAME,
+        );
+        let index =
+            crate::db::physical_attestation::quote_identifier("idx_push_service_vapid_keys_active");
+        tx.execute(
+            &format!(
+                "CREATE TABLE {quoted_schema}.{table} (\
+                   kid TEXT NOT NULL PRIMARY KEY, \
+                   sealed_private_key TEXT NOT NULL, \
+                   public_key BYTEA NOT NULL, \
+                   root_key_version BIGINT NOT NULL, \
+                   created_at_ms BIGINT NOT NULL, \
+                   retired_at_ms BIGINT)"
+            ),
+            (),
+        )
+        .await?;
+        tx.execute(
+            &format!(
+                "CREATE INDEX {index} ON {quoted_schema}.{table} \
+                 (retired_at_ms, created_at_ms)"
+            ),
+            (),
+        )
+        .await?;
+    }
+    super::runtime_attach::verify_vapid_table_shape_tx(tx, schema)
+        .await
+        .map_err(VapidOwnerError::Schema)?;
+
+    let cipher = VapidKeyCipher::new(root_key);
+    if marker_exists {
+        super::runtime_attach::verify_vapid_marker_shape_tx(tx, schema)
+            .await
+            .map_err(VapidOwnerError::Schema)?;
+        let marked_kid = super::runtime_attach::verify_vapid_marker_data_tx(tx, identity).await?;
+        let active_count = super::runtime_attach::count_active_vapid_keys_tx(tx, schema).await?;
+        if active_count == 0 {
+            return Err(VapidOwnerError::InvalidMarker);
+        }
+        if active_count > 1 {
+            return Err(VapidOwnerError::MultipleActiveKeys);
+        }
+        let record = super::runtime_attach::select_vapid_active_key_tx(tx, schema)
+            .await?
+            .ok_or(VapidOwnerError::InvalidMarker)?;
+        if record.kid != marked_kid {
+            return Err(VapidOwnerError::InvalidMarker);
+        }
+        validate_persisted_key(&cipher, &record).map_err(|_| VapidOwnerError::InvalidStoredKey)?;
+        return Ok(());
+    }
+
+    let active_count = super::runtime_attach::count_active_vapid_keys_tx(tx, schema).await?;
+    if active_count > 1 {
+        return Err(VapidOwnerError::MultipleActiveKeys);
+    }
+    let active = super::runtime_attach::select_vapid_active_key_tx(tx, schema).await?;
+    let initial_kid = if let Some(record) = active {
+        validate_persisted_key(&cipher, &record).map_err(|_| VapidOwnerError::InvalidStoredKey)?;
+        record.kid
+    } else {
+        if super::runtime_attach::count_vapid_keys_tx(tx, schema).await? != 0 {
+            return Err(VapidOwnerError::RotationRequired);
+        }
+        provision_first_key_tx(tx, schema, &cipher).await?
+    };
+
+    let marker = crate::db::physical_attestation::quote_identifier(
+        super::runtime_attach::VAPID_MARKER_TABLE_NAME,
+    );
+    tx.execute(
+        &format!(
+            "CREATE TABLE {quoted_schema}.{marker} (\
+               marker_id INTEGER NOT NULL PRIMARY KEY CHECK (marker_id = 1), \
+               version BIGINT NOT NULL CHECK (version = 1), \
+               system_identifier TEXT NOT NULL, \
+               database_oid BIGINT NOT NULL, \
+               database_name TEXT NOT NULL, \
+               schema_oid BIGINT NOT NULL, \
+               schema_name TEXT NOT NULL, \
+               initial_kid TEXT NOT NULL)"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "INSERT INTO {quoted_schema}.{marker} \
+             (marker_id, version, system_identifier, database_oid, database_name, \
+              schema_oid, schema_name, initial_kid) \
+             VALUES (1, 1, ?, ?, ?, ?, ?, ?)"
+        ),
+        crate::db_params![
+            identity.system_identifier.to_string(),
+            i64::from(identity.database.oid),
+            identity.database.name.0.clone(),
+            i64::from(identity.schema.oid),
+            identity.schema.name.0.clone(),
+            initial_kid,
+        ],
+    )
+    .await?;
+    super::runtime_attach::verify_vapid_marker_shape_tx(tx, schema)
+        .await
+        .map_err(VapidOwnerError::Schema)?;
+    Ok(())
+}
+
+async fn provision_first_key_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    cipher: &VapidKeyCipher,
+) -> Result<String, VapidOwnerError> {
+    let secret_key = match env::var(VAPID_ENV_VAR) {
+        Ok(raw) => {
+            let raw = Zeroizing::new(raw);
+            parse_env_scalar(raw.as_str())?
+        }
+        Err(env::VarError::NotPresent) => p256::SecretKey::random(&mut OsRng),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(VapidOwnerError::InvalidBootstrapEnvironment);
+        }
+    };
+    let kid = Kid::new();
+    let scalar_bytes = Zeroizing::new(secret_key.to_bytes());
+    let public_bytes = secret_key
+        .public_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
+    let _signer = InProcessVapidSigner::try_new(kid, secret_key)
+        .map_err(|source| VapidOwnerError::Load(VapidLoadError::SignerInit { source }))?;
+    let sealed = cipher
+        .seal(&scalar_bytes[..], AAD_LABEL, kid.as_bytes())
+        .map_err(|_| VapidOwnerError::SealFailed)?;
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let table =
+        crate::db::physical_attestation::quote_identifier(super::runtime_attach::VAPID_TABLE_NAME);
+    tx.execute(
+        &format!(
+            "INSERT INTO {quoted_schema}.{table} \
+             (kid, sealed_private_key, public_key, root_key_version, created_at_ms) \
+             VALUES (?, ?, ?, ?, ?)"
+        ),
+        crate::db_params![
+            kid.to_string(),
+            sealed,
+            public_bytes,
+            i64::from(CURRENT_ROOT_KEY_VERSION),
+            chrono::Utc::now().timestamp_millis(),
+        ],
+    )
+    .await?;
+    Ok(kid.to_string())
+}
+
+fn validate_persisted_key(
+    cipher: &VapidKeyCipher,
+    record: &super::runtime_attach::VapidKeyRecord,
+) -> Result<(), VapidRuntimeAttachError> {
+    if record.root_key_version != i64::from(CURRENT_ROOT_KEY_VERSION) {
+        return Err(VapidRuntimeAttachError::UnknownRootKeyVersion);
+    }
+    let kid_uuid = record
+        .kid
+        .parse::<Uuid>()
+        .map_err(|_| VapidRuntimeAttachError::InvalidKid)?;
+    let kid = Kid(kid_uuid);
+    let scalar = cipher
+        .open(&record.sealed_private_key, AAD_LABEL, kid.as_bytes())
+        .map_err(VapidRuntimeAttachError::Unseal)?;
+    let secret_key = p256::SecretKey::from_slice(scalar.as_slice())
+        .map_err(|_| VapidRuntimeAttachError::InvalidPrivateKey)?;
+    if secret_key.public_key().to_encoded_point(false).as_bytes() != record.public_key.as_slice() {
+        return Err(VapidRuntimeAttachError::PublicKeyMismatch);
+    }
+    Ok(())
 }
 
 /// AES-256-GCM sealing for VAPID private keys.

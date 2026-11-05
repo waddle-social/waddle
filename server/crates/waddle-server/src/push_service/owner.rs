@@ -8,7 +8,7 @@ const PUSH_SCHEMA_MARKER_TABLE: &str = "push_service_schema_marker";
 const PUSH_SCHEMA_VERSION: i64 = 1;
 const PUSH_OWNER_PHASE_INCOMPLETE: i64 = 0;
 const PUSH_OWNER_PHASE_COMPLETE: i64 = 1;
-const PUSH_RELATIONS_IN_LOCK_ORDER: [&str; 8] = [
+const PUSH_RELATIONS_IN_LOCK_ORDER: [&str; 10] = [
     "push_owner_locks",
     "push_nodes",
     "push_node_locks",
@@ -16,6 +16,8 @@ const PUSH_RELATIONS_IN_LOCK_ORDER: [&str; 8] = [
     "push_delivery_attempts",
     "push_publish_jobs",
     "push_publication_orders",
+    super::runtime_attach::VAPID_TABLE_NAME,
+    super::runtime_attach::VAPID_MARKER_TABLE_NAME,
     PUSH_SCHEMA_MARKER_TABLE,
 ];
 
@@ -102,6 +104,40 @@ pub(super) async fn initialize_owner(
     if ready {
         return Err(PushServiceOwnerError::InvalidMarker);
     }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Prepare the first durable VAPID signer after the regular Push Service
+/// owner phase is complete. DDL, initial key insertion, and the VAPID-specific
+/// completion marker commit atomically under the shared Push schema gate.
+pub(super) async fn prepare_vapid_owner(
+    db: &Database,
+    identity: &PgIdentity,
+    root_key: &[u8],
+) -> Result<(), super::vapid_storage::VapidOwnerError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(super::vapid_storage::VapidOwnerError::PostgresRequired);
+    }
+    if db.uses_attested_postgres_pool() {
+        return Err(super::vapid_storage::VapidOwnerError::OwnerHandleRequired);
+    }
+
+    let mut tx = db.begin().await?;
+    configure_owner_transaction(&mut tx).await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
+    )
+    .await?;
+    pin_owner_schema(&mut tx, identity).await?;
+    lock_existing_push_relations_tx(&mut tx, &identity.schema.name.0).await?;
+    let push_ready =
+        super::runtime_attach::verify_marker_shape_and_data_tx(&mut tx, identity).await?;
+    if !push_ready {
+        return Err(super::vapid_storage::VapidOwnerError::PushServiceNotReady);
+    }
+    super::vapid_storage::prepare_vapid_owner_tx(&mut tx, identity, root_key).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -336,7 +372,8 @@ pub(super) async fn verify_no_temp_push_relations_tx(
                    AND relation.relname IN ( \
                      'push_service_schema_marker', 'push_owner_locks', 'push_nodes', \
                      'push_node_locks', 'push_devices', 'push_delivery_attempts', \
-                     'push_publish_jobs', 'push_publication_orders', \
+                   'push_publish_jobs', 'push_publication_orders', \
+                   'push_service_vapid_keys', 'push_service_vapid_schema_marker', \
                      'notification_outbox', 'notification_outbox_lineage'))",
             (),
         )
@@ -363,7 +400,8 @@ pub(super) async fn lock_existing_push_relations_tx(
              WHERE namespace.nspname = ? AND relation.relname IN (\
                'push_service_schema_marker', 'push_owner_locks', 'push_nodes', \
                'push_node_locks', 'push_devices', 'push_delivery_attempts', \
-               'push_publish_jobs', 'push_publication_orders') \
+               'push_publish_jobs', 'push_publication_orders', \
+               'push_service_vapid_keys', 'push_service_vapid_schema_marker') \
              ORDER BY relation.relname",
             crate::db_params![schema],
         )
@@ -406,7 +444,8 @@ async fn verify_existing_relations_tx(
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
              WHERE namespace.nspname = ? AND relation.relname IN (\
                'push_owner_locks', 'push_nodes', 'push_node_locks', 'push_devices', \
-               'push_delivery_attempts', 'push_publish_jobs', 'push_publication_orders')",
+               'push_delivery_attempts', 'push_publish_jobs', 'push_publication_orders', \
+               'push_service_vapid_keys', 'push_service_vapid_schema_marker')",
             crate::db_params![schema],
         )
         .await?;
@@ -428,11 +467,13 @@ async fn verify_existing_relations_tx(
                WHERE inbound.contype = 'f' AND namespace.nspname = ? \
                  AND target.relname IN ('push_owner_locks', 'push_nodes', \
                    'push_node_locks', 'push_devices', 'push_delivery_attempts', \
-                   'push_publish_jobs', 'push_publication_orders') \
+                   'push_publish_jobs', 'push_publication_orders', \
+                   'push_service_vapid_keys', 'push_service_vapid_schema_marker') \
                  AND NOT (source.relnamespace = namespace.oid \
                    AND source.relname IN ('push_owner_locks', 'push_nodes', \
                      'push_node_locks', 'push_devices', 'push_delivery_attempts', \
-                     'push_publish_jobs', 'push_publication_orders')))",
+                     'push_publish_jobs', 'push_publication_orders', \
+                     'push_service_vapid_keys', 'push_service_vapid_schema_marker')))",
             crate::db_params![schema],
         )
         .await?;
