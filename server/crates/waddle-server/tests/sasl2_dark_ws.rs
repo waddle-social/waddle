@@ -27,6 +27,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const NS_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
 const NS_SASL: &str = "urn:ietf:params:xml:ns:xmpp-sasl";
 const NS_STREAM: &str = "http://etherx.jabber.org/streams";
+const NS_XMPP_STREAMS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
 
 type Peer = WebSocketStream<DuplexStream>;
 
@@ -122,6 +123,53 @@ async fn start_stream(peer: &mut Peer) -> Element {
 async fn stop_server(server: JoinHandle<()>) {
     server.abort();
     let _ = server.await;
+}
+
+async fn expect_transport_closed(peer: &mut Peer) {
+    match timeout(TIMEOUT, peer.next())
+        .await
+        .expect("websocket close timeout")
+    {
+        Some(Ok(Message::Close(_))) => {}
+        other => panic!("expected WebSocket close frame, got {other:?}"),
+    }
+}
+
+async fn expect_stream_closed(peer: &mut Peer) {
+    let close = receive(peer).await;
+    assert_eq!((close.name(), close.ns()), ("close", NS_FRAMING.to_owned()));
+    expect_transport_closed(peer).await;
+}
+
+async fn seed_scram_account(state: &Arc<WebSocketState>) {
+    use waddle_server::auth::{NativeUserStore, RegisterRequest};
+    use waddle_server::test_support::seed_local_account;
+
+    seed_local_account(state, "alice").await;
+    NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone())
+        .register(RegisterRequest {
+            username: "alice".to_owned(),
+            domain: "example.com".to_owned(),
+            password: "test-password".to_owned(),
+            email: None,
+        })
+        .await
+        .expect("register SCRAM account");
+}
+
+async fn begin_sasl2_scram(peer: &mut Peer) {
+    send(
+        peer,
+        Sasl2Authenticate::new(
+            Sasl2Mechanism::ScramSha256,
+            Some(Sasl2Data::new(b"n,,n=alice,r=clientnonce".to_vec())),
+        )
+        .to_element(),
+    )
+    .await;
+    let challenge =
+        Sasl2Challenge::from_element(&receive(peer).await).expect("SASL2 SCRAM challenge");
+    assert!(String::from_utf8_lossy(challenge.data.as_bytes()).starts_with("r=clientnonce"));
 }
 
 #[tokio::test]
@@ -417,9 +465,89 @@ async fn sasl2_oauth_error_pending_closes_on_non_sasl_traffic() {
         "<iq xmlns='jabber:client' type='get' id='pending-auth'><query xmlns='jabber:iq:roster'/></iq>",
     )
     .await;
-    let close = receive(&mut peer).await;
-    assert_eq!(close.name(), "close");
-    assert_eq!(close.ns(), NS_FRAMING);
+    expect_stream_closed(&mut peer).await;
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_oauth_error_pending_closes_on_whitespace() {
+    let state = websocket_state_with_sasl2().await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+
+    send(&mut peer, authenticate(bearer("invalid-token", None))).await;
+    let _challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
+        .expect("invalid token starts a SASL2 error challenge");
+    send_raw(&mut peer, " \t\r\n").await;
+    expect_stream_closed(&mut peer).await;
+
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_scram_pending_closes_on_whitespace() {
+    let state = websocket_state_with_sasl2().await;
+    seed_scram_account(&state).await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+    begin_sasl2_scram(&mut peer).await;
+
+    send_raw(&mut peer, " \t\r\n").await;
+    expect_stream_closed(&mut peer).await;
+
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_scram_pending_closes_on_non_sasl_traffic() {
+    let state = websocket_state_with_sasl2().await;
+    seed_scram_account(&state).await;
+    let (mut peer, server) = connect(state).await;
+    let _ = start_stream(&mut peer).await;
+    begin_sasl2_scram(&mut peer).await;
+
+    send_raw(
+        &mut peer,
+        "<iq xmlns='jabber:client' type='get' id='pending-scram'><query xmlns='jabber:iq:roster'/></iq>",
+    )
+    .await;
+    expect_stream_closed(&mut peer).await;
+
+    stop_server(server).await;
+}
+
+#[tokio::test]
+async fn sasl2_authenticate_after_success_sends_stream_error_and_closes_transport() {
+    let state = websocket_state_with_sasl2().await;
+    let session = create_test_session(&state, "alice").await;
+    let (mut peer, server) = connect(state).await;
+
+    let _ = start_stream(&mut peer).await;
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let _success = Sasl2Success::from_element(&receive(&mut peer).await)
+        .expect("first SASL2 authentication succeeds");
+    let _post_auth_features = receive(&mut peer).await;
+
+    send_raw(
+        &mut peer,
+        "<iq xmlns='jabber:client' type='set' id='bind'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><resource>web</resource></bind></iq>",
+    )
+    .await;
+    let bind = receive(&mut peer).await;
+    assert_eq!(bind.name(), "iq");
+    assert_eq!(bind.attr("type"), Some("result"));
+
+    send(&mut peer, authenticate(bearer(&session.id, None))).await;
+    let stream_error = receive(&mut peer).await;
+    assert_eq!(
+        (stream_error.name(), stream_error.ns()),
+        ("error", NS_STREAM.to_owned())
+    );
+    assert!(stream_error
+        .get_child("not-authorized", NS_XMPP_STREAMS)
+        .is_some());
+    expect_stream_closed(&mut peer).await;
+
     stop_server(server).await;
 }
 

@@ -52,6 +52,29 @@ pub(super) fn is_sasl2_parse_failure(frame: &str, err: &ParseError) -> bool {
     }
 }
 
+pub(super) fn is_sasl2_response_parse_failure(frame: &str, err: &ParseError) -> bool {
+    if !matches!(
+        err,
+        ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)
+    ) {
+        return false;
+    }
+    match parse_error_root_name(frame) {
+        Some("response") => {
+            raw_xml_attr_value(frame, "xmlns") == Some(waddle_xmpp_core::xep0388::NS_SASL2)
+        }
+        Some(root) => match root.split_once(':') {
+            Some((prefix, "response")) if !prefix.is_empty() => {
+                let namespace_attr = format!("xmlns:{prefix}");
+                decoded_raw_xml_attr_value(frame, &namespace_attr).as_deref()
+                    == Some(waddle_xmpp_core::xep0388::NS_SASL2)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 pub(super) fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
     match (parse_error_root_name(frame), err) {
         _ if is_sasl2_parse_failure(frame, err) => {

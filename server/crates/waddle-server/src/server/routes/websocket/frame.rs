@@ -2,7 +2,9 @@ use super::frame_backstop::{
     run_with_backstop, run_with_backstop_and_admission, InboundDisposition, StanzaBackstop,
     StanzaTimeout,
 };
-use super::parse_errors::{is_sasl2_parse_failure, is_sasl_parse_failure, parse_error_responses};
+use super::parse_errors::{
+    is_sasl2_response_parse_failure, is_sasl_parse_failure, parse_error_responses,
+};
 use super::resource_binding::handle_resource_binding;
 use super::sasl::{
     handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response,
@@ -307,6 +309,32 @@ fn stream_open_error_response(
     .into()
 }
 
+fn sasl2_authentication_pending(phase: &ConnectionPhase) -> bool {
+    phase.is_sasl2_oauth_error_pending() || phase.scram_pending_is_sasl2()
+}
+
+fn clear_sasl2_authentication_pending(phase: &mut ConnectionPhase, scram_failure: AuthFailure<'_>) {
+    if phase.take_sasl2_oauth_error_pending() {
+        return;
+    }
+    if phase.scram_pending_is_sasl2() {
+        let _ = phase.take_scram_pending();
+        record_scram_failure(scram_failure, None);
+    }
+}
+
+fn sasl2_stream_error_response() -> ResponseBatch {
+    vec![
+        Element::from(StreamError {
+            condition: DefinedCondition::NotAuthorized,
+            texts: Default::default(),
+            application_specific: Vec::new(),
+        }),
+        websocket_stream_close_element(),
+    ]
+    .into()
+}
+
 fn sasl2_failure_from_sasl1(responses: &[Element]) -> Element {
     use waddle_xmpp_core::xep0388::Sasl2FailureCondition;
 
@@ -519,6 +547,12 @@ async fn handle_xmpp_frame_impl(
     } else {
         match waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame) {
             Ok(parsed) => parsed,
+            Err(ParseError::Empty) if sasl2_authentication_pending(phase) => {
+                clear_sasl2_authentication_pending(phase, AuthFailure::ScramOther);
+                *authenticated_session = None;
+                *phase = ConnectionPhase::closing(None);
+                return vec![websocket_stream_close_element()].into();
+            }
             Err(ParseError::Empty) => return ResponseBatch::default(),
             Err(
                 error @ (ParseError::InvalidOpenFrom
@@ -539,9 +573,9 @@ async fn handle_xmpp_frame_impl(
                 return stream_open_error_response(domain, None, condition);
             }
             Err(err) => {
-                if phase.is_sasl2_oauth_error_pending() {
-                    if is_sasl2_parse_failure(frame, &err) {
-                        let _ = phase.take_sasl2_oauth_error_pending();
+                if sasl2_authentication_pending(phase) {
+                    if is_sasl2_response_parse_failure(frame, &err) {
+                        clear_sasl2_authentication_pending(phase, AuthFailure::ScramMalformed);
                         *authenticated_session = None;
                         if let Some(responses) = parse_error_responses(frame, &err) {
                             return responses.into();
@@ -551,6 +585,7 @@ async fn handle_xmpp_frame_impl(
                     // challenge is outstanding. Terminate the stream on any
                     // other malformed traffic rather than leaving the challenge
                     // state active for a later frame.
+                    clear_sasl2_authentication_pending(phase, AuthFailure::ScramOther);
                     *phase = ConnectionPhase::closing(None);
                     *authenticated_session = None;
                     return vec![websocket_stream_close_element()].into();
@@ -577,7 +612,7 @@ async fn handle_xmpp_frame_impl(
     };
     let stanza_lang = parsed.message_stanza_lang;
 
-    if phase.is_sasl2_oauth_error_pending()
+    if sasl2_authentication_pending(phase)
         && !matches!(
             &parsed.frame,
             InboundFrame::Sasl2Response(_) | InboundFrame::Sasl2Abort
@@ -585,6 +620,7 @@ async fn handle_xmpp_frame_impl(
     {
         // XEP-0388 requires disconnecting if the client sends anything other
         // than a SASL2 response or abort during authentication.
+        clear_sasl2_authentication_pending(phase, AuthFailure::ScramOther);
         *phase = ConnectionPhase::closing(None);
         *authenticated_session = None;
         return vec![websocket_stream_close_element()].into();
@@ -726,6 +762,14 @@ async fn handle_xmpp_frame_impl(
                     Sasl2FailureCondition::InvalidMechanism,
                 )]
                 .into();
+            }
+            if phase.is_authenticated() {
+                // XEP-0388 §4.8 requires a stream error for any new SASL2
+                // authentication after success. Retain session and binding
+                // authority until normal transport-close cleanup runs.
+                let bound_jid = phase.bound_jid().cloned();
+                *phase = ConnectionPhase::closing(bound_jid);
+                return sasl2_stream_error_response();
             }
             if !phase.allows_sasl_auth() {
                 return vec![sasl2_failure_element(Sasl2FailureCondition::NotAuthorized)].into();
