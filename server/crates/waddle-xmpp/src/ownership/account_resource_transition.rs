@@ -15,6 +15,7 @@
 
 use jid::FullJid;
 use minidom::Element;
+use minidom::Node;
 use std::io::{self, Write};
 use uuid::Uuid;
 use xmpp_parsers::presence::Show;
@@ -29,6 +30,11 @@ pub const ACCOUNT_RESOURCE_OPERATION_CAPACITY: usize = 64;
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOADS: usize = 64;
 /// Maximum serialized size of all presence extension payloads in one snapshot.
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES: usize = 32 * 1024;
+/// Maximum number of XML tree nodes, attributes, and prefix declarations
+/// traversed across all presence payloads in one snapshot.
+pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_ITEMS: usize = 4 * 1024;
+/// Maximum nesting depth accepted in one presence payload.
+pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH: usize = 128;
 /// Maximum status text length retained in one snapshot.
 pub const ACCOUNT_RESOURCE_MAX_STATUS_BYTES: usize = 4 * 1024;
 
@@ -66,6 +72,108 @@ impl Write for CappedByteCounter {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+struct PresencePayloadPreflight {
+    raw_bytes: usize,
+    items: usize,
+}
+
+impl PresencePayloadPreflight {
+    fn add_bytes(&mut self, bytes: usize) -> bool {
+        let Some(total) = self.raw_bytes.checked_add(bytes) else {
+            return false;
+        };
+        if total > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES {
+            return false;
+        }
+        self.raw_bytes = total;
+        true
+    }
+
+    fn add_item(&mut self) -> bool {
+        let Some(total) = self.items.checked_add(1) else {
+            return false;
+        };
+        if total > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_ITEMS {
+            return false;
+        }
+        self.items = total;
+        true
+    }
+}
+
+/// Inspect all XML strings and structure before minidom serializes an item.
+/// Its rxml encoder builds a temporary buffer per item and escapes each input
+/// byte to at most a fixed-size entity, so capping the complete borrowed tree
+/// and its item count first gives each such buffer a fixed memory ceiling. This
+/// raw-tree budget is conservative and can reject a payload whose serialized
+/// form would fit (for example, repeated namespace declarations). The byte
+/// counter below enforces the exact serialized-size limit for accepted trees.
+fn presence_payloads_within_raw_bounds(payloads: &[Element]) -> bool {
+    let mut preflight = PresencePayloadPreflight::default();
+    let mut pending = Vec::with_capacity(payloads.len());
+
+    for payload in payloads {
+        if !preflight.add_item() {
+            return false;
+        }
+        pending.push((payload, 0));
+    }
+
+    while let Some((element, depth)) = pending.pop() {
+        if depth > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH
+            || !preflight.add_bytes(element.name().len())
+            || !preflight.add_bytes(element.ns_ref().len())
+        {
+            return false;
+        }
+
+        for (prefix, namespace) in element.prefixes.declared_prefixes() {
+            if !preflight.add_item()
+                || !prefix
+                    .as_ref()
+                    .is_none_or(|prefix| preflight.add_bytes(prefix.len()))
+                || !preflight.add_bytes(namespace.len())
+            {
+                return false;
+            }
+        }
+
+        for ((namespace, name), value) in element.attrs().iter() {
+            if !preflight.add_item()
+                || !preflight.add_bytes(namespace.len())
+                || !preflight.add_bytes(name.len())
+                || !preflight.add_bytes(value.len())
+            {
+                return false;
+            }
+        }
+
+        for node in element.nodes() {
+            if !preflight.add_item() {
+                return false;
+            }
+
+            match node {
+                Node::Element(child) => {
+                    let child_depth = depth + 1;
+                    if child_depth > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH {
+                        return false;
+                    }
+                    pending.push((child, child_depth));
+                }
+                Node::Text(text) => {
+                    if !preflight.add_bytes(text.len()) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    true
 }
 
 /// Monotonic revision of this single full-JID resource slot.
@@ -122,6 +230,10 @@ impl AccountResourceSnapshot {
                 .as_ref()
                 .is_some_and(|stream| stream.as_str().len() > SM_SESSION_ID_MAX_LEN)
         {
+            return false;
+        }
+
+        if !presence_payloads_within_raw_bounds(&self.presence_payloads) {
             return false;
         }
 
@@ -1573,6 +1685,48 @@ mod tests {
         )
     }
 
+    fn assert_payload_update_rejected(
+        slot: &mut AccountResourceSlot,
+        claim_identity: &UserClaimIdentity,
+        binding_ref: &BindingRef,
+        payload: Element,
+        raw_tree_within_bounds: bool,
+    ) {
+        assert_eq!(
+            presence_payloads_within_raw_bounds(std::slice::from_ref(&payload)),
+            raw_tree_within_bounds
+        );
+        let before_revision = slot.revision();
+        let before_snapshot = slot.snapshot().cloned().expect("active snapshot");
+        let operation = operation(AccountResourceMutation::UpdateSnapshot {
+            claim_identity: claim_identity.clone(),
+            expected_revision: before_revision,
+            binding_ref: binding_ref.clone(),
+            snapshot: snapshot(
+                true,
+                None,
+                None,
+                0,
+                vec![payload],
+                false,
+                false,
+                false,
+                None,
+            ),
+        });
+
+        assert_eq!(
+            slot.execute(operation.clone()),
+            Err(AccountResourceExecuteError::SnapshotTooLarge)
+        );
+        assert_eq!(slot.revision(), before_revision);
+        assert_eq!(
+            slot.lookup(&operation),
+            AccountResourceOperationLookup::Unknown
+        );
+        assert_eq!(slot.snapshot(), Some(&before_snapshot));
+    }
+
     fn retirement_evidence(
         slot: &AccountResourceSlot,
         custody_disposition: BindingRetirementDisposition,
@@ -2073,20 +2227,12 @@ mod tests {
         );
         assert_eq!(slot.snapshot(), Some(&original));
 
-        let oversized_payload_xml = format!(
-            "<payload xmlns='urn:example'>{}</payload>",
-            "x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1)
-        );
-        let oversized_payload: Element = oversized_payload_xml
-            .parse()
-            .expect("large XML payload remains well formed");
-        let mut capped_counter =
-            CappedByteCounter::new(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES);
-        assert!(oversized_payload.write_to(&mut capped_counter).is_err());
-        assert!(
-            capped_counter.bytes_written <= ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES,
-            "the counting sink must never accept bytes beyond its cap"
-        );
+        let oversized_payload = Element::builder("payload", "urn:example")
+            .append("x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1))
+            .build();
+        assert!(!presence_payloads_within_raw_bounds(std::slice::from_ref(
+            &oversized_payload
+        )));
 
         let oversized_payload_snapshot = snapshot(
             true,
@@ -2116,6 +2262,81 @@ mod tests {
             AccountResourceOperationLookup::Unknown
         );
         assert_eq!(slot.snapshot(), Some(&original));
+    }
+
+    #[test]
+    fn xml_tree_preflight_bounds_text_attributes_namespaces_and_depth() {
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let binding_ref = binding(local_connection());
+        bind_active(&mut slot, &claim_identity, &binding_ref);
+
+        let oversized_text = Element::builder("payload", "urn:example")
+            .append("x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1))
+            .build();
+        assert_payload_update_rejected(
+            &mut slot,
+            &claim_identity,
+            &binding_ref,
+            oversized_text,
+            false,
+        );
+
+        let oversized_attribute = Element::builder("payload", "urn:example")
+            .attr(
+                minidom::rxml::xml_ncname!("value").to_owned(),
+                "x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1),
+            )
+            .build();
+        assert_payload_update_rejected(
+            &mut slot,
+            &claim_identity,
+            &binding_ref,
+            oversized_attribute,
+            false,
+        );
+
+        let oversized_namespace = Element::bare(
+            "payload",
+            "x".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES + 1),
+        );
+        assert_payload_update_rejected(
+            &mut slot,
+            &claim_identity,
+            &binding_ref,
+            oversized_namespace,
+            false,
+        );
+
+        let mut deep_payload = Element::bare("leaf", "urn:example");
+        for _ in 0..=ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH {
+            let mut parent = Element::bare("node", "urn:example");
+            parent.append_child(deep_payload);
+            deep_payload = parent;
+        }
+        assert_payload_update_rejected(
+            &mut slot,
+            &claim_identity,
+            &binding_ref,
+            deep_payload,
+            false,
+        );
+
+        // The raw preflight allows this tree, but rxml expands each ampersand
+        // to `&amp;`. The capped writer rejects the exact serialized overflow.
+        let escaped_overflow = Element::builder("payload", "urn:example")
+            .append("&".repeat(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_BYTES / 4 + 1))
+            .build();
+        assert!(presence_payloads_within_raw_bounds(std::slice::from_ref(
+            &escaped_overflow
+        )));
+        assert_payload_update_rejected(
+            &mut slot,
+            &claim_identity,
+            &binding_ref,
+            escaped_overflow,
+            true,
+        );
     }
 
     #[test]
