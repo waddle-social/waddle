@@ -4,6 +4,10 @@ use std::collections::HashMap;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
+use super::owner::{
+    self, PUBSUB_ATTACH_LOCK_FUNCTION, PUBSUB_SCHEMA_ADVISORY_LOCK_KEY, PUBSUB_SCHEMA_MARKER_TABLE,
+    PUBSUB_SCHEMA_MARKER_VERSION,
+};
 use super::schema::PUBSUB_SCHEMA_VERSION;
 
 /// A restricted PubSub store cannot attach to an unverified runtime database.
@@ -17,6 +21,8 @@ pub enum PubSubRuntimeAttachError {
     ActiveSchemaMismatch,
     #[error("could not bound PostgreSQL waits for PubSub attachment")]
     ReadBounds,
+    #[error("PubSub relation {table} is undergoing a concurrent schema change")]
+    ConcurrentSchemaChange { table: &'static str },
     #[error("failed to lock PubSub relation {table}: {source}")]
     Relation {
         table: &'static str,
@@ -36,6 +42,10 @@ pub enum PubSubRuntimeAttachError {
     InvalidIndex { table: &'static str },
     #[error("PubSub schema version is missing, ambiguous, or incompatible")]
     InvalidVersion,
+    #[error("PubSub owner marker is missing, incomplete, malformed, or bound to another identity")]
+    InvalidMarker,
+    #[error("PubSub owner-controlled attach lock helper is missing, malformed, or misprivileged")]
+    InvalidAttachLock,
     #[error("PubSub runtime role or privileges are unsafe at {component}")]
     UnsafeRuntimePrivileges { component: &'static str },
     #[error("PubSub identity sequence is missing, unsafe, or behind its rows")]
@@ -96,6 +106,16 @@ struct Table {
 const NO_CHECKS: &[&str] = &[];
 const NO_INDEXES: &[Index] = &[];
 const VERSION_COLUMNS: &[Column] = &[integer("version", true)];
+const MARKER_COLUMNS: &[Column] = &[
+    integer("marker_id", true),
+    bigint("version", true),
+    bigint("owner_phase", true),
+    text("system_identifier", true),
+    bigint("database_oid", true),
+    text("database_name", true),
+    bigint("schema_oid", true),
+    text("schema_name", true),
+];
 const NODE_COLUMNS: &[Column] = &[
     text("owner_jid", true),
     text("node_name", true),
@@ -206,6 +226,11 @@ const NOTIFICATION_CHECKS: &[&str] = &[
     "CHECK ((rich_payload_opt_in = ANY (ARRAY[0, 1])))",
 ];
 const PUSH_CHECKS: &[&str] = &["CHECK ((revision > 0))"];
+const MARKER_CHECKS: &[&str] = &[
+    "CHECK ((marker_id = 1))",
+    "CHECK ((owner_phase = ANY (ARRAY[(0)::bigint, (1)::bigint])))",
+    "CHECK ((version = 1))",
+];
 
 // Alphabetical lock order is shared by all PubSub runtime attachments.
 const TABLES: &[Table] = &[
@@ -318,6 +343,18 @@ const TABLES: &[Table] = &[
         delete: false,
     },
     Table {
+        name: PUBSUB_SCHEMA_MARKER_TABLE,
+        columns: MARKER_COLUMNS,
+        primary: "marker_id",
+        unique: None,
+        foreign_node: false,
+        checks: MARKER_CHECKS,
+        indexes: NO_INDEXES,
+        insert: false,
+        update: false,
+        delete: false,
+    },
+    Table {
         name: "pubsub_schema_version",
         columns: VERSION_COLUMNS,
         primary: "version",
@@ -358,37 +395,24 @@ pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError
     let schema = &capability.identity().schema.name.0;
     let quoted = crate::db::physical_attestation::quote_identifier(schema);
     let mut tx = db.begin().await?;
+    // The advisory gate and definer helper run before relation locks. Keep
+    // READ COMMITTED so later catalog checks get a fresh snapshot after any
+    // owner transaction that held the gate; the helper's SUE locks then keep
+    // DDL stable through every verification query.
     tx.execute(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
         (),
     )
     .await?;
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| PubSubRuntimeAttachError::ReadBounds)?;
-    // LOCK and timeout setup do not fix an RR snapshot. Hold every target
-    // relation before the attestor's first SELECT so catalog DDL cannot be
-    // observed from a stale snapshot acquired before the relation locks.
-    for table in TABLES {
-        tx.execute(
-            &format!(
-                "LOCK TABLE {quoted}.\"{}\" IN ACCESS SHARE MODE",
-                table.name
-            ),
-            (),
-        )
-        .await
-        .map_err(|source| PubSubRuntimeAttachError::Relation {
-            table: table.name,
-            source,
-        })?;
-    }
     capability.attest_transaction(&mut tx).await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
+    )
+    .await?;
     let mut active = tx
         .query(
             "SELECT n.oid::bigint = ? AND n.nspname = pg_catalog.current_schema() \
@@ -396,20 +420,49 @@ pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError
          AND pg_catalog.cardinality(pg_catalog.current_schemas(false)) <= 2 \
          AND (pg_catalog.cardinality(pg_catalog.current_schemas(false)) = 1 \
            OR pg_catalog.left((pg_catalog.current_schemas(false))[2]::text,8) = 'pg_temp_') \
-         FROM pg_catalog.pg_namespace n WHERE n.nspname = ?",
-            crate::db_params![i64::from(capability.identity().schema.oid), schema],
+         AND db.oid::bigint = ? AND db.datname = ? \
+         FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_database db \
+           ON db.datname = pg_catalog.current_database() WHERE n.nspname = ?",
+            crate::db_params![
+                i64::from(capability.identity().schema.oid),
+                i64::from(capability.identity().database.oid),
+                capability.identity().database.name.0.clone(),
+                schema
+            ],
         )
         .await?;
     if !matches!(active.next().await?, Some(row) if row.get::<bool>(0)?) {
         return Err(PubSubRuntimeAttachError::ActiveSchemaMismatch);
     }
     verify_runtime_role(&mut tx, schema).await?;
+    verify_attach_lock_function(&mut tx, capability.identity()).await?;
+    let attach_lock = format!(
+        "{}.{}",
+        quoted,
+        crate::db::physical_attestation::quote_identifier(PUBSUB_ATTACH_LOCK_FUNCTION)
+    );
+    let mut locked = match tx.query(&format!("SELECT {attach_lock}()"), ()).await {
+        Ok(locked) => locked,
+        Err(source) if postgres_lock_not_available(&source) => {
+            return Err(PubSubRuntimeAttachError::ConcurrentSchemaChange {
+                table: attach_lock_error_table(&source),
+            });
+        }
+        Err(source) => return Err(source.into()),
+    };
+    if locked.next().await?.is_none() {
+        return Err(PubSubRuntimeAttachError::InvalidAttachLock);
+    }
+    drop(locked);
     for table in TABLES {
         verify_table(&mut tx, schema, table).await?;
         verify_columns(&mut tx, schema, table).await?;
         verify_constraints(&mut tx, schema, table).await?;
         verify_indexes(&mut tx, schema, table).await?;
         verify_table_acl(&mut tx, schema, table).await?;
+    }
+    if !verify_marker_shape_and_data_tx(&mut tx, capability.identity()).await? {
+        return Err(PubSubRuntimeAttachError::InvalidMarker);
     }
     let mut versions = tx
         .query(
@@ -464,7 +517,7 @@ pub(super) async fn verify_owner_preflight(
             if !row.get::<bool>(0)? {
                 return Err(PubSubRuntimeAttachError::InvalidTable { table: table.name });
             }
-            if table.name == "pubsub_schema_version" {
+            if table.name == "pubsub_schema_version" || table.name == PUBSUB_SCHEMA_MARKER_TABLE {
                 verify_table(tx, schema, table).await?;
                 verify_columns(tx, schema, table).await?;
                 verify_constraints(tx, schema, table).await?;
@@ -473,6 +526,217 @@ pub(super) async fn verify_owner_preflight(
         }
     }
     Ok(())
+}
+
+pub(super) async fn verify_marker_shape_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let marker = TABLES
+        .iter()
+        .find(|table| table.name == PUBSUB_SCHEMA_MARKER_TABLE)
+        .ok_or(PubSubRuntimeAttachError::InvalidTable {
+            table: PUBSUB_SCHEMA_MARKER_TABLE,
+        })?;
+    verify_table(tx, schema, marker).await?;
+    verify_columns(tx, schema, marker).await?;
+    verify_constraints(tx, schema, marker).await?;
+    verify_indexes(tx, schema, marker).await
+}
+
+pub(super) async fn verify_marker_shape_and_data_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<bool, PubSubRuntimeAttachError> {
+    verify_marker_shape_tx(tx, &identity.schema.name.0).await?;
+    verify_marker_data(tx, identity).await
+}
+
+pub(super) async fn verify_owner_schema_shape_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PubSubRuntimeAttachError> {
+    for table in TABLES {
+        verify_owner_table_owner(tx, schema, table).await?;
+        verify_table(tx, schema, table).await?;
+        verify_columns(tx, schema, table).await?;
+        verify_constraints(tx, schema, table).await?;
+        verify_indexes(tx, schema, table).await?;
+    }
+    verify_owner_attach_lock_function(tx, schema).await?;
+    Ok(())
+}
+
+async fn verify_attach_lock_function(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), PubSubRuntimeAttachError> {
+    verify_attach_lock_function_shape(tx, &identity.schema.name.0, Some(identity.schema.oid), true)
+        .await
+}
+
+pub(super) async fn verify_owner_attach_lock_function(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PubSubRuntimeAttachError> {
+    verify_attach_lock_function_shape(tx, schema, None, false).await
+}
+
+async fn verify_attach_lock_function_shape(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    schema_oid: Option<u32>,
+    verify_runtime_grant: bool,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let body = owner::attach_lock_function_body(schema);
+    let runtime_grant = if verify_runtime_grant {
+        "pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE') \
+         AND NOT pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE WITH GRANT OPTION') \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl, \
+           pg_catalog.acldefault('f', p.proowner))) a \
+           WHERE a.grantee = 0 OR a.grantee NOT IN (p.proowner, runtime.oid) \
+             OR (a.grantee = runtime.oid AND (a.privilege_type <> 'EXECUTE' OR a.is_grantable)) \
+             OR (a.grantee = p.proowner AND a.privilege_type <> 'EXECUTE'))"
+    } else {
+        "NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl, \
+           pg_catalog.acldefault('f', p.proowner))) a \
+           WHERE a.grantee = 0 OR (a.grantee <> p.proowner \
+             AND (a.privilege_type <> 'EXECUTE' OR a.is_grantable)))"
+    };
+    let query = format!(
+        "SELECT pg_catalog.count(*)::bigint, pg_catalog.min(p.oid::bigint), \
+         COALESCE(pg_catalog.bool_and( \
+           p.prokind = 'f' AND p.prosecdef AND p.proowner = n.nspowner \
+           AND p.prorettype = 'pg_catalog.void'::pg_catalog.regtype \
+           AND p.prolang = (SELECT oid FROM pg_catalog.pg_language WHERE lanname = 'sql') \
+           AND p.pronargs = 0 AND p.pronargdefaults = 0 AND p.provariadic = 0 AND NOT p.proretset \
+           AND p.provolatile = 'v' AND NOT p.proleakproof AND p.proparallel = 'u' \
+           AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[] AND p.prosrc = ? \
+           AND (?::bigint IS NULL OR n.oid::bigint = ?::bigint) \
+           AND {runtime_grant}), false) \
+         FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+         LEFT JOIN pg_catalog.pg_roles runtime ON runtime.rolname = current_user \
+         WHERE n.nspname = ? AND p.proname = ?"
+    );
+    let mut rows = tx
+        .query(
+            &query,
+            crate::db_params![
+                body,
+                schema_oid.map(i64::from),
+                schema_oid.map(i64::from),
+                schema,
+                PUBSUB_ATTACH_LOCK_FUNCTION
+            ],
+        )
+        .await?;
+    let valid = match rows.next().await? {
+        Some(row) => {
+            row.get::<i64>(0)? == 1
+                && row.get::<Option<i64>>(1)?.is_some_and(|oid| oid > 0)
+                && row.get::<bool>(2)?
+        }
+        None => false,
+    };
+    if !valid {
+        return Err(PubSubRuntimeAttachError::InvalidAttachLock);
+    }
+    Ok(())
+}
+
+fn postgres_lock_not_available(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Internal(sqlx::Error::Database(database_error))
+            if database_error.code().as_deref() == Some("55P03")
+    )
+}
+
+fn attach_lock_error_table(error: &DatabaseError) -> &'static str {
+    let message = match error {
+        DatabaseError::Internal(sqlx::Error::Database(database_error)) => database_error.message(),
+        _ => return "unknown PubSub relation",
+    };
+    TABLES
+        .iter()
+        .find(|table| message.contains(table.name))
+        .map_or("unknown PubSub relation", |table| table.name)
+}
+
+async fn verify_owner_table_owner(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &Table,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT c.relowner = n.nspowner FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ?",
+            crate::db_params![schema, table.name],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(PubSubRuntimeAttachError::InvalidTable { table: table.name });
+    }
+    Ok(())
+}
+
+async fn verify_marker_data(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<bool, PubSubRuntimeAttachError> {
+    let schema = crate::db::physical_attestation::quote_identifier(&identity.schema.name.0);
+    let marker = crate::db::physical_attestation::quote_identifier(PUBSUB_SCHEMA_MARKER_TABLE);
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT version, owner_phase, system_identifier, database_oid, database_name, schema_oid, schema_name \
+                 FROM {schema}.{marker} WHERE marker_id = 1"
+            ),
+            (),
+        )
+        .await
+        .map_err(|source| PubSubRuntimeAttachError::Relation {
+            table: PUBSUB_SCHEMA_MARKER_TABLE,
+            source,
+        })?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(PubSubRuntimeAttachError::InvalidMarker)?;
+    let version: i64 = row.get(0)?;
+    let owner_phase: i64 = row.get(1)?;
+    let system_identifier: String = row.get(2)?;
+    let database_oid: i64 = row.get(3)?;
+    let database_name: String = row.get(4)?;
+    let schema_oid: i64 = row.get(5)?;
+    let schema_name: String = row.get(6)?;
+    let valid = version == PUBSUB_SCHEMA_MARKER_VERSION
+        && matches!(owner_phase, 0 | 1)
+        && system_identifier == identity.system_identifier.to_string()
+        && database_oid == i64::from(identity.database.oid)
+        && database_name == identity.database.name.0
+        && schema_oid == i64::from(identity.schema.oid)
+        && schema_name == identity.schema.name.0;
+    drop(rows);
+    if !valid {
+        return Err(PubSubRuntimeAttachError::InvalidMarker);
+    }
+    let mut rows = tx
+        .query(
+            &format!("SELECT count(*)::bigint FROM {schema}.{marker}"),
+            (),
+        )
+        .await
+        .map_err(|source| PubSubRuntimeAttachError::Relation {
+            table: PUBSUB_SCHEMA_MARKER_TABLE,
+            source,
+        })?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<i64>(0)? == 1) {
+        return Err(PubSubRuntimeAttachError::InvalidMarker);
+    }
+    Ok(owner_phase == 1)
 }
 
 async fn verify_table(
@@ -681,6 +945,40 @@ async fn verify_indexes(
         .ok_or(PubSubRuntimeAttachError::InvalidIndex { table: table.name })?
         .get(0)?;
     if count != (1 + usize::from(table.unique.is_some()) + table.indexes.len()) as i64 {
+        return Err(PubSubRuntimeAttachError::InvalidIndex { table: table.name });
+    }
+    let mut indexes = tx
+        .query(
+            "SELECT ix.relname::text, \
+             i.indisvalid AND i.indisready AND i.indislive AND am.amname = 'btree' \
+             AND i.indnkeyatts = i.indnatts AND i.indpred IS NULL AND i.indexprs IS NULL \
+             AND (SELECT pg_catalog.count(*) = i.indnkeyatts \
+               AND COALESCE(pg_catalog.bool_and(opc.opcdefault \
+                 AND opc.opcmethod = ix.relam AND opc.opcintype = a.atttypid \
+                 AND key_collation.collation_oid = a.attcollation), false) \
+               FROM pg_catalog.unnest(i.indclass) WITH ORDINALITY opkey(opclass_oid, pos) \
+               JOIN pg_catalog.unnest(i.indkey) WITH ORDINALITY indkey(attnum, pos) \
+                 ON indkey.pos = opkey.pos \
+               JOIN pg_catalog.unnest(i.indcollation) WITH ORDINALITY key_collation(collation_oid, pos) \
+                 ON key_collation.pos = opkey.pos \
+               JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = indkey.attnum \
+               JOIN pg_catalog.pg_opclass opc ON opc.oid = opkey.opclass_oid) \
+             FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ix ON ix.oid = i.indexrelid \
+             JOIN pg_catalog.pg_class t ON t.oid = i.indrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_catalog.pg_am am ON am.oid = ix.relam \
+             WHERE n.nspname = ? AND t.relname = ?",
+            crate::db_params![schema, table.name],
+        )
+        .await?;
+    let mut operator_count = 0_i64;
+    while let Some(row) = indexes.next().await? {
+        operator_count += 1;
+        if !row.get::<bool>(1)? {
+            return Err(PubSubRuntimeAttachError::InvalidIndex { table: table.name });
+        }
+    }
+    if operator_count != count {
         return Err(PubSubRuntimeAttachError::InvalidIndex { table: table.name });
     }
     for index in table.indexes {

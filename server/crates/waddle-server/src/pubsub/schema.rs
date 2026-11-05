@@ -6,6 +6,7 @@ use waddle_xmpp::XmppError;
 use waddle_xmpp::pubsub::AccessModel;
 use waddle_xmpp_core::pubsub::{PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA};
 
+use super::owner::{self, PUBSUB_SCHEMA_ADVISORY_LOCK_KEY};
 use super::DatabasePubSubStorage;
 
 /// Schema version for the pubsub + projection tables managed in this
@@ -28,8 +29,6 @@ use super::DatabasePubSubStorage;
 //   `pubsub#type` profile metadata (XEP-0472/XEP-0501).
 pub(super) const PUBSUB_SCHEMA_VERSION: i64 = 8;
 
-// Dedicated transaction advisory lock for owner-side PubSub schema changes.
-const PUBSUB_SCHEMA_ADVISORY_LOCK_KEY: i64 = 7_534_519_881_230_429_064;
 const DATA_TABLES: &[&str] = &[
     "pubsub_nodes",
     "pubsub_items",
@@ -89,6 +88,12 @@ impl DatabasePubSubStorage {
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.execute("SET LOCAL lock_timeout = '30s'", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.execute("SET LOCAL statement_timeout = '300000ms'", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
             tx.query(
                 "SELECT pg_catalog.pg_advisory_xact_lock(?)",
                 crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
@@ -97,9 +102,15 @@ impl DatabasePubSubStorage {
             .map_err(|error| XmppError::internal(error.to_string()))?;
             if let BootstrapPolicy::GuardedOwner(identity) = policy {
                 pin_owner_schema(&mut tx, identity).await?;
+                owner::lock_existing_relations_tx(&mut tx, &identity.schema.name.0).await?;
+                owner::begin_owner_phase_tx(&mut tx, identity).await?;
                 super::runtime_attach::verify_owner_preflight(&mut tx, &identity.schema.name.0)
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
+            } else {
+                let schema = owner::pin_legacy_schema_path_tx(&mut tx).await?;
+                owner::lock_existing_relations_tx(&mut tx, &schema).await?;
+                owner::invalidate_completion_marker_tx(&mut tx, &schema).await?;
             }
         }
         SchemaTransaction {
@@ -108,6 +119,9 @@ impl DatabasePubSubStorage {
         }
         .initialize(policy)
         .await?;
+        if let BootstrapPolicy::GuardedOwner(identity) = policy {
+            owner::complete_owner_phase_tx(&mut tx, identity).await?;
+        }
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))
@@ -128,6 +142,13 @@ async fn pin_owner_schema(
          n.nspname = pg_catalog.current_schema() AND owner.rolname = current_user \
          AND NOT owner.rolcanlogin AND NOT owner.rolsuper AND NOT owner.rolcreatedb \
          AND NOT owner.rolcreaterole AND NOT owner.rolreplication AND NOT owner.rolbypassrls \
+         AND owner.oid <> db.datdba AND NOT pg_catalog.pg_is_in_recovery() \
+         AND NOT pg_catalog.has_database_privilege(owner.oid, db.oid, 'TEMP') \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = owner.oid) \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(\
+           COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a \
+           WHERE a.grantee = 0 OR (a.grantee <> n.nspowner \
+             AND (a.privilege_type <> 'USAGE' OR a.is_grantable))) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
            WHERE c.relnamespace = pg_catalog.pg_my_temp_schema()) \
          FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
@@ -335,6 +356,7 @@ impl SchemaTransaction<'_, '_> {
                 "dnd_projection_source_version",
                 "notification_settings_projection",
                 "notification_settings_projection_source_version",
+                "pubsub_push_publications",
                 "pubsub_items",
                 "pubsub_subscriptions",
                 "pubsub_affiliations",
