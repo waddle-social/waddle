@@ -7,6 +7,7 @@ use super::{
     schema, CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownOutboxError,
     CallTeardownProducingNode, CallTeardownQueueStats, TeardownTarget,
 };
+use crate::db::lineage::PgIdentity;
 use crate::db::Database;
 
 pub const MAX_ATTEMPTS: i64 = 20;
@@ -37,7 +38,35 @@ impl CallTeardownOutboxStore {
         db: Database,
         node_identity: SharedNodeIdentity,
     ) -> Result<Self, CallTeardownOutboxError> {
+        if db.uses_attested_postgres_pool() {
+            return Err(CallTeardownOutboxError::OwnerPreparationRequired);
+        }
         schema::initialize(&db).await?;
+        Ok(Self { db, node_identity })
+    }
+
+    /// Prepare or upgrade the outbox while connected as the trusted owner of
+    /// the exact PostgreSQL schema. This must run before the restricted runtime
+    /// pool is created. It does not grant runtime privileges; provisioning
+    /// must grant that login only SELECT, INSERT, UPDATE, and DELETE on the
+    /// prepared relation before attachment. Any preexisting relation owned by
+    /// another role must be transferred to the schema owner by the trusted
+    /// provisioner before this method runs.
+    pub async fn initialize_owner(
+        db: &Database,
+        identity: &PgIdentity,
+    ) -> Result<(), CallTeardownOutboxError> {
+        schema::initialize_owner(db, identity).await
+    }
+
+    /// Attach the functional outbox store to an already prepared schema using
+    /// this exact physically attested PostgreSQL main-lane handle. Attachment
+    /// only verifies the schema; it never creates or upgrades it.
+    pub async fn attach_existing(
+        db: Database,
+        node_identity: SharedNodeIdentity,
+    ) -> Result<Self, CallTeardownOutboxError> {
+        super::runtime_attach::verify(&db).await?;
         Ok(Self { db, node_identity })
     }
 
