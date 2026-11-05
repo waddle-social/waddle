@@ -67,6 +67,30 @@ The typed command currently covers RFC 7395/SASL/classic stanzas and peer
 recipient-pass work. XEP-0198 nonzas and malformed-frame response mapping still
 need typed commands before the driver can cover the live `/ws` input surface.
 
+## Endpoint cleanup integration tranche
+
+The existing app-owned `ActorEndpointCleanupIndex` in
+`actor_local_endpoint.rs` remains the lifecycle authority for a physical
+connection. Extend its exact-`ConnectionRef` record with the driver task's
+operation ledger and retain the driver's independent supervisor/join on that
+same record. Do not add a second per-connection index. Recovery and
+acknowledgement must remain available after caller and task handles are dropped;
+stale connection references and successor operations must not alias.
+
+Stop and lease-loss seal admission immediately. A configured shutdown grace
+allows accepted work to finish; at its deadline, abort and join the worker,
+retaining the active input as `CompletionUnknown` and queued inputs as
+`NotStarted`. Keep the cleanup record until both driver and physical-pump
+cleanup have joined and retained work is settled. Preserve exact operation
+identity and never replay from caller cancellation.
+
+Characterize handle-independent lookup/ack, single handler execution, stale
+references, duplicate/full admission, lease loss, panic, deadline abort,
+stalled pump, successor fencing, and control responsiveness behind a stalled
+handler. Keep `/ws` selection, endpoint publication, stream-management
+advancement, wire behavior, workflow files, P2 custody, and the remaining
+XEP-0198/malformed-frame paths out of this tranche.
+
 ## Verification plan
 
 - Deterministically cancel a caller wait while a handler is paused; retrieve
