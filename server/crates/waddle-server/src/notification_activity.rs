@@ -31,6 +31,7 @@ use jid::BareJid;
 use thiserror::Error;
 
 use crate::db::{Database, DatabaseError, IntoParams};
+mod owner;
 pub(crate) mod runtime_attach;
 mod schema;
 mod store;
@@ -64,7 +65,25 @@ impl NotificationActivityStore {
         if db.attested_pg_writer_capability().is_some() {
             return Err(NotificationActivityError::OwnerBootstrapRequiresOwnerHandle);
         }
-        Self::build_initialized(db).await
+        if db.driver() == crate::db::DatabaseDriver::Sqlite {
+            return Self::build_initialized(db).await;
+        }
+        if !db.is_main_lane() {
+            return Err(crate::db::DatabaseError::QueryFailed(
+                "notification activity owner preparation requires the main database lane"
+                    .to_owned(),
+            )
+            .into());
+        }
+
+        let store = Self { db: db.clone() };
+        let owner_session = owner::OwnerPreparationSession::begin(&db).await?;
+        if let Err(error) = store.initialize().await {
+            owner_session.abort().await;
+            return Err(error);
+        }
+        owner_session.complete().await?;
+        Ok(store)
     }
 
     async fn build_initialized(db: Database) -> Result<Self, NotificationActivityError> {

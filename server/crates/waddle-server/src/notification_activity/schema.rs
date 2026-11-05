@@ -8,6 +8,17 @@ use super::{
 use crate::db::DatabaseDriver;
 use std::collections::BTreeSet;
 
+// This database-local gate serializes owner preparation with runtime attach.
+// It is intentionally separate from the notification outbox and Push Service
+// gates so their lock order remains independent.
+pub(crate) const ACTIVITY_SCHEMA_GATE: (i32, i32) = (0x5744444c, 0x4e414354);
+pub(crate) const ACTIVITY_OWNER_STATE_TABLE: &str = "notification_activity_owner_state";
+pub(crate) const ACTIVITY_OWNER_STATE_REVISION: &str = "1";
+pub(crate) const ACTIVITY_OWNER_STATE_SINGLETON_CHECK: &str =
+    "notification_activity_owner_state_singleton_check";
+pub(crate) const ACTIVITY_OWNER_STATE_REVISION_CHECK: &str =
+    "notification_activity_owner_state_revision_check";
+
 /// CHECK constraint name on `notification_activity.last_chat_state`.
 pub(crate) const NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME: &str =
     "notification_activity_last_chat_state_check";

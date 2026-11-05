@@ -1242,10 +1242,55 @@ pub(in crate::ingress_substrate) async fn gc_orphan_proof_batch(
     // Serialize windows sharing a traversal so a slower pass cannot rewind it.
     let mut cursor = budget.progress.orphan_cursor.lock().await;
     let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
-    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
+    // READ COMMITTED is required so the orphan scan starts from a snapshot
+    // taken after the epoch lock below. This transaction only deletes
+    // `sm_ingress_appends` (which is not in V1009's guarded relation set),
+    // but it reads guarded canonical state and must not race activation.
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(gc_error_from_database)?;
+    }
+    install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
     if Instant::now() >= budget.deadline {
         return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
     }
+    // The share lock and transaction-local proof are held through commit.
+    // Activation therefore cannot change the live epoch between the
+    // canonical-parent scan and deletion of its orphan proof.
+    let live_epoch = acquire_gc_epoch_lock_first(&mut tx, 0)
+        .await
+        .map_err(|failure| failure.error)?;
+    if live_epoch > supported_protocol_epoch() {
+        return Err(AliasGcError::Substrate(
+            IngressSubstrateError::UnsupportedLiveEpoch,
+        ));
+    }
+    if tx.driver() == DatabaseDriver::Postgres {
+        let mut proof = tx
+            .query(
+                r#"
+                SELECT
+                    set_config('waddle.protocol_epoch', ?, true),
+                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
+                "#,
+                crate::db_params![live_epoch.to_storage().to_string()],
+            )
+            .await
+            .map_err(gc_error_from_database)?;
+        proof
+            .next()
+            .await
+            .map_err(gc_error_from_database)?
+            .ok_or(AliasGcError::Substrate(IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            }))?;
+        drop(proof);
+    }
+    if Instant::now() >= budget.deadline {
+        return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
+    }
+    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
     let mut rows = if let Some(after) = cursor.as_ref() {
         tx.query(
             dialect_sql(

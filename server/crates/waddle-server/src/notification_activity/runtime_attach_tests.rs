@@ -1,3 +1,4 @@
+use super::schema::ACTIVITY_OWNER_STATE_TABLE;
 use super::{
     DurableStoreAttachError, NotificationActivityReader, NotificationActivityStore,
     NotificationChatState,
@@ -162,6 +163,8 @@ impl Fixture {
         .await?;
         let _owner_activity =
             NotificationActivityStore::initialize_owner(owner_database.clone()).await?;
+        let _owner_activity_again =
+            NotificationActivityStore::initialize_owner(owner_database.clone()).await?;
         let _owner_push =
             DatabasePushRegistrationStore::initialize_owner(owner_database.clone()).await?;
 
@@ -174,6 +177,10 @@ impl Fixture {
         )?;
         for statement in [
             "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC".to_owned(),
+            format!(
+                "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {}",
+                self.owner
+            ),
             format!(
                 "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {}",
                 self.definer
@@ -198,6 +205,12 @@ impl Fixture {
         sqlx::query(&format!(
             "GRANT SELECT, INSERT, UPDATE ON {}.notification_activity TO {}",
             self.target, self.runtime
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.{} TO {}",
+            self.target, ACTIVITY_OWNER_STATE_TABLE, self.runtime
         ))
         .execute(&self.admin)
         .await?;
@@ -249,6 +262,128 @@ impl Fixture {
             Err(error) => bail!("attested push owner bootstrap had wrong error: {error}"),
             Ok(_) => bail!("attested push owner bootstrap unexpectedly succeeded"),
         }
+
+        sqlx::query(&format!(
+            "UPDATE {}.{} SET prepared_revision = '0' WHERE singleton = '1'",
+            self.target, ACTIVITY_OWNER_STATE_TABLE
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationActivityStore::attach_existing(runtime_database.clone()).await {
+            Err(DurableStoreAttachError::OwnerPreparationIncomplete) => {}
+            Err(error) => bail!("incomplete activity marker had wrong error: {error}"),
+            Ok(_) => bail!("incomplete activity marker was accepted"),
+        }
+        let _owner_activity_after_incomplete =
+            NotificationActivityStore::initialize_owner(owner_database.clone()).await?;
+
+        sqlx::query(&format!(
+            "UPDATE {}.{} SET schema_oid = schema_oid + 1 WHERE singleton = '1'",
+            self.target, ACTIVITY_OWNER_STATE_TABLE
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationActivityStore::attach_existing(runtime_database.clone()).await {
+            Err(DurableStoreAttachError::OwnerIdentityMismatch) => {}
+            Err(error) => bail!("wrong activity marker identity had wrong error: {error}"),
+            Ok(_) => bail!("wrong activity marker identity was accepted"),
+        }
+        sqlx::query(&format!(
+            "UPDATE {}.{} SET schema_oid = (\
+               SELECT oid::bigint FROM pg_catalog.pg_namespace WHERE nspname = $1\
+             ) WHERE singleton = '1'",
+            self.target, ACTIVITY_OWNER_STATE_TABLE
+        ))
+        .bind(&self.target)
+        .execute(&self.admin)
+        .await?;
+
+        sqlx::query(&format!(
+            "GRANT UPDATE ON {}.{} TO {}",
+            self.target, ACTIVITY_OWNER_STATE_TABLE, self.runtime
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationActivityStore::attach_existing(runtime_database.clone()).await {
+            Err(DurableStoreAttachError::UnsafeRuntimeRole) => {}
+            Err(error) => bail!("activity marker UPDATE grant had wrong error: {error}"),
+            Ok(_) => bail!("activity marker UPDATE grant was accepted"),
+        }
+        sqlx::query(&format!(
+            "REVOKE UPDATE ON {}.{} FROM {}",
+            self.target, ACTIVITY_OWNER_STATE_TABLE, self.runtime
+        ))
+        .execute(&self.admin)
+        .await?;
+
+        sqlx::query(&format!(
+            "DROP TABLE {}.{}",
+            self.target, ACTIVITY_OWNER_STATE_TABLE
+        ))
+        .execute(&self.admin)
+        .await?;
+        match NotificationActivityStore::attach_existing(runtime_database.clone()).await {
+            Err(DurableStoreAttachError::OwnerPreparationIncomplete) => {}
+            Err(error) => bail!("missing activity marker had wrong error: {error}"),
+            Ok(_) => bail!("missing activity marker was accepted"),
+        }
+        let _owner_activity_after_missing =
+            NotificationActivityStore::initialize_owner(owner_database.clone()).await?;
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.{} TO {}",
+            self.target, ACTIVITY_OWNER_STATE_TABLE, self.runtime
+        ))
+        .execute(&self.admin)
+        .await?;
+
+        let mut ddl = self.admin.begin().await?;
+        sqlx::query(&format!(
+            "LOCK TABLE {}.notification_activity IN ACCESS EXCLUSIVE MODE",
+            self.target
+        ))
+        .execute(&mut *ddl)
+        .await?;
+        let attach_database = runtime_database.clone();
+        let attach_during_ddl = tokio::spawn(async move {
+            NotificationActivityStore::attach_existing(attach_database).await
+        });
+        self.wait_for_activity_lock_wait().await?;
+        sqlx::query(&format!(
+            "CREATE FUNCTION {}.notification_activity_attach_race() \
+             RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+            self.target
+        ))
+        .execute(&mut *ddl)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE TRIGGER notification_activity_attach_race \
+             BEFORE INSERT ON {}.notification_activity FOR EACH ROW \
+             EXECUTE FUNCTION {}.notification_activity_attach_race()",
+            self.target, self.target
+        ))
+        .execute(&mut *ddl)
+        .await?;
+        ddl.commit().await?;
+        match attach_during_ddl.await? {
+            Err(DurableStoreAttachError::UnexpectedTrigger {
+                table: "notification_activity",
+            }) => {}
+            Err(error) => bail!("activity trigger race had wrong error: {error}"),
+            Ok(_) => bail!("activity trigger committed during attach was accepted"),
+        }
+        sqlx::query(&format!(
+            "DROP TRIGGER notification_activity_attach_race ON {}.notification_activity",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "DROP FUNCTION {}.notification_activity_attach_race()",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+
         let activity = NotificationActivityStore::attach_existing(runtime_database.clone()).await?;
         let push = DatabasePushRegistrationStore::attach_existing(runtime_database.clone()).await?;
 
@@ -421,8 +556,40 @@ impl Fixture {
         drop(activity);
         drop(runtime_database);
         drop(_owner_push);
+        drop(_owner_activity_after_missing);
+        drop(_owner_activity_after_incomplete);
+        drop(_owner_activity_again);
         drop(_owner_activity);
         drop(owner_database);
+        Ok(())
+    }
+
+    async fn wait_for_activity_lock_wait(&self) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                       SELECT 1 FROM pg_catalog.pg_locks lock_entry \
+                       JOIN pg_catalog.pg_class relation \
+                         ON relation.oid = lock_entry.relation \
+                       JOIN pg_catalog.pg_namespace namespace \
+                         ON namespace.oid = relation.relnamespace \
+                       WHERE namespace.nspname = $1 \
+                         AND relation.relname = 'notification_activity' \
+                         AND lock_entry.mode = 'ShareUpdateExclusiveLock' \
+                         AND NOT lock_entry.granted\
+                     )",
+                )
+                .bind(&self.target)
+                .fetch_one(&self.admin)
+                .await?;
+                if waiting {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
         Ok(())
     }
 
@@ -435,6 +602,13 @@ impl Fixture {
         .execute(&self.cluster_admin)
         .await
         .expect("remove disposable definer function grant");
+        sqlx::query(&format!(
+            "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM {}",
+            self.owner
+        ))
+        .execute(&self.cluster_admin)
+        .await
+        .expect("remove disposable owner function grant");
         let restore_public = if self.had_public_control_execute {
             "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO PUBLIC"
         } else {
