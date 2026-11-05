@@ -16,7 +16,7 @@ mod item;
 mod node;
 mod open;
 mod owner;
-mod runtime_attach;
+pub(crate) mod runtime_attach;
 mod schema;
 mod versioned;
 #[cfg(test)]

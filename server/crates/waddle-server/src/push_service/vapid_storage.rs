@@ -597,6 +597,16 @@ async fn provision_first_key_tx(
     Ok(kid.to_string())
 }
 
+/// Check a selected owner-prepared key without constructing or returning a
+/// signer. The VAPID custody diagnostic invokes this while its shared
+/// read-only transaction still holds the VAPID relation locks.
+pub(super) fn verify_persisted_key_for_attachment(
+    root_key: &[u8],
+    record: &super::runtime_attach::VapidKeyRecord,
+) -> Result<(), VapidRuntimeAttachError> {
+    validate_persisted_key(&VapidKeyCipher::new(root_key), record)
+}
+
 fn validate_persisted_key(
     cipher: &VapidKeyCipher,
     record: &super::runtime_attach::VapidKeyRecord,

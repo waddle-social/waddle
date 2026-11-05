@@ -31,3 +31,21 @@ contract. Old-writer session drain, direct-primary fencing, V1009 role/epoch
 compatibility, functional constructors, clustered ownership and release
 qualification remain separate gates. GitHub Actions and workflow files stay
 disabled until #2046 is complete, per user direction.
+
+## Local verification and remaining gate
+
+The final combined tree passed the one-slot PostgreSQL 17 custody-classifier
+test (1/1), existing PostgreSQL runtime-attachment regressions (4/4), and the
+SQLite owner-rejection test (1/1). Server formatting, scoped all-features
+Clippy with `-D warnings` (excluding the repository's existing unused-import
+and dead-code categories), and a no-default-features server check passed.
+Independent read-only final review found no remaining actionable issue after
+the exact lineage and Foundation-parent fixes. The Rust structure script still
+reports two unchanged test files outside this diff.
+
+These tests exercise the one-statement SQL classifier and each existing store
+attachment, but do not exercise the full joint diagnostic against a single
+database containing all owner-prepared stores and distinct owner/runtime
+roles. The helper remains unwired, returns no serving handle, and cannot be
+used as a restricted-startup or rollout certificate. That integrated role and
+one-slot transaction case remains a separate qualification gate.
