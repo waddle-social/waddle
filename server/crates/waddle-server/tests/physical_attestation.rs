@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPool};
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, Row};
 use waddle_server::config::LineageConfig;
 #[cfg(feature = "test-support")]
 use waddle_server::db::bootstrap::{
@@ -20,8 +20,9 @@ use waddle_server::db::lineage::{
     self, AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseName, PgSchemaName,
 };
 use waddle_server::db::physical_attestation::{
-    attest_connection, attested_pool, inspect_installation, install, DarkIngressAuthority,
-    DarkIngressAuthorityError, InstallationStatus, PgRoleName, PhysicalAttestationConfig,
+    attest_connection, attest_dark_catalog_pinned, attested_pool, inspect_installation, install,
+    DarkIngressAuthority, DarkIngressAuthorityError, DarkPhysicalAttestationError,
+    DarkPhysicalAttestationPins, InstallationStatus, PgRoleName, PhysicalAttestationConfig,
     PhysicalAttestationError, TransactionBounds,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
@@ -1378,6 +1379,776 @@ fn url_with_search_path(base: &str, search_path: &str) -> String {
 
 fn test_url() -> Option<String> {
     waddle_ws_test_support::require_test_postgres_url()
+}
+
+// The fixture administrator supplies these pins before the tests introduce
+// catalog drift. Production must get them through an independent handoff.
+async fn dark_attestor_fixture(
+    fixture: &Fixture,
+) -> (PhysicalAttestationConfig, DarkPhysicalAttestationPins) {
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestor");
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}._lineage TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("provision the runtime lineage lock privilege");
+    let row = sqlx::query(
+        "SELECT db.datdba::bigint, n.nspowner::bigint, r.oid::bigint, i.oid::bigint, \
+                d.oid::bigint, trusted.oid::bigint, c.oid::bigint, \
+                idx.indexrelid::bigint, p.oid::bigint \
+         FROM pg_catalog.pg_database db \
+         JOIN pg_catalog.pg_namespace n ON n.nspname=$1 \
+         JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname='_lineage' \
+         JOIN pg_catalog.pg_index idx ON idx.indrelid=c.oid AND idx.indisprimary \
+         JOIN pg_catalog.pg_namespace trusted ON trusted.nspname=$2 \
+         JOIN pg_catalog.pg_proc p ON p.pronamespace=trusted.oid AND p.proname='read_physical_identity' \
+         JOIN pg_catalog.pg_roles r ON r.rolname=$3 \
+         JOIN pg_catalog.pg_roles i ON i.rolname=$4 \
+         JOIN pg_catalog.pg_roles d ON d.rolname=$5 \
+         WHERE db.datname=pg_catalog.current_database()",
+    )
+    .bind(&fixture.target)
+    .bind(&fixture.trusted)
+    .bind(&fixture.runtime)
+    .bind(&fixture.installer)
+    .bind(&fixture.definer)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("administrator independently records fixture pins");
+    let oid = |index| u32::try_from(row.get::<i64, _>(index)).expect("OID fits u32");
+    let pins = DarkPhysicalAttestationPins {
+        database_owner_role_oid: oid(0),
+        schema_owner_role_oid: oid(1),
+        runtime_role_oid: oid(2),
+        installer_role_oid: oid(3),
+        definer_role_oid: oid(4),
+        trusted_schema_oid: oid(5),
+        lineage_relation_oid: oid(6),
+        lineage_primary_index_oid: oid(7),
+        attestor_function_oid: oid(8),
+        installation_operation_id: fixture.operation_id,
+    };
+    (config, pins)
+}
+
+async fn dark_attestor_attempt(
+    fixture: &Fixture,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+) -> Result<(), DarkPhysicalAttestationError> {
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    let mut tx = runtime.begin().await.expect("begin runtime transaction");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read committed proof");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound lock waits");
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound statements");
+    let result = attest_dark_catalog_pinned(&mut tx, config, pins, &fixture.target).await;
+    tx.rollback().await.expect("roll back proof transaction");
+    result
+}
+
+async fn bound_dark_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
+    for statement in [
+        "SET LOCAL transaction_timeout = '20s'",
+        "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **tx)
+            .await
+            .expect("bound transaction lifetime");
+    }
+}
+
+async fn create_attestor_probe(fixture: &Fixture) {
+    sqlx::query(&format!(
+        "CREATE SEQUENCE {}.attestor_probe",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create nontransactional execution witness");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SEQUENCE {}.attestor_probe TO {}",
+        fixture.target, fixture.definer
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("permit definer to update witness");
+}
+
+async fn attestor_probe_was_called(fixture: &Fixture) -> bool {
+    sqlx::query_scalar(&format!(
+        "SELECT is_called FROM {}.attestor_probe",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read execution witness")
+}
+
+#[tokio::test]
+async fn dark_attestor_accepts_exact_pins_and_rejects_unbounded_or_stale_inputs() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    dark_attestor_attempt(&fixture, &config, pins)
+        .await
+        .expect("prove and invoke the exact installed attestor");
+    let mut wrong = pins;
+    wrong.lineage_relation_oid = 0;
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, wrong).await,
+        Err(DarkPhysicalAttestationError::InvalidPins)
+    ));
+    wrong = pins;
+    wrong.attestor_function_oid ^= 1;
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, wrong).await,
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
+    ));
+    sqlx::query(&format!(
+        "REVOKE SELECT ON {}._lineage FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove the required lineage lock privilege");
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::CatalogDrift)
+    ));
+
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    let mut tx = runtime.begin().await.expect("begin transaction");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("repeatable read");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound lock wait");
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound statement");
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target).await,
+        Err(DarkPhysicalAttestationError::TransactionBoundary)
+    ));
+    tx.rollback().await.expect("roll back RR transaction");
+    let mut tx = runtime.begin().await.expect("begin unbounded transaction");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read committed");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound statement");
+    sqlx::query("SET LOCAL lock_timeout = '0'")
+        .execute(&mut *tx)
+        .await
+        .expect("remove lock bound");
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target).await,
+        Err(DarkPhysicalAttestationError::TransactionBoundary)
+    ));
+    tx.rollback()
+        .await
+        .expect("roll back unbounded transaction");
+    let mut tx = runtime.begin().await.expect("begin unbounded lifetime");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read committed");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound lock wait");
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("bound statement");
+    sqlx::query("SET LOCAL transaction_timeout = '0'")
+        .execute(&mut *tx)
+        .await
+        .expect("remove transaction lifetime bound");
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target).await,
+        Err(DarkPhysicalAttestationError::TransactionBoundary)
+    ));
+    tx.rollback().await.expect("roll back unbounded lifetime");
+    drop(runtime);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_rejects_replaced_definer_before_it_runs() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_attestor_probe(&fixture).await;
+    sqlx::query(&format!(
+        r#"CREATE OR REPLACE FUNCTION {}.read_physical_identity()
+RETURNS TABLE (
+    lineage_uuid text, deployment_uuid text,
+    stored_system_identifier text, stored_database_oid text, stored_database_name text,
+    stored_schema_oid text, stored_schema_name text,
+    live_system_identifier text, live_database_oid text, live_database_name text,
+    live_schema_oid text, live_schema_name text, stored_lineage_format bigint
+)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+AS $body$ SELECT pg_catalog.nextval('{}.attestor_probe'::pg_catalog.regclass)::text,
+    'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text,
+    'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text, 1::bigint $body$"#,
+        fixture.trusted, fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("replace body while keeping its OID, marker and ACL");
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::CatalogDrift)
+    ));
+    assert!(!attestor_probe_was_called(&fixture).await);
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    sqlx::query(&format!(
+        "SELECT * FROM {}.read_physical_identity()",
+        fixture.trusted
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect("the replacement is otherwise executable");
+    assert!(attestor_probe_was_called(&fixture).await);
+    drop(runtime);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_bounds_lineage_output_before_calling_the_function() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = pg_catalog.repeat('x', 129)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("write overlong stored identity");
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::Attestation(
+            PhysicalAttestationError::InvalidValue {
+                field: "bounded lineage fields"
+            }
+        ))
+    ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_rejects_oversized_catalog_trees_before_deparsing() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    let literal = "x".repeat(16_384);
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage DROP CONSTRAINT _lineage_id_check",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove original check");
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage ADD CONSTRAINT _lineage_id_check \
+         CHECK (id = 1 AND pg_catalog.length('{literal}') > 0)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("install oversized built-in-only check");
+    let (raw_size, stored_size): (i32, i32) = sqlx::query_as(
+        "SELECT pg_catalog.octet_length(x.conbin::pg_catalog.text), pg_catalog.pg_column_size(x.conbin) \
+         FROM pg_catalog.pg_constraint x \
+         WHERE x.conrelid = $1::pg_catalog.oid AND x.contype='c'",
+    )
+    .bind(sqlx::postgres::types::Oid(pins.lineage_relation_oid))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("measure raw and compressed check tree");
+    assert!(raw_size > 4096);
+    assert!(stored_size < 4096, "the oversized tree is compressed");
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::OversizedCatalogExpression)
+    ));
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage DROP CONSTRAINT _lineage_id_check",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove oversized check");
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage ADD CONSTRAINT _lineage_id_check CHECK (id = 1)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore exact check");
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage ALTER COLUMN stamped_at SET DEFAULT \
+         CASE WHEN pg_catalog.length('{literal}') > 0 THEN CURRENT_TIMESTAMP \
+         ELSE CURRENT_TIMESTAMP END",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("install oversized built-in-only default");
+    let (raw_size, stored_size): (i32, i32) = sqlx::query_as(
+        "SELECT pg_catalog.octet_length(a.adbin::pg_catalog.text), pg_catalog.pg_column_size(a.adbin) \
+         FROM pg_catalog.pg_attrdef a WHERE a.adrelid = $1::pg_catalog.oid",
+    )
+    .bind(sqlx::postgres::types::Oid(pins.lineage_relation_oid))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("measure raw and compressed default tree");
+    assert!(raw_size > 4096);
+    assert!(stored_size < 4096, "the oversized tree is compressed");
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::OversizedCatalogExpression)
+    ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_rejects_compressed_function_configuration() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    let literal = "x".repeat(16_384);
+    sqlx::query(&format!(
+        "ALTER FUNCTION {}.read_physical_identity() SET waddle.oversized = '{literal}'",
+        fixture.trusted
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("install a compressed oversized function configuration");
+    let (compression, stored_size, rendered_size): (Option<String>, i32, i32) = sqlx::query_as(
+        "SELECT pg_catalog.pg_column_compression(p.proconfig), \
+                pg_catalog.pg_column_size(p.proconfig), \
+                pg_catalog.octet_length(p.proconfig::pg_catalog.text) \
+         FROM pg_catalog.pg_proc p WHERE p.oid = $1",
+    )
+    .bind(sqlx::postgres::types::Oid(pins.attestor_function_oid))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("measure compressed function configuration");
+    assert!(compression.is_some());
+    assert!(stored_size < 4096);
+    assert!(rendered_size > 4096);
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
+    ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_never_reads_an_oversized_inherited_search_path() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    let inherited = "untrusted".repeat(32_768);
+    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+        .bind(&inherited)
+        .execute(&mut runtime)
+        .await
+        .expect("install oversized inherited path");
+    let mut tx = runtime.begin().await.expect("begin proof");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read committed");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await
+        .expect("lock bound");
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("statement bound");
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &"x".repeat(1025)).await,
+        Err(DarkPhysicalAttestationError::InvalidRestorePath)
+    ));
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, "invalid\0path").await,
+        Err(DarkPhysicalAttestationError::InvalidRestorePath)
+    ));
+    for name in [String::new(), "x".repeat(64), "invalid\0name".to_owned()] {
+        let mut wrong = fixture.lineage.clone();
+        wrong
+            .postgres_identity
+            .as_mut()
+            .expect("PostgreSQL identity")
+            .database
+            .name = PgDatabaseName(name);
+        let wrong = fixture.with_lineage(wrong);
+        assert!(matches!(
+            attest_dark_catalog_pinned(&mut tx, &wrong, pins, &fixture.target).await,
+            Err(DarkPhysicalAttestationError::InvalidDatabaseName)
+        ));
+    }
+    // This deliberate test query verifies that rejected restore inputs did not
+    // alter the inherited setting. The proof itself never queries that value.
+    let before_size: i32 = sqlx::query_scalar(
+        "SELECT pg_catalog.octet_length(pg_catalog.current_setting('search_path'))",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("measure inherited path in test");
+    assert_eq!(
+        usize::try_from(before_size).expect("positive length"),
+        inherited.len()
+    );
+    attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target)
+        .await
+        .expect("proof replaces the inherited path without reading it");
+    let restored: String = sqlx::query_scalar("SHOW search_path")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read caller-selected path");
+    assert_eq!(restored, fixture.target);
+    tx.rollback().await.expect("roll back proof");
+    drop(runtime);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_uses_safe_search_path_and_restores_callers_path() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_attestor_probe(&fixture).await;
+    let poison = format!("{}_poison", fixture.target);
+    sqlx::query(&format!("CREATE SCHEMA {poison}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("create hostile path schema");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {poison} TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("expose hostile path schema");
+    sqlx::query(&format!(
+        r#"CREATE FUNCTION {poison}.poison_equal(pg_catalog.name, pg_catalog.text)
+RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp
+AS $body$ BEGIN
+  PERFORM pg_catalog.nextval('{}.attestor_probe'::pg_catalog.regclass);
+  RETURN $1::pg_catalog.text OPERATOR(pg_catalog.=) $2;
+END $body$"#,
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create hostile operator function");
+    sqlx::query(&format!(
+        "CREATE OPERATOR {poison}.= (FUNCTION={poison}.poison_equal, \
+         LEFTARG=pg_catalog.name, RIGHTARG=pg_catalog.text)"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create search-path operator");
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    sqlx::query(&format!(
+        "SET search_path = {}, {poison}, pg_catalog",
+        fixture.target
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect("select hostile path");
+    let mut tx = runtime.begin().await.expect("begin proof");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read committed");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await
+        .expect("lock bound");
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("statement bound");
+    let before: String = sqlx::query_scalar("SHOW search_path")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("capture caller path");
+    attest_dark_catalog_pinned(&mut tx, &config, pins, &before)
+        .await
+        .expect("proof ignores hostile operator");
+    let after: String = sqlx::query_scalar("SHOW search_path")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read restored path");
+    assert_eq!(after, before);
+    tx.rollback().await.expect("roll back proof");
+    assert!(!attestor_probe_was_called(&fixture).await);
+    let equal: bool =
+        sqlx::query_scalar("SELECT 'same'::pg_catalog.name = 'same'::pg_catalog.text")
+            .fetch_one(&mut runtime)
+            .await
+            .expect("resolve hostile operator outside the proof");
+    assert!(equal);
+    assert!(attestor_probe_was_called(&fixture).await);
+    drop(runtime);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_rejects_view_and_custom_cast_before_either_runs() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url.clone()).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_attestor_probe(&fixture).await;
+    sqlx::query(&format!(
+        "CREATE FUNCTION {}.attestor_probe_fn() RETURNS integer LANGUAGE sql VOLATILE \
+         SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS \
+         'SELECT pg_catalog.nextval(''{}.attestor_probe''::pg_catalog.regclass)::integer'",
+        fixture.target, fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create view side-effect witness");
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage RENAME TO original_lineage",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("rename original lineage");
+    sqlx::query(&format!(
+        "CREATE VIEW {}._lineage AS SELECT l.id + {}.attestor_probe_fn() AS id, \
+         l.format,l.lineage_uuid,l.deployment_uuid,l.pg_system_identifier,l.pg_database_oid, \
+         l.pg_database_name,l.pg_schema_oid,l.pg_schema_name,l.stamped_at \
+         FROM {}.original_lineage l",
+        fixture.target, fixture.target, fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("replace lineage with an executable view");
+    for role in [&fixture.runtime, &fixture.definer] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}._lineage TO {}",
+            fixture.target, role
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("allow view access");
+    }
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
+    ));
+    assert!(!attestor_probe_was_called(&fixture).await);
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    sqlx::query(&format!(
+        "SELECT * FROM {}.read_physical_identity()",
+        fixture.trusted
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect("view executes if the old attestor is called directly");
+    assert!(attestor_probe_was_called(&fixture).await);
+    drop(runtime);
+    fixture.cleanup().await;
+
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_attestor_probe(&fixture).await;
+    sqlx::query(&format!(
+        "CREATE FUNCTION {}.attestor_cast(text) RETURNS bigint LANGUAGE sql VOLATILE \
+         SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS \
+         'SELECT pg_catalog.nextval(''{}.attestor_probe''::pg_catalog.regclass)'",
+        fixture.target, fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create malicious text cast");
+    sqlx::query(&format!(
+        "CREATE CAST (text AS bigint) WITH FUNCTION {}.attestor_cast(text) AS IMPLICIT",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("install malicious cast in isolated database");
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage ALTER COLUMN format TYPE text USING format::text",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("replace format with a castable hostile type");
+    assert!(matches!(
+        dark_attestor_attempt(&fixture, &config, pins).await,
+        Err(DarkPhysicalAttestationError::CatalogDrift)
+    ));
+    assert!(!attestor_probe_was_called(&fixture).await);
+    sqlx::query("SELECT '1'::text::bigint")
+        .execute(&fixture.admin)
+        .await
+        .expect("the installed cast is executable");
+    assert!(attestor_probe_was_called(&fixture).await);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_rechecks_pinned_heap_after_replacement_during_lock_wait() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    let mut holder = fixture.admin.begin().await.expect("begin DDL holder");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("holder PID");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}._lineage IN ACCESS EXCLUSIVE MODE",
+        fixture.target
+    ))
+    .execute(&mut *holder)
+    .await
+    .expect("hold the original heap");
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    let runtime_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut runtime)
+        .await
+        .expect("runtime PID");
+    let restore_path = fixture.target.clone();
+    let task = tokio::spawn(async move {
+        let mut tx = runtime.begin().await.expect("begin proof");
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .expect("read committed");
+        bound_dark_transaction(&mut tx).await;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await
+            .expect("lock bound");
+        sqlx::query("SET LOCAL statement_timeout = '10s'")
+            .execute(&mut *tx)
+            .await
+            .expect("statement bound");
+        let result = attest_dark_catalog_pinned(&mut tx, &config, pins, &restore_path).await;
+        tx.rollback().await.expect("rollback proof");
+        result
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool =
+                sqlx::query_scalar("SELECT $2 = ANY(pg_catalog.pg_blocking_pids($1))")
+                    .bind(runtime_pid)
+                    .bind(holder_pid)
+                    .fetch_one(&fixture.admin)
+                    .await
+                    .expect("observe blocked attestation");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("attestor must wait on the original heap");
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage RENAME TO original_lineage",
+        fixture.target
+    ))
+    .execute(&mut *holder)
+    .await
+    .expect("rename original while locked");
+    sqlx::query(&format!(
+        "CREATE TABLE {}._lineage (LIKE {}.original_lineage INCLUDING ALL)",
+        fixture.target, fixture.target
+    ))
+    .execute(&mut *holder)
+    .await
+    .expect("replace with another ordinary heap of the same shape");
+    sqlx::query(&format!(
+        "INSERT INTO {}._lineage SELECT * FROM {}.original_lineage",
+        fixture.target, fixture.target
+    ))
+    .execute(&mut *holder)
+    .await
+    .expect("copy identical lineage values");
+    for role in [&fixture.runtime, &fixture.definer] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}._lineage TO {}",
+            fixture.target, role
+        ))
+        .execute(&mut *holder)
+        .await
+        .expect("provide the original grants");
+    }
+    holder.commit().await.expect("publish replacement");
+    assert!(matches!(
+        task.await.expect("join attestation"),
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
+    ));
+    fixture.cleanup().await;
 }
 
 #[cfg(feature = "test-support")]

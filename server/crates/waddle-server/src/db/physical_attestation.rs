@@ -25,6 +25,10 @@ pub use installer::{
     inspect_installation, install, observe_installation, InstallationObservation,
     InstallationStatus,
 };
+mod preflight;
+pub use preflight::{
+    attest_dark_catalog_pinned, DarkPhysicalAttestationError, DarkPhysicalAttestationPins,
+};
 mod restricted_ingress;
 pub use restricted_ingress::{
     ReceiptAuthorityError, ReceiptCommit, ReceiptOperation, ReceiptOperationAuthority,
