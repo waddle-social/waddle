@@ -6,7 +6,8 @@ use std::time::Duration;
 use sqlx::postgres::types::Oid;
 use sqlx::{Connection, PgConnection, Row};
 use waddle_server::db::physical_attestation::{
-    pinned_attested_pool, AttestedPgPool, DarkPinnedEntryError, PinnedRuntimeAuthority,
+    pinned_attested_pool, AttestedPgPool, DarkPinnedEntryError, PinnedCatalogError,
+    PinnedRuntimeAuthority,
 };
 use waddle_server::db::{
     DarkMigrationLedgerPins, Database, DatabaseConfig, DatabaseDriver, MigrationRunner,
@@ -28,7 +29,11 @@ async fn pinned_pool(fixture: &Fixture, lock_timeout: Option<&str>) -> AttestedP
         .await
         .expect("apply migrations through V1030");
     drop(database);
-    for relation in ["_migrations", "ingress_protocol_epoch"] {
+    for relation in [
+        "_migrations",
+        "ingress_protocol_epoch",
+        "ingress_epoch_guard_manifest",
+    ] {
         sqlx::query(&format!(
             "GRANT SELECT ON {}.{} TO {}",
             fixture.target, relation, fixture.runtime
@@ -257,7 +262,7 @@ async fn dark_pinned_entry_rejects_epoch_relation_replacement() {
     .expect("create replacement epoch heap");
     assert!(matches!(
         pool.inspect_dark_pinned_read_only_entry().await,
-        Err(DarkPinnedEntryError::EpochRelationDrift)
+        Err(DarkPinnedEntryError::Catalog(_))
     ));
     pool.close().await;
     fixture.cleanup().await;
@@ -304,7 +309,9 @@ async fn dark_pinned_entry_times_out_on_held_epoch_lock_and_rolls_back() {
     .expect("entry waits on pinned epoch heap");
     assert!(matches!(
         entry.await.expect("join timed-out entry"),
-        Err(DarkPinnedEntryError::Postgres(_))
+        Err(DarkPinnedEntryError::Catalog(PinnedCatalogError::Postgres(
+            _
+        )))
     ));
 
     // Observe the exact waiting backend before a new checkout's hook can
@@ -413,7 +420,7 @@ async fn dark_pinned_entry_rechecks_epoch_pin_after_lock_wait() {
     owner_tx.commit().await.expect("release relation lock");
     let observed = entry.await.expect("join entry task");
     assert!(
-        matches!(observed, Err(DarkPinnedEntryError::EpochRelationDrift)),
+        matches!(observed, Err(DarkPinnedEntryError::Catalog(_))),
         "post-wait pin recheck should reject replacement: {observed:?}"
     );
     pool.close().await;

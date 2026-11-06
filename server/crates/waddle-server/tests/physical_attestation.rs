@@ -7415,5 +7415,9 @@ mod pinned_hook_tests;
 #[path = "physical_attestation/pinned_entry.rs"]
 mod pinned_entry_tests;
 
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/pinned_catalog.rs"]
+mod pinned_catalog_tests;
+
 #[path = "physical_attestation/pinned_installer.rs"]
 mod pinned_installer;

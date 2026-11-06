@@ -26,8 +26,8 @@ pub struct PinnedRuntimeAuthority {
     pub(super) attestor: DarkPhysicalAttestationPins,
     pub(super) ledger: DarkMigrationLedgerPins,
     pub(super) epoch_relation_oid: u32,
-    epoch_primary_index_oid: u32,
-    guard_manifest_relation_oid: u32,
+    pub(super) epoch_primary_index_oid: u32,
+    pub(super) guard_manifest_relation_oid: u32,
 }
 
 impl PinnedRuntimeAuthority {
@@ -174,6 +174,13 @@ async fn checkout_inner(
     // Raw BEGIN does not update SQLx's transaction depth. End an inherited
     // transaction before observing any identity; errors discard the session.
     sqlx::query("ROLLBACK").execute(&mut *connection).await?;
+    // An inherited path can put a user-defined type before pg_catalog. Even
+    // a role-name cast would then execute a domain CHECK before catalog
+    // attestation. Keep built-ins first for every pre-proof statement; the
+    // trusted target path is restored only after the proof and TEMP cleanup.
+    sqlx::query("SET search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await?;
     let timeouts = bound_postgres_session_waits(connection).await?;
     // A returned session can retain session-level locks independently of a
     // transaction. Releasing them before the barrier avoids self-deadlock.
@@ -181,8 +188,6 @@ async fn checkout_inner(
         .execute(&mut *connection)
         .await?;
     reject_assumed_role(connection, &authority.config).await?;
-    reject_runtime_temp_privilege(connection).await?;
-    discard_temporary_relations(connection).await?;
 
     let restore_path = format!(
         "{}, pg_temp",
@@ -202,6 +207,11 @@ async fn checkout_inner(
     // A successful rollback response is required before the session can be
     // lent. Any error or cancellation causes SQLx to discard the connection.
     tx.rollback().await?;
+    // The pinned preflight bounded ACL material before using the privilege
+    // helper, and verified the runtime's effective TEMP prohibition. Repeat
+    // it after rollback before clearing any retained temporary relations.
+    reject_runtime_temp_privilege(connection).await?;
+    discard_temporary_relations(connection).await?;
     normalize_search_path(connection, &authority.config).await?;
     reject_assumed_role(connection, &authority.config).await?;
     reject_runtime_temp_privilege(connection).await?;

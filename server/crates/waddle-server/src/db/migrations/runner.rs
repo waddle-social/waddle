@@ -342,11 +342,11 @@ impl MigrationRunner {
         ledger_table: &str,
         required_version: i64,
     ) -> Result<(), DatabaseError> {
-        // Bound both rows and text before SQLx decodes them. An untrusted
-        // ledger may contain arbitrarily many rows or very large TEXT fields;
-        // a statement timeout does not bound client allocation. One extra
-        // row/character is enough to refuse a malformed ledger. No ORDER BY
-        // means no ordering operator is needed for prefix validation.
+        // Bound row count and raw TEXT bytes in separate statements before
+        // substring projection. PostgreSQL can fetch an entire compressed
+        // TOAST value even for a short substring; octet_length(text) reads
+        // its raw size without detoasting. The existing locked/quiescent
+        // ledger boundary makes these checks apply to the later read.
         let max_description = self
             .migrations
             .iter()
@@ -357,6 +357,39 @@ impl MigrationRunner {
             .map_err(|_| MigrationLedgerError::OversizedLedger)?;
         let row_limit = i64::try_from(self.migrations.len().saturating_add(1))
             .map_err(|_| MigrationLedgerError::OversizedLedger)?;
+        let max_description_bytes = self
+            .migrations
+            .iter()
+            .map(|migration| migration.description.len())
+            .max()
+            .unwrap_or(0);
+        let byte_limit = i32::try_from(max_description_bytes)
+            .map_err(|_| MigrationLedgerError::OversizedLedger)?;
+        let counted: i64 = sqlx::query_scalar(&format!(
+            "SELECT pg_catalog.count(*) FROM (SELECT 1 FROM ONLY {ledger_table} LIMIT $1) bounded"
+        ))
+        .bind(row_limit)
+        .fetch_one(&mut *connection)
+        .await?;
+        if counted
+            > i64::try_from(self.migrations.len())
+                .map_err(|_| MigrationLedgerError::OversizedLedger)?
+        {
+            return Err(MigrationLedgerError::OversizedLedger.into());
+        }
+        let bounded: bool = sqlx::query_scalar(&format!(
+            "SELECT NOT EXISTS (SELECT 1 FROM ONLY {ledger_table} \
+             WHERE pg_catalog.octet_length(description) > $1 \
+                OR (checksum IS NOT NULL AND pg_catalog.octet_length(checksum) > 64))"
+        ))
+        .bind(byte_limit)
+        .fetch_one(&mut *connection)
+        .await?;
+        if !bounded {
+            return Err(MigrationLedgerError::OversizedLedger.into());
+        }
+        // One extra row/character still catches any malformed prefix before
+        // SQLx decodes it. No ORDER BY needs a text ordering operator.
         let sql = format!(
             "SELECT version, pg_catalog.substr(description, 1, $1), \
              pg_catalog.substr(checksum, 1, 65) FROM ONLY {ledger_table} LIMIT $2"

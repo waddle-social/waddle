@@ -1,8 +1,10 @@
 //! Real PG17 coverage of pinned fresh/reused physical pool hooks.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection};
 use waddle_server::db::physical_attestation::{
     attested_pool, pinned_attested_pool, AttestedPgPool, DarkPhysicalAttestationPins, PgRoleName,
@@ -142,6 +144,147 @@ async fn pinned_checkout_proves_fresh_and_reused_sessions_and_preserves_limits()
     drop(warm);
     pool.close().await;
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn pinned_hook_does_not_resolve_identity_casts_through_hostile_search_path() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, attestor) = dark_attestor_fixture(&fixture).await;
+
+    // PostgreSQL implicitly searches pg_catalog first unless it appears
+    // explicitly later in search_path. Put this attacker-controlled type
+    // ahead of pg_catalog so the unqualified ::text identity casts invoke
+    // the domain check if the hook evaluates them before normalization.
+    let hostile_schema = format!("waddle_hostile_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {hostile_schema}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("create hostile type schema");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {hostile_schema} TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("allow runtime type lookup");
+    create_attestor_probe(&fixture).await;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SEQUENCE {}.attestor_probe TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("allow side-effect witness");
+    sqlx::query(&format!(
+        "CREATE DOMAIN {hostile_schema}.text AS pg_catalog.text \
+         CHECK (pg_catalog.nextval('{}.attestor_probe'::pg_catalog.regclass) > 0)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create hostile text domain");
+    let clean_after_domain = !attestor_probe_was_called(&fixture).await;
+
+    let hostile_path = format!("{hostile_schema},pg_catalog,{}", fixture.target);
+    let hostile_options = PgConnectOptions::from_str(&super::url_with_search_path(
+        &fixture.base_url,
+        &hostile_path,
+    ))
+    .expect("hostile runtime options")
+    .username(&fixture.runtime);
+    let mut vulnerable_control = PgConnection::connect_with(&hostile_options)
+        .await
+        .expect("raw hostile-path runtime connection for negative control");
+    let negative_control_clean_on_connect = !attestor_probe_was_called(&fixture).await;
+    // The result may carry the domain OID rather than text's OID, so execution
+    // is the signal and any client-side row decoding is intentionally ignored.
+    let _ = sqlx::query("SELECT session_user::text, current_user::text")
+        .fetch_one(&mut vulnerable_control)
+        .await;
+    let hostile_cast_triggered = attestor_probe_was_called(&fixture).await;
+    drop(vulnerable_control);
+    sqlx::query(&format!(
+        "SELECT pg_catalog.setval('{}.attestor_probe'::pg_catalog.regclass, 1, false)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("reset witness after vulnerable-order control");
+
+    let mut control = PgConnection::connect_with(&hostile_options)
+        .await
+        .expect("raw hostile-path runtime connection");
+    let clean_on_connect = !attestor_probe_was_called(&fixture).await;
+    sqlx::query("SET search_path = pg_catalog, pg_temp")
+        .execute(&mut control)
+        .await
+        .expect("set catalog-first control path");
+    let control_path: String =
+        sqlx::query_scalar("SELECT pg_catalog.current_setting('search_path')")
+            .fetch_one(&mut control)
+            .await
+            .expect("read control path");
+    let _: (String, String) = sqlx::query_as("SELECT session_user::text, current_user::text")
+        .fetch_one(&mut control)
+        .await
+        .expect("perform isolated role casts");
+    let clean_after_role_casts = !attestor_probe_was_called(&fixture).await;
+    drop(control);
+
+    let pool = pinned_attested_pool(
+        hostile_options,
+        config.clone(),
+        authority(&fixture, &config, attestor, 1),
+        1,
+        Duration::from_secs(5),
+    )
+    .expect("pinned pool");
+    let clean_after_pool_creation = !attestor_probe_was_called(&fixture).await;
+
+    let fresh = pool.acquire_for_test().await;
+    let (fresh_clean, pid) = if let Ok(mut fresh) = fresh {
+        let pid = backend_pid(&mut fresh).await;
+        let clean = !attestor_probe_was_called(&fixture).await;
+        sqlx::query(&format!("SET search_path = {hostile_path}"))
+            .execute(&mut *fresh)
+            .await
+            .expect("poison reused checkout search_path");
+        drop(fresh);
+        (clean, Some(pid))
+    } else {
+        (false, None)
+    };
+
+    let reused = pool.acquire_for_test().await;
+    let reused_clean = if let (Some(pid), Ok(mut reused)) = (pid, reused) {
+        let same_session = backend_pid(&mut reused).await == pid;
+        let clean = !attestor_probe_was_called(&fixture).await;
+        drop(reused);
+        same_session && clean
+    } else {
+        false
+    };
+    pool.close().await;
+    fixture.cleanup().await;
+    assert!(
+        clean_after_domain
+            && negative_control_clean_on_connect
+            && hostile_cast_triggered
+            && clean_on_connect
+            && clean_after_role_casts
+            && control_path == "pg_catalog, pg_temp"
+            && clean_after_pool_creation
+            && fresh_clean
+            && reused_clean,
+        "hostile domain witness results: clean_after_domain={clean_after_domain}, \
+         negative_control_clean_on_connect={negative_control_clean_on_connect}, \
+         hostile_cast_triggered={hostile_cast_triggered}, clean_on_connect={clean_on_connect}, \
+         clean_after_role_casts={clean_after_role_casts}, \
+         control_path={control_path:?}, clean_after_pool_creation={clean_after_pool_creation}, \
+         fresh_clean={fresh_clean}, reused_clean={reused_clean}"
+    );
 }
 
 #[tokio::test]

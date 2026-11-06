@@ -302,6 +302,18 @@ async fn verify_catalog(
     // privilege helper or ACL expansion can consume the arrays.
     verify_acl_raw_bounds(connection, schema, pins).await?;
     verify_acl_item_counts(connection, schema, pins).await?;
+    // Bound the relation inventory and fixed built-in operator family before
+    // the exact catalog query can join or scan their members. This must be a
+    // separate statement because SQL predicate evaluation order is not fixed.
+    let inventory: bool = sqlx::query_scalar(CATALOG_INVENTORY_QUERY)
+        .bind(Oid(pins.ledger_relation_oid))
+        .bind(Oid(pins.schema_oid))
+        .fetch_optional(&mut *connection)
+        .await?
+        .unwrap_or(false);
+    if !inventory {
+        return Err(DarkLedgerPreflightError::CatalogDrift);
+    }
     let exact: bool = sqlx::query_scalar(CATALOG_QUERY)
         .bind(schema)
         .bind(Oid(pins.schema_oid))
@@ -345,6 +357,24 @@ async fn verify_acl_item_counts(
     Ok(())
 }
 
+// Count at most one over each bound, without consuming variable-size catalog
+// fields. Include system attributes because the later ACL check inspects them.
+// PostgreSQL 17's built-in btree integer_ops family has OID 1976.
+const CATALOG_INVENTORY_QUERY: &str = r#"
+SELECT c.relnamespace = $2 AND c.relname = '_migrations'
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_attribute a
+       WHERE a.attrelid = $1 LIMIT 33) bounded) <= 32
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_index i
+       WHERE i.indrelid = $1 LIMIT 2) bounded) <= 1
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_trigger t
+       WHERE t.tgrelid = $1 LIMIT 1) bounded) = 0
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_amop o
+       WHERE o.amopfamily = 1976::pg_catalog.oid LIMIT 129) bounded) <= 128
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_amproc p
+       WHERE p.amprocfamily = 1976::pg_catalog.oid LIMIT 129) bounded) <= 128
+FROM pg_catalog.pg_class c WHERE c.oid = $1
+"#;
+
 // No target relation, expression, type output function, or rule is touched by
 // this query. Built-in OIDs are matched directly, not via user-defined casts.
 const CATALOG_QUERY: &str = r#"
@@ -374,6 +404,8 @@ SELECT n.oid = $2 AND n.nspowner = $3 AND c.oid = $5 AND c.relowner = $3
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid)
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid)
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid)
+  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                  WHERE a.attrelid = c.oid AND a.attacl IS NOT NULL)
   AND (SELECT count(*) FROM pg_catalog.pg_attribute a
        WHERE a.attrelid = c.oid AND a.attnum > 0) = 4
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
@@ -392,7 +424,9 @@ SELECT n.oid = $2 AND n.nspowner = $3 AND c.oid = $5 AND c.relowner = $3
   AND EXISTS (SELECT 1 FROM pg_catalog.pg_index i
     JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
     JOIN pg_catalog.pg_opclass opclass ON opclass.oid = i.indclass[0]
+      AND opclass.oid = 3124::pg_catalog.oid
     JOIN pg_catalog.pg_opfamily family ON family.oid = opclass.opcfamily
+      AND family.oid = 1976::pg_catalog.oid
     WHERE i.indrelid = c.oid AND idx.oid = $6 AND idx.relnamespace = n.oid
       AND idx.relowner = owner.oid AND idx.relkind = 'i' AND idx.relpersistence = 'p'
       AND idx.relam = 403::pg_catalog.oid AND opclass.opcmethod = 403::pg_catalog.oid
@@ -409,11 +443,11 @@ SELECT n.oid = $2 AND n.nspowner = $3 AND c.oid = $5 AND c.relowner = $3
       AND i.indexprs IS NULL AND i.indpred IS NULL
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_amproc p
         JOIN pg_catalog.pg_proc f ON f.oid = p.amproc
-        WHERE p.amprocfamily = family.oid AND f.pronamespace <> 11::pg_catalog.oid)
+        WHERE p.amprocfamily = 1976::pg_catalog.oid AND f.pronamespace <> 11::pg_catalog.oid)
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_amop op
         JOIN pg_catalog.pg_operator o ON o.oid = op.amopopr
         JOIN pg_catalog.pg_proc f ON f.oid = o.oprcode
-        WHERE op.amopfamily = family.oid
+        WHERE op.amopfamily = 1976::pg_catalog.oid
           AND (o.oprnamespace <> 11::pg_catalog.oid OR f.pronamespace <> 11::pg_catalog.oid)))
   AND CASE WHEN pg_catalog.pg_column_size(
       COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) <= 8192
@@ -437,7 +471,7 @@ FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_roles owner ON owner.oid = $3
 JOIN pg_catalog.pg_roles runtime ON runtime.oid = $4
-WHERE n.nspname = $1 AND c.relname = '_migrations'
+WHERE n.nspname = $1 AND c.relname = '_migrations' AND n.oid = $2 AND c.oid = $5
 "#;
 
 #[cfg(test)]
