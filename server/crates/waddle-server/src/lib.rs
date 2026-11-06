@@ -46,6 +46,9 @@ pub mod room_policy;
 pub mod server;
 /// The one enclosing graceful-shutdown deadline every stage derives from.
 pub mod shutdown_deadline;
+/// Unselected PostgreSQL custody candidate; no release transport calls this API.
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub mod sm_custody;
 pub mod sm_persistence;
 /// Postgres-fenced `SmPersistenceStorage` (ADR-0017 Phase 3 Slice 4).
 /// Gated behind the `clustering` Cargo feature, matching every other
