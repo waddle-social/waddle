@@ -16,7 +16,7 @@ mod traits;
 #[cfg(test)]
 mod tests;
 
-pub use error::MamStorageError;
+pub use error::{BoundedMamLookupError, MamStorageError};
 pub use in_memory::InMemoryMamStorage;
 pub use sqlx_store::{
     lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,

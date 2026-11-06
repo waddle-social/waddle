@@ -21,6 +21,8 @@ mod epoch_acl;
 #[cfg(feature = "test-support")]
 #[path = "migration_owner_lab/mam.rs"]
 mod mam;
+#[path = "migration_owner_lab/serving_role_graph.rs"]
+mod serving_role_graph;
 #[cfg(feature = "test-support")]
 #[path = "migration_owner_lab/transition.rs"]
 mod transition;

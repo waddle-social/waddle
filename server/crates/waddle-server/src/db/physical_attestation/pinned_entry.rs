@@ -1,8 +1,9 @@
 //! Fixed, dark observation of a pinned read-only transaction entry.
 //!
 //! This is not a serving capability. In particular, the epoch heap prelock
-//! does not fence ordinary row updates or prove the epoch value, index, guard
-//! manifest, or owner/ACL transition protocol.
+//! does not fence ordinary row updates or prove the epoch and manifest rows,
+//! guard behavior, or owner/ACL transition protocol. The catalog proof pins
+//! the epoch index and the epoch and manifest relation shapes.
 
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use crate::db::migrations::{
 use crate::db::read_only_timeout::{bound_postgres_waits, timeout_millis};
 use crate::db::{Database, DatabaseError, Transaction};
 
-const ENTRY_DEADLINE: Duration = Duration::from_secs(25);
+pub(super) const ENTRY_DEADLINE: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Error)]
 pub enum DarkPinnedEntryError {
@@ -95,7 +96,7 @@ impl AttestedPgPool {
     }
 }
 
-async fn prepare_entry(
+pub(super) async fn prepare_entry(
     tx: &mut Transaction<'_>,
     authority: &super::PinnedRuntimeAuthority,
     pause: Option<(

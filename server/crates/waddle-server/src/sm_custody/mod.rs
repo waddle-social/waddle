@@ -6,6 +6,7 @@
 
 mod admission;
 mod handoff;
+mod recipient_guard;
 mod repository;
 mod schema;
 mod settlement;

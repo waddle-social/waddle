@@ -59,6 +59,8 @@ mod multiframe;
 mod preaccept_handoff;
 #[path = "sm_custody_quota_race.rs"]
 mod quota_race;
+#[path = "sm_custody_recipient_guard.rs"]
+mod recipient_guard;
 
 impl Candidate {
     async fn new() -> Self {
@@ -101,6 +103,7 @@ impl Candidate {
         for table in [
             "sm_custody_quota",
             "sm_custody_route_guards",
+            "sm_custody_recipient_route_guards",
             "sm_custody_gates",
             "sm_custody_operations",
             "sm_custody_slots",

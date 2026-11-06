@@ -13,6 +13,17 @@ CREATE TABLE __SCHEMA__.sm_custody_route_guards (
     recipient TEXT NOT NULL CHECK (recipient <> ''),
     PRIMARY KEY (message_key, recipient)
 );
+-- Candidate-only recipient-wide interlock. Unlike sm_custody_route_guards,
+-- this row is shared by every source for a recipient. State 1 is an
+-- irreversible route transition that prevents new candidate admissions.
+-- This relation is deliberately unregistered and does not fence legacy SM
+-- writers or authorize pending_delivery acceptance. It has no quota or safe
+-- retirement protocol; disposable fixture grants permit direct state closure.
+CREATE TABLE __SCHEMA__.sm_custody_recipient_route_guards (
+    recipient TEXT PRIMARY KEY CHECK (recipient <> '' AND pg_catalog.strpos(recipient, '/') = 0),
+    state SMALLINT NOT NULL DEFAULT 0 CHECK (state IN (0, 1)),
+    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)
+);
 CREATE TABLE __SCHEMA__.sm_custody_gates (
     gate_id UUID PRIMARY KEY,
     token UUID NOT NULL,
@@ -70,6 +81,24 @@ LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN RAISE EXCEPTION 'immutable SM custody evidence'; END $$;
 CREATE TRIGGER sm_custody_route_guards_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_route_guards FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE FUNCTION __SCHEMA__.sm_custody_recipient_route_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF NEW.recipient IS DISTINCT FROM OLD.recipient
+       OR (OLD.state = 1 AND NEW.state <> 1)
+       OR NEW.revision < OLD.revision
+       OR (NEW.state = OLD.state AND NEW.revision <> OLD.revision)
+       OR (NEW.state = 1 AND OLD.state = 0 AND NEW.revision <> OLD.revision + 1) THEN
+        RAISE EXCEPTION 'SM custody recipient route state cannot roll back';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_recipient_route_guard_update
+BEFORE UPDATE ON __SCHEMA__.sm_custody_recipient_route_guards
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_recipient_route_guard();
+CREATE TRIGGER sm_custody_recipient_route_guard_no_delete
+BEFORE DELETE OR TRUNCATE ON __SCHEMA__.sm_custody_recipient_route_guards
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE TRIGGER sm_custody_operations_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_operations FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE TRIGGER sm_custody_slots_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
@@ -100,9 +129,9 @@ FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 -- Single-row raw candidate inserts follow the same source -> recipient ->
 -- gate order. Arbitrary multi-row/raw transactions are not a trusted writer
 -- boundary: their row order or previously held locks can still invert it.
-CREATE FUNCTION __SCHEMA__.sm_custody_lock_source(source UUID, resource TEXT) RETURNS void
+CREATE FUNCTION __SCHEMA__.sm_custody_lock_source(source UUID, resource TEXT, require_open BOOLEAN) RETURNS void
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
-DECLARE bare TEXT;
+DECLARE bare TEXT; route_state SMALLINT;
 BEGIN
     IF pg_catalog.strpos(resource, '/') < 2 THEN
         RAISE EXCEPTION 'SM custody resource is not a full JID';
@@ -114,12 +143,20 @@ BEGIN
       VALUES (source, bare) ON CONFLICT DO NOTHING;
     PERFORM 1 FROM __SCHEMA__.sm_custody_route_guards
       WHERE message_key = source AND recipient = bare FOR UPDATE;
+    INSERT INTO __SCHEMA__.sm_custody_recipient_route_guards (recipient)
+      VALUES (bare) ON CONFLICT DO NOTHING;
+    SELECT state INTO route_state FROM __SCHEMA__.sm_custody_recipient_route_guards
+      WHERE recipient = bare FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody recipient route guard is absent'; END IF;
+    IF require_open AND route_state <> 0 THEN
+        RAISE EXCEPTION 'SM custody recipient route is closed';
+    END IF;
 END $$;
 CREATE FUNCTION __SCHEMA__.sm_custody_admission_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE closed BOOLEAN; gate_resource TEXT; retained_rows BIGINT; retained_bytes BIGINT;
 BEGIN
-    PERFORM __SCHEMA__.sm_custody_lock_source(NEW.message_key, NEW.resource);
+    PERFORM __SCHEMA__.sm_custody_lock_source(NEW.message_key, NEW.resource, TRUE);
     SELECT sealed, resource INTO closed, gate_resource FROM __SCHEMA__.sm_custody_gates WHERE gate_id = NEW.gate_id FOR UPDATE;
     IF closed IS DISTINCT FROM FALSE OR gate_resource IS DISTINCT FROM NEW.resource THEN
         RAISE EXCEPTION 'SM custody gate is closed or resource differs';
@@ -151,7 +188,7 @@ BEGIN
     SELECT message_key, resource INTO source_key, source_resource FROM __SCHEMA__.sm_custody_operations
       WHERE operation_id = NEW.operation_id AND gate_id = NEW.gate_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody slot has no operation'; END IF;
-    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource);
+    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource, TRUE);
     SELECT sealed INTO closed FROM __SCHEMA__.sm_custody_gates WHERE gate_id = NEW.gate_id FOR UPDATE;
     IF closed IS DISTINCT FROM FALSE OR NOT EXISTS (
         SELECT 1 FROM __SCHEMA__.sm_custody_operations o WHERE o.operation_id = NEW.operation_id
@@ -175,7 +212,7 @@ BEGIN
     SELECT o.message_key, o.resource INTO source_key, source_resource FROM __SCHEMA__.sm_custody_operations o
       WHERE o.operation_id = NEW.operation_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody handoff has no operation'; END IF;
-    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource);
+    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource, TRUE);
     SELECT g.sealed INTO closed FROM __SCHEMA__.sm_custody_operations o
       JOIN __SCHEMA__.sm_custody_gates g ON g.gate_id = o.gate_id
       JOIN __SCHEMA__.sm_custody_slots s ON (s.operation_id, s.gate_id) = (o.operation_id, o.gate_id)
@@ -208,7 +245,7 @@ BEGIN
     SELECT message_key, resource INTO source_key, source_resource FROM __SCHEMA__.sm_custody_operations
       WHERE operation_id = NEW.operation_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody transfer has no operation'; END IF;
-    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource);
+    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource, FALSE);
     PERFORM 1 FROM __SCHEMA__.sm_custody_gates g JOIN __SCHEMA__.sm_custody_operations o
       ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id
         AND o.message_key = source_key AND o.resource = source_resource FOR UPDATE OF g;
@@ -231,7 +268,7 @@ BEGIN
     SELECT message_key, resource INTO source_key, source_resource FROM __SCHEMA__.sm_custody_operations
       WHERE operation_id = NEW.operation_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody terminal has no operation'; END IF;
-    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource);
+    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource, FALSE);
     PERFORM 1 FROM __SCHEMA__.sm_custody_gates g JOIN __SCHEMA__.sm_custody_operations o
       ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id
         AND o.message_key = source_key AND o.resource = source_resource FOR UPDATE OF g;

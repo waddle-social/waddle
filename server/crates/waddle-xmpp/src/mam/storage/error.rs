@@ -57,6 +57,17 @@ pub enum MamStorageError {
     },
 }
 
+/// Failures specific to the bounded pinned-transaction lookup.
+#[derive(Error, Debug)]
+pub enum BoundedMamLookupError {
+    #[error("MAM lookup key exceeds the bounded request size")]
+    KeyTooLarge,
+    #[error("MAM lookup row exceeds the bounded response size")]
+    RowTooLarge,
+    #[error(transparent)]
+    Storage(#[from] MamStorageError),
+}
+
 impl From<sqlx::Error> for MamStorageError {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error.to_string())

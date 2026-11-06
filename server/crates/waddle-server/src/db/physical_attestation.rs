@@ -32,6 +32,11 @@ mod pinned_catalog;
 pub use pinned_catalog::PinnedCatalogError;
 mod pinned_entry;
 pub use pinned_entry::DarkPinnedEntryError;
+mod pinned_mam;
+#[cfg(not(feature = "test-support"))]
+pub(crate) use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
+#[cfg(feature = "test-support")]
+pub use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
 mod preflight;
 pub use preflight::{
     attest_dark_catalog_pinned, DarkPhysicalAttestationError, DarkPhysicalAttestationPins,

@@ -24,9 +24,9 @@ use crate::ingress_uow::{
 
 /// Unselected candidate over the exact shared, physically attested UOW.
 /// Source-bearing operations acquire epoch -> principal -> exact claim ->
-/// sorted canonical sources -> sorted recipient guards -> gate -> attempts
-/// and journals. Gate-only operations never subsequently acquire a source.
-/// No transaction spans transport I/O.
+/// sorted canonical sources -> per-source and recipient-wide guards -> gate
+/// -> attempts and journals. Gate-only operations never subsequently acquire
+/// a source. No transaction spans transport I/O.
 pub struct SmCustodyRepository {
     pub(super) uow: IngressUnitOfWork,
     pub(super) schema: String,
@@ -179,10 +179,11 @@ impl SmCustodyRepository {
     pub(super) async fn guarded_source(
         &self,
         allow_sealed: bool,
+        require_open_route: bool,
         key: MessageKey,
     ) -> Result<IngressUowTransaction<'_>, CustodyError> {
         let mut tx = self.authority().await?;
-        self.lock_sources_and_routes(&mut tx, &[key.to_storage()])
+        self.lock_sources_and_routes(&mut tx, &[key.to_storage()], require_open_route)
             .await?;
         self.lock_gate(&mut tx, (!allow_sealed).then_some(false))
             .await?;
@@ -196,6 +197,7 @@ impl SmCustodyRepository {
         &self,
         operation: Uuid,
         allow_sealed: bool,
+        require_open_route: bool,
         recovery: Option<&CustodyRecoveryAuthority>,
     ) -> Result<IngressUowTransaction<'_>, CustodyError> {
         let mut tx = match recovery {
@@ -209,7 +211,8 @@ impl SmCustodyRepository {
         if source.1 != self.capture.resource.to_string() {
             return Err(CustodyError::Conflict);
         }
-        self.lock_sources_and_routes(&mut tx, &[source.0]).await?;
+        self.lock_sources_and_routes(&mut tx, &[source.0], require_open_route)
+            .await?;
         let required_sealed = if recovery.is_some() {
             Some(true)
         } else {
@@ -469,6 +472,7 @@ impl SmCustodyRepository {
         &self,
         tx: &mut IngressUowTransaction<'_>,
         sources: &[Uuid],
+        require_open_route: bool,
     ) -> Result<(), CustodyError> {
         let mut sources = sources.to_vec();
         sources.sort_unstable();
@@ -484,13 +488,23 @@ impl SmCustodyRepository {
             .map_err(db)?
             .ok_or(CustodyError::SourceMissing)?;
         }
-        let recipient = self.capture.resource.to_bare().to_string();
+        let bare_jid = self.capture.resource.to_bare();
+        let sql_bare: String = sqlx::query_scalar("SELECT pg_catalog.split_part($1, '/', 1)")
+            .bind(self.capture.resource.to_string())
+            .fetch_one(pg(tx)?)
+            .await
+            .map_err(db)?;
+        if sql_bare != bare_jid.to_string() {
+            return Err(CustodyError::Rejected);
+        }
+        let recipient = bare_jid.to_string();
         for key in sources {
             sqlx::query(&format!("INSERT INTO {}.sm_custody_route_guards (message_key, recipient) VALUES ($1,$2) ON CONFLICT DO NOTHING", self.schema))
                 .bind(key).bind(&recipient).execute(pg(tx)?).await.map_err(db)?;
             sqlx::query(&format!("SELECT 1 FROM {}.sm_custody_route_guards WHERE message_key = $1 AND recipient = $2 FOR UPDATE", self.schema))
                 .bind(key).bind(&recipient).fetch_one(pg(tx)?).await.map_err(db)?;
         }
+        super::recipient_guard::acquire(tx, &self.schema, &bare_jid, require_open_route).await?;
         Ok(())
     }
 
