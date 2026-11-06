@@ -15,9 +15,12 @@ use crate::server::routes::websocket::supervised_io::StopReason;
 use jid::BareJid;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::ConnectionRef;
 
@@ -92,11 +95,11 @@ pub(super) enum ConnectionActorDriverTaskResultValue {
         Result<ConnectionActorDriverCompletion<ResponseBatch>, ConnectionActorDriverError>,
     ),
     PeerStanza(Result<ConnectionActorDriverCompletion<DriveOutcome>, ConnectionActorDriverError>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Paused(&'static str),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Immediate,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ImmediateResult(&'static str),
 }
 
@@ -105,6 +108,7 @@ pub(super) enum ConnectionActorDriverTaskResultValue {
 pub(super) enum ConnectionActorDriverTaskUnknownReason {
     WorkerAborted,
     WorkerStopped,
+    AuthorityRevoked,
     ResultReservationExceeded,
 }
 
@@ -122,14 +126,37 @@ pub(super) enum ConnectionActorDriverTaskSnapshot {
     NotStarted,
 }
 
-/// A per-connection actor-owned handler task. Dropping its caller-facing
-/// handle requests stop, while the task and its join supervisor remain detached
-/// and retain every accepted operation record.
+/// A per-connection actor-owned handler task. Dropping an unattached
+/// caller-facing handle requests stop; after endpoint attachment, the app-owned
+/// cleanup record controls stop and join while retaining accepted operations.
 pub(super) struct ConnectionActorDriverTask {
     shared: Arc<DriverShared>,
     data: mpsc::Sender<DriverCommand>,
     control: mpsc::Sender<DriverControl>,
+    cleanup: ConnectionActorDriverTaskCleanup,
+    drop_stops: bool,
+}
+
+/// App-owned handle for observing and terminating one driver worker. The
+/// endpoint cleanup record retains this beside the physical I/O custodian;
+/// it has no pointer back to that record or its index.
+#[derive(Clone)]
+pub(super) struct ConnectionActorDriverTaskCleanup {
+    inner: Arc<DriverCleanupInner>,
+}
+
+struct DriverCleanupInner {
+    shared: Arc<DriverShared>,
     abort: AbortHandle,
+    shutdown_deadline_armed: AtomicBool,
+    _data: mpsc::Sender<DriverCommand>,
+    _control: mpsc::Sender<DriverControl>,
+    supervisor: AsyncMutex<SupervisorJoinState>,
+}
+
+struct SupervisorJoinState {
+    handle: Option<JoinHandle<()>>,
+    joined: bool,
 }
 
 struct DriverShared {
@@ -143,12 +170,15 @@ struct DriverShared {
     byte_permits: Arc<Semaphore>,
     limits: ConnectionActorDriverTaskLimits,
     state: Mutex<DriverLedger>,
+    settlement_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     joined: Mutex<bool>,
     joined_changed: Notify,
 }
 
 struct DriverLedger {
     accepting: bool,
+    stop_reason: Option<StopReason>,
+    stop_started_at: Option<Instant>,
     next_id: u64,
     operations: HashMap<u64, Arc<DriverOperation>>,
 }
@@ -179,17 +209,25 @@ pub(super) enum ConnectionActorDriverTaskInput {
         wire_bytes: usize,
     },
     PeerStanza(Box<OutboundStanza>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Paused {
         entered: Arc<Notify>,
         release: Arc<Notify>,
         result: &'static str,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    StartPaused {
+        dequeued: Arc<Notify>,
+        release: Arc<Notify>,
+        effect_runs: Arc<std::sync::atomic::AtomicUsize>,
+    },
+    #[cfg(any(test, feature = "test-support"))]
+    Panic,
+    #[cfg(any(test, feature = "test-support"))]
     Immediate {
         input_bytes: usize,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ImmediateResult(&'static str),
 }
 
@@ -216,11 +254,15 @@ impl ConnectionActorDriverTaskInput {
             // Count a typed representation only. XML serialization belongs
             // to the eventual socket adapter, not actor admission.
             Self::PeerStanza(stanza) => accounted_debug_bytes(stanza),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Paused { .. } => 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
+            Self::StartPaused { .. } => 0,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Panic => 0,
+            #[cfg(any(test, feature = "test-support"))]
             Self::Immediate { input_bytes } => *input_bytes,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::ImmediateResult(result) => result.len(),
         }
     }
@@ -297,9 +339,12 @@ impl ConnectionActorDriverTask {
             limits,
             state: Mutex::new(DriverLedger {
                 accepting: true,
+                stop_reason: None,
+                stop_started_at: None,
                 next_id: 1,
                 operations: HashMap::new(),
             }),
+            settlement_callback: Mutex::new(None),
             joined: Mutex::new(false),
             joined_changed: Notify::new(),
         });
@@ -319,7 +364,20 @@ impl ConnectionActorDriverTask {
             control_receiver,
         }));
         let abort = worker.abort_handle();
-        tokio::spawn(supervise_driver(worker, Arc::clone(&shared)));
+        let supervisor = tokio::spawn(supervise_driver(worker, Arc::clone(&shared)));
+        let cleanup = ConnectionActorDriverTaskCleanup {
+            inner: Arc::new(DriverCleanupInner {
+                shared: Arc::clone(&shared),
+                abort,
+                shutdown_deadline_armed: AtomicBool::new(false),
+                _data: data.clone(),
+                _control: control.clone(),
+                supervisor: AsyncMutex::new(SupervisorJoinState {
+                    handle: Some(supervisor),
+                    joined: false,
+                }),
+            }),
+        };
         tokio::spawn(watch_driver_authority(
             Arc::clone(&shared),
             permit,
@@ -330,7 +388,8 @@ impl ConnectionActorDriverTask {
             shared,
             data,
             control,
-            abort,
+            cleanup,
+            drop_stops: true,
         })
     }
 
@@ -368,7 +427,7 @@ impl ConnectionActorDriverTask {
         self.submit(ConnectionActorDriverTaskInput::PeerStanza(Box::new(stanza)))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn submit_paused(
         &self,
         entered: Arc<Notify>,
@@ -380,6 +439,27 @@ impl ConnectionActorDriverTask {
             release,
             result,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn submit_start_paused(
+        &self,
+        dequeued: Arc<Notify>,
+        release: Arc<Notify>,
+        effect_runs: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
+        self.submit(ConnectionActorDriverTaskInput::StartPaused {
+            dequeued,
+            release,
+            effect_runs,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn submit_panic(
+        &self,
+    ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
+        self.submit(ConnectionActorDriverTaskInput::Panic)
     }
 
     fn submit(
@@ -463,19 +543,17 @@ impl ConnectionActorDriverTask {
     /// Stop admission immediately and let a started effectful handler return
     /// into retained completion custody before the worker exits.
     pub(super) fn request_stop(&self, reason: StopReason) {
-        self.shared.request_stop(reason);
+        self.cleanup.request_stop(reason);
     }
 
     /// Force-abort the owned worker and wait until the independent supervisor
     /// has joined it and classified queued/active records.
     pub(super) async fn force_abort_and_join(&self) {
-        self.shared.request_stop(StopReason::ShutdownDeadline);
-        self.abort.abort();
-        self.shared.wait_joined().await;
+        self.cleanup.force_abort_and_join().await;
     }
 
     pub(super) async fn wait_joined(&self) {
-        self.shared.wait_joined().await;
+        self.cleanup.wait_joined().await;
     }
 
     /// Resolve after the actor task services a control marker. This queue is
@@ -512,18 +590,18 @@ impl ConnectionActorDriverTask {
         connection_ref: &ConnectionRef,
         id: u64,
     ) -> Option<ConnectionActorDriverTicket> {
-        if connection_ref != &self.shared.connection_ref {
-            return None;
-        }
-        let ledger = self.shared.lock_state();
-        let operation = ledger.operations.get(&id)?.clone();
-        (operation.connection_ref == *connection_ref).then(|| ConnectionActorDriverTicket {
-            operation,
-            shared: Arc::clone(&self.shared),
-        })
+        self.cleanup.lookup(connection_ref, id)
     }
 
-    #[cfg(test)]
+    pub(super) fn cleanup_handle(&self) -> ConnectionActorDriverTaskCleanup {
+        self.cleanup.clone()
+    }
+
+    pub(super) fn mark_app_owned(&mut self) {
+        self.drop_stops = false;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn submit_immediate(
         &self,
         input_bytes: usize,
@@ -531,7 +609,7 @@ impl ConnectionActorDriverTask {
         self.submit(ConnectionActorDriverTaskInput::Immediate { input_bytes })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn submit_with_custom_result(
         &self,
         result: &'static str,
@@ -542,7 +620,9 @@ impl ConnectionActorDriverTask {
 
 impl Drop for ConnectionActorDriverTask {
     fn drop(&mut self) {
-        self.shared.request_stop(StopReason::Requested);
+        if self.drop_stops {
+            self.cleanup.request_stop(StopReason::Requested);
+        }
     }
 }
 
@@ -568,6 +648,218 @@ pub(super) enum ConnectionActorDriverTaskControlError {
     Stopped,
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionActorDriverTestUnknownReason {
+    WorkerAborted,
+    WorkerStopped,
+    AuthorityRevoked,
+    ResultReservationExceeded,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionActorDriverTestSnapshot {
+    Accepted,
+    Running,
+    Completed,
+    CompletionUnknown(ConnectionActorDriverTestUnknownReason),
+    NotStarted,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ConnectionActorDriverTestAdmissionError {
+    #[error("connection driver is stopping")]
+    Stopped,
+    #[error("connection driver capacity is full")]
+    Overloaded,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+pub struct ConnectionActorDriverTestGate {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[cfg(feature = "test-support")]
+impl ConnectionActorDriverTestGate {
+    pub async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct ConnectionActorDriverTestTicket {
+    ticket: ConnectionActorDriverTicket,
+}
+
+#[cfg(feature = "test-support")]
+impl ConnectionActorDriverTestTicket {
+    pub(super) fn from_ticket(ticket: ConnectionActorDriverTicket) -> Self {
+        Self { ticket }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.ticket.id()
+    }
+
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        self.ticket.connection_ref()
+    }
+
+    pub fn snapshot(&self) -> ConnectionActorDriverTestSnapshot {
+        map_test_snapshot(self.ticket.snapshot())
+    }
+
+    pub async fn wait(&self) -> ConnectionActorDriverTestSnapshot {
+        map_test_snapshot(self.ticket.wait().await)
+    }
+
+    pub fn run_count(&self) -> usize {
+        self.ticket
+            .operation
+            .runs
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn retains_input(&self) -> bool {
+        self.ticket.operation._reservation.input_bytes > 0
+            || !matches!(
+                &self.ticket.operation.input,
+                DriverInput::Immediate { input_bytes: 0 }
+            )
+    }
+
+    pub fn acknowledge(self) -> bool {
+        self.ticket.acknowledge().is_ok()
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn map_test_snapshot(
+    snapshot: ConnectionActorDriverTaskSnapshot,
+) -> ConnectionActorDriverTestSnapshot {
+    match snapshot {
+        ConnectionActorDriverTaskSnapshot::Accepted => ConnectionActorDriverTestSnapshot::Accepted,
+        ConnectionActorDriverTaskSnapshot::Running => ConnectionActorDriverTestSnapshot::Running,
+        ConnectionActorDriverTaskSnapshot::Completed(_) => {
+            ConnectionActorDriverTestSnapshot::Completed
+        }
+        ConnectionActorDriverTaskSnapshot::CompletionUnknown { reason, .. } => {
+            let reason = match reason {
+                ConnectionActorDriverTaskUnknownReason::WorkerAborted => {
+                    ConnectionActorDriverTestUnknownReason::WorkerAborted
+                }
+                ConnectionActorDriverTaskUnknownReason::WorkerStopped => {
+                    ConnectionActorDriverTestUnknownReason::WorkerStopped
+                }
+                ConnectionActorDriverTaskUnknownReason::AuthorityRevoked => {
+                    ConnectionActorDriverTestUnknownReason::AuthorityRevoked
+                }
+                ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded => {
+                    ConnectionActorDriverTestUnknownReason::ResultReservationExceeded
+                }
+            };
+            ConnectionActorDriverTestSnapshot::CompletionUnknown(reason)
+        }
+        ConnectionActorDriverTaskSnapshot::NotStarted => {
+            ConnectionActorDriverTestSnapshot::NotStarted
+        }
+    }
+}
+
+/// Test-only producer handle for the production compiled driver task. An
+/// attached task remains app-owned when this caller handle is dropped.
+#[cfg(feature = "test-support")]
+pub struct ConnectionActorDriverTestHandle {
+    task: ConnectionActorDriverTask,
+}
+
+#[cfg(feature = "test-support")]
+impl ConnectionActorDriverTestHandle {
+    pub(super) fn from_attached(task: ConnectionActorDriverTask) -> Self {
+        Self { task }
+    }
+
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        self.task.connection_ref()
+    }
+
+    pub fn submit_paused(
+        &self,
+        gate: &ConnectionActorDriverTestGate,
+    ) -> Result<ConnectionActorDriverTestTicket, ConnectionActorDriverTestAdmissionError> {
+        self.task
+            .submit_paused(
+                Arc::clone(&gate.entered),
+                Arc::clone(&gate.release),
+                "paused test operation",
+            )
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+            .map_err(map_test_admission_error)
+    }
+
+    pub fn submit_immediate(
+        &self,
+    ) -> Result<ConnectionActorDriverTestTicket, ConnectionActorDriverTestAdmissionError> {
+        self.task
+            .submit_immediate(0)
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+            .map_err(map_test_admission_error)
+    }
+
+    pub fn lookup(
+        &self,
+        connection_ref: &ConnectionRef,
+        id: u64,
+    ) -> Option<ConnectionActorDriverTestTicket> {
+        self.task
+            .lookup(connection_ref, id)
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+    }
+
+    pub fn request_stop(&self, reason: StopReason) {
+        self.task.request_stop(reason);
+    }
+
+    pub async fn wait_stopped(&self) -> Instant {
+        self.task.shared.stop.cancelled().await;
+        self.task
+            .shared
+            .lock_state()
+            .stop_started_at
+            .unwrap_or_else(Instant::now)
+    }
+
+    pub async fn wait_joined(&self) {
+        self.task.wait_joined().await;
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn map_test_admission_error(
+    error: ConnectionActorDriverTaskAdmissionError,
+) -> ConnectionActorDriverTestAdmissionError {
+    match error {
+        ConnectionActorDriverTaskAdmissionError::Overloaded => {
+            ConnectionActorDriverTestAdmissionError::Overloaded
+        }
+        ConnectionActorDriverTaskAdmissionError::Stopped
+        | ConnectionActorDriverTaskAdmissionError::WrongOperationKind
+        | ConnectionActorDriverTaskAdmissionError::OperationIdExhausted
+        | ConnectionActorDriverTaskAdmissionError::InvalidLimits => {
+            ConnectionActorDriverTestAdmissionError::Stopped
+        }
+    }
+}
+
 impl ConnectionActorDriverTicket {
     pub(super) fn id(&self) -> u64 {
         self.operation.id
@@ -582,7 +874,7 @@ impl ConnectionActorDriverTicket {
             && self.shared.connection_ref == *connection_ref
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn retains_input(&self) -> bool {
         self.operation._reservation.input_bytes > 0
             || !matches!(
@@ -595,7 +887,7 @@ impl ConnectionActorDriverTicket {
         self.operation.input.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn run_count(&self) -> usize {
         self.operation
             .runs
@@ -646,6 +938,8 @@ impl ConnectionActorDriverTicket {
             return Err(ConnectionActorDriverTaskAckError::WrongOwner);
         }
         ledger.operations.remove(&self.operation.id);
+        drop(ledger);
+        self.shared.operation_acknowledged();
         Ok(())
     }
 }
@@ -668,11 +962,104 @@ impl DriverShared {
     }
 
     fn request_stop(&self, reason: StopReason) {
-        self.lifecycle.request_stop(reason);
         let mut ledger = self.lock_state();
+        if ledger.stop_reason.is_none() {
+            ledger.stop_reason = Some(reason);
+            ledger.stop_started_at = Some(Instant::now());
+        }
+        let effective_reason = ledger.stop_reason.unwrap_or(reason);
         ledger.accepting = false;
+        // Admission, operation start, and result publication use this same
+        // ledger lock. Mark the core stopped before releasing the gate so a
+        // worker cannot pass its core preflight after stop has won the ledger.
+        self.lifecycle.request_stop(effective_reason);
         self.stop.cancel();
+    }
+
+    fn begin_operation(&self, operation: &Arc<DriverOperation>) -> bool {
+        let ledger = self.lock_state();
+        if !ledger.accepting
+            || self.stop.is_cancelled()
+            || self.shutdown.is_cancelled()
+            || operation.connection_ref != self.connection_ref
+            || !ledger
+                .operations
+                .get(&operation.id)
+                .is_some_and(|current| Arc::ptr_eq(current, operation))
+        {
+            return false;
+        }
+        let mut snapshot = operation.lock_snapshot();
+        if !matches!(*snapshot, ConnectionActorDriverTaskSnapshot::Accepted) {
+            return false;
+        }
+        *snapshot = ConnectionActorDriverTaskSnapshot::Running;
+        operation
+            .runs
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        operation.changed.notify_waiters();
+        true
+    }
+
+    fn publish_completion(
+        &self,
+        operation: &DriverOperation,
+        result: Arc<ConnectionActorDriverTaskResult>,
+        exceeds_reservation: bool,
+        authority_revoked: bool,
+    ) {
+        let mut ledger = self.lock_state();
+        let unknown_reason = if exceeds_reservation {
+            if ledger.stop_reason.is_none() {
+                ledger.stop_reason = Some(StopReason::OutboundOverload);
+                ledger.stop_started_at = Some(Instant::now());
+            }
+            ledger.accepting = false;
+            self.stop.cancel();
+            Some(ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded)
+        } else if authority_revoked {
+            Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
+        } else if !ledger.accepting {
+            Some(match ledger.stop_reason {
+                Some(StopReason::LeaseLost) => {
+                    ConnectionActorDriverTaskUnknownReason::AuthorityRevoked
+                }
+                _ => ConnectionActorDriverTaskUnknownReason::WorkerStopped,
+            })
+        } else {
+            None
+        };
+        match unknown_reason {
+            Some(reason) => {
+                operation.set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                    reason,
+                    result: Some(result),
+                })
+            }
+            None => operation.set_snapshot(ConnectionActorDriverTaskSnapshot::Completed(result)),
+        }
         drop(ledger);
+        if exceeds_reservation {
+            self.request_stop(StopReason::OutboundOverload);
+        }
+    }
+
+    fn operation_acknowledged(&self) {
+        let callback = self
+            .settlement_callback
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    fn set_settlement_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .settlement_callback
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(callback);
     }
 
     async fn wait_joined(&self) {
@@ -724,6 +1111,119 @@ impl DriverShared {
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = true;
         self.joined_changed.notify_waiters();
+    }
+}
+
+impl ConnectionActorDriverTaskCleanup {
+    pub(super) fn connection_ref(&self) -> &ConnectionRef {
+        &self.inner.shared.connection_ref
+    }
+
+    pub(super) fn request_stop(&self, reason: StopReason) {
+        self.inner.shared.request_stop(reason);
+    }
+
+    pub(super) fn set_settlement_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.inner.shared.set_settlement_callback(callback);
+    }
+
+    pub(super) fn lookup(
+        &self,
+        connection_ref: &ConnectionRef,
+        id: u64,
+    ) -> Option<ConnectionActorDriverTicket> {
+        if connection_ref != &self.inner.shared.connection_ref {
+            return None;
+        }
+        let ledger = self.inner.shared.lock_state();
+        let operation = ledger.operations.get(&id)?.clone();
+        (operation.connection_ref == *connection_ref).then(|| ConnectionActorDriverTicket {
+            operation,
+            shared: Arc::clone(&self.inner.shared),
+        })
+    }
+
+    pub(super) fn is_settled(&self) -> bool {
+        let ledger = self.inner.shared.lock_state();
+        let joined = *self
+            .inner
+            .shared
+            .joined
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        joined && ledger.operations.is_empty()
+    }
+
+    pub(super) fn is_joined(&self) -> bool {
+        *self
+            .inner
+            .shared
+            .joined
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    }
+
+    /// Arm the one grace timer for this driver. Its deadline is based on the
+    /// synchronous first-stop timestamp in the ledger, so executor scheduling
+    /// delay cannot extend the configured grace. The worker supervisor remains
+    /// the sole owner of the JoinHandle and reports its join independently.
+    pub(super) fn arm_shutdown_deadline(&self, grace: Duration) {
+        if self
+            .inner
+            .shutdown_deadline_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let shared = Arc::clone(&self.inner.shared);
+        let abort = self.inner.abort.clone();
+        tokio::spawn(async move {
+            shared.stop.cancelled().await;
+            let started_at = shared
+                .lock_state()
+                .stop_started_at
+                .unwrap_or_else(Instant::now);
+            let deadline = started_at.checked_add(grace).unwrap_or_else(Instant::now);
+            tokio::select! {
+                biased;
+                _ = shared.wait_joined() => {}
+                _ = tokio::time::sleep_until(deadline) => abort.abort(),
+            }
+        });
+    }
+
+    /// Stop admission, let the active handler return for `grace`, then abort
+    /// and join the worker if it remains stalled. Accepted queued inputs are
+    /// classified as `NotStarted`; the active input remains
+    /// `CompletionUnknown` after a forced abort.
+    pub(super) async fn shutdown_and_join(&self, grace: Duration) {
+        self.request_stop(StopReason::Requested);
+        self.arm_shutdown_deadline(grace);
+        self.wait_joined().await;
+    }
+
+    async fn force_abort_and_join(&self) {
+        self.request_stop(StopReason::ShutdownDeadline);
+        self.inner.abort.abort();
+        self.join_supervisor().await;
+    }
+
+    async fn wait_joined(&self) {
+        self.inner.shared.wait_joined().await;
+        self.join_supervisor().await;
+    }
+
+    async fn join_supervisor(&self) {
+        let mut state = self.inner.supervisor.lock().await;
+        if state.joined {
+            return;
+        }
+        if let Some(supervisor) = state.handle.as_mut() {
+            let _ = supervisor.await;
+        }
+        state.handle = None;
+        state.joined = true;
     }
 }
 
@@ -790,13 +1290,27 @@ async fn run_driver(worker: DriverWorker) {
                 });
             continue;
         }
-        command
-            .operation
-            .set_snapshot(ConnectionActorDriverTaskSnapshot::Running);
-        command
-            .operation
-            .runs
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(any(test, feature = "test-support"))]
+        if let DriverInput::StartPaused {
+            dequeued, release, ..
+        } = &command.operation.input
+        {
+            dequeued.notify_one();
+            release.notified().await;
+        }
+        match permit.with_current(|| shared.begin_operation(&command.operation)) {
+            Ok(true) => {}
+            Ok(false) => {
+                if shutdown.is_cancelled() {
+                    shared.request_stop(StopReason::ShutdownDeadline);
+                }
+                return;
+            }
+            Err(_) => {
+                shared.request_stop(StopReason::LeaseLost);
+                return;
+            }
+        }
         let mut active =
             ActiveOperationGuard::new(Arc::clone(&command.operation), Arc::clone(&shared));
         let result = match &command.operation.input {
@@ -819,7 +1333,7 @@ async fn run_driver(worker: DriverWorker) {
                 core.interpret_peer_stanza(websocket.as_ref(), stanza, &permit, &shutdown)
                     .await,
             ),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             DriverInput::Paused {
                 entered,
                 release,
@@ -829,14 +1343,27 @@ async fn run_driver(worker: DriverWorker) {
                 release.notified().await;
                 ConnectionActorDriverTaskResultValue::Paused(result)
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
+            DriverInput::StartPaused { effect_runs, .. } => {
+                effect_runs.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                ConnectionActorDriverTaskResultValue::Immediate
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            DriverInput::Panic => panic!("synthetic driver panic"),
+            #[cfg(any(test, feature = "test-support"))]
             DriverInput::Immediate { .. } => ConnectionActorDriverTaskResultValue::Immediate,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             DriverInput::ImmediateResult(result) => {
                 ConnectionActorDriverTaskResultValue::ImmediateResult(result)
             }
         };
-        active.complete(result);
+        let mut result = Some(result);
+        if permit
+            .with_current(|| active.complete(result.take().expect("operation result is present")))
+            .is_err()
+        {
+            active.complete_non_current(result.take().expect("revoked operation result remains"));
+        }
     }
 }
 
@@ -867,17 +1394,21 @@ impl ActiveOperationGuard {
         });
         let exceeds_reservation =
             result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
-        if exceeds_reservation {
-            self.shared.request_stop(StopReason::OutboundOverload);
-            self.operation
-                .set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
-                    reason: ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded,
-                    result: Some(result),
-                });
-        } else {
-            self.operation
-                .set_snapshot(ConnectionActorDriverTaskSnapshot::Completed(result));
-        }
+        self.shared
+            .publish_completion(&self.operation, result, exceeds_reservation, false);
+        self.complete = true;
+    }
+
+    fn complete_non_current(&mut self, value: ConnectionActorDriverTaskResultValue) {
+        let result = Arc::new(ConnectionActorDriverTaskResult {
+            value,
+            _reservation: Arc::clone(&self.operation._reservation),
+        });
+        let exceeds_reservation =
+            result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
+        self.shared.request_stop(StopReason::LeaseLost);
+        self.shared
+            .publish_completion(&self.operation, result, exceeds_reservation, true);
         self.complete = true;
     }
 }
@@ -1140,6 +1671,351 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_owned_driver_survives_caller_handle_drop_and_recovers_once() {
+        let mut task = test_task().await;
+        let cleanup = task.cleanup_handle();
+        let connection_ref = task.connection_ref().clone();
+        let successor = ConnectionRef::fresh(connection_ref.node_lease().clone());
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let ticket = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "owned")
+            .expect("operation accepted");
+        let id = ticket.id();
+        task.mark_app_owned();
+
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("worker entered operation");
+        drop(ticket);
+        drop(task);
+        assert!(
+            !cleanup.inner.shared.stop.is_cancelled(),
+            "dropping an app-owned caller handle does not stop its worker"
+        );
+        assert!(cleanup.lookup(&successor, id).is_none());
+        release.notify_one();
+
+        let recovered = cleanup
+            .lookup(&connection_ref, id)
+            .expect("exact app record reacquires the operation");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), recovered.wait())
+                .await
+                .expect("handler completion is retained"),
+            ConnectionActorDriverTaskSnapshot::Completed(result)
+                if matches!(result.value, ConnectionActorDriverTaskResultValue::Paused("owned"))
+        ));
+        assert_eq!(recovered.run_count(), 1);
+        assert!(
+            !cleanup.is_joined(),
+            "dropping the producer handle does not close the app-owned worker"
+        );
+        recovered
+            .acknowledge()
+            .expect("operation acknowledged once");
+        assert!(cleanup.lookup(&connection_ref, id).is_none());
+        cleanup.request_stop(StopReason::Requested);
+        cleanup.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_aborts_and_joins_then_classifies_active_and_queued() {
+        let mut task = test_task().await;
+        let cleanup = task.cleanup_handle();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "stalled")
+            .expect("active operation accepted");
+        let queued = task
+            .submit_immediate(12)
+            .expect("queued operation accepted");
+        task.mark_app_owned();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("worker entered stalled handler");
+        drop(task);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            cleanup.shutdown_and_join(Duration::from_millis(10)),
+        )
+        .await
+        .expect("deadline abort and supervisor join are bounded");
+
+        assert!(cleanup.is_joined());
+        assert!(matches!(
+            active.snapshot(),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::WorkerAborted,
+                result: None,
+            }
+        ));
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        active.acknowledge().expect("active custody acknowledged");
+        queued.acknowledge().expect("queued custody acknowledged");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_deadline_is_measured_from_the_synchronous_first_stop() {
+        let task = test_task().await;
+        let cleanup = task.cleanup_handle();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "held")
+            .expect("active operation accepted");
+        let queued = task.submit_immediate(0).expect("queued operation accepted");
+        entered.notified().await;
+        tokio::time::pause();
+        let grace = Duration::from_secs(10);
+        cleanup.arm_shutdown_deadline(grace);
+
+        task.request_stop(StopReason::Requested);
+        // Leave the timer task unscheduled past its deadline. It must use the
+        // stop Instant recorded synchronously under DriverLedger, not start a
+        // fresh grace when the detached timer gets CPU time.
+        tokio::time::advance(grace + Duration::from_secs(1)).await;
+        tokio::time::timeout(Duration::from_secs(1), cleanup.wait_joined())
+            .await
+            .expect("the original first-stop deadline has already elapsed");
+
+        assert!(matches!(
+            active.snapshot(),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::WorkerAborted,
+                result: None,
+            }
+        ));
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        active.acknowledge().expect("active custody acknowledged");
+        queued.acknowledge().expect("queued custody acknowledged");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stop_and_submit_share_one_admission_linearization_gate() {
+        let task = Arc::new(test_task().await);
+        let cleanup = task.cleanup_handle();
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let submit_task = Arc::clone(&task);
+        let submit_start = Arc::clone(&start);
+        let submit = tokio::task::spawn_blocking(move || {
+            submit_start.wait();
+            submit_task.submit_immediate(0)
+        });
+        let stop_cleanup = cleanup.clone();
+        let stop_start = Arc::clone(&start);
+        let stop = tokio::task::spawn_blocking(move || {
+            stop_start.wait();
+            stop_cleanup.request_stop(StopReason::Requested);
+        });
+        start.wait();
+        let submitted = submit.await.expect("submit thread joins");
+        stop.await.expect("stop thread joins");
+
+        assert!(
+            task.submit_immediate(0).is_err(),
+            "later admission is sealed"
+        );
+        cleanup.wait_joined().await;
+        match submitted {
+            Ok(ticket) => {
+                assert!(matches!(
+                    ticket.snapshot(),
+                    ConnectionActorDriverTaskSnapshot::Completed(_)
+                        | ConnectionActorDriverTaskSnapshot::CompletionUnknown { .. }
+                        | ConnectionActorDriverTaskSnapshot::NotStarted
+                ));
+                ticket
+                    .acknowledge()
+                    .expect("the winner of the admission gate remains recoverable");
+            }
+            Err(error) => {
+                assert_eq!(error, ConnectionActorDriverTaskAdmissionError::Stopped)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_before_handler_return_wins_completion_snapshot_publication() {
+        let task = test_task().await;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "late result")
+            .expect("active operation accepted");
+        let queued = task
+            .submit_immediate(4)
+            .expect("queued operation accepted before stop");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("handler reached deterministic pause");
+
+        task.request_stop(StopReason::Requested);
+        assert!(matches!(
+            task.submit_immediate(0),
+            Err(ConnectionActorDriverTaskAdmissionError::Stopped)
+        ));
+        release.notify_one();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), active.wait())
+                .await
+                .expect("late handler result remains observable"),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::WorkerStopped,
+                result: Some(result),
+            } if matches!(result.value, ConnectionActorDriverTaskResultValue::Paused("late result"))
+        ));
+        task.wait_joined().await;
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        active.acknowledge().expect("late result custody settled");
+        queued.acknowledge().expect("queued input custody settled");
+    }
+
+    #[tokio::test]
+    async fn stop_after_dequeue_before_start_claim_keeps_operation_not_started() {
+        let task = test_task().await;
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let effect_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticket = task
+            .submit_start_paused(
+                Arc::clone(&dequeued),
+                Arc::clone(&release),
+                Arc::clone(&effect_runs),
+            )
+            .expect("operation accepted");
+
+        tokio::time::timeout(Duration::from_secs(1), dequeued.notified())
+            .await
+            .expect("worker dequeued and paused before the start claim");
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::Accepted
+        ));
+
+        task.request_stop(StopReason::Requested);
+        release.notify_one();
+        task.wait_joined().await;
+
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        assert_eq!(
+            ticket.run_count(),
+            0,
+            "the start claim never won the ledger"
+        );
+        assert_eq!(
+            effect_runs.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the handler/effect body was never entered"
+        );
+        ticket.acknowledge().expect("not-started custody settled");
+    }
+
+    #[tokio::test]
+    async fn panic_keeps_active_unknown_and_queued_not_started() {
+        let task = test_task().await;
+        let panicking = task.submit_panic().expect("panic operation accepted");
+        let queued = task
+            .submit_immediate(0)
+            .expect("second operation accepted before worker runs");
+        task.wait_joined().await;
+        assert!(matches!(
+            panicking.snapshot(),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::WorkerAborted,
+                result: None,
+            }
+        ));
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        panicking.acknowledge().expect("panicked operation settled");
+        queued.acknowledge().expect("queued operation settled");
+    }
+
+    #[tokio::test]
+    async fn lookup_ack_and_stop_remain_available_while_control_waits_behind_handler() {
+        let task = test_task().await;
+        let completed = task.submit_immediate(0).expect("first operation accepted");
+        let completed_id = completed.id();
+        let connection_ref = task.connection_ref().clone();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), completed.wait())
+                .await
+                .expect("first operation completes"),
+            ConnectionActorDriverTaskSnapshot::Completed(_)
+        ));
+
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "after stop")
+            .expect("second operation accepted");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("second handler is stalled");
+        let barrier = task
+            .try_control_barrier()
+            .expect("control admission is independent");
+
+        let recovered = task
+            .lookup(&connection_ref, completed_id)
+            .expect("exact lookup does not wait for the worker");
+        assert!(matches!(
+            recovered.snapshot(),
+            ConnectionActorDriverTaskSnapshot::Completed(_)
+        ));
+        recovered
+            .acknowledge()
+            .expect("completed result acknowledged");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), barrier)
+            .await
+            .expect("control barrier runs after the handler returns")
+            .expect("control marker completed");
+        assert!(!matches!(
+            active.wait().await,
+            ConnectionActorDriverTaskSnapshot::Accepted
+                | ConnectionActorDriverTaskSnapshot::Running
+        ));
+        task.request_stop(StopReason::LeaseLost);
+        assert!(matches!(
+            task.submit_immediate(0),
+            Err(ConnectionActorDriverTaskAdmissionError::Stopped)
+        ));
+        task.wait_joined().await;
+        active.acknowledge().expect("active operation settled");
+    }
+
+    #[tokio::test]
+    async fn concurrent_join_callers_both_observe_the_supervisor_join() {
+        let task = test_task().await;
+        let cleanup = task.cleanup_handle();
+        task.request_stop(StopReason::Requested);
+        tokio::join!(
+            task.wait_joined(),
+            cleanup.shutdown_and_join(Duration::from_secs(1)),
+        );
+        assert!(cleanup.is_joined());
+    }
+
+    #[tokio::test]
     async fn lease_revocation_seals_admission_while_a_handler_is_stalled() {
         let websocket = create_test_websocket_state().await;
         let lifecycle = NodeLifecycle::new();
@@ -1176,7 +2052,10 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), active.wait())
                 .await
                 .expect("active handler returns under its own custody"),
-            ConnectionActorDriverTaskSnapshot::Completed(_)
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::AuthorityRevoked,
+                result: Some(_),
+            }
         ));
         task.wait_joined().await;
         active.acknowledge().expect("completion explicitly settled");

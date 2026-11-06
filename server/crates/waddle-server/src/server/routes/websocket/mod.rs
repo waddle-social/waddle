@@ -96,6 +96,12 @@ mod connection_actor_core;
 mod connection_actor_driver_task;
 #[cfg(feature = "test-support")]
 pub use connection_actor_core::fixture as connection_actor;
+#[cfg(feature = "test-support")]
+pub use connection_actor_driver_task::{
+    ConnectionActorDriverTestAdmissionError, ConnectionActorDriverTestGate,
+    ConnectionActorDriverTestHandle, ConnectionActorDriverTestSnapshot,
+    ConnectionActorDriverTestTicket, ConnectionActorDriverTestUnknownReason,
+};
 #[cfg(feature = "clustering")]
 mod remote_muc_retry;
 pub(crate) mod replay;

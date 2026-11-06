@@ -22,6 +22,8 @@ use waddle_server::clustering::NodeLifecycle;
 use waddle_server::test_support::actor_local_endpoint::{
     ActorEndpointCleanupIndex, ActorLocalEndpointError, ActorLocalEndpointOwner,
     ActorLocalPublishError, ActorLocalWriteError, ActorPublicationProbe,
+    ConnectionActorDriverTestGate, ConnectionActorDriverTestSnapshot,
+    ConnectionActorDriverTestUnknownReason,
 };
 use waddle_server::test_support::connection_actor::{
     start_connection_actor, start_connection_actor_with_effect, start_connection_actor_with_hooks,
@@ -38,11 +40,12 @@ use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
     OutboundTerminal, ReservedIoStartConfig, ShutdownProtocol, StopReason, TransportLimits,
 };
+use waddle_server::test_support::websocket_state;
 use waddle_server::websocket_transport::{
     ActorWriteProbe, TestSocketAdmission, WebSocketInput, WebSocketOutput,
 };
 use waddle_xmpp::ownership::BindingRef;
-use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
+use waddle_xmpp::ownership::{ConnectionRef, NodeIdentity, NodeLeaseIdentity, SharedNodeIdentity};
 use waddle_xmpp::protocol::frame::{parse_frame_with_metadata, InboundFrame, ParseError};
 use waddle_xmpp::registry::user_actor::{GetResources, HoldUserActorForPublication, UserActor};
 use waddle_xmpp::registry::{
@@ -606,6 +609,713 @@ async fn actor_owner_route(
                 .await;
             let _ = route.started.send((connection, started)).await;
         })
+}
+
+struct ActorOwnerDriverRoute {
+    lifecycle: NodeLifecycle,
+    identity: Option<SharedNodeIdentity>,
+    inventory: IoCustodianInventory,
+    index: ActorEndpointCleanupIndex,
+    retirement_deadline: Duration,
+    write_probe: Option<Arc<ActorWriteProbe>>,
+    started: mpsc::Sender<(
+        ConnectionRef,
+        Result<StartedActorOwner, ActorLocalEndpointError>,
+    )>,
+}
+
+async fn actor_owner_driver_route(
+    State(route): State<Arc<ActorOwnerDriverRoute>>,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let admission = match &route.identity {
+        Some(identity) => TestSocketAdmission::clustered(
+            &route.lifecycle,
+            identity,
+            &route.inventory,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        ),
+        None => TestSocketAdmission::standalone(
+            &route.lifecycle,
+            &route.inventory,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    }
+    .expect("socket admission");
+    let admission = match &route.write_probe {
+        Some(probe) => admission.with_actor_write_probe(Arc::clone(probe)),
+        None => admission,
+    };
+    let connection = admission.connection_ref().clone();
+    upgrade
+        .protocols(["xmpp"])
+        .on_upgrade(move |socket| async move {
+            let started = admission
+                .start_actor_local_endpoint(
+                    socket,
+                    test_transport_limits(8, 2048, 2, 4096),
+                    route.retirement_deadline,
+                    &route.index,
+                    2,
+                    4096,
+                )
+                .await;
+            let _ = route.started.send((connection, started)).await;
+        })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn app_cleanup_index_recovers_driver_after_caller_and_task_handles_drop() {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("app cleanup inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerDriverRoute {
+        lifecycle: NodeLifecycle::new(),
+        identity: None,
+        inventory: inventory.clone(),
+        index: index.clone(),
+        retirement_deadline: TEST_TIMEOUT,
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner-driver", get(actor_owner_driver_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner-driver", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (connection, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (owner, input, output) = started.expect("endpoint owner starts");
+    let driver = owner
+        .attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("driver attaches to exact endpoint");
+    assert_eq!(owner.connection_ref(), &connection);
+    let observer = inventory.observe(&connection).expect("physical observer");
+
+    let gate = ConnectionActorDriverTestGate::default();
+    let caller_ticket = driver.submit_paused(&gate).expect("operation admitted");
+    let id = caller_ticket.id();
+    timeout(TEST_TIMEOUT, gate.wait_until_entered())
+        .await
+        .expect("driver entered handler");
+    drop(caller_ticket);
+    drop(driver);
+
+    let successor = ConnectionRef::fresh(connection.node_lease().clone());
+    assert!(index.lookup_driver_for_test(&successor, id).is_none());
+    assert!(index.contains(&connection));
+    assert!(matches!(
+        owner.attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+        Err(ActorLocalEndpointError::DriverAlreadyAttached)
+    ));
+
+    gate.release();
+    let recovered = index
+        .lookup_driver_for_test(&connection, id)
+        .expect("app-owned exact-ref ledger recovers after handle drop");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, recovered.wait())
+            .await
+            .expect("operation completion is retained"),
+        ConnectionActorDriverTestSnapshot::Completed
+    );
+    assert_eq!(recovered.run_count(), 1);
+    assert!(
+        index.contains(&connection),
+        "unacknowledged result keeps its slot"
+    );
+
+    owner.request_stop(StopReason::Requested);
+    assert!(matches!(
+        owner.attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+        Err(ActorLocalEndpointError::DriverCleanupStarted)
+    ));
+    drop(input);
+    drop(output);
+    drop(owner);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("physical pumps join"),
+        CustodianState::Joined
+    );
+    timeout(TEST_TIMEOUT, async {
+        while !index.join_cleanup_finished_for_test(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("endpoint join task attempted its one prune before direct ticket ack");
+    assert!(
+        index.contains(&connection),
+        "both joins retain unacknowledged result"
+    );
+    assert!(
+        recovered.acknowledge(),
+        "direct ticket acknowledgement settles custody"
+    );
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("direct ticket acknowledgement prunes the joined exact record");
+    assert!(!index.acknowledge_driver_for_test(&connection, id));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attached_driver_binds_the_captured_identity_revision() {
+    let lifecycle = NodeLifecycle::new();
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("actor-custody-test", "epoch-a"));
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("app cleanup inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerDriverRoute {
+        lifecycle: lifecycle.clone(),
+        identity: Some(identity.clone()),
+        inventory: inventory.clone(),
+        index: index.clone(),
+        retirement_deadline: TEST_TIMEOUT,
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner-driver", get(actor_owner_driver_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner-driver", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (connection, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (owner, input, output) = started.expect("endpoint owner starts");
+    let driver = owner
+        .attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("driver attaches to exact endpoint");
+    let observer = inventory.observe(&connection).expect("physical observer");
+    let gate = ConnectionActorDriverTestGate::default();
+    let active = driver.submit_paused(&gate).expect("operation admitted");
+    timeout(TEST_TIMEOUT, gate.wait_until_entered())
+        .await
+        .expect("handler is in flight");
+
+    identity
+        .rotate(NodeIdentity::new("actor-custody-test", "epoch-b"))
+        .await;
+    assert!(
+        lifecycle.is_ready(),
+        "identity loss does not change Serving"
+    );
+    assert!(
+        driver.submit_immediate().is_err(),
+        "stale source rejects admission"
+    );
+    gate.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, active.wait())
+            .await
+            .expect("in-flight operation settles under revoked identity"),
+        ConnectionActorDriverTestSnapshot::CompletionUnknown(
+            ConnectionActorDriverTestUnknownReason::AuthorityRevoked
+        )
+    );
+
+    owner.request_stop(StopReason::LeaseLost);
+    drop(input);
+    drop(output);
+    drop(owner);
+    drop(driver);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("physical pumps join"),
+        CustodianState::Joined
+    );
+    assert!(index.acknowledge_driver_for_test(&connection, active.id()));
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revoked operation settlement releases the joined record");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pump_stop_starts_driver_deadline_while_other_pump_is_held() {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("app cleanup inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let write_probe = Arc::new(ActorWriteProbe::default());
+    let route = Arc::new(ActorOwnerDriverRoute {
+        lifecycle: NodeLifecycle::new(),
+        identity: None,
+        inventory: inventory.clone(),
+        index: index.clone(),
+        retirement_deadline: Duration::from_millis(800),
+        write_probe: Some(Arc::clone(&write_probe)),
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner-driver", get(actor_owner_driver_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (mut peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner-driver", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (connection, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (owner, input, mut output) = started.expect("endpoint owner starts");
+    let driver = owner
+        .attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("driver attaches to exact endpoint");
+    let observer = inventory.observe(&connection).expect("physical observer");
+    let gate = ConnectionActorDriverTestGate::default();
+    let active = driver
+        .submit_paused(&gate)
+        .expect("active handler admitted");
+    let queued = driver.submit_immediate().expect("queued handler admitted");
+    let active_id = active.id();
+    let queued_id = queued.id();
+    timeout(TEST_TIMEOUT, gate.wait_until_entered())
+        .await
+        .expect("handler is held in flight");
+
+    write_probe.pause_next();
+    let frame = output
+        .data_frame(axum::extract::ws::Message::Text(
+            "held outbound write".into(),
+        ))
+        .expect("current data frame");
+    let output_task = tokio::spawn(async move { output.submit(frame).await });
+    timeout(TEST_TIMEOUT, write_probe.wait_for_entry())
+        .await
+        .expect("other pump is held inside its synchronous sink attempt");
+    output_task
+        .await
+        .expect("output submit task joins")
+        .expect("outbound frame is admitted");
+
+    peer.send(Message::Close(None))
+        .await
+        .expect("peer initiates pump-triggered stop");
+    let late_tickets = timeout(TEST_TIMEOUT, async {
+        let mut tickets = Vec::new();
+        loop {
+            match driver.submit_immediate() {
+                Ok(ticket) => {
+                    tickets.push(ticket);
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(_) => return tickets,
+            }
+        }
+    })
+    .await
+    .expect("pump stop immediately seals driver admission");
+    assert_eq!(observer.stop_reason(), Some(StopReason::PeerClosed));
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, active.wait())
+            .await
+            .expect("driver uses the stop-time deadline while pumps retire"),
+        ConnectionActorDriverTestSnapshot::CompletionUnknown(
+            ConnectionActorDriverTestUnknownReason::WorkerAborted
+        )
+    );
+    assert_eq!(
+        timeout(TEST_TIMEOUT, queued.wait())
+            .await
+            .expect("queued operation is classified after worker join"),
+        ConnectionActorDriverTestSnapshot::NotStarted
+    );
+    assert!(late_tickets
+        .iter()
+        .all(|ticket| { ticket.snapshot() == ConnectionActorDriverTestSnapshot::NotStarted }));
+    assert_ne!(
+        observer.state(),
+        CustodianState::Joined,
+        "physical cleanup still waits for the held outbound pump"
+    );
+    assert!(index.contains(&connection), "both join proofs gate pruning");
+
+    write_probe.release();
+    drop(input);
+    drop(owner);
+    drop(driver);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("physical pump cleanup completes after release"),
+        CustodianState::Joined
+    );
+    timeout(TEST_TIMEOUT, async {
+        while !index.join_cleanup_finished_for_test(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("endpoint cleanup task finishes its first prune attempt");
+    assert!(index.acknowledge_driver_for_test(&connection, active_id));
+    assert!(index.acknowledge_driver_for_test(&connection, queued_id));
+    for ticket in late_tickets {
+        assert!(index.acknowledge_driver_for_test(&connection, ticket.id()));
+    }
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("joined and acknowledged owner record prunes");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graceful_output_close_starts_driver_deadline_without_peer_reply() {
+    let retirement_deadline = Duration::from_millis(400);
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("app cleanup inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerDriverRoute {
+        lifecycle: NodeLifecycle::new(),
+        identity: None,
+        inventory: inventory.clone(),
+        index: index.clone(),
+        retirement_deadline,
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner-driver", get(actor_owner_driver_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner-driver", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (connection, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (owner, input, mut output) = started.expect("endpoint owner starts");
+    let driver = owner
+        .attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("driver attaches to exact endpoint");
+    let observer = inventory.observe(&connection).expect("physical observer");
+    let gate = ConnectionActorDriverTestGate::default();
+    let active = driver
+        .submit_paused(&gate)
+        .expect("active handler admitted");
+    timeout(TEST_TIMEOUT, gate.wait_until_entered())
+        .await
+        .expect("driver handler is stalled");
+
+    let close = tokio::spawn(async move { output.close().await });
+    let stopped_at = timeout(TEST_TIMEOUT, driver.wait_stopped())
+        .await
+        .expect("graceful close synchronously seals driver admission");
+    assert!(driver.submit_immediate().is_err());
+
+    assert_eq!(
+        timeout(
+            retirement_deadline + Duration::from_millis(250),
+            active.wait()
+        )
+        .await
+        .expect("driver uses the grace from graceful-close initiation"),
+        ConnectionActorDriverTestSnapshot::CompletionUnknown(
+            ConnectionActorDriverTestUnknownReason::WorkerAborted
+        )
+    );
+    assert!(
+        stopped_at.elapsed() < retirement_deadline + Duration::from_millis(250),
+        "physical retirement must not add a second driver grace"
+    );
+    drop(_peer);
+    drop(input);
+    drop(owner);
+    drop(driver);
+    let _ = timeout(TEST_TIMEOUT, close).await;
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("physical pumps join after peer release"),
+        CustodianState::Joined
+    );
+    timeout(TEST_TIMEOUT, async {
+        while !index.join_cleanup_finished_for_test(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("endpoint cleanup finishes its prune attempt");
+    assert!(index.acknowledge_driver_for_test(&connection, active.id()));
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("settled endpoint record is pruned");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identity_only_revocation_arms_driver_deadline_while_lifecycle_serves() {
+    let retirement_deadline = Duration::from_millis(160);
+    let lifecycle = NodeLifecycle::new();
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("actor-custody-test", "epoch-a"));
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("app cleanup inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerDriverRoute {
+        lifecycle: lifecycle.clone(),
+        identity: Some(identity.clone()),
+        inventory: inventory.clone(),
+        index: index.clone(),
+        retirement_deadline,
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner-driver", get(actor_owner_driver_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner-driver", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (connection, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (owner, input, output) = started.expect("endpoint owner starts");
+    let driver = owner
+        .attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("driver attaches to exact endpoint");
+    let observer = inventory.observe(&connection).expect("physical observer");
+    let gate = ConnectionActorDriverTestGate::default();
+    let active = driver
+        .submit_paused(&gate)
+        .expect("active handler admitted");
+    let queued = driver
+        .submit_immediate()
+        .expect("queued operation admitted");
+    timeout(TEST_TIMEOUT, gate.wait_until_entered())
+        .await
+        .expect("driver handler is stalled");
+
+    identity
+        .rotate(NodeIdentity::new("actor-custody-test", "epoch-b"))
+        .await;
+    assert!(
+        lifecycle.is_ready(),
+        "only the identity revision was revoked"
+    );
+    assert!(
+        driver.submit_immediate().is_err(),
+        "stale permit rejects admission"
+    );
+    assert_eq!(
+        timeout(
+            retirement_deadline + Duration::from_millis(120),
+            active.wait()
+        )
+        .await
+        .expect("authority watcher starts the one configured grace"),
+        ConnectionActorDriverTestSnapshot::CompletionUnknown(
+            ConnectionActorDriverTestUnknownReason::WorkerAborted
+        )
+    );
+    timeout(TEST_TIMEOUT, driver.wait_joined())
+        .await
+        .expect("deadline abort is joined by the independent driver supervisor");
+    assert_eq!(
+        queued.snapshot(),
+        ConnectionActorDriverTestSnapshot::NotStarted
+    );
+    owner.request_stop(StopReason::LeaseLost);
+    drop(input);
+    drop(output);
+    drop(owner);
+    drop(driver);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("physical pumps join after explicit owner stop"),
+        CustodianState::Joined
+    );
+    timeout(TEST_TIMEOUT, async {
+        while !index.join_cleanup_finished_for_test(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("endpoint cleanup finishes its prune attempt");
+    assert!(index.acknowledge_driver_for_test(&connection, active.id()));
+    assert!(index.acknowledge_driver_for_test(&connection, queued.id()));
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revoked operation settlement releases the joined record");
+    drop(_peer);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn app_cleanup_deadline_retains_unknown_active_and_not_started_queued() {
+    let inventory = IoCustodianInventory::new(1).expect("physical inventory");
+    let index = ActorEndpointCleanupIndex::new(1).expect("app cleanup inventory");
+    let (started, mut ready) = mpsc::channel(1);
+    let route = Arc::new(ActorOwnerDriverRoute {
+        lifecycle: NodeLifecycle::new(),
+        identity: None,
+        inventory: inventory.clone(),
+        index: index.clone(),
+        retirement_deadline: Duration::from_millis(25),
+        write_probe: None,
+        started,
+    });
+    let app = Router::new()
+        .route("/actor-owner-driver", get(actor_owner_driver_route))
+        .with_state(route);
+    let (server_socket, client_socket) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(ActorOwnerDuplexListener(Some(server_socket)), app).await;
+    });
+    let (_peer, _) =
+        tokio_tungstenite::client_async("ws://localhost/actor-owner-driver", client_socket)
+            .await
+            .expect("real WebSocket upgrade");
+    let (connection, started) = timeout(TEST_TIMEOUT, ready.recv())
+        .await
+        .expect("owner start deadline")
+        .expect("owner event");
+    let (owner, input, output) = started.expect("endpoint owner starts");
+    let driver = owner
+        .attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("driver attaches to exact endpoint");
+    let observer = inventory.observe(&connection).expect("physical observer");
+
+    let gate = ConnectionActorDriverTestGate::default();
+    let active = driver
+        .submit_paused(&gate)
+        .expect("active operation accepted");
+    let queued = driver
+        .submit_immediate()
+        .expect("queued operation accepted");
+    let active_id = active.id();
+    let queued_id = queued.id();
+    timeout(TEST_TIMEOUT, gate.wait_until_entered())
+        .await
+        .expect("active handler stalls");
+    drop(active);
+    drop(queued);
+    drop(driver);
+
+    owner.request_stop(StopReason::ShutdownDeadline);
+    drop(input);
+    drop(output);
+    drop(owner);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("physical pumps join"),
+        CustodianState::Joined
+    );
+
+    let active = index
+        .lookup_driver_for_test(&connection, active_id)
+        .expect("active operation remains in app custody");
+    let queued = index
+        .lookup_driver_for_test(&connection, queued_id)
+        .expect("queued operation remains in app custody");
+    timeout(TEST_TIMEOUT, active.wait())
+        .await
+        .expect("driver deadline abort completes its cleanup record");
+    timeout(TEST_TIMEOUT, queued.wait())
+        .await
+        .expect("queued classification completes with the worker join");
+    assert_eq!(
+        active.snapshot(),
+        ConnectionActorDriverTestSnapshot::CompletionUnknown(
+            ConnectionActorDriverTestUnknownReason::WorkerAborted
+        )
+    );
+    assert!(active.retains_input());
+    assert_eq!(
+        queued.snapshot(),
+        ConnectionActorDriverTestSnapshot::NotStarted
+    );
+    assert!(index.acknowledge_driver_for_test(&connection, active_id));
+    assert!(index.acknowledge_driver_for_test(&connection, queued_id));
+    timeout(TEST_TIMEOUT, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("explicitly settled driver custody releases joined record");
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

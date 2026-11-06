@@ -34,6 +34,11 @@ pub mod actor_local_endpoint {
         ActorEndpointCleanupIndex, ActorLocalEndpointError, ActorLocalEndpointOwner,
         ActorLocalPublishError, ActorLocalWriteError, ActorPublicationProbe,
     };
+    pub use crate::server::routes::websocket::{
+        ConnectionActorDriverTestAdmissionError, ConnectionActorDriverTestGate,
+        ConnectionActorDriverTestHandle, ConnectionActorDriverTestSnapshot,
+        ConnectionActorDriverTestTicket, ConnectionActorDriverTestUnknownReason,
+    };
 }
 #[cfg(feature = "test-support")]
 pub mod connection_actor {

@@ -157,6 +157,9 @@ pub struct StopSignal {
 struct StopSignalState {
     reason: Option<StopReason>,
     listener: Option<Arc<dyn Fn(StopReason) + Send + Sync>>,
+    retirement_started: bool,
+    retirement_reason: Option<StopReason>,
+    retirement_listener: Option<Arc<dyn Fn(StopReason) + Send + Sync>>,
 }
 
 impl StopSignal {
@@ -166,6 +169,9 @@ impl StopSignal {
             state: Arc::new(Mutex::new(StopSignalState {
                 reason: None,
                 listener: None,
+                retirement_started: false,
+                retirement_reason: None,
+                retirement_listener: None,
             })),
         }
     }
@@ -181,6 +187,7 @@ impl StopSignal {
             Err(poisoned) => poisoned.into_inner(),
         };
         if state.reason.is_none() {
+            Self::begin_retirement_locked(&mut state, reason);
             if let Some(listener) = &state.listener {
                 // The listener is a synchronous lifecycle authority. It runs
                 // before cancellation becomes observable so protocol
@@ -198,6 +205,28 @@ impl StopSignal {
         }
         drop(state);
         self.token.cancel();
+    }
+
+    fn begin_retirement(&self, reason: StopReason) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Self::begin_retirement_locked(&mut state, reason);
+    }
+
+    fn begin_retirement_locked(state: &mut StopSignalState, reason: StopReason) {
+        if state.retirement_started {
+            return;
+        }
+        state.retirement_started = true;
+        state.retirement_reason = Some(reason);
+        if let Some(listener) = &state.retirement_listener {
+            // This callback is the synchronous owner-side retirement fence.
+            // It runs before the pump stop or graceful-shutdown signal becomes
+            // observable and must not call back into this StopSignal.
+            listener(reason);
+        }
     }
 
     /// Run the synchronous sink enqueue only if no stop has won the state
@@ -226,6 +255,17 @@ impl StopSignal {
         state.listener = Some(Arc::clone(&listener));
         if let Some(reason) = state.reason {
             listener(reason);
+        }
+    }
+
+    fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.retirement_listener = Some(Arc::clone(&listener));
+        if state.retirement_started {
+            listener(state.retirement_reason.unwrap_or(StopReason::Requested));
         }
     }
 
@@ -1572,8 +1612,7 @@ impl IoCustodianHandle {
     }
 
     /// Clone the exact physical connection's first-wins stop signal for
-    /// independently owned test-support tasks.
-    #[cfg(feature = "test-support")]
+    /// independently owned cleanup tasks.
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
     }
@@ -1631,6 +1670,7 @@ impl IoCustodianHandle {
         };
         *admission_open = false;
         drop(admission_open);
+        self.client.stop.begin_retirement(StopReason::Requested);
         self.client.shutdown.cancel();
     }
 
@@ -1662,6 +1702,12 @@ impl IoCustodianHandle {
     #[cfg(feature = "test-support")]
     pub(crate) fn set_stop_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_listener(listener);
+    }
+
+    /// Install the app-owned retirement fence. It runs once, synchronously,
+    /// before either pump-stop cancellation or graceful shutdown is visible.
+    pub(crate) fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
+        self.client.stop.set_retirement_listener(listener);
     }
 
     /// Create an observation-only handle that can outlive this controller.

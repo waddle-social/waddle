@@ -4,6 +4,14 @@
 //! index retains accepted envelopes after the actor or startup caller exits
 //! and until both physical pumps join and a terminal owner settles them.
 
+use super::connection_actor_driver_task::{
+    ConnectionActorDriverTask, ConnectionActorDriverTaskAckError, ConnectionActorDriverTaskCleanup,
+    ConnectionActorDriverTicket,
+};
+#[cfg(feature = "test-support")]
+use super::connection_actor_driver_task::{
+    ConnectionActorDriverTestHandle, ConnectionActorDriverTestTicket,
+};
 use super::supervised_io::{CustodianState, IoCustodianHandle, StopReason, TransportLimits};
 use crate::websocket_transport::{
     ActorSocketPublicationAuthority, OutputError, SocketAdmission, SocketAdmissionError,
@@ -20,6 +28,7 @@ use std::collections::HashMap;
 #[cfg(feature = "test-support")]
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+#[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,6 +56,14 @@ pub enum ActorLocalEndpointError {
     InvalidBounds,
     #[error("the prior binding still owns an active endpoint or retained work")]
     PriorBindingActive,
+    #[error("a driver task is already attached to this connection")]
+    DriverAlreadyAttached,
+    #[error("endpoint cleanup has started and cannot accept a driver task")]
+    DriverCleanupStarted,
+    #[error("driver task belongs to a different physical connection")]
+    DriverConnectionMismatch,
+    #[error("the connection driver task could not be started")]
+    DriverTaskUnavailable,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,11 +102,26 @@ pub enum ActorLocalWriteError {
 
 struct CleanupRecord {
     custodian: IoCustodianHandle,
+    driver_shutdown_grace: Duration,
     custodies: Mutex<Vec<Arc<ActorOutboundCustody>>>,
     publications: Mutex<PublicationState>,
-    joined: AtomicBool,
+    lifecycle: Mutex<CleanupLifecycle>,
+    #[cfg(feature = "test-support")]
+    join_cleanup_finished: AtomicBool,
     #[cfg(feature = "test-support")]
     publication_probe: Mutex<Option<Arc<ActorPublicationProbe>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupPhase {
+    Accepting,
+    Stopping,
+    Joined,
+}
+
+struct CleanupLifecycle {
+    phase: CleanupPhase,
+    driver: Option<ConnectionActorDriverTaskCleanup>,
 }
 
 /// Test-only pause after the UserActor mirror accepts a provisional candidate
@@ -268,6 +300,88 @@ impl CleanupRecord {
             .iter()
             .any(|current| Arc::ptr_eq(current, candidate))
     }
+
+    fn attach_driver(
+        &self,
+        connection: &ConnectionRef,
+        driver: ConnectionActorDriverTaskCleanup,
+        settlement_callback: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), ActorLocalEndpointError> {
+        if driver.connection_ref() != connection {
+            return Err(ActorLocalEndpointError::DriverConnectionMismatch);
+        }
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if lifecycle.phase != CleanupPhase::Accepting {
+            return Err(ActorLocalEndpointError::DriverCleanupStarted);
+        }
+        if lifecycle.driver.is_some() {
+            return Err(ActorLocalEndpointError::DriverAlreadyAttached);
+        }
+        driver.set_settlement_callback(settlement_callback);
+        driver.arm_shutdown_deadline(self.driver_shutdown_grace);
+        lifecycle.driver = Some(driver);
+        Ok(())
+    }
+
+    /// Atomically prevent late attachment and hand stop to the attached task.
+    fn begin_shutdown(&self, reason: StopReason) -> Option<ConnectionActorDriverTaskCleanup> {
+        let driver = {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+            if lifecycle.phase == CleanupPhase::Accepting {
+                lifecycle.phase = CleanupPhase::Stopping;
+            }
+            lifecycle.driver.clone()
+        };
+        if let Some(driver) = &driver {
+            driver.request_stop(reason);
+            driver.arm_shutdown_deadline(self.driver_shutdown_grace);
+        }
+        driver
+    }
+
+    fn driver(&self) -> Option<ConnectionActorDriverTaskCleanup> {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .driver
+            .clone()
+    }
+
+    fn mark_joined(&self, pumps_joined: bool, driver_joined: bool) {
+        if !pumps_joined || !driver_joined {
+            return;
+        }
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if lifecycle.phase == CleanupPhase::Stopping
+            && lifecycle
+                .driver
+                .as_ref()
+                .is_none_or(ConnectionActorDriverTaskCleanup::is_joined)
+        {
+            lifecycle.phase = CleanupPhase::Joined;
+        }
+    }
+
+    fn is_joined(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .phase
+            == CleanupPhase::Joined
+    }
+
+    fn driver_is_settled(&self) -> bool {
+        self.driver().is_none_or(|driver| driver.is_settled())
+    }
 }
 
 struct CleanupIndexState {
@@ -299,6 +413,7 @@ impl ActorEndpointCleanupIndex {
         &self,
         connection: ConnectionRef,
         custodian: IoCustodianHandle,
+        driver_shutdown_grace: Duration,
     ) -> Result<Arc<CleanupRecord>, ActorLocalEndpointError> {
         let mut index = self
             .state
@@ -309,12 +424,18 @@ impl ActorEndpointCleanupIndex {
         }
         let record = Arc::new(CleanupRecord {
             custodian,
+            driver_shutdown_grace,
             custodies: Mutex::new(Vec::new()),
             publications: Mutex::new(PublicationState {
                 stopped: false,
                 tickets: Vec::new(),
             }),
-            joined: AtomicBool::new(false),
+            lifecycle: Mutex::new(CleanupLifecycle {
+                phase: CleanupPhase::Accepting,
+                driver: None,
+            }),
+            #[cfg(feature = "test-support")]
+            join_cleanup_finished: AtomicBool::new(false),
             #[cfg(feature = "test-support")]
             publication_probe: Mutex::new(None),
         });
@@ -330,6 +451,74 @@ impl ActorEndpointCleanupIndex {
             .contains_key(connection)
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn join_cleanup_finished_for_test(&self, connection: &ConnectionRef) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .records
+            .get(connection)
+            .is_some_and(|record| record.join_cleanup_finished.load(Ordering::Acquire))
+    }
+
+    /// Resolve a retained driver operation only through the exact physical
+    /// connection record. The index does not create a second operation map.
+    pub(super) fn lookup_driver(
+        &self,
+        connection: &ConnectionRef,
+        id: u64,
+    ) -> Option<ConnectionActorDriverTicket> {
+        let record = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .records
+            .get(connection)?
+            .clone();
+        record.driver()?.lookup(connection, id)
+    }
+
+    /// Acknowledge a terminal driver result through its app-owned connection
+    /// record, then release the record if all actor and pump custody settled.
+    pub(super) fn acknowledge_driver(
+        &self,
+        connection: &ConnectionRef,
+        id: u64,
+    ) -> Result<(), ConnectionActorDriverTaskAckError> {
+        let record = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .records
+            .get(connection)
+            .cloned()
+            .ok_or(ConnectionActorDriverTaskAckError::WrongOwner)?;
+        let driver = record
+            .driver()
+            .ok_or(ConnectionActorDriverTaskAckError::WrongOwner)?;
+        let ticket = driver
+            .lookup(connection, id)
+            .ok_or(ConnectionActorDriverTaskAckError::AlreadyAcknowledged)?;
+        ticket.acknowledge()?;
+        self.prune_if_settled(connection);
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn lookup_driver_for_test(
+        &self,
+        connection: &ConnectionRef,
+        id: u64,
+    ) -> Option<ConnectionActorDriverTestTicket> {
+        self.lookup_driver(connection, id)
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn acknowledge_driver_for_test(&self, connection: &ConnectionRef, id: u64) -> bool {
+        self.acknowledge_driver(connection, id).is_ok()
+    }
+
     /// An attempt still running or unjoined pumps cannot be settled by this
     /// index. The caller decides retry, retention or durable compensation.
     pub fn take_joined_terminal(
@@ -341,7 +530,7 @@ impl ActorEndpointCleanupIndex {
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let record = index.records.get(id.connection())?.clone();
-        if !record.joined.load(Ordering::Acquire) {
+        if !record.is_joined() {
             return None;
         }
         let custodies = record
@@ -355,7 +544,7 @@ impl ActorEndpointCleanupIndex {
             .iter()
             .all(|custody| custody.retained_count() == 0);
         drop(custodies);
-        if empty && !record.has_publications() {
+        if empty && !record.has_publications() && record.driver_is_settled() {
             index.records.remove(id.connection());
         }
         result
@@ -372,7 +561,7 @@ impl ActorEndpointCleanupIndex {
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let record = index.records.get(connection)?.clone();
-        if !record.joined.load(Ordering::Acquire) {
+        if !record.is_joined() {
             return None;
         }
         let custodies = record
@@ -391,29 +580,33 @@ impl ActorEndpointCleanupIndex {
             .iter()
             .all(|custody| custody.retained_count() == 0);
         drop(custodies);
-        if empty && !record.has_publications() {
+        if empty && !record.has_publications() && record.driver_is_settled() {
             index.records.remove(connection);
         }
         Some(terminal)
     }
 
     fn prune_if_settled(&self, connection: &ConnectionRef) {
-        let mut index = self
-            .state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if let Some(record) = index.records.get(connection) {
-            let settled = record.joined.load(Ordering::Acquire)
-                && !record.has_publications()
-                && record
-                    .custodies
-                    .lock()
-                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-                    .iter()
-                    .all(|custody| custody.retained_count() == 0);
-            if settled {
-                index.records.remove(connection);
-            }
+        prune_cleanup_index_state(&self.state, connection);
+    }
+}
+
+fn prune_cleanup_index_state(state: &Mutex<CleanupIndexState>, connection: &ConnectionRef) {
+    let mut index = state
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+    if let Some(record) = index.records.get(connection) {
+        let settled = record.is_joined()
+            && !record.has_publications()
+            && record.driver_is_settled()
+            && record
+                .custodies
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+                .iter()
+                .all(|custody| custody.retained_count() == 0);
+        if settled {
+            index.records.remove(connection);
         }
     }
 }
@@ -465,27 +658,46 @@ impl ActorLocalEndpointOwner {
         let (custodian, input, output) = admission
             .start_socket(socket, limits, retirement_deadline)
             .await?;
-        let cleanup = match index.insert(connection.clone(), custodian.clone()) {
+        let cleanup = match index.insert(connection.clone(), custodian.clone(), retirement_deadline)
+        {
             Ok(cleanup) => cleanup,
             Err(error) => {
                 custodian.request_stop(StopReason::Requested);
                 return Err(error);
             }
         };
+        let stop_cleanup = Arc::downgrade(&cleanup);
+        cleanup
+            .custodian
+            .set_retirement_listener(Arc::new(move |reason| {
+                if let Some(cleanup) = stop_cleanup.upgrade() {
+                    cleanup.begin_shutdown(reason);
+                }
+            }));
+        let driver_shutdown_grace = retirement_deadline;
         let joined_cleanup = Arc::clone(&cleanup);
         let joined_index = index.clone();
         let joined_connection = connection.clone();
         tokio::spawn(async move {
             let state: CustodianState = joined_cleanup.custodian.wait_until_joined().await;
+            let driver = joined_cleanup.begin_shutdown(StopReason::Requested);
             joined_cleanup.stop_publication();
             joined_cleanup.seal_all();
-            joined_cleanup
-                .joined
-                .store(state == CustodianState::Joined, Ordering::Release);
+            let driver_joined = if let Some(driver) = driver {
+                driver.shutdown_and_join(driver_shutdown_grace).await;
+                driver.is_joined()
+            } else {
+                true
+            };
+            joined_cleanup.mark_joined(state == CustodianState::Joined, driver_joined);
             joined_cleanup
                 .retire_publications(retirement_deadline)
                 .await;
             joined_index.prune_if_settled(&joined_connection);
+            #[cfg(feature = "test-support")]
+            joined_cleanup
+                .join_cleanup_finished
+                .store(true, Ordering::Release);
         });
         Ok((
             Self {
@@ -502,6 +714,53 @@ impl ActorLocalEndpointOwner {
 
     pub fn connection_ref(&self) -> &ConnectionRef {
         self.authority.connection_ref()
+    }
+
+    /// Attach the one dormant actor driver to this physical endpoint's
+    /// existing cleanup record. The supplied state must carry this exact
+    /// transport identity; task and I/O custody remain under one index entry.
+    pub(super) fn attach_driver_task(
+        &self,
+        state: super::state::WsConnState,
+        websocket: Arc<super::WebSocketState>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Result<ConnectionActorDriverTask, ActorLocalEndpointError> {
+        if state.connection_ref != *self.connection_ref() {
+            return Err(ActorLocalEndpointError::DriverConnectionMismatch);
+        }
+        let mut task = ConnectionActorDriverTask::spawn(
+            state,
+            websocket,
+            self.authority.admission_permit(),
+            shutdown,
+        )
+        .map_err(|_| ActorLocalEndpointError::DriverTaskUnavailable)?;
+        let index_state = Arc::downgrade(&self.index.state);
+        let connection = self.connection_ref().clone();
+        let settlement_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(index_state) = index_state.upgrade() {
+                prune_cleanup_index_state(&index_state, &connection);
+            }
+        });
+        self.cleanup.attach_driver(
+            self.connection_ref(),
+            task.cleanup_handle(),
+            settlement_callback,
+        )?;
+        task.mark_app_owned();
+        Ok(task)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn attach_driver_task_for_test(
+        &self,
+        websocket: Arc<super::WebSocketState>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Result<ConnectionActorDriverTestHandle, ActorLocalEndpointError> {
+        let state =
+            super::state::WsConnState::new_for_connection_ref(self.connection_ref().clone());
+        self.attach_driver_task(state, websocket, shutdown)
+            .map(ConnectionActorDriverTestHandle::from_attached)
     }
 
     /// A detached startup task owns the whole registry→mirror→activation
@@ -601,6 +860,7 @@ impl ActorLocalEndpointOwner {
     pub fn request_stop(&self, reason: StopReason) {
         self.cleanup.stop_publication();
         self.cleanup.seal_all();
+        self.cleanup.begin_shutdown(reason);
         self.cleanup.custodian.request_stop(reason);
     }
 
