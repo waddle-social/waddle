@@ -40,6 +40,10 @@ CREATE TABLE __SCHEMA__.sm_custody_terminals (
     operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
     disposition INTEGER NOT NULL CHECK (disposition IN (1, 2))
 );
+-- Source completion is transfer to candidate custody, never transport or ACK.
+CREATE TABLE __SCHEMA__.sm_custody_handoffs (
+    operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_slots (operation_id)
+);
 -- A transfer is independent of the canonical row and includes its full payload.
 CREATE TABLE __SCHEMA__.sm_custody_transfers (
     operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
@@ -56,6 +60,8 @@ CREATE TRIGGER sm_custody_slots_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_slots FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE TRIGGER sm_custody_terminals_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_terminals FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE TRIGGER sm_custody_handoffs_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_handoffs FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE TRIGGER sm_custody_transfers_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_transfers FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE FUNCTION __SCHEMA__.sm_custody_gate_guard() RETURNS trigger

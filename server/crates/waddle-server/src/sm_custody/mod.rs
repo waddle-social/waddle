@@ -5,11 +5,16 @@
 //! Operations retain full payloads independently of the bounded replay cache.
 
 mod admission;
+mod handoff;
 mod repository;
 mod schema;
 mod settlement;
 mod types;
 
+pub use handoff::{
+    CandidateHydration, CandidateSmMemory, CommittedPreacceptHandoff, HandoffFailure,
+    HandoffRecovery, HandoffStage,
+};
 pub use repository::SmCustodyRepository;
 pub use schema::candidate_postgres_ddl;
 pub use types::{

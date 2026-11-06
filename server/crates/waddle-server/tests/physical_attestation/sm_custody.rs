@@ -47,8 +47,15 @@ struct Candidate {
     lease: SendLease,
 }
 
+#[path = "preaccept_handoff.rs"]
+mod preaccept_handoff;
+
 impl Candidate {
     async fn new() -> Self {
+        Self::with_prepared(true).await
+    }
+
+    async fn with_prepared(prepared: bool) -> Self {
         // Unlike the older optional fixtures, this suite cannot silently skip.
         let url = std::env::var("WADDLE_TEST_POSTGRES_URL")
             .expect("SM custody requires WADDLE_TEST_POSTGRES_URL and PostgreSQL 17");
@@ -88,6 +95,7 @@ impl Candidate {
             "sm_custody_slots",
             "sm_custody_terminals",
             "sm_custody_transfers",
+            "sm_custody_handoffs",
         ] {
             sqlx::query(&format!(
                 "GRANT SELECT, INSERT, UPDATE ON {}.{table} TO {}",
@@ -118,7 +126,23 @@ impl Candidate {
         sqlx::query(&format!("INSERT INTO {q}.sessions (id,user_jid,token_hash,auth_context_id,auth_context_version,principal_auth_epoch,created_at,last_used_at) VALUES ('custody',$1,'custody-token',$2,3,5,$3,$3)"))
             .bind(principal.bare_jid().to_string()).bind(principal.auth_context_id().as_uuid().to_string())
             .bind(now().to_rfc3339()).execute(&fixture.admin).await.expect("principal");
-        let (pin, envelope, intent) = direct_pin(Uuid::new_v4(), "bob@example.test/laptop");
+        let (pin, envelope, mut intent) = direct_pin(Uuid::new_v4(), "bob@example.test/laptop");
+        if !prepared {
+            let mut decoded = waddle_xmpp::ingress::IngressEffectIntent::decode_v1(
+                pin.key.kind.to_storage(),
+                &intent,
+            )
+            .expect("direct intent");
+            let waddle_xmpp::ingress::IngressEffectIntent::RouteDirect { prepared, .. } =
+                &mut decoded
+            else {
+                panic!("direct fixture")
+            };
+            *prepared = None;
+            intent = decoded
+                .with_encoded_v1(|_, bytes| bytes.to_vec())
+                .expect("unprepared intent");
+        }
         seed_pg_direct(&fixture, &pin, envelope, intent).await;
         let mut admission = request(pin);
         let lease = pg_attempt(&fixture, &config, &mut admission).await;
@@ -618,11 +642,7 @@ fn uuid_field(input: &serde_json::Value, key: &str) -> Uuid {
     text_field(input, key).parse().expect("child UUID")
 }
 
-/// Native subprocess entry, invoked only by the parent concurrency test. An
-/// ordinary test run ignores this helper rather than silently skipping PG work.
-#[tokio::test]
-#[ignore = "native subprocess entry for postgres_sm_custody_delayed_commit_survives_origin_death"]
-async fn sm_custody_process_child() {
+async fn child_repository() -> (SmCustodyRepository, Uuid) {
     let input: serde_json::Value = serde_json::from_str(
         &std::env::var("WADDLE_SM_CUSTODY_CHILD").expect("parent descriptor required"),
     )
@@ -679,8 +699,16 @@ async fn sm_custody_process_child() {
         CustodyLimits::new(16, 65536).expect("limits"),
     )
     .expect("repository");
+    (repo, uuid_field(&input, "operation"))
+}
+
+/// Native subprocess entry, explicitly invoked by the parent concurrency case.
+#[tokio::test]
+#[ignore = "native subprocess entry for postgres_sm_custody_delayed_commit_survives_origin_death"]
+async fn sm_custody_process_child() {
+    let (repo, operation) = child_repository().await;
     let admission = repo
-        .committed_admission(uuid_field(&input, "operation"))
+        .committed_admission(operation)
         .await
         .expect("positive readback");
     repo.bind(&admission).await.expect("child durable bind");
