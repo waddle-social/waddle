@@ -320,8 +320,9 @@ impl SmCustodyRepository {
         Ok(CustodyInventoryPage { operations, next })
     }
 
-    /// Bounded read-only inventory of pending bound slots. Gaps stay visible
-    /// through their original ordinals; no new attempt or send authority exists.
+    /// Bounded read-only inventory of pending slots with committed source
+    /// handoff. Gaps stay visible through their original ordinals; no new
+    /// attempt or send authority exists.
     pub async fn replay_inventory(
         &self,
         sealed: &SealedSession,
@@ -335,7 +336,7 @@ impl SmCustodyRepository {
             .map_err(|_| CustodyError::Rejected)?
             .unwrap_or(0);
         let mut tx = self.recovery_guard(authority, true).await?;
-        let rows = sqlx::query(&format!("{} WHERE o.gate_id = $1 AND s.ordinal > $2 AND t.operation_id IS NULL ORDER BY s.ordinal LIMIT 17", operation_select(&self.schema)))
+        let rows = sqlx::query(&format!("{} WHERE o.gate_id = $1 AND s.ordinal > $2 AND t.operation_id IS NULL AND EXISTS (SELECT 1 FROM {}.sm_custody_handoffs h WHERE h.operation_id = o.operation_id) ORDER BY s.ordinal LIMIT 17", operation_select(&self.schema), self.schema))
             .bind(self.capture.gate_id).bind(after).fetch_all(pg(&mut tx)?).await.map_err(db)?;
         let mut operations = rows
             .into_iter()

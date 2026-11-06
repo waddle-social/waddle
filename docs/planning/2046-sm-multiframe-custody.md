@@ -23,9 +23,10 @@ first transfer seals it atomically and leaves remaining custody discoverable.
 
 Sealed inventory lists bound operations by ordinal followed by unbound ones,
 with at most 16 returned rows per page. Replay inventory includes pending bound
-operations in ordinal order, preserving gaps and the original operation,
-payload, timestamp, and resource. Neither inventory allocates a send attempt or
-grants permission to replay on a transport. Immutable admissions stay charged
+operations only after their source handoff marker commits, in ordinal order,
+preserving gaps and the original operation, payload, timestamp, and resource.
+Incomplete source handoffs remain visible in general recovery inventory. Neither
+inventory allocates a send attempt or grants permission to replay on a transport. Immutable admissions stay charged
 even after terminal settlement; an exact-copy constraint bounds all transfer
 payloads by the retained admission total.
 

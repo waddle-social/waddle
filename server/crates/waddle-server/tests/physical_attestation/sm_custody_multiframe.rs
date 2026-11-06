@@ -348,8 +348,23 @@ async fn postgres_multiframe_sealed_multipage_successor_recovery_and_replay() {
     for (frame, lease) in &frames {
         let admission = repo.admit(frame, lease).await.expect("admit");
         repo.bind(&admission).await.expect("bind");
+        repo.resume_preaccept(frame.operation_id)
+            .await
+            .expect("source handoff marker");
         admissions.push(admission);
     }
+    let incomplete = source(&c, "bound but source not handed off").await;
+    let incomplete_admission = repo
+        .admit(&incomplete.0, &incomplete.1)
+        .await
+        .expect("incomplete admission");
+    assert_eq!(
+        repo.bind(&incomplete_admission)
+            .await
+            .expect("incomplete slot")
+            .ordinal(),
+        20
+    );
     let unbound = source(&c, "unbound").await;
     repo.admit(&unbound.0, &unbound.1)
         .await
@@ -401,7 +416,7 @@ async fn postgres_multiframe_sealed_multipage_successor_recovery_and_replay() {
         .inventory(&seal, &authority, page1.next)
         .await
         .expect("page two");
-    assert_eq!(page2.operations.len(), 4);
+    assert_eq!(page2.operations.len(), 5);
     assert!(page2.next.is_none());
     let inventory: Vec<_> = page1
         .operations
@@ -416,6 +431,8 @@ async fn postgres_multiframe_sealed_multipage_successor_recovery_and_replay() {
         );
     }
     assert_eq!(inventory[1].terminal(), Some(CustodyTerminal::Transfer));
+    assert_eq!(inventory[19].frame(), &incomplete.0);
+    assert_eq!(inventory[19].slot().expect("incomplete slot").ordinal(), 20);
     assert_eq!(inventory.last().expect("unbound").frame(), &unbound.0);
     let replay1 = successor
         .replay_inventory(&seal, &authority, None)
@@ -430,6 +447,14 @@ async fn postgres_multiframe_sealed_multipage_successor_recovery_and_replay() {
         .expect("replay page two");
     assert_eq!(replay2.operations.len(), 2);
     assert!(replay2.next.is_none());
+    assert!(
+        replay1
+            .operations
+            .iter()
+            .chain(replay2.operations.iter())
+            .all(|operation| operation.frame().operation_id != incomplete.0.operation_id),
+        "a bound slot without a committed source handoff is not replayable"
+    );
     let saved = successor
         .reconcile(&seal, &authority, frames[0].0.operation_id)
         .await
