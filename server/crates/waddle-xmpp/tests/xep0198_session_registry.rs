@@ -2899,6 +2899,7 @@ async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
             &chat_stanza(&resource, "once"),
             chrono::Utc::now(),
             key.clone(),
+            Default::default(),
         )
         .await
         .expect("first drain record");
@@ -2916,6 +2917,7 @@ async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
             &chat_stanza(&resource, "once"),
             chrono::Utc::now(),
             key,
+            Default::default(),
         )
         .await
         .expect("duplicate drain record");

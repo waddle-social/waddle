@@ -120,6 +120,7 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
                 &queued.stanza,
                 obligation.received_at.expect("canonical receive time"),
                 obligation.key.clone(),
+                Default::default(),
             )
             .await
             .expect("durable local append");

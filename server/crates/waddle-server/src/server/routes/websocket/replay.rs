@@ -515,7 +515,10 @@ async fn record_drained_xml(
                 next_sequence,
                 &stanza,
                 original_receipt_at,
-                key,
+                super::drain_append::DrainedAppendIdentity {
+                    key,
+                    provenance: &provenance,
+                },
                 drained_appends,
             )
             .await

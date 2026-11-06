@@ -10,7 +10,8 @@ use super::{warn, Stanza, StreamManagementState, WebSocketState};
 use crate::ingress::append_authority::AppendAuthorityRejection;
 use crate::ingress::identity::IngressAppendObligationRef;
 use waddle_xmpp::stream_management::{
-    SmDrainedAppendTicket, SmIngressAppendKey, SmKeyedAppendOutcome, SmRelayedAppendObligation,
+    SmDrainedAppendTicket, SmFrameProvenance, SmIngressAppendKey, SmKeyedAppendOutcome,
+    SmRelayedAppendObligation,
 };
 
 /// Canonical-read health across one drain.
@@ -245,15 +246,22 @@ pub(super) enum Claim {
     Unkeyed,
 }
 
+/// A ledger key and the independently chosen classification of this frame.
+pub(super) struct DrainedAppendIdentity<'a> {
+    pub(super) key: SmIngressAppendKey,
+    pub(super) provenance: &'a SmFrameProvenance,
+}
+
 pub(super) async fn claim(
     state: &WebSocketState,
     detached_stream_id: Option<&str>,
     sequence: u32,
     stanza: &Stanza,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
-    key: SmIngressAppendKey,
+    identity: DrainedAppendIdentity<'_>,
     drained_appends: &[DrainedAppend],
 ) -> Claim {
+    let DrainedAppendIdentity { key, provenance } = identity;
     let registry = &state.deps.protocol.sm_session_registry;
     let Some(stream_id) = detached_stream_id else {
         // A re-execution can queue the same obligation twice before the detach;
@@ -280,6 +288,7 @@ pub(super) async fn claim(
             stanza,
             original_receipt_at,
             key,
+            provenance.clone(),
         )
         .await
     {

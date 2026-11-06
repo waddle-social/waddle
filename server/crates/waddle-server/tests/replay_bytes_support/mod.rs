@@ -149,6 +149,7 @@ impl ReplayBytesFixture {
                         stanza,
                         self.receipt,
                         key.clone(),
+                        Default::default(),
                     )
                     .await
                     .expect("append production payload"),
@@ -176,6 +177,7 @@ impl ReplayBytesFixture {
                         stanza,
                         self.receipt + chrono::Duration::hours(1),
                         key.clone(),
+                        Default::default(),
                     )
                     .await
                     .expect("retry committed append"),

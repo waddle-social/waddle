@@ -795,6 +795,67 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     let registry = InMemorySmSessionRegistry::new()
         .with_persistence(storage.clone())
         .with_claim_store(claims.clone(), identity.clone());
+    // Exercise a fenced incremental write and reload in this fixture's
+    // isolated PostgreSQL schema before the expiry/promotion scenario.
+    let incremental_stream = SmSessionId::new("fenced-provenance-incremental");
+    let mut incremental = recorded_resume_session(incremental_stream.as_str(), 300);
+    incremental.jid = "alice@example.com/incremental".parse().unwrap();
+    registry
+        .store_session(incremental)
+        .await
+        .expect("incremental source");
+    let incremental_fence = registry
+        .current_sm_claim_fence(incremental_stream.as_str())
+        .expect("incremental source fence");
+    let mut header = storage
+        .get_session(&incremental_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut entry = storage
+        .list_unacked(&incremental_stream)
+        .await
+        .unwrap()
+        .remove(0);
+    entry.sequence = 3;
+    entry.provenance = waddle_xmpp::stream_management::SmFrameProvenance::ingress([
+        waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(1),
+            semantic_identity_hash: [5; 32],
+            resource: header.jid.clone(),
+        },
+    ]);
+    header.outbound_count = 3;
+    assert_eq!(
+        storage
+            .append_detached_stanza_atomic(
+                waddle_xmpp::stream_management::persistence::PersistedDetachedAppend {
+                    session: header,
+                    stanza: entry.clone(),
+                    evicted_sequences: Vec::new(),
+                    ingress_append: None,
+                    new_delivery: false,
+                },
+                Some(&incremental_fence),
+            )
+            .await
+            .unwrap(),
+        waddle_xmpp::stream_management::persistence::KeyedSnapshotOutcome::Committed
+    );
+    let loaded = storage.list_unacked(&incremental_stream).await.unwrap();
+    assert_eq!(loaded[2].provenance, entry.provenance);
+    let scans = storage.list_all_sessions_with_unacked().await.unwrap();
+    assert_eq!(
+        scans
+            .iter()
+            .find(|(session, _)| session.stream_id == incremental_stream)
+            .unwrap()
+            .1[2]
+            .provenance,
+        entry.provenance
+    );
+    storage.delete_session(&incremental_stream).await.unwrap();
     let stream = SmSessionId::new("fenced-expired-resume-completion");
     let mut source = recorded_resume_session(stream.as_str(), 1);
     let provenance = waddle_xmpp::stream_management::SmFrameProvenance::ingress([

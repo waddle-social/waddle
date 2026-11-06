@@ -1170,6 +1170,7 @@ async fn live_attempt_blocks_new_allocation_but_allows_accepted_frame_custody() 
             &stanza(),
             Utc::now(),
             key.clone(),
+            Default::default(),
         )
         .await
         .expect("accepted frame custody bypasses new delivery guard");

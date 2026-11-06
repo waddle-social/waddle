@@ -207,6 +207,7 @@ async fn assert_registry_append_recovers_detach_claim(keyed: bool, timeout_first
                     &entry.stanza,
                     receipt,
                     key.clone(),
+                    waddle_xmpp::stream_management::SmFrameProvenance::ingress([key.clone()]),
                 )
                 .await
                 .expect("keyed append recovers the initial durable claim"),
@@ -235,6 +236,15 @@ async fn assert_registry_append_recovers_detach_claim(keyed: bool, timeout_first
     assert_eq!(queue[0].sequence, 1);
     assert_eq!(queue[0].stanza.to_element(), entry.stanza.to_element());
     assert_eq!(queue[0].original_receipt_at, receipt);
+    assert_eq!(
+        queue[0].provenance,
+        if keyed {
+            waddle_xmpp::stream_management::SmFrameProvenance::ingress([key.clone()])
+        } else {
+            Default::default()
+        },
+        "fenced incremental persistence retains the caller's frame classification"
+    );
     let expected = SmClaimFence::new(f.identity.clone(), epoch);
     assert_eq!(
         registry.current_sm_claim_fence(stream.as_str()),
@@ -340,6 +350,7 @@ async fn assert_fenceless_append_cannot_recreate_or_adopt_source(keyed: bool) {
                         &entry.stanza,
                         Utc::now(),
                         key.clone(),
+                        Default::default(),
                     )
                     .await
                     .is_err(),

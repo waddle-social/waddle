@@ -441,13 +441,14 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
+        let provenance = super::super::SmFrameProvenance::ingress([key.clone()]);
         self.commit_keyed_detached_entry(
             stream_id,
             key,
             true,
             stanza,
             original_receipt_at,
-            move |session, provenance| {
+            move |session| {
                 Some(session.record_detached_outbound_with_provenance(
                     stanza,
                     original_receipt_at,
@@ -467,6 +468,8 @@ impl InMemorySmSessionRegistry {
     /// because nothing on the drain path reached a wire and the client's `h` can never
     /// include it. `NoSession` also covers a slot the session cannot take (already
     /// acknowledged or occupied); nothing was written and no proof exists.
+    /// The caller supplies the frame's classification separately: the ledger key
+    /// alone does not identify the output of a multi-frame recipient pass.
     pub async fn record_keyed_outbound_for_detached_stream_at(
         self: &Arc<Self>,
         stream_id: &str,
@@ -474,6 +477,7 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
         key: SmIngressAppendKey,
+        provenance: super::super::SmFrameProvenance,
     ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::SmKeyedAppendOutcome;
         match self.consult_ingress_append_ledger(&key).await? {
@@ -488,7 +492,7 @@ impl InMemorySmSessionRegistry {
             false,
             stanza,
             original_receipt_at,
-            move |session, provenance| {
+            move |session| {
                 session.record_detached_outbound_at_with_provenance(
                     sequence,
                     stanza,
@@ -550,10 +554,7 @@ impl InMemorySmSessionRegistry {
         new_delivery: bool,
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
-        record: impl FnOnce(
-            &mut super::super::DetachedSession,
-            super::super::SmFrameProvenance,
-        ) -> Option<super::DetachedUnackedStanza>,
+        record: impl FnOnce(&mut super::super::DetachedSession) -> Option<super::DetachedUnackedStanza>,
     ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::persistence::{KeyedSnapshotOutcome, PersistedIngressAppend};
         use crate::stream_management::SmKeyedAppendOutcome;
@@ -589,8 +590,7 @@ impl InMemorySmSessionRegistry {
             // against the exact session that would receive the append.
             return Ok(SmKeyedAppendOutcome::Suppressed);
         }
-        let provenance = super::super::SmFrameProvenance::ingress([key.clone()]);
-        let Some(entry) = record(&mut updated, provenance) else {
+        let Some(entry) = record(&mut updated) else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
         let sequence = entry.sequence;
