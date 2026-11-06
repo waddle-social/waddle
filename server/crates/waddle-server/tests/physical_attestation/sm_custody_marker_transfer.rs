@@ -92,7 +92,7 @@ async fn postgres_transfer_requires_its_own_marker_and_retains_unmarked_recovery
         &second_item.admission(&seal).expect("exact admission"),
     )
     .await
-    .expect("successor exact retry");
+    .expect("sealed exact retry");
     let after = repo
         .inventory(&seal, &c.authority(), None)
         .await

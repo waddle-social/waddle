@@ -130,8 +130,9 @@ CREATE TRIGGER sm_custody_slot_guard BEFORE INSERT ON __SCHEMA__.sm_custody_slot
 FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_slot_guard();
 -- A raw marker must identify this operation's completed source attempt, not
 -- a completed attempt from another resource, owner, or lease generation. The
--- completion tuple must be written in this transaction. A raw no-op UPDATE can
--- still forge it; this disposable role is not a restricted writer boundary.
+-- completed tuple's 32-bit xmin must match the current XID's low bits. This is
+-- only a structural hint: raw DML can no-op UPDATE it, and wrap can reuse
+-- those bits. The disposable role is not a restricted writer boundary.
 CREATE FUNCTION __SCHEMA__.sm_custody_handoff_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE source_key UUID; closed BOOLEAN;
