@@ -21,4 +21,4 @@ The 128-byte reservation covers at most one acknowledgement produced by `SmAck::
 
 The generic inbound and recipient core methods remain compiled for future work, but the bounded driver cannot call them until their producers have a proven bound or retained continuation. Their narrowly scoped dead-code expectations identify that gate in test-support builds.
 
-A checkpoint result remains in operation custody when authority changes: a computed acknowledgement is retained only as an unknown completion, never as a current result. A failed checkpoint seals admission before publishing its result; queued requests remain not started. Unknown handler results also seal the ledger without relying on the separate authority watcher to run first.
+A checkpoint result remains in operation custody when authority changes: a computed acknowledgement is retained only as an unknown completion, never as a current result. A failed checkpoint seals admission before publishing its result; queued requests remain not started. Unknown handler results and shutdown observed at publication also seal the ledger without relying on the separate authority watcher to run first.

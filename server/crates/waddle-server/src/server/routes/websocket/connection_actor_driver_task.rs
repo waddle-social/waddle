@@ -1134,9 +1134,13 @@ impl DriverShared {
             ))
         );
         let mut ledger = self.lock_state();
+        // Shutdown cancellation can win after the handler's final check but
+        // before its result reaches this gate, ahead of the watcher task.
+        let shutdown_cancelled = self.shutdown.is_cancelled();
         let unknown_reason = if exceeds_reservation {
             Some(ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded)
         } else if authority_revoked
+            || shutdown_cancelled
             || handler_unknown == Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
         {
             Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
@@ -1152,13 +1156,11 @@ impl DriverShared {
         };
         let stop_reason = if exceeds_reservation {
             Some(StopReason::OutboundOverload)
+        } else if shutdown_cancelled {
+            Some(StopReason::ShutdownDeadline)
         } else if handler_unknown == Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
         {
-            Some(if self.shutdown.is_cancelled() {
-                StopReason::ShutdownDeadline
-            } else {
-                StopReason::LeaseLost
-            })
+            Some(StopReason::LeaseLost)
         } else if handler_unknown.is_some() || checkpoint_failed {
             Some(StopReason::Requested)
         } else {
@@ -2157,6 +2159,57 @@ mod tests {
             Err(ConnectionActorDriverTaskAdmissionError::Stopped)
         ));
         task.shared.request_stop(StopReason::LeaseLost);
+        release.notify_one();
+        task.wait_joined().await;
+        ticket.acknowledge().expect("unknown result settled");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_before_publication_retains_current_result_as_unknown_without_watcher() {
+        let task = test_task().await;
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let ticket = task
+            .submit(DriverInput::SmRequest {
+                input: ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>")
+                    .sm_request()
+                    .expect("typed request"),
+                before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                after_checkpoint: None,
+            })
+            .expect("request admitted");
+        tokio::time::timeout(Duration::from_secs(5), dequeued.notified())
+            .await
+            .expect("worker is held before its start claim");
+
+        // No await occurs between cancellation and publication, so the
+        // independently spawned watcher cannot have sealed this ledger.
+        task.shared.shutdown.cancel();
+        assert!(task.shared.lock_state().accepting);
+        let mut active =
+            ActiveOperationGuard::new(Arc::clone(&ticket.operation), Arc::clone(&task.shared));
+        let stop_reason = active.complete(ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+            ConnectionActorDriverCompletion::CurrentAtCompletion(Some(
+                waddle_xmpp::stream_management::SmAck::new(7),
+            )),
+        )));
+        assert_eq!(stop_reason, Some(StopReason::ShutdownDeadline));
+        let ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+            reason: ConnectionActorDriverTaskUnknownReason::AuthorityRevoked,
+            result: Some(result),
+        } = ticket.snapshot()
+        else {
+            panic!("shutdown must retain the result as unknown");
+        };
+        assert!(matches!(
+            &result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack))
+            )) if ack.h == 7
+        ));
+        assert!(!task.shared.lock_state().accepting);
+        assert!(task.shared.stop.is_cancelled());
+        task.shared.request_stop(StopReason::ShutdownDeadline);
         release.notify_one();
         task.wait_joined().await;
         ticket.acknowledge().expect("unknown result settled");
