@@ -657,10 +657,9 @@ async fn typed_oversized_frame_closes_pending_sasl2_exchange() {
     let state = crate::test_support::websocket_state_with_sasl2().await;
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::sasl2_oauth_error_pending();
-    let parsed = waddle_xmpp::protocol::frame::parse_frame_with_metadata(
-        "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='example.com' version='1.0'/>",
-    )
-    .expect("typed input parses before size is applied");
+    let input = super::super::frame::ClassifiedInboundFrame::classify(
+        &" ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1),
+    );
     let domain: jid::BareJid = "example.com".parse().expect("XMPP domain");
     let permit = state
         .deps
@@ -670,10 +669,9 @@ async fn typed_oversized_frame_closes_pending_sasl2_exchange() {
         .expect("test node admits requests");
     let shutdown = tokio_util::sync::CancellationToken::new();
 
-    let responses = super::super::frame::handle_parsed_xmpp_frame_with_admission(
-        parsed,
+    let responses = super::super::frame::handle_classified_xmpp_frame_with_admission(
+        input,
         &domain,
-        waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1,
         state.as_ref(),
         &mut conn,
         &permit,

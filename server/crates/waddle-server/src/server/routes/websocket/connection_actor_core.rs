@@ -5,7 +5,8 @@
 //! hold the lifecycle gate. The actor fixture exercises this same core.
 
 use super::frame::{
-    handle_parsed_xmpp_frame_with_admission, ordered_relay_origin_from_sm, ResponseBatch,
+    handle_classified_xmpp_frame_with_admission, ordered_relay_origin_from_sm,
+    ClassifiedInboundFrame, ResponseBatch,
 };
 use super::interpret_loop::build_interpret_deps;
 use super::replay::{drive_interpret_loop, DriveOutcome};
@@ -92,19 +93,17 @@ impl ConnectionActorCore {
     /// `WsConnState`; the returned batch is still only local output work.
     pub(super) async fn process_inbound_frame(
         &mut self,
-        parsed: waddle_xmpp::protocol::frame::ParsedFrame,
+        input: ClassifiedInboundFrame,
         domain: &jid::BareJid,
-        wire_bytes: usize,
         state: &WebSocketState,
         permit: &NodeAdmissionPermit,
         shutdown: &CancellationToken,
     ) -> Result<ConnectionActorDriverCompletion<ResponseBatch>, ConnectionActorDriverError> {
         let lifecycle = Arc::clone(&self.lifecycle);
         run_with_driver_completion(lifecycle, permit, shutdown, || async {
-            handle_parsed_xmpp_frame_with_admission(
-                parsed,
+            handle_classified_xmpp_frame_with_admission(
+                input,
                 domain,
-                wire_bytes,
                 state,
                 &mut self.state,
                 permit,
@@ -268,19 +267,11 @@ mod tests {
         let mut owner = ConnectionActorCore::new(WsConnState::new());
         let frame =
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#;
-        let parsed =
-            waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame).expect("typed frame");
+        let input = ClassifiedInboundFrame::classify(frame);
         let domain = jid::BareJid::from_str("example.com").expect("typed XMPP domain");
 
         let ConnectionActorDriverCompletion::CurrentAtCompletion(batch) = owner
-            .process_inbound_frame(
-                parsed,
-                &domain,
-                frame.len(),
-                state.as_ref(),
-                &permit,
-                &shutdown,
-            )
+            .process_inbound_frame(input, &domain, state.as_ref(), &permit, &shutdown)
             .await
             .expect("current actor can process a frame")
         else {
@@ -295,6 +286,252 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(frames[0].contains("urn:ietf:params:xml:ns:xmpp-framing"));
         assert!(frames[1].contains("<features"));
+    }
+
+    async fn owner_frames(
+        owner: &mut ConnectionActorCore,
+        frame: &str,
+        state: &WebSocketState,
+    ) -> Vec<String> {
+        let permit = crate::clustering::NodeLifecycle::new()
+            .admit()
+            .expect("serving permit");
+        let domain = "example.com".parse().expect("domain");
+        let input = ClassifiedInboundFrame::classify(frame);
+        assert_eq!(input.wire_bytes(), frame.len());
+        let ConnectionActorDriverCompletion::CurrentAtCompletion(batch) = owner
+            .process_inbound_frame(input, &domain, state, &permit, &CancellationToken::new())
+            .await
+            .expect("owner handler completed")
+        else {
+            panic!("owner remained current")
+        };
+        batch.into_serialized_frames()
+    }
+
+    fn without_generated_stream_ids(frames: &[String]) -> Vec<String> {
+        use std::str::FromStr;
+        use xmpp_parsers::minidom::Element;
+
+        frames
+            .iter()
+            .map(|frame| {
+                let mut element = Element::from_str(frame).expect("response XML");
+                if element.is("open", "urn:ietf:params:xml:ns:xmpp-framing") {
+                    element.set_attr(
+                        minidom::rxml::Namespace::NONE,
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        "generated-stream-id",
+                    );
+                    super::super::transport_xml::element_to_xml(element)
+                } else {
+                    frame.clone()
+                }
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn typed_owner_xep0198_dispatch_matches_transport_bytes_and_state() {
+        use super::super::frame::handle_xmpp_frame;
+        use super::super::ConnectionPhase;
+
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        // Rejections prove enable and resume reach their SM handlers, rather
+        // than disappearing as unknown roots in ParsedFrame classification.
+        for frame in [
+            "<enable xmlns='urn:xmpp:sm:3'/>",
+            "<resume xmlns='urn:xmpp:sm:3' previd='absent' h='0'/>",
+        ] {
+            let mut owner = ConnectionActorCore::new(WsConnState::new());
+            let mut transport = WsConnState::new();
+            let frames = owner_frames(&mut owner, frame, state.as_ref()).await;
+            assert_eq!(
+                frames,
+                handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut transport).await
+            );
+            assert_eq!(frames.len(), 1);
+            assert!(frames[0].contains("unexpected-request"));
+            assert!(!owner.state.sm_state.enabled);
+        }
+
+        let ready = || {
+            let mut conn = WsConnState::new();
+            conn.phase =
+                ConnectionPhase::ready("alice@example.com/web".parse().expect("bound JID"), false);
+            conn.sm_state
+                .enable("typed-owner-sm".to_owned(), false, None);
+            conn
+        };
+        let mut owner = ConnectionActorCore::new(ready());
+        let mut transport = ready();
+        for frame in [
+            "<r xmlns='urn:xmpp:sm:3'/>",
+            "<a xmlns='urn:xmpp:sm:3' h='0'/>",
+        ] {
+            let frames = owner_frames(&mut owner, frame, state.as_ref()).await;
+            assert_eq!(
+                frames,
+                handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut transport).await
+            );
+            if frame.starts_with("<r ") {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(
+                    frames[0]
+                        .parse::<xmpp_parsers::minidom::Element>()
+                        .expect("ack XML")
+                        .attr("h"),
+                    Some("0"),
+                );
+            } else {
+                assert!(frames.is_empty());
+            }
+            assert!(owner.state.sm_state.enabled);
+            assert_eq!(
+                owner.state.sm_state.inbound_count,
+                transport.sm_state.inbound_count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_owner_malformed_and_empty_input_preserves_transport_disposition() {
+        use super::super::frame::handle_xmpp_frame;
+        use super::super::ConnectionPhase;
+
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let cases = [
+            ("<a xmlns='urn:xmpp:sm:3' h='invalid'/>", None),
+            ("<resume xmlns='urn:xmpp:sm:3' h='0'/>", None),
+            (
+                "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>",
+                Some("malformed-request"),
+            ),
+            (
+                "<s:response xmlns:s='urn:ietf:params:xml:ns:xmpp-sasl'><broken/>",
+                Some("malformed-request"),
+            ),
+            (
+                "<response xmlns='urn:xmpp:sasl:2'>!</response>",
+                Some("malformed-request"),
+            ),
+            (
+                "<iq type='get' id='a&amp;b'><bad>",
+                Some("feature-not-implemented"),
+            ),
+            (
+                "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='example.com'/>",
+                Some("invalid-from"),
+            ),
+            (
+                "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing'",
+                Some("not-well-formed"),
+            ),
+            ("<open xmlns='urn:wrong'/>", Some("invalid-namespace")),
+            (
+                "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing'>text</open>",
+                Some("invalid-xml"),
+            ),
+            (" \t\n", None),
+        ];
+        for pending_sasl2 in [false, true] {
+            for (frame, expected) in cases {
+                let initial = || {
+                    let mut conn = WsConnState::new();
+                    if pending_sasl2 {
+                        conn.phase = ConnectionPhase::sasl2_oauth_error_pending();
+                    }
+                    conn
+                };
+                let mut owner = ConnectionActorCore::new(initial());
+                let mut transport = initial();
+                let frames = owner_frames(&mut owner, frame, state.as_ref()).await;
+                assert_eq!(
+                    without_generated_stream_ids(&frames),
+                    without_generated_stream_ids(
+                        &handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut transport)
+                            .await
+                    ),
+                    "{frame}, pending={pending_sasl2}"
+                );
+                assert_eq!(
+                    format!("{:?}", owner.state.phase),
+                    format!("{:?}", transport.phase)
+                );
+                assert!(!owner.state.phase.is_sasl2_oauth_error_pending());
+                assert!(owner.state.authenticated_session.is_none());
+                if !pending_sasl2 {
+                    if let Some(expected) = expected {
+                        assert!(
+                            frames.iter().any(|response| response.contains(expected)),
+                            "{frame}: {frames:?}"
+                        );
+                    } else {
+                        assert!(frames.is_empty(), "{frame}: {frames:?}");
+                    }
+                }
+            }
+        }
+        let oversized = " ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1);
+        for pending in [false, true] {
+            let initial = || {
+                let mut conn = WsConnState::new();
+                if pending {
+                    conn.phase = ConnectionPhase::sasl2_oauth_error_pending();
+                }
+                conn
+            };
+            let mut owner = ConnectionActorCore::new(initial());
+            let mut transport = initial();
+            let frames = owner_frames(&mut owner, &oversized, state.as_ref()).await;
+            assert_eq!(
+                frames,
+                handle_xmpp_frame(&oversized, "example.com", state.as_ref(), &mut transport).await
+            );
+            assert_eq!(frames.len(), usize::from(pending));
+            assert_eq!(
+                format!("{:?}", owner.state.phase),
+                format!("{:?}", transport.phase)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_owner_malformed_sasl2_clears_sasl1_scram_like_transport() {
+        use super::super::frame::handle_xmpp_frame;
+        use waddle_xmpp::auth::ScramServer;
+        use waddle_xmpp::protocol::{ConnectionPhase, ScramPendingState};
+
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        for frame in [
+            "<response xmlns='urn:xmpp:sasl:2'>!</response>",
+            "<s:authenticate xmlns:s='urn:xmpp:sasl:2'/>",
+        ] {
+            let initial = || {
+                let mut conn = WsConnState::new();
+                conn.phase = ConnectionPhase::scram_pending(ScramPendingState::new(
+                    ScramServer::new(),
+                    vec![],
+                    vec![],
+                    "alice",
+                ));
+                conn
+            };
+            let mut owner = ConnectionActorCore::new(initial());
+            let mut transport = initial();
+            let frames = owner_frames(&mut owner, frame, state.as_ref()).await;
+            assert_eq!(
+                frames,
+                handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut transport).await
+            );
+            assert_eq!(frames.len(), 1);
+            assert!(frames[0].contains("malformed-request"));
+            assert!(matches!(
+                owner.state.phase,
+                ConnectionPhase::Unauthenticated
+            ));
+            assert!(matches!(transport.phase, ConnectionPhase::Unauthenticated));
+        }
     }
 
     #[tokio::test]
