@@ -34,8 +34,8 @@ use waddle_server::websocket_transport::{
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef};
 use waddle_xmpp::registry::user_actor::UserActor;
 use waddle_xmpp::registry::{
-    ActorSocketOutboundEndpoint, ConnectionEntry, ConnectionRegistry, LocalRetryDispatchOutcome,
-    OutboundStanza, TrySendDirectWithCustody,
+    ConnectionEntry, ConnectionRegistry, LocalRetryDispatchOutcome, OutboundStanza,
+    TrySendDirectWithCustody,
 };
 use waddle_xmpp::stream_management::{
     SmAck, SmIngressAppendKey, SmIngressReceiptKind, SmRelayedAppendObligation, SmRequest,
@@ -115,7 +115,17 @@ async fn route(State(route): State<Arc<Route>>, upgrade: WebSocketUpgrade) -> im
 struct Fixture {
     owner: ActorLocalEndpointOwner,
     driver: ConnectionActorDriverTestHandle,
-    endpoint: ActorSocketOutboundEndpoint,
+    peer: WebSocketStream<DuplexStream>,
+    server: tokio::task::JoinHandle<()>,
+    inventory: IoCustodianInventory,
+    index: ActorEndpointCleanupIndex,
+    connection: ConnectionRef,
+}
+
+struct UnattachedFixture {
+    owner: ActorLocalEndpointOwner,
+    input: WebSocketInput<axum::Error>,
+    output: WebSocketOutput<axum::Error>,
     peer: WebSocketStream<DuplexStream>,
     server: tokio::task::JoinHandle<()>,
     inventory: IoCustodianInventory,
@@ -132,6 +142,49 @@ async fn fixture_with_retirement(
     replay_frames: usize,
     retirement_deadline: Duration,
 ) -> Fixture {
+    let UnattachedFixture {
+        owner,
+        input,
+        output,
+        peer,
+        server,
+        inventory,
+        index,
+        connection,
+    } = unattached_fixture(probe, retirement_deadline).await;
+    let state = websocket_state().await;
+    let driver = owner
+        .attach_physical_driver_for_test(
+            Arc::clone(&state),
+            tokio_util::sync::CancellationToken::new(),
+            input,
+            output,
+            physical_limits(replay_frames),
+        )
+        .expect("exact physical driver");
+    Fixture {
+        owner,
+        driver,
+        peer,
+        server,
+        inventory,
+        index,
+        connection,
+    }
+}
+
+fn physical_limits(replay_frames: usize) -> PhysicalLimits {
+    PhysicalLimits {
+        max_frame_bytes: 2048,
+        max_replay_frames: replay_frames,
+        max_replay_bytes: 2048 * replay_frames,
+    }
+}
+
+async fn unattached_fixture(
+    probe: Option<Arc<ActorWriteProbe>>,
+    retirement_deadline: Duration,
+) -> UnattachedFixture {
     let inventory = IoCustodianInventory::new(1).expect("pump inventory");
     let index = ActorEndpointCleanupIndex::new(1).expect("cleanup inventory");
     let (started, mut ready) = mpsc::channel(1);
@@ -157,27 +210,11 @@ async fn fixture_with_retirement(
         .await
         .expect("startup deadline")
         .expect("startup result");
-    let (mut owner, input, output) = started.expect("physical owner");
-    let (endpoint, receiver) = owner.new_binding_channel().expect("direct channel");
-    let state = websocket_state().await;
-    let driver = owner
-        .attach_physical_driver_for_test(
-            Arc::clone(&state),
-            tokio_util::sync::CancellationToken::new(),
-            input,
-            output,
-            receiver,
-            PhysicalLimits {
-                max_frame_bytes: 2048,
-                max_replay_frames: replay_frames,
-                max_replay_bytes: 2048 * replay_frames,
-            },
-        )
-        .expect("exact physical driver");
-    Fixture {
+    let (owner, input, output) = started.expect("physical owner");
+    UnattachedFixture {
         owner,
-        driver,
-        endpoint,
+        input,
+        output,
         peer,
         server,
         inventory,
@@ -460,17 +497,20 @@ async fn cancelled_waiter_control_checkpoint_and_full_replay_use_one_writer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pending_direct_recovery_outlives_the_endpoint_index() {
-    let Fixture {
-        owner,
-        driver,
-        endpoint,
-        mut peer,
+async fn existing_actor_channel_rejects_physical_attach_and_keeps_terminal_custody() {
+    use waddle_xmpp::registry::ActorOutboundStage;
+
+    let UnattachedFixture {
+        mut owner,
+        input,
+        output,
+        peer: _peer,
         server,
         inventory,
         index,
         connection,
-    } = fixture(None, 1).await;
+    } = unattached_fixture(None, DEADLINE).await;
+    let (endpoint, mut receiver) = owner.new_binding_channel().expect("direct channel");
     let jid: jid::FullJid = "alice@example.test/phone".parse().expect("full JID");
     let candidate = ConnectionEntry::new_actor_provisional_for_binding(
         endpoint,
@@ -478,6 +518,7 @@ async fn pending_direct_recovery_outlives_the_endpoint_index() {
         jid.clone(),
     )
     .expect("exact binding");
+    let custody = candidate.actor_custody().expect("candidate custody");
     let registry = Arc::new(ConnectionRegistry::new());
     let actor = UserActor::spawn(UserActor::new(jid.to_bare()));
     owner
@@ -491,20 +532,6 @@ async fn pending_direct_recovery_outlives_the_endpoint_index() {
         )
         .await
         .expect("publish direct endpoint");
-    let gate = ConnectionActorDriverTestGate::default();
-    let ticket = driver
-        .submit_physical_producer(stanza(), 1, 2048, &gate)
-        .expect("producer");
-    timeout(DEADLINE, gate.wait_until_entered())
-        .await
-        .expect("effect start");
-    gate.release();
-    let _ = read_text(&mut peer).await;
-    wait_snapshot(&driver, |state| {
-        state.flushed == 1 && state.replay_frames == 1
-    })
-    .await;
-
     let obligation = SmRelayedAppendObligation {
         key: SmIngressAppendKey {
             message_key: waddle_xmpp::ingress::MessageKey::new(),
@@ -528,7 +555,27 @@ async fn pending_direct_recovery_outlives_the_endpoint_index() {
             .expect("dispatch"),
         LocalRetryDispatchOutcome::AcceptedOrSettled
     ));
-    wait_snapshot(&driver, |state| state.direct_pending).await;
+    let id = timeout(DEADLINE, receiver.recv())
+        .await
+        .expect("direct queue deadline")
+        .expect("queued direct ID");
+    let original = custody.snapshot(&id).expect("retained direct envelope");
+    assert!(matches!(
+        owner.attach_physical_driver_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+            input,
+            output,
+            physical_limits(1),
+        ),
+        Err(ActorLocalEndpointError::PriorBindingActive)
+    ));
+    assert!(Arc::ptr_eq(
+        &original,
+        &custody
+            .snapshot(&id)
+            .expect("custody survived rejected attach")
+    ));
     owner.request_stop(StopReason::Requested);
     let observer = inventory.observe(&connection).expect("pump observer");
     assert_eq!(
@@ -544,35 +591,212 @@ async fn pending_direct_recovery_outlives_the_endpoint_index() {
     })
     .await
     .expect("joined cleanup");
-    assert!(index.drain_joined_terminal(&connection).is_none());
-    let mut recovery = index
-        .take_joined_physical_for_test(&connection)
-        .expect("physical recovery");
-    let direct = recovery
-        .pending_direct
-        .take()
-        .expect("pending direct frame");
+    let (recovered, stage) = index
+        .take_joined_terminal(&id)
+        .expect("one terminal transfer");
+    assert_eq!(stage, ActorOutboundStage::NotAttempted);
+    assert!(Arc::ptr_eq(&original, &recovered));
+    assert_eq!(recovered.ingress_append.as_ref(), Some(&obligation));
+    assert!(index.take_joined_terminal(&id).is_none());
+    actor.kill();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn physical_attach_excludes_new_actor_channel_and_repeated_attach() {
+    let mut fixture = fixture(None, 1).await;
+    assert!(matches!(
+        fixture.owner.new_binding_channel(),
+        Err(ActorLocalEndpointError::PriorBindingActive)
+    ));
+    assert!(matches!(
+        fixture.owner.attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+        Err(ActorLocalEndpointError::DriverAlreadyAttached)
+    ));
+    wait_snapshot(&fixture.driver, |state| {
+        state.enrollment == PhysicalEnrollment::Enrolled
+    })
+    .await;
+    fixture.owner.request_stop(StopReason::Requested);
+    assert!(matches!(
+        fixture.owner.attach_driver_task_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+        Err(ActorLocalEndpointError::DriverCleanupStarted)
+    ));
+    wait_cleanup_joined(&fixture).await;
+    let recovery = fixture
+        .index
+        .take_joined_physical_for_test(&fixture.connection)
+        .expect("exact joined recovery");
     recovery
         .retire_stream()
         .await
         .expect("retire fixture stream");
-    drop(recovery);
-    drop(index);
-    drop(owner);
-    drop(driver);
-    drop(ticket);
+    fixture.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn physical_attach_rejects_another_connections_input_and_output() {
+    let UnattachedFixture {
+        owner,
+        input,
+        output,
+        peer: _peer,
+        server,
+        inventory,
+        index,
+        connection,
+    } = unattached_fixture(None, DEADLINE).await;
+    let UnattachedFixture {
+        owner: other_owner,
+        input: other_input,
+        output: other_output,
+        peer: _other_peer,
+        server: other_server,
+        inventory: other_inventory,
+        index: _other_index,
+        connection: other_connection,
+    } = unattached_fixture(None, DEADLINE).await;
+    assert_ne!(connection, other_connection);
+    assert!(matches!(
+        owner.attach_physical_driver_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+            other_input,
+            other_output,
+            physical_limits(1),
+        ),
+        Err(ActorLocalEndpointError::DriverConnectionMismatch)
+    ));
+    let driver = owner
+        .attach_physical_driver_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+            input,
+            output,
+            physical_limits(1),
+        )
+        .expect("correct owner still attaches");
+    assert_eq!(driver.connection_ref(), &connection);
+    wait_snapshot(&driver, |state| {
+        state.enrollment == PhysicalEnrollment::Enrolled
+    })
+    .await;
+    owner.request_stop(StopReason::Requested);
+    let observer = inventory.observe(&connection).expect("pump observer");
     assert_eq!(
-        direct
-            .outbound
-            .pending_row_id
-            .as_ref()
-            .map(|id| id.as_str()),
-        Some("physical-pending-row")
+        timeout(DEADLINE, observer.wait_until_joined())
+            .await
+            .expect("join"),
+        CustodianState::Joined
     );
-    assert_eq!(direct.outbound.ingress_append.as_ref(), Some(&obligation));
-    assert!(direct.custody.snapshot(&direct.id).is_some());
-    actor.kill();
+    timeout(DEADLINE, async {
+        while !index.join_cleanup_finished_for_test(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("joined cleanup");
+    let recovery = index
+        .take_joined_physical_for_test(&connection)
+        .expect("exact recovery");
+    recovery
+        .retire_stream()
+        .await
+        .expect("retire fixture stream");
+    other_owner.request_stop(StopReason::Requested);
+    let other_observer = other_inventory
+        .observe(&other_connection)
+        .expect("other observer");
+    assert_eq!(
+        timeout(DEADLINE, other_observer.wait_until_joined())
+            .await
+            .expect("other join"),
+        CustodianState::Joined
+    );
     server.abort();
+    other_server.abort();
+}
+
+async fn rejects_mixed_physical_halves(wrong_input: bool) {
+    let UnattachedFixture {
+        owner,
+        input,
+        output,
+        peer: _peer,
+        server,
+        inventory,
+        index: _index,
+        connection,
+    } = unattached_fixture(None, DEADLINE).await;
+    let UnattachedFixture {
+        owner: other_owner,
+        input: other_input,
+        output: other_output,
+        peer: _other_peer,
+        server: other_server,
+        inventory: other_inventory,
+        index: _other_index,
+        connection: other_connection,
+    } = unattached_fixture(None, DEADLINE).await;
+    let (mut input, mut output) = (Some(input), Some(output));
+    let (mut other_input, mut other_output) = (Some(other_input), Some(other_output));
+    let attempted_input = if wrong_input {
+        other_input.take().expect("other input")
+    } else {
+        input.take().expect("matching input")
+    };
+    let attempted_output = if wrong_input {
+        output.take().expect("matching output")
+    } else {
+        other_output.take().expect("other output")
+    };
+    assert!(matches!(
+        owner.attach_physical_driver_for_test(
+            websocket_state().await,
+            tokio_util::sync::CancellationToken::new(),
+            attempted_input,
+            attempted_output,
+            physical_limits(1),
+        ),
+        Err(ActorLocalEndpointError::DriverConnectionMismatch)
+    ));
+    drop((input, output, other_input, other_output));
+    owner.request_stop(StopReason::Requested);
+    other_owner.request_stop(StopReason::Requested);
+    let observer = inventory.observe(&connection).expect("first observer");
+    let other_observer = other_inventory
+        .observe(&other_connection)
+        .expect("second observer");
+    assert_eq!(
+        timeout(DEADLINE, observer.wait_until_joined())
+            .await
+            .expect("first join"),
+        CustodianState::Joined
+    );
+    assert_eq!(
+        timeout(DEADLINE, other_observer.wait_until_joined())
+            .await
+            .expect("second join"),
+        CustodianState::Joined
+    );
+    server.abort();
+    other_server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn physical_attach_rejects_wrong_input_with_correct_output() {
+    rejects_mixed_physical_halves(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn physical_attach_rejects_wrong_output_with_correct_input() {
+    rejects_mixed_physical_halves(false).await;
 }
 
 struct ReleaseStartProbe(Arc<ActorWriteProbe>);

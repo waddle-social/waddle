@@ -2052,6 +2052,12 @@ enum InitialRetirement {
     PhysicalRequest,
 }
 
+#[cfg(feature = "test-support")]
+type PendingPumpJoins<ReadError, WriteError> = (
+    Option<Result<InboundExit<ReadError>, JoinError>>,
+    Option<Result<OutboundExit<WriteError>, JoinError>>,
+);
+
 // Only the attached dark physical fixture enables this path. A sink may be
 // inside start_send while holding StopSignal's synchronous fence; joining a
 // blocking stop child leaves the reaper free to enforce its own deadline.
@@ -2063,8 +2069,7 @@ async fn retire_physical_pumps<ReadError, WriteError>(
     cleanup_pending_published: &AtomicBool,
     retirement_deadline: Duration,
     initial: InitialRetirement,
-    mut inbound: Option<Result<InboundExit<ReadError>, JoinError>>,
-    mut outbound: Option<Result<OutboundExit<WriteError>, JoinError>>,
+    joined: PendingPumpJoins<ReadError, WriteError>,
 ) -> (
     Result<InboundExit<ReadError>, JoinError>,
     Result<OutboundExit<WriteError>, JoinError>,
@@ -2073,6 +2078,7 @@ where
     ReadError: Send + 'static,
     WriteError: Send + 'static,
 {
+    let (mut inbound, mut outbound) = joined;
     let mut stop_done = matches!(initial, InitialRetirement::Stop);
     let mut stop_reason =
         matches!(initial, InitialRetirement::PumpExited).then_some(StopReason::PumpExited);
@@ -2105,16 +2111,16 @@ where
         if stop_done && force_requested {
             supervisor.force_stop.cancel();
         }
-        if inbound.is_some()
-            && outbound.is_some()
-            && stop_child.is_none()
-            && !child_failed
-            && handoff.close_if_empty()
-        {
-            return (
-                inbound.expect("inbound joined"),
-                outbound.expect("outbound joined"),
-            );
+        if stop_child.is_none() && !child_failed {
+            match (inbound.take(), outbound.take()) {
+                (Some(inbound), Some(outbound)) if handoff.close_if_empty() => {
+                    return (inbound, outbound);
+                }
+                (retained_inbound, retained_outbound) => {
+                    inbound = retained_inbound;
+                    outbound = retained_outbound;
+                }
+            }
         }
 
         tokio::select! {
@@ -2208,8 +2214,7 @@ async fn run_io_custodian<ReadError, WriteError>(
                 &cleanup_pending_published,
                 retirement_deadline,
                 initial,
-                inbound.take(),
-                outbound.take(),
+                (inbound.take(), outbound.take()),
             )
             .await,
         )

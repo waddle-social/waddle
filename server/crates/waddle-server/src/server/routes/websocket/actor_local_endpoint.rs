@@ -322,8 +322,20 @@ impl CleanupRecord {
             return Err(ActorLocalEndpointError::DriverAlreadyAttached);
         }
         #[cfg(feature = "test-support")]
-        if driver.owns_physical() && !self.custodian.enable_physical_stop_handoff() {
-            return Err(ActorLocalEndpointError::DriverCleanupStarted);
+        if driver.owns_physical() {
+            // This fixture has no exclusive claim over actor custody. Keep
+            // actor channels and the physical writer mutually exclusive under
+            // the same lifecycle → custodies order used by channel creation.
+            let custodies = self
+                .custodies
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+            if !custodies.is_empty() {
+                return Err(ActorLocalEndpointError::PriorBindingActive);
+            }
+            if !self.custodian.enable_physical_stop_handoff() {
+                return Err(ActorLocalEndpointError::DriverCleanupStarted);
+            }
         }
         driver.set_settlement_callback(settlement_callback);
         driver.arm_shutdown_deadline(self.driver_shutdown_grace);
@@ -386,16 +398,6 @@ impl CleanupRecord {
 
     fn driver_is_settled(&self) -> bool {
         self.driver().is_none_or(|driver| driver.is_settled())
-    }
-
-    fn can_transfer_direct(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.driver()
-                .is_none_or(|driver| driver.physical_direct_reconciled())
-        }
-        #[cfg(not(feature = "test-support"))]
-        true
     }
 }
 
@@ -567,7 +569,7 @@ impl ActorEndpointCleanupIndex {
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let record = index.records.get(id.connection())?.clone();
-        if !record.is_joined() || !record.can_transfer_direct() {
+        if !record.is_joined() {
             return None;
         }
         let custodies = record
@@ -598,7 +600,7 @@ impl ActorEndpointCleanupIndex {
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let record = index.records.get(connection)?.clone();
-        if !record.is_joined() || !record.can_transfer_direct() {
+        if !record.is_joined() {
             return None;
         }
         let custodies = record
@@ -808,13 +810,10 @@ impl ActorLocalEndpointOwner {
         shutdown: tokio_util::sync::CancellationToken,
         input: WebSocketInput<axum::Error>,
         output: WebSocketOutput<axum::Error>,
-        receiver: ActorOutboundReceiver,
         limits: PhysicalLimits,
     ) -> Result<ConnectionActorDriverTestHandle, ActorLocalEndpointError> {
         if input.connection_ref() != self.connection_ref()
             || output.connection_ref() != self.connection_ref()
-            || receiver.custody().connection() != self.connection_ref()
-            || !self.cleanup.contains_custody(receiver.custody())
         {
             return Err(ActorLocalEndpointError::DriverConnectionMismatch);
         }
@@ -833,7 +832,6 @@ impl ActorLocalEndpointOwner {
         let parts = super::connection_actor_driver_task::physical::PhysicalParts::new(
             input,
             output,
-            receiver,
             self.cleanup.custodian.clone(),
             limits,
             first,
@@ -927,12 +925,20 @@ impl ActorLocalEndpointOwner {
     pub fn new_binding_channel(
         &mut self,
     ) -> Result<(ActorSocketOutboundEndpoint, ActorOutboundReceiver), ActorLocalEndpointError> {
-        #[cfg(feature = "test-support")]
-        if self
+        let lifecycle = self
             .cleanup
-            .driver()
-            .is_some_and(|driver| driver.owns_physical())
+            .lifecycle
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        #[cfg(feature = "test-support")]
+        if lifecycle
+            .driver
+            .as_ref()
+            .is_some_and(ConnectionActorDriverTaskCleanup::owns_physical)
         {
+            return Err(ActorLocalEndpointError::PriorBindingActive);
+        }
+        if lifecycle.phase != CleanupPhase::Accepting {
             return Err(ActorLocalEndpointError::PriorBindingActive);
         }
         if self.cleanup.publication_stopped() || self.cleanup.has_publications() {
@@ -963,6 +969,8 @@ impl ActorLocalEndpointOwner {
         )
         .ok_or(ActorLocalEndpointError::InvalidBounds)?;
         custodies.push(custody);
+        drop(custodies);
+        drop(lifecycle);
         Ok((endpoint, receiver))
     }
 

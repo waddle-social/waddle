@@ -27,9 +27,6 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::ownership::ConnectionRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::registry::{
-    ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver, DeliveryKind, OutboundStanza,
-};
 use waddle_xmpp::stream_management::SmAck;
 use waddle_xmpp::Stanza;
 
@@ -52,7 +49,6 @@ pub struct PhysicalSnapshot {
     pub replay_bytes: usize,
     pub checkpoint_h: Option<u32>,
     pub control_pending: bool,
-    pub direct_pending: bool,
     /// The exact reaper accepted the driver's stop request. This does not say
     /// which reason won the physical stop fence.
     pub stop_forwarded: bool,
@@ -75,7 +71,6 @@ pub struct PhysicalRecovery {
     pub operations: Vec<super::ConnectionActorDriverTestTicket>,
     pub active: Option<PhysicalProducerRecovery>,
     pub current: Option<PhysicalWriteRecovery>,
-    pub pending_direct: Option<PhysicalDirectRecovery>,
     pub control: Option<PhysicalControlRecovery>,
     pub replay: Vec<PhysicalReplayRecovery>,
     pub checkpoint_h: Option<u32>,
@@ -128,14 +123,7 @@ pub struct PhysicalWriteRecovery {
 
 pub enum PhysicalWriteKind {
     Producer { operation_id: u64, ordinal: u64 },
-    Direct(PhysicalDirectRecovery),
     Acknowledgement(SmAck),
-}
-
-pub struct PhysicalDirectRecovery {
-    pub id: ActorOutboundId,
-    pub outbound: Arc<OutboundStanza>,
-    pub custody: Arc<ActorOutboundCustody>,
 }
 
 pub enum PhysicalControlRecovery {
@@ -151,21 +139,12 @@ pub struct PhysicalReplayRecovery {
 }
 
 pub enum PhysicalReplayPayload {
-    Producer {
-        stanza: Stanza,
-        operation_id: u64,
-    },
-    Direct {
-        id: ActorOutboundId,
-        outbound: Arc<OutboundStanza>,
-        custody: Arc<ActorOutboundCustody>,
-    },
+    Producer { stanza: Stanza, operation_id: u64 },
 }
 
 pub(in crate::server::routes::websocket) struct PhysicalParts {
     input: WebSocketInput<axum::Error>,
     output: Option<WebSocketOutput<axum::Error>>,
-    direct: ActorOutboundReceiver,
     custodian: IoCustodianHandle,
     limits: PhysicalLimits,
     first_handled: Option<OrderedRelayInboundSequence>,
@@ -176,7 +155,6 @@ impl PhysicalParts {
     pub(in crate::server::routes::websocket) fn new(
         input: WebSocketInput<axum::Error>,
         output: WebSocketOutput<axum::Error>,
-        direct: ActorOutboundReceiver,
         custodian: IoCustodianHandle,
         limits: PhysicalLimits,
         first_handled: OrderedRelayInboundSequence,
@@ -192,7 +170,6 @@ impl PhysicalParts {
         Some(Self {
             input,
             output: Some(output),
-            direct,
             custodian,
             limits,
             first_handled: Some(first_handled),
@@ -204,7 +181,6 @@ impl PhysicalParts {
 pub(super) struct PhysicalShared {
     connection: ConnectionRef,
     core: Arc<AsyncMutex<ConnectionActorCore>>,
-    direct_custody: Arc<ActorOutboundCustody>,
     stream: SmSessionId,
     ingress: Arc<crate::ingress::IngressAuthority>,
     producer_claimed: AtomicBool,
@@ -220,7 +196,6 @@ struct PhysicalLedger {
     active: Option<(Arc<DriverOperation>, ContinuationTicket)>,
     current: Option<CurrentWrite>,
     control: Option<PendingControl>,
-    pending_direct: Option<ActorOutboundId>,
     replay: VecDeque<ReplayEntry>,
     replay_bytes: usize,
     appended: u32,
@@ -243,7 +218,6 @@ enum CurrentKind {
         operation: Arc<DriverOperation>,
         ticket: ContinuationTicket,
     },
-    Direct(ActorOutboundId),
     Acknowledgement(SmAck),
 }
 
@@ -258,10 +232,6 @@ enum ReplayPayload {
     Producer {
         stanza: Stanza,
         operation: Arc<DriverOperation>,
-    },
-    Direct {
-        id: ActorOutboundId,
-        outbound: Arc<OutboundStanza>,
     },
 }
 
@@ -302,7 +272,6 @@ impl PhysicalShared {
             Arc::new(Self {
                 connection,
                 core: Arc::new(AsyncMutex::new(core)),
-                direct_custody: Arc::clone(parts.direct.custody()),
                 stream: parts.stream.clone(),
                 ingress,
                 producer_claimed: AtomicBool::new(false),
@@ -363,7 +332,6 @@ impl PhysicalShared {
             replay_bytes: ledger.replay_bytes,
             checkpoint_h: ledger.checkpoint_h,
             control_pending: ledger.control.is_some(),
-            direct_pending: ledger.pending_direct.is_some(),
             stop_forwarded: ledger.stop_forwarded,
             enrollment: ledger.enrollment.unwrap_or(PhysicalEnrollment::NotStarted),
         }
@@ -371,10 +339,6 @@ impl PhysicalShared {
 
     fn control_pending(&self) -> bool {
         self.lock().control.is_some()
-    }
-
-    fn direct_pending(&self) -> bool {
-        self.lock().pending_direct.is_some()
     }
 
     fn replay_has_room(&self, bytes: usize) -> bool {
@@ -395,23 +359,7 @@ impl PhysicalShared {
             ) && ledger.active.is_none()
                 && ledger.current.is_none()
                 && ledger.control.is_none()
-                && ledger.pending_direct.is_none()
                 && ledger.replay.is_empty())
-    }
-
-    pub(super) fn direct_reconciled(&self) -> bool {
-        self.lock().reconciled
-    }
-
-    fn direct_recovery(&self, id: &ActorOutboundId) -> Option<PhysicalDirectRecovery> {
-        if id.connection() != &self.connection {
-            return None;
-        }
-        Some(PhysicalDirectRecovery {
-            id: id.clone(),
-            outbound: self.direct_custody.snapshot(id)?,
-            custody: Arc::clone(&self.direct_custody),
-        })
     }
 
     /// Called only after the exact endpoint confirms both pumps and driver
@@ -461,27 +409,21 @@ impl PhysicalShared {
             }
             None => None,
         };
-        let current = match ledger.current.as_ref() {
-            Some(current) => Some(PhysicalWriteRecovery {
+        let current = ledger
+            .current
+            .as_ref()
+            .map(|current| PhysicalWriteRecovery {
                 kind: match &current.kind {
                     CurrentKind::Producer { operation, ticket } => PhysicalWriteKind::Producer {
                         operation_id: operation.id,
                         ordinal: ticket.ordinal(),
                     },
-                    CurrentKind::Direct(id) => PhysicalWriteKind::Direct(self.direct_recovery(id)?),
                     CurrentKind::Acknowledgement(ack) => PhysicalWriteKind::Acknowledgement(*ack),
                 },
                 receipt: current.receipt.get().cloned(),
-            }),
-            None => None,
-        };
-        let pending_direct = match ledger.pending_direct.as_ref() {
-            Some(id) => Some(self.direct_recovery(id)?),
-            None => None,
-        };
+            });
         ledger.active = None;
         ledger.current = None;
-        ledger.pending_direct = None;
         let control = ledger.control.take().map(|control| match control {
             PendingControl::Request { ack, started, .. } => {
                 PhysicalControlRecovery::Request { ack, started }
@@ -501,11 +443,6 @@ impl PhysicalShared {
                             operation_id: operation.id,
                         }
                     }
-                    ReplayPayload::Direct { id, outbound } => PhysicalReplayPayload::Direct {
-                        id,
-                        outbound,
-                        custody: Arc::clone(&self.direct_custody),
-                    },
                 },
                 receipt: entry.receipt.get().cloned(),
             })
@@ -516,7 +453,6 @@ impl PhysicalShared {
             operations: Vec::new(),
             active,
             current,
-            pending_direct,
             control,
             replay,
             checkpoint_h: ledger.checkpoint_h,
@@ -1067,7 +1003,7 @@ fn observe_terminal(shared: &Arc<PhysicalShared>, progress: WriteProgress) -> bo
         return false;
     }
     match &current.kind {
-        CurrentKind::Producer { .. } | CurrentKind::Direct(_) => {
+        CurrentKind::Producer { .. } => {
             ledger.attempted = ledger.appended;
             ledger.flushed = ledger.flushed.saturating_add(1);
         }
@@ -1163,49 +1099,6 @@ fn start_control_write(
         frame,
         None,
     ))
-}
-
-fn start_direct_write(
-    parts: &mut PhysicalParts,
-    shared: &Arc<PhysicalShared>,
-    runtime: &mut Runtime,
-) -> Option<bool> {
-    let id = shared.lock().pending_direct.clone()?;
-    if id.connection() != &shared.connection {
-        return Some(false);
-    }
-    let custody = Arc::clone(parts.direct.custody());
-    let Some(outbound) = custody.snapshot(&id) else {
-        return Some(false);
-    };
-    if outbound.kind != DeliveryKind::DirectFrame {
-        return Some(false);
-    }
-    let Some(xml) = encode(&outbound.stanza, shared.limits.max_frame_bytes) else {
-        return Some(false);
-    };
-    if !shared.replay_has_room(xml.len()) {
-        return None;
-    }
-    let bytes = xml.len();
-    let Some(output) = parts.output.as_ref() else {
-        return Some(false);
-    };
-    let Ok(frame) = output.actor_data_frame(Message::Text(xml.into()), custody, id.clone()) else {
-        return Some(false);
-    };
-    let started = launch_write(
-        parts,
-        shared,
-        runtime,
-        CurrentKind::Direct(id.clone()),
-        frame,
-        Some((ReplayPayload::Direct { id, outbound }, bytes)),
-    );
-    if started {
-        shared.lock().pending_direct = None;
-    }
-    Some(started)
 }
 
 fn start_producer_write(
@@ -1373,7 +1266,6 @@ enum Event {
     Attempt(WriteProgress),
     Terminal(WriteProgress),
     Inbound(Option<Result<RetainedWebSocketInput, InputError<axum::Error>>>),
-    Direct(Option<ActorOutboundId>),
     Command(Option<super::DriverCommand>),
     Control(Option<DriverControl>),
 }
@@ -1390,7 +1282,6 @@ pub(super) async fn run(mut worker: DriverWorker, mut parts: PhysicalParts) {
     runtime.enrollment = Some(Box::pin(async move {
         ingress.enroll_stream(&stream).await.is_ok()
     }));
-    let mut direct_open = true;
     let mut control_open = true;
     let mut commands_open = true;
     loop {
@@ -1421,14 +1312,9 @@ pub(super) async fn run(mut worker: DriverWorker, mut parts: PhysicalParts) {
             if idle {
                 let started =
                     start_control_write(&mut parts, &shared, &mut runtime).or_else(|| {
-                        if shared.control_pending() {
-                            return None;
-                        }
-                        start_direct_write(&mut parts, &shared, &mut runtime).or_else(|| {
-                            (!shared.direct_pending())
-                                .then(|| start_producer_write(&mut parts, &shared, &mut runtime))
-                                .flatten()
-                        })
+                        (!shared.control_pending())
+                            .then(|| start_producer_write(&mut parts, &shared, &mut runtime))
+                            .flatten()
                     });
                 if started == Some(false) {
                     stop(&worker, &parts, &mut runtime, StopReason::Requested);
@@ -1449,7 +1335,6 @@ pub(super) async fn run(mut worker: DriverWorker, mut parts: PhysicalParts) {
             result = poll_slot(&mut runtime.attempt), if runtime.attempt.is_some() => Event::Attempt(result),
             result = poll_slot(&mut runtime.terminal), if runtime.terminal.is_some() => Event::Terminal(result),
             incoming = parts.input.recv_retained(), if !runtime.stopping && enrolled && !shared.control_pending() => Event::Inbound(incoming),
-            direct = parts.direct.recv(), if !runtime.stopping && enrolled && direct_open && !shared.direct_pending() => Event::Direct(direct),
             command = worker.receiver.recv(), if !runtime.stopping && enrolled && commands_open && runtime.active.is_none() => Event::Command(command),
             control = worker.control_receiver.recv(), if !runtime.stopping && control_open => Event::Control(control),
         };
@@ -1503,11 +1388,6 @@ pub(super) async fn run(mut worker: DriverWorker, mut parts: PhysicalParts) {
                     stop(&worker, &parts, &mut runtime, StopReason::Requested);
                 }
             }
-            Event::Direct(Some(id)) => {
-                shared.lock().pending_direct = Some(id);
-                shared.changed.notify_waiters();
-            }
-            Event::Direct(None) => direct_open = false,
             Event::Command(Some(command)) => {
                 if !start_producer(&worker, &shared, &mut runtime, command.operation) {
                     stop(&worker, &parts, &mut runtime, StopReason::Requested);

@@ -8,6 +8,16 @@ ordered writer. Keep generic inbound/peer handlers rejected and the serving
 selector unchanged. This is a local scheduling and custody proof, not a
 production control-latency or durable-resume claim.
 
+The physical fixture supports the fixed producer and SM control only. Actor
+direct channels and physical attachment are mutually exclusive until direct
+custody has an exclusive writer and terminal-reconciliation capability.
+
+The direct path needs its own architecture and implementation gate. A holder
+of an actor custody handle can currently invoke attempt, flush and terminal
+removal independently; an endpoint-index check alone cannot make physical
+recovery exclusive. A later integration must fence those operations and retain
+all direct obligations through an exact-owner, joined transfer.
+
 ## Coherent implementation group
 
 1. Define a typed retained continuation with a unique exact `ConnectionRef`,
@@ -16,8 +26,9 @@ production control-latency or durable-resume claim.
    `ResponseBatch` or `DriveOutcome`. Reserve hard frame-count and serialized-
    byte credits before effects, and retain or atomically transfer those credits
    through writer admission and settlement without a full-budget deadlock.
-2. Keep one owner-selected arbiter for continuation chunks, existing direct
-   frames and permitted SM control. Admit at most one continuation frame to
+2. Keep one owner-selected arbiter for continuation chunks and permitted SM
+   control. Integrating existing direct frames is a separate gate. Admit at
+   most one continuation frame to
    the writer at once. Control may progress at a safe yield only after the
    handled prefix and checkpoint are durable; a stalled effect or physical
    writer is not assigned a false latency bound.
@@ -28,18 +39,22 @@ production control-latency or durable-resume claim.
    forbid an unproven retry. A local flush is not client ACK. Cloneable ticket
    snapshots cannot confer ownership or release credits early.
 4. Preserve SM handled-prefix, outbound append/exposure, replay and ACK as
-   separate milestones. Count XEP-0198 control elements as uncounted. Keep
-   existing direct-frame pending/ingress obligation references intact.
+   separate milestones. Count XEP-0198 control elements as uncounted. The later
+   direct-frame gate must retain pending/ingress obligation references.
 
 ## Verification and activation boundary
 
 Use deterministic loopback tests for effect-once cancellation before and
 between chunks, exact/over-limit count and byte reservations, duplicate owner
-claims, direct-frame ordering, a handled-prefix hole, `<r/>` at a safe yield
+claims, a handled-prefix hole, `<r/>` at a safe yield
 under output pressure, `<a/>` during a full window, and stop/revoke before
 admission, at writer readiness, after attempt and after flush. Assert retained
 input/output credits and joined cleanup at each terminal state. Run relevant
 XEP-0198 tests, formatting, scoped Clippy and independent final review.
+Direct-frame ordering and its independent terminal-custody fence remain future
+verification. Checkpoint abort before polling, during persistence and after
+persistence, all simultaneous ready-slot races, and every readiness/admission
+interleaving remain unproven by this fixture.
 
 This fixture does not enable generic `process_inbound_frame` or peer dispatch,
 replace the production socket loop, create P2 acceptance custody, establish
@@ -50,7 +65,7 @@ and `WebSocketOutput`, label it a scheduler model rather than transport proof.
 
 ## Phase 1 implementation boundary
 
-The current phase implements only the test-support scheduler model: typed lazy
+The hosted phase 1 baseline implements the test-support scheduler model: typed lazy
 frame production, pre-effect count and worst-case byte reservation, an exact
 connection owner claim, a bounded handled-sequence window, and separate
 prepared/admitted/attempted/uncertain/flushed milestones. Its tests exercise
@@ -66,8 +81,9 @@ The independent review approved implementation subject to these blocking
 conditions:
 
 1. A worker taking physical I/O stays parked until the exact endpoint cleanup
-   record accepts it. Validate the input, output, state and registered direct
-   custody against the same complete `ConnectionRef` before release.
+   record accepts it. Validate input, output and state against the same complete
+   `ConnectionRef` before release. Until a direct custody claim exists, reject
+   attachment if an actor channel exists and reject new channels after attachment.
 2. Keep the typed frame, cursor, reserved credits and actual write receipt
    discoverable through the exact cleanup record after a worker exits. An
    unresolved output cannot be acknowledged or pruned until the receipt is
@@ -77,7 +93,7 @@ conditions:
    admission, input and stop independently; a control response joins the
    same writer at a safe yield. No latency claim applies while a checkpoint
    or the current physical write is stalled.
-4. Record each countable synthetic or direct frame exactly once in actual
+4. Record each countable synthetic frame exactly once in actual
    arbiter order. Keep outbound append, exposure, local flush and peer `<a/>`
    separate, including at a full send window. In-memory replay is not durable
    replay. A durable inbound-checkpoint claim additionally requires an enrolled
@@ -108,8 +124,8 @@ design requires an independent challenge before implementation:
 - Before starting a checkpoint, retain the original input permit and an
   independently bounded control reservation in the app-owned ledger. The
   checkpoint temporarily owns the sole connection core and returns it with its
-  typed result. A drop guard must escrow that core on abort, including when the
-  future has never been polled. The design must prove drop ordering and avoid
+  typed result. A pre-acquired owned mutex guard keeps the core escrowed on abort,
+  including when the future has never been polled. The design must prove drop ordering and avoid
   holding any lifecycle or ledger lock across an await or callback.
 - Keep an admission future pinned until it resolves or stop wins. Store its
   exact-connection receipt synchronously before any further await. While an

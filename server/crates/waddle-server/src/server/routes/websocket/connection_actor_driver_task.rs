@@ -29,9 +29,9 @@ use waddle_xmpp::ownership::ConnectionRef;
 pub(super) mod physical;
 #[cfg(feature = "test-support")]
 pub use physical::{
-    PhysicalControlRecovery, PhysicalDirectRecovery, PhysicalEnrollment, PhysicalLimits,
-    PhysicalProducerRecovery, PhysicalRecovery, PhysicalReplayPayload, PhysicalReplayRecovery,
-    PhysicalSnapshot, PhysicalWriteKind, PhysicalWriteRecovery,
+    PhysicalControlRecovery, PhysicalEnrollment, PhysicalLimits, PhysicalProducerRecovery,
+    PhysicalRecovery, PhysicalReplayPayload, PhysicalReplayRecovery, PhysicalSnapshot,
+    PhysicalWriteKind, PhysicalWriteRecovery,
 };
 #[cfg(feature = "test-support")]
 use physical::{PhysicalParts, PhysicalProducer, PhysicalShared};
@@ -1551,15 +1551,6 @@ impl ConnectionActorDriverTaskCleanup {
             .joined
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(super) fn physical_direct_reconciled(&self) -> bool {
-        self.inner
-            .shared
-            .physical
-            .as_ref()
-            .is_none_or(|physical| physical.direct_reconciled())
     }
 
     #[cfg(feature = "test-support")]
