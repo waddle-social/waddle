@@ -6,6 +6,8 @@
 #[cfg(feature = "test-support")]
 pub mod iq_forward;
 #[cfg(feature = "test-support")]
+pub mod observer_quarantine;
+#[cfg(feature = "test-support")]
 pub mod postgres_proxy;
 #[cfg(feature = "test-support")]
 pub(crate) mod relation_guard_lab;
