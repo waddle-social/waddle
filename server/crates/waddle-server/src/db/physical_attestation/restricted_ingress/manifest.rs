@@ -193,7 +193,7 @@ pub(super) async fn verify_functions_and_triggers(
                 .iter()
                 .filter(|f| f.owner == "api")
                 .count()
-                + usize::from(receipt_journal),
+                + 2 * usize::from(receipt_journal),
         )
     {
         return Err(RestrictedIngressProfileError::Mismatch(
@@ -204,6 +204,7 @@ pub(super) async fn verify_functions_and_triggers(
     let mut names = names;
     if receipt_journal {
         names.push("waddle_p21_record_effect_receipt");
+        names.push("waddle_p21_lookup_receipt_operation");
     }
     let alternate: bool = sqlx::query_scalar(r#"
         SELECT EXISTS (

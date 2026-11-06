@@ -6,9 +6,9 @@
 //! The inherited v2 verifier also requires a trusted-clean catalog at entry;
 //! it reads the guard manifest before proving its complete structural shape.
 //! The SQLite backend has only cooperative application ownership.
-//! This experimental PostgreSQL profile grants runtime SELECT on the whole
-//! journal; an exact-key lookup, bounded retention, and the joint role profile
-//! are required before any serving selector can use it.
+//! PostgreSQL runtime access to historical results is through a separately
+//! pinned exact-key definer lookup. Bounded retention and the joint role profile
+//! remain required before any serving selector can use it.
 
 use std::time::Duration;
 
@@ -43,6 +43,7 @@ pub struct ReceiptOperationPins {
     pub epoch_relation_oid: u32,
     pub journal_relation_oid: u32,
     pub journal_function_oid: u32,
+    pub journal_lookup_function_oid: u32,
 }
 
 impl ReceiptOperationPins {
@@ -55,6 +56,7 @@ impl ReceiptOperationPins {
             self.epoch_relation_oid,
             self.journal_relation_oid,
             self.journal_function_oid,
+            self.journal_lookup_function_oid,
         ]
         .into_iter()
         .all(|oid| oid != 0)
@@ -62,6 +64,7 @@ impl ReceiptOperationPins {
             && self.schema_owner_role_oid != self.api_owner_role_oid
             && self.runtime_role_oid != self.api_owner_role_oid
             && self.epoch_relation_oid != self.journal_relation_oid
+            && self.journal_function_oid != self.journal_lookup_function_oid
     }
 }
 
@@ -483,7 +486,11 @@ impl ReceiptTransaction<'_> {
         match self.backend {
             Backend::Postgres { capability, .. } => {
                 let schema = &capability.config.postgres().schema.name.0;
-                let query = format!("SELECT message_key, receipt_kind, semantic_identity_hash, inserted FROM {}.p21_receipt_operation_results WHERE operation_id=$1", quote_identifier(schema));
+                let query = format!(
+                    "SELECT message_key, receipt_kind, semantic_identity_hash, inserted \
+                     FROM {}.waddle_p21_lookup_receipt_operation($1)",
+                    quote_identifier(schema)
+                );
                 let connection = self
                     .transaction
                     .postgres_connection()

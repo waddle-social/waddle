@@ -9,12 +9,16 @@ use uuid::Uuid;
 use waddle_server::db::physical_attestation::{
     attested_pool, PgRoleName, PhysicalAttestationConfig, ReceiptAuthorityError, ReceiptCommit,
     ReceiptOperation, ReceiptOperationAuthority, ReceiptOperationPins, ReceiptReadback,
+    RestrictedIngressProfileError,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_server::test_support::database_from_attested_postgres_pool;
 
 use super::super::{proxy_runtime_options, Fixture};
 use super::receipt_transaction;
+
+const LOOKUP_CANDIDATE: &str =
+    include_str!("../../src/db/migrations/owner/p21_receipt_journal_lookup_candidate.sql");
 
 pub(super) async fn exercise(
     fixture: &Fixture,
@@ -28,6 +32,16 @@ pub(super) async fn exercise(
     let api_name = api.as_str();
     let journal = format!("{s}.p21_receipt_operation_results");
     let function = format!("{s}.waddle_p21_record_effect_receipt(uuid,uuid,integer,bytea)");
+    let lookup_function = format!("{s}.waddle_p21_lookup_receipt_operation(uuid)");
+    let lookup_sql = LOOKUP_CANDIDATE
+        .replace("__SCHEMA__", s)
+        .replace("__SCHEMA_LITERAL__", &format!("'{s}'"))
+        .replace("__RUNTIME_ROLE__", r);
+    let lookup_create_or_replace = lookup_sql
+        .split_once("\nREVOKE ALL")
+        .expect("lookup candidate grants follow function definition")
+        .0
+        .replacen("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1);
 
     // Reapply V1030 through the registered runner with hostile default ACLs.
     // This is a disposable, exclusively owned schema with an empty journal.
@@ -93,19 +107,143 @@ pub(super) async fn exercise(
     .await
     .expect("inert ACL");
     assert_eq!(before, (false, false, false));
+
     super::execute(
         &fixture.admin,
         &format!(
-            "GRANT CREATE ON SCHEMA {s} TO {api_name}; \
-         ALTER FUNCTION {function} OWNER TO {api_name}; \
-         ALTER FUNCTION {function} SECURITY DEFINER; \
-         REVOKE CREATE ON SCHEMA {s} FROM {api_name}; \
-         GRANT SELECT,INSERT ON {journal} TO {api_name}; \
-         GRANT SELECT ON {journal} TO {r}; \
-         GRANT EXECUTE ON FUNCTION {function} TO {r}"
+            "GRANT USAGE ON SCHEMA {s} TO {}; \
+             ALTER DEFAULT PRIVILEGES FOR ROLE {api_name} IN SCHEMA {s} \
+                 GRANT EXECUTE ON FUNCTIONS TO {};",
+            fixture.outsider, fixture.outsider
         ),
     )
     .await;
+    let mut default_probe = fixture
+        .admin
+        .begin()
+        .await
+        .expect("begin default ACL probe");
+    sqlx::query(&format!("GRANT CREATE ON SCHEMA {s} TO {api_name}"))
+        .execute(&mut *default_probe)
+        .await
+        .expect("grant temporary probe create");
+    sqlx::query(&format!("SET LOCAL ROLE {api_name}"))
+        .execute(&mut *default_probe)
+        .await
+        .expect("assume API owner for default ACL probe");
+    sqlx::query(&format!(
+        "CREATE FUNCTION {s}.p21_default_acl_probe() RETURNS integer \
+         LANGUAGE sql AS 'SELECT 7'"
+    ))
+    .execute(&mut *default_probe)
+    .await
+    .expect("create function with hostile named default ACL");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *default_probe)
+        .await
+        .expect("reset default ACL probe role");
+    sqlx::query(&format!("REVOKE CREATE ON SCHEMA {s} FROM {api_name}"))
+        .execute(&mut *default_probe)
+        .await
+        .expect("revoke temporary probe create");
+    default_probe
+        .commit()
+        .await
+        .expect("commit default ACL positive control");
+    let mut outsider_probe =
+        PgConnection::connect_with(&fixture.runtime_options.clone().username(&fixture.outsider))
+            .await
+            .expect("outsider default ACL positive control connection");
+    let default_acl_value: i32 = sqlx::query_scalar(&format!("SELECT {s}.p21_default_acl_probe()"))
+        .fetch_one(&mut outsider_probe)
+        .await
+        .expect("named default ACL is effective for outsider");
+    assert_eq!(default_acl_value, 7);
+    drop(outsider_probe);
+    super::execute(
+        &fixture.admin,
+        &format!("DROP FUNCTION {s}.p21_default_acl_probe()"),
+    )
+    .await;
+
+    let mut hostile_install = fixture.admin.begin().await.expect("begin hostile install");
+    sqlx::query(&format!("GRANT CREATE ON SCHEMA {s} TO {api_name}"))
+        .execute(&mut *hostile_install)
+        .await
+        .expect("grant temporary hostile install create");
+    sqlx::query(&format!("SET LOCAL ROLE {api_name}"))
+        .execute(&mut *hostile_install)
+        .await
+        .expect("assume API owner for hostile install");
+    let hostile_install_result = sqlx::raw_sql(&lookup_sql)
+        .execute(&mut *hostile_install)
+        .await;
+    assert!(
+        hostile_install_result.is_err(),
+        "lookup installation must reject named default EXECUTE grants"
+    );
+    hostile_install
+        .rollback()
+        .await
+        .expect("rollback entire hostile lookup install");
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE {api_name} IN SCHEMA {s} \
+             REVOKE EXECUTE ON FUNCTIONS FROM {};",
+            fixture.outsider
+        ),
+    )
+    .await;
+    let lookup_exists: bool =
+        sqlx::query_scalar("SELECT pg_catalog.to_regprocedure($1::text) IS NOT NULL")
+            .bind(&lookup_function)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("lookup rollback observation");
+    assert!(
+        !lookup_exists,
+        "hostile install transaction must roll back the function"
+    );
+
+    let mut provision = fixture.admin.begin().await.expect("begin dark promotion");
+    sqlx::query(&format!("GRANT CREATE ON SCHEMA {s} TO {api_name}"))
+        .execute(&mut *provision)
+        .await
+        .expect("grant temporary API create");
+    sqlx::query(&format!("ALTER FUNCTION {function} OWNER TO {api_name}"))
+        .execute(&mut *provision)
+        .await
+        .expect("transfer record function");
+    sqlx::query(&format!("ALTER FUNCTION {function} SECURITY DEFINER"))
+        .execute(&mut *provision)
+        .await
+        .expect("harden record function");
+    sqlx::query(&format!("GRANT SELECT,INSERT ON {journal} TO {api_name}"))
+        .execute(&mut *provision)
+        .await
+        .expect("grant API journal access");
+    sqlx::query(&format!("SET LOCAL ROLE {api_name}"))
+        .execute(&mut *provision)
+        .await
+        .expect("assume API owner");
+    sqlx::query(&format!("GRANT EXECUTE ON FUNCTION {function} TO {r}"))
+        .execute(&mut *provision)
+        .await
+        .expect("grant record API to runtime");
+    sqlx::raw_sql(&lookup_sql)
+        .execute(&mut *provision)
+        .await
+        .expect("install exact-key lookup under API owner");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *provision)
+        .await
+        .expect("reset API role");
+    sqlx::query(&format!("REVOKE CREATE ON SCHEMA {s} FROM {api_name}"))
+        .execute(&mut *provision)
+        .await
+        .expect("revoke temporary API create");
+    provision.commit().await.expect("commit dark promotion");
     let schema_oid = config_identity_schema_oid(fixture);
     let schema_owner: Oid =
         sqlx::query_scalar("SELECT nspowner FROM pg_catalog.pg_namespace WHERE oid=$1")
@@ -134,6 +272,13 @@ pub(super) async fn exercise(
     .fetch_one(&fixture.admin)
     .await
     .expect("function OID");
+    let lookup_function_oid: Oid = sqlx::query_scalar(
+        "SELECT oid FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(&lookup_function)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("lookup function OID");
     let pins = ReceiptOperationPins {
         schema_oid,
         schema_owner_role_oid: schema_owner.0,
@@ -142,6 +287,7 @@ pub(super) async fn exercise(
         epoch_relation_oid: epoch_oid,
         journal_relation_oid: journal_oid.0,
         journal_function_oid: function_oid.0,
+        journal_lookup_function_oid: lookup_function_oid.0,
     };
     let db = receipt_transaction::database(fixture, config.clone(), "receipt-journal");
     let authority = ReceiptOperationAuthority::postgres(db.clone(), api.clone(), pins)
@@ -174,6 +320,47 @@ pub(super) async fn exercise(
         authority.readback(&operation).await.expect("readback"),
         ReceiptReadback::Committed { inserted: true }
     );
+
+    let runtime_has_journal_select: bool =
+        sqlx::query_scalar("SELECT pg_catalog.has_table_privilege($1,$2,'SELECT')")
+            .bind(r)
+            .bind(&journal)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("runtime journal privilege");
+    assert!(
+        !runtime_has_journal_select,
+        "runtime must not read the journal directly"
+    );
+    let runtime_has_journal_column_select: bool =
+        sqlx::query_scalar("SELECT pg_catalog.has_any_column_privilege($1,$2,'SELECT')")
+            .bind(r)
+            .bind(&journal)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("runtime journal column privilege");
+    assert!(
+        !runtime_has_journal_column_select,
+        "runtime must not read journal columns directly"
+    );
+    let mut outsider =
+        PgConnection::connect_with(&fixture.runtime_options.clone().username(&fixture.outsider))
+            .await
+            .expect("outsider connection");
+    let outsider_lookup = sqlx::query(&format!(
+        "SELECT * FROM {s}.waddle_p21_lookup_receipt_operation($1)"
+    ))
+    .bind(operation.operation_id)
+    .fetch_one(&mut outsider)
+    .await;
+    assert!(
+        matches!(&outsider_lookup, Err(error) if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref() == Some("42501")),
+        "non-runtime role must be denied by function EXECUTE ACL: {outsider_lookup:?}"
+    );
+    drop(outsider);
     let conflicting = ReceiptOperation {
         kind: receipts[1].kind,
         semantic_identity_hash: receipts[1].semantic_identity_hash,
@@ -254,6 +441,15 @@ pub(super) async fn exercise(
         "losing receipt rolls back with its mismatched journal attempt"
     );
 
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "CREATE SEQUENCE {s}.p21_lookup_probe_seq; \
+             GRANT USAGE,SELECT ON SEQUENCE {s}.p21_lookup_probe_seq TO {api_name};"
+        ),
+    )
+    .await;
+
     let mut direct = PgConnection::connect_with(&fixture.runtime_options)
         .await
         .expect("runtime connection");
@@ -290,20 +486,142 @@ pub(super) async fn exercise(
             format!("ALTER FUNCTION {function} SET search_path=pg_catalog,pg_temp"),
         ),
         (
+            "lookup owner",
+            format!("ALTER FUNCTION {lookup_function} OWNER TO {r}"),
+            format!("ALTER FUNCTION {lookup_function} OWNER TO {api_name}"),
+        ),
+        (
+            "lookup search path",
+            format!("ALTER FUNCTION {lookup_function} SET search_path=public"),
+            format!("ALTER FUNCTION {lookup_function} SET search_path=pg_catalog,pg_temp"),
+        ),
+        (
+            "lookup same-OID body replacement",
+            format!(
+                "CREATE OR REPLACE FUNCTION {s}.waddle_p21_lookup_receipt_operation(p_operation_id uuid) \
+                 RETURNS TABLE (message_key uuid, receipt_kind integer, semantic_identity_hash bytea, inserted boolean) \
+                 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp ROWS 1 \
+                 AS $bad_lookup$ BEGIN \
+                   PERFORM pg_catalog.nextval('{s}.p21_lookup_probe_seq'::pg_catalog.regclass); \
+                   RETURN QUERY SELECT journal.message_key,journal.receipt_kind, \
+                       journal.semantic_identity_hash,journal.inserted \
+                     FROM {journal} AS journal WHERE journal.operation_id=p_operation_id; \
+                 END $bad_lookup$"
+            ),
+            lookup_create_or_replace.clone(),
+        ),
+        (
+            "lookup PUBLIC execute",
+            format!("GRANT EXECUTE ON FUNCTION {lookup_function} TO PUBLIC"),
+            format!("REVOKE EXECUTE ON FUNCTION {lookup_function} FROM PUBLIC"),
+        ),
+        (
+            "lookup runtime grant option",
+            format!("GRANT EXECUTE ON FUNCTION {lookup_function} TO {r} WITH GRANT OPTION"),
+            format!("REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION {lookup_function} FROM {r}"),
+        ),
+        (
+            "lookup overload",
+            format!("CREATE FUNCTION {s}.waddle_p21_lookup_receipt_operation(uuid,boolean) RETURNS boolean LANGUAGE sql AS 'SELECT false'"),
+            format!("DROP FUNCTION {s}.waddle_p21_lookup_receipt_operation(uuid,boolean)"),
+        ),
+        (
             "extra index",
             format!("CREATE INDEX p21_journal_hostile ON {journal}(receipt_kind)"),
             format!("DROP INDEX {s}.p21_journal_hostile"),
         ),
     ] {
         super::execute(&fixture.admin, &change).await;
-        let rejected = authority
-            .record(&ReceiptOperation {
-                operation_id: Uuid::new_v4(),
-                ..operation
-            })
-            .await;
+        let hostile_lookup = label == "lookup same-OID body replacement";
+        if hostile_lookup {
+            let mut direct_runtime = PgConnection::connect_with(&fixture.runtime_options)
+                .await
+                .expect("runtime for direct hostile lookup positive control");
+            sqlx::query(&format!(
+                "SELECT * FROM {s}.waddle_p21_lookup_receipt_operation($1)"
+            ))
+            .bind(operation.operation_id)
+            .fetch_one(&mut direct_runtime)
+            .await
+            .expect("hostile function positive control invokes its sequence");
+            drop(direct_runtime);
+        }
+        let rejection = if hostile_lookup {
+            let result = authority.readback(&operation).await;
+            assert!(
+                matches!(
+                    &result,
+                    Err(ReceiptAuthorityError::Profile(
+                        RestrictedIngressProfileError::Mismatch("journal lookup function")
+                    ))
+                ),
+                "same-OID hostile lookup must fail the lookup profile check: {result:?}"
+            );
+            result.map(|_| ()).map_err(|error| format!("{error:?}"))
+        } else {
+            authority
+                .record(&ReceiptOperation {
+                    operation_id: Uuid::new_v4(),
+                    ..operation
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))
+        };
+        if label == "lookup same-OID body replacement" {
+            let sentinel: (i64, bool) = sqlx::query_as(&format!(
+                "SELECT last_value,is_called FROM {s}.p21_lookup_probe_seq"
+            ))
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("lookup sequence sentinel");
+            assert_eq!(
+                sentinel,
+                (1, true),
+                "profile rejection must precede hostile lookup invocation"
+            );
+        }
         super::execute(&fixture.admin, &restore).await;
-        assert!(rejected.is_err(), "accepted hostile {label}: {rejected:?}");
+        let mut restore_acl = fixture
+            .admin
+            .begin()
+            .await
+            .expect("begin lookup ACL restoration");
+        sqlx::query(&format!("GRANT CREATE ON SCHEMA {s} TO {api_name}"))
+            .execute(&mut *restore_acl)
+            .await
+            .expect("temporary API create for owner restoration");
+        sqlx::query(&format!("ALTER FUNCTION {lookup_function} OWNER TO {api_name}"))
+            .execute(&mut *restore_acl)
+            .await
+            .expect("restore lookup owner");
+        sqlx::query(&format!("REVOKE CREATE ON SCHEMA {s} FROM {api_name}"))
+            .execute(&mut *restore_acl)
+            .await
+            .expect("revoke temporary API create");
+        sqlx::query(&format!(
+            "REVOKE ALL ON FUNCTION {lookup_function} FROM PUBLIC, {r}"
+        ))
+        .execute(&mut *restore_acl)
+        .await
+        .expect("clear lookup runtime ACL");
+        sqlx::query(&format!("SET LOCAL ROLE {api_name}"))
+            .execute(&mut *restore_acl)
+            .await
+            .expect("assume API owner for lookup ACL restore");
+        sqlx::query(&format!("GRANT EXECUTE ON FUNCTION {lookup_function} TO {r}"))
+            .execute(&mut *restore_acl)
+            .await
+            .expect("restore owner-granted lookup execute");
+        sqlx::query("RESET ROLE")
+            .execute(&mut *restore_acl)
+            .await
+            .expect("reset restored API role");
+        restore_acl
+            .commit()
+            .await
+            .expect("commit lookup ACL restoration");
+        assert!(rejection.is_err(), "accepted hostile {label}: {rejection:?}");
         assert_eq!(
             authority
                 .readback(&operation)
@@ -337,6 +655,10 @@ pub(super) async fn exercise(
             journal_function_oid: pins.journal_function_oid + 1,
             ..pins
         },
+        ReceiptOperationPins {
+            journal_lookup_function_oid: pins.journal_lookup_function_oid + 1,
+            ..pins
+        },
     ] {
         let wrong = ReceiptOperationAuthority::postgres(db.clone(), api.clone(), wrong)
             .expect("syntactically valid pins");
@@ -360,6 +682,46 @@ pub(super) async fn exercise(
         "strict v2 refuses separately provisioned extra API function"
     );
     strict.close().await;
+
+    let pending = ReceiptOperation {
+        operation_id: Uuid::new_v4(),
+        ..operation
+    };
+    let mut pending_transaction = fixture
+        .admin
+        .begin()
+        .await
+        .expect("begin pending journal row");
+    sqlx::query(&format!(
+        "INSERT INTO {journal} (operation_id,message_key,receipt_kind,semantic_identity_hash,inserted) \
+         VALUES ($1,$2,$3,$4,false)"
+    ))
+    .bind(pending.operation_id)
+    .bind(pending.message.to_storage())
+    .bind(pending.kind.to_storage())
+    .bind(pending.semantic_identity_hash.as_slice())
+    .execute(&mut *pending_transaction)
+    .await
+    .expect("uncommitted journal result");
+    assert_eq!(
+        authority
+            .readback(&pending)
+            .await
+            .expect("uncommitted absence"),
+        ReceiptReadback::Indeterminate,
+        "an uncommitted journal row is not visible as rollback proof"
+    );
+    pending_transaction
+        .rollback()
+        .await
+        .expect("rollback pending journal row");
+    assert_eq!(
+        authority
+            .readback(&pending)
+            .await
+            .expect("rolled-back absence"),
+        ReceiptReadback::Indeterminate
+    );
 
     let lost = ReceiptOperation {
         operation_id: Uuid::new_v4(),
