@@ -8,8 +8,8 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use super::{
-    acquire_dark_shared_migration_ledger_v1023, DarkLedgerPreflightError, DarkMigrationLedgerPins,
-    MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+    acquire_dark_shared_migration_ledger_v1023, acquire_dark_shared_migration_ledger_v1030_write,
+    DarkLedgerPreflightError, DarkMigrationLedgerPins, MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
 };
 use crate::db::migrations::{migration_checksum, MigrationRunner};
 use crate::db::{Database, DatabaseDriver, DatabaseError, MigrationLedgerError};
@@ -143,6 +143,37 @@ impl Fixture {
         self.create_ledger().await;
     }
 
+    async fn seed_v1030(&self) {
+        let mut conn = self.admin.acquire().await.expect("owner connection");
+        sqlx::query(&format!("SET ROLE {}", self.owner))
+            .execute(&mut *conn)
+            .await
+            .expect("assume owner");
+        for migration in MigrationRunner::single()
+            .migrations
+            .into_iter()
+            .filter(|migration| (1023..=1030).contains(&migration.version))
+        {
+            if migration.version == 1023 {
+                continue;
+            }
+            sqlx::query(&format!(
+                "INSERT INTO {}._migrations (version, description, checksum) VALUES ($1, $2, $3)",
+                self.schema
+            ))
+            .bind(migration.version)
+            .bind(&migration.description)
+            .bind(migration_checksum(&migration, DatabaseDriver::Postgres))
+            .execute(&mut *conn)
+            .await
+            .expect("seed current registered migration");
+        }
+        sqlx::query("RESET ROLE")
+            .execute(&mut *conn)
+            .await
+            .expect("reset role");
+    }
+
     async fn close(self) {
         self.reader.close().await;
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
@@ -157,6 +188,131 @@ impl Fixture {
         }
         self.admin.close().await;
     }
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url).await;
+    fixture.seed_v1030().await;
+    let db = fixture.database();
+    let pins = fixture.pins().await;
+
+    let mut tx = db.begin().await.expect("write transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("read-write boundary");
+    let mut proof =
+        acquire_dark_shared_migration_ledger_v1030_write(&mut tx, &fixture.schema, pins)
+            .await
+            .expect("complete registered V1030 prefix");
+    proof
+        .transaction()
+        .execute("CREATE TEMP TABLE proof_alive (id integer)", ())
+        .await
+        .expect("proof holds caller transaction");
+    drop(proof);
+    tx.rollback().await.expect("rollback proof transaction");
+
+    // The write proof must reject read-only transactions without attempting
+    // to upgrade or read the ledger.
+    let mut tx = db.begin().await.expect("read-only transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_write(&mut tx, &fixture.schema, pins).await,
+        Err(DarkLedgerPreflightError::TransactionBoundary)
+    ));
+    tx.rollback().await.expect("rollback rejected transaction");
+
+    sqlx::query(&format!(
+        "UPDATE {}._migrations SET checksum='bad' WHERE version=1030",
+        fixture.schema
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("damage current migration");
+    let mut tx = db.begin().await.expect("stale transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("write boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_write(&mut tx, &fixture.schema, pins).await,
+        Err(DarkLedgerPreflightError::Database(_))
+    ));
+    tx.rollback().await.expect("rollback stale ledger");
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_rejects_oversized_raw_acl_before_expansion() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url).await;
+    fixture.seed_v1030().await;
+    let mut roles = Vec::new();
+    for index in 0..65 {
+        let role = format!("ledger_acl_{index}_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&fixture.admin)
+            .await
+            .expect("create ACL grantee");
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}._migrations TO {role}",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grow raw ACL");
+        roles.push(role);
+    }
+    let db = fixture.database();
+    let mut tx = db.begin().await.expect("write transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("write boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_write(
+            &mut tx,
+            &fixture.schema,
+            fixture.pins().await
+        )
+        .await,
+        Err(DarkLedgerPreflightError::CatalogDrift)
+    ));
+    tx.rollback().await.expect("rollback oversized ACL");
+    sqlx::query(&format!(
+        "REVOKE ALL ON {}._migrations FROM {}",
+        fixture.schema,
+        roles.join(", ")
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke test ACL roles");
+    for role in roles {
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&fixture.admin)
+            .await
+            .expect("drop test ACL role");
+    }
+    fixture.close().await;
 }
 
 async fn reject_without_relation_lock(fixture: &Fixture, pins: DarkMigrationLedgerPins) {
