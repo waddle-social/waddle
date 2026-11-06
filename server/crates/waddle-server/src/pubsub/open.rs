@@ -78,6 +78,15 @@ impl DatabasePubSubStorage {
         Ok(Self { db })
     }
 
+    /// Diagnose the unselected PG17 H-owned helper profile on the exact
+    /// attested main pool. This does not return a store or authorize serving.
+    pub async fn verify_restricted_profile_v1(
+        db: &Database,
+        profile: &super::RestrictedServingProfileV1,
+    ) -> Result<(), super::PubSubRuntimeAttachError> {
+        super::runtime_attach::verify_restricted_v1(db, profile).await
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }

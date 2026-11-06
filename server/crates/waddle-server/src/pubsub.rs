@@ -23,7 +23,7 @@ mod versioned;
 mod versioned_tests;
 
 pub use open::{build_database_pubsub_storage, build_pubsub_storage};
-pub use runtime_attach::PubSubRuntimeAttachError;
+pub use runtime_attach::{PubSubRuntimeAttachError, RestrictedServingProfileV1};
 
 #[cfg(test)]
 mod tests;

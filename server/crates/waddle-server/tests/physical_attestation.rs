@@ -7423,5 +7423,13 @@ mod pinned_mam_lookup_tests;
 #[path = "physical_attestation/pinned_catalog.rs"]
 mod pinned_catalog_tests;
 
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/catalog_mutation_fence.rs"]
+mod catalog_mutation_fence_tests;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/sm_recipient_route_race.rs"]
+mod sm_recipient_route_race_tests;
+
 #[path = "physical_attestation/pinned_installer.rs"]
 mod pinned_installer;

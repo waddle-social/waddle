@@ -5,7 +5,9 @@
 -- existing simple identifier grammar `[a-z_][a-z0-9_]{0,62}`), and substitute the
 -- exact pinned ingress_definer_api_candidate.sql and
 -- p21_receipt_journal_lookup_candidate.sql assets at the two SQL placeholders.
--- Never accept any of these substitutions from R.
+-- Render __SCHEMA__ as a quoted identifier even for simple identifiers: the
+-- H-helper profile verifies the exact resulting body. Never accept any of
+-- these substitutions from R.
 --
 -- Run atomically in a caller-owned READ COMMITTED transaction as a trusted role
 -- administrator, only after independently pinning the primary, schema, all

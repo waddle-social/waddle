@@ -329,19 +329,27 @@ const MUC_TABLES: &[&Table] = &[
 ];
 
 pub(super) async fn verify(db: &Database) -> Result<(), RoomEffectRuntimeAttachError> {
-    verify_tables(db, &[&EFFECTS], false).await.map(drop)
+    verify_tables(db, &[&EFFECTS], false, None).await.map(drop)
 }
 
 pub(super) async fn verify_muc_room_runtime(
     db: &Database,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
-    verify_tables(db, MUC_TABLES, true).await
+    verify_tables(db, MUC_TABLES, true, None).await
+}
+
+pub(super) async fn verify_muc_room_runtime_v1(
+    db: &Database,
+    profile: &crate::pubsub::RestrictedServingProfileV1,
+) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
+    verify_tables(db, MUC_TABLES, true, Some(profile)).await
 }
 
 async fn verify_tables(
     db: &Database,
     tables: &[&Table],
     exact_schema_acl: bool,
+    profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(RoomEffectRuntimeAttachError::AttestedPostgresRequired);
@@ -365,11 +373,13 @@ async fn verify_tables(
         (),
     )
     .await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-        (),
-    )
-    .await?;
+    if profile.is_none() {
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            (),
+        )
+        .await?;
+    }
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| RoomEffectRuntimeAttachError::ReadBounds)?;
@@ -400,11 +410,33 @@ async fn verify_tables(
     if !matches!(active.next().await?, Some(row) if row.get::<bool>(0)?) {
         return Err(RoomEffectRuntimeAttachError::ActiveSchemaMismatch);
     }
+    drop(active);
+    if let Some(profile) = profile {
+        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await?;
+        crate::pubsub::runtime_attach::verify_restricted_v1_graph_tx(
+            &mut tx,
+            identity,
+            capability.definer_role().as_str(),
+            profile,
+        )
+        .await
+        .map_err(|_| RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "v1 role graph",
+        })?;
+        let names: Vec<_> = tables.iter().map(|table| table.name).collect();
+        crate::pubsub::runtime_attach::verify_no_definer_writers_tx(&mut tx, schema, &names)
+            .await
+            .map_err(|_| RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+                component: "v1 definer relay",
+            })?;
+    }
     verify_runtime_role(
         &mut tx,
         schema,
         exact_schema_acl,
         capability.definer_role().as_str(),
+        profile,
     )
     .await?;
     for table in tables {
@@ -757,15 +789,21 @@ async fn verify_runtime_role(
     schema: &str,
     exact_schema_acl: bool,
     expected_definer: &str,
+    profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
 ) -> Result<(), RoomEffectRuntimeAttachError> {
-    let schema_acl = if exact_schema_acl {
+    let schema_acl = if let Some(profile) = profile {
+        format!("AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+           WHERE a.grantee NOT IN (n.nspowner,r.oid,definer.oid,pg_catalog.to_regrole('pg_monitor'),{}::pg_catalog.oid,{}::pg_catalog.oid) \
+             OR (a.grantee <> n.nspowner AND (a.grantor <> n.nspowner OR a.privilege_type <> 'USAGE' OR a.is_grantable)))",
+            profile.api_oid, profile.helper_oid)
+    } else if exact_schema_acl {
         "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
            WHERE a.grantee = 0 OR a.grantee NOT IN (n.nspowner,r.oid,definer.oid) \
              OR (a.grantee = r.oid AND (a.privilege_type <> 'USAGE' OR a.is_grantable)) \
-             OR (a.grantee = definer.oid AND (a.privilege_type <> 'USAGE' OR a.is_grantable)))"
+             OR (a.grantee = definer.oid AND (a.privilege_type <> 'USAGE' OR a.is_grantable)))".to_owned()
     } else {
         "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
-           WHERE a.grantee = 0 OR (a.grantee <> n.nspowner AND (a.privilege_type <> 'USAGE' OR a.is_grantable)))"
+           WHERE a.grantee = 0 OR (a.grantee <> n.nspowner AND (a.privilege_type <> 'USAGE' OR a.is_grantable)))".to_owned()
     };
     let definer_join = if exact_schema_acl {
         "JOIN pg_catalog.pg_roles definer ON definer.rolname = ?"

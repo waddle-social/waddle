@@ -99,7 +99,7 @@ impl VerifiedMucRoomRuntime {
     }
 
     /// The room-runtime proof includes the effect relation in the same
-    /// read-only catalog snapshot.
+    /// read-only transaction. Trusted DDL and ACL changes must be quiescent.
     pub fn effect_outbox(&self) -> &VerifiedRoomEffectOutbox {
         &self.effect_outbox
     }
@@ -148,6 +148,21 @@ impl RoomEffectOutboxStore {
         db: Database,
     ) -> Result<VerifiedMucRoomRuntime, super::RoomEffectRuntimeAttachError> {
         let capability = super::runtime_attach::verify_muc_room_runtime(&db).await?;
+        Ok(VerifiedMucRoomRuntime {
+            effect_outbox: VerifiedRoomEffectOutbox {
+                capability,
+                _db: db,
+            },
+        })
+    }
+
+    /// Diagnose the unselected A/H role profile against the prepared MUC
+    /// schema. The returned evidence grants no mutation or serving authority.
+    pub async fn verify_muc_room_runtime_v1(
+        db: Database,
+        profile: &crate::pubsub::RestrictedServingProfileV1,
+    ) -> Result<VerifiedMucRoomRuntime, super::RoomEffectRuntimeAttachError> {
+        let capability = super::runtime_attach::verify_muc_room_runtime_v1(&db, profile).await?;
         Ok(VerifiedMucRoomRuntime {
             effect_outbox: VerifiedRoomEffectOutbox {
                 capability,

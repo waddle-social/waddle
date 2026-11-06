@@ -10,11 +10,462 @@ use waddle_server::db::physical_attestation::{
     attested_pool, install, PgRoleName, PhysicalAttestationConfig,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
-use waddle_server::pubsub::{DatabasePubSubStorage, PubSubRuntimeAttachError};
+use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
+use waddle_server::muc_durable::PostgresMucRoomStore;
+use waddle_server::pubsub::{
+    DatabasePubSubStorage, PubSubRuntimeAttachError, RestrictedServingProfileV1,
+};
+use waddle_server::room_effect_outbox::RoomEffectOutboxStore;
 use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_xmpp::pubsub::{
     PubSubItem, PubSubStorage, PublicationNode, PublicationVersion, VersionedPublishResult,
 };
+
+const V1_HELPER_TABLES: [&str; 12] = [
+    "dnd_projection",
+    "dnd_projection_source_version",
+    "notification_settings_projection",
+    "notification_settings_projection_source_version",
+    "pubsub_affiliations",
+    "pubsub_items",
+    "pubsub_nodes",
+    "pubsub_owner_configured",
+    "pubsub_push_publications",
+    "pubsub_schema_marker",
+    "pubsub_schema_version",
+    "pubsub_subscriptions",
+];
+
+#[tokio::test]
+async fn pg17_v1_helper_attaches_real_owner_prepared_pubsub_and_rejects_drift() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let f = Fixture::new(url.clone()).await;
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let owner = format!("v1_owner_{suffix}");
+    let migrator = format!("v1_migrator_{suffix}");
+    let api = format!("v1_api_{suffix}");
+    let helper = format!("v1_helper_{suffix}");
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+        .fetch_one(&f.admin)
+        .await
+        .expect("PostgreSQL version");
+    assert!(
+        (170_000..180_000).contains(&version),
+        "requires PostgreSQL 17"
+    );
+    for role in [&owner, &api, &helper] {
+        run_sql(&f, &format!("CREATE ROLE {role} NOLOGIN NOINHERIT")).await;
+    }
+    run_sql(&f, &format!("CREATE ROLE {migrator} LOGIN NOINHERIT")).await;
+    run_sql(
+        &f,
+        &format!("GRANT {owner} TO {migrator} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE"),
+    )
+    .await;
+    run_sql(&f, &format!("ALTER SCHEMA {} OWNER TO {owner}", f.target)).await;
+    run_sql(
+        &f,
+        &format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"),
+    )
+    .await;
+    let mut owner_url = url::Url::parse(&f.base_url).expect("owner URL");
+    let retained: Vec<_> = owner_url
+        .query_pairs()
+        .filter(|(key, _)| key != "user" && key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    owner_url
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("user", &migrator)
+        .append_pair(
+            "options",
+            &format!("-c role={owner} -c search_path={}", f.target),
+        );
+    let owner_db = Database::from_config(
+        "v1 PubSub owner",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, owner_url.to_string()),
+    )
+    .await
+    .expect("connect owner");
+    let identity = f
+        .lineage
+        .postgres_identity
+        .as_ref()
+        .expect("identity")
+        .clone();
+    DatabasePubSubStorage::initialize_owner(owner_db.clone(), &identity)
+        .await
+        .expect("prepare the real PubSub schema");
+    PostgresMucRoomStore::initialize_owner(&owner_db, &identity)
+        .await
+        .expect("prepare the real MUC schema");
+    MucDestroyCompletionOutboxStore::try_new(owner_db.clone())
+        .await
+        .expect("prepare the real MUC destroy outbox");
+    RoomEffectOutboxStore::initialize_owner(&owner_db, &identity)
+        .await
+        .expect("prepare the real MUC effect outbox");
+    for (table, rights) in [
+        ("pubsub_schema_marker", "SELECT"),
+        ("pubsub_schema_version", "SELECT"),
+        ("pubsub_nodes", "SELECT, INSERT, UPDATE, DELETE"),
+        ("pubsub_items", "SELECT, INSERT, UPDATE, DELETE"),
+        ("pubsub_subscriptions", "SELECT, INSERT, DELETE"),
+        ("pubsub_affiliations", "SELECT, INSERT, UPDATE, DELETE"),
+        ("pubsub_owner_configured", "SELECT, INSERT"),
+        ("dnd_projection", "SELECT, INSERT, UPDATE, DELETE"),
+        ("dnd_projection_source_version", "SELECT, INSERT, UPDATE"),
+        (
+            "notification_settings_projection",
+            "SELECT, INSERT, UPDATE, DELETE",
+        ),
+        (
+            "notification_settings_projection_source_version",
+            "SELECT, INSERT, UPDATE",
+        ),
+        ("pubsub_push_publications", "SELECT, INSERT, UPDATE"),
+    ] {
+        run_sql(
+            &f,
+            &format!("GRANT {rights} ON {}.{table} TO {}", f.target, f.runtime),
+        )
+        .await;
+    }
+    run_sql(
+        &f,
+        &format!(
+            "GRANT SELECT ON SEQUENCE {}.pubsub_items_seq_seq TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    for table in [
+        "clustering_muc_rooms",
+        "clustering_muc_room_affiliations",
+        "clustering_muc_room_lifecycles",
+        "clustering_muc_destroy_outbox",
+        "clustering_muc_room_effects",
+    ] {
+        run_sql(
+            &f,
+            &format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{table} TO {}",
+                f.target, f.runtime
+            ),
+        )
+        .await;
+    }
+    run_sql(
+        &f,
+        &format!(
+            "GRANT SELECT, INSERT, DELETE ON {}.clustering_muc_admin_receipts TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT EXECUTE ON FUNCTION {}.pubsub_runtime_attach_lock() TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    let config = install(&f.installer_options, f.config(), f.operation_id)
+        .await
+        .expect("install attestor");
+    let attested = attested_pool(f.runtime_options.clone(), config, 2, Duration::from_secs(3))
+        .expect("attested pool");
+    let pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "v1 pubsub",
+        attested,
+        1,
+        1,
+    )
+    .await
+    .expect("attested database");
+    let runtime = pool.global().clone();
+    DatabasePubSubStorage::attach_existing(runtime.clone())
+        .await
+        .expect("the legacy profile remains attachable");
+    RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone())
+        .await
+        .expect("the legacy MUC profile remains attachable");
+    run_sql(
+        &f,
+        &format!("GRANT USAGE ON SCHEMA {} TO {api}, {helper}", f.target),
+    )
+    .await;
+    for table in V1_HELPER_TABLES {
+        run_sql(
+            &f,
+            &format!("GRANT UPDATE ON {}.{table} TO {helper}", f.target),
+        )
+        .await;
+    }
+    // Render the actual unregistered candidate's exact body.
+    let asset = include_str!("../src/db/migrations/owner/serving_role_graph_v1_candidate.sql");
+    let body = asset
+        .split_once("AS $v1_pubsub_lock$")
+        .unwrap()
+        .1
+        .split_once("$v1_pubsub_lock$")
+        .unwrap()
+        .0
+        .replace("__SCHEMA__", &format!("\"{}\"", f.target));
+    run_sql(
+        &f,
+        &format!("DROP FUNCTION {}.pubsub_runtime_attach_lock()", f.target),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!("GRANT CREATE ON SCHEMA {} TO {helper}", f.target),
+    )
+    .await;
+    run_sql(&f, &format!(
+        "CREATE FUNCTION {}.pubsub_runtime_attach_lock() RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $v1_pubsub_lock${body}$v1_pubsub_lock$",
+        f.target
+    )).await;
+    run_sql(
+        &f,
+        &format!(
+            "ALTER FUNCTION {}.pubsub_runtime_attach_lock() OWNER TO {helper}",
+            f.target
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "REVOKE ALL ON FUNCTION {}.pubsub_runtime_attach_lock() FROM PUBLIC",
+            f.target
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT EXECUTE ON FUNCTION {}.pubsub_runtime_attach_lock() TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!("REVOKE CREATE ON SCHEMA {} FROM {helper}", f.target),
+    )
+    .await;
+    let role_oid = |name: String| {
+        let admin = f.admin.clone();
+        async move {
+            let oid: i64 =
+                sqlx::query_scalar("SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname=$1")
+                    .bind(name)
+                    .fetch_one(&admin)
+                    .await
+                    .expect("role OID");
+            u32::try_from(oid).expect("valid role OID")
+        }
+    };
+    let helper_function_oid: i64 =
+        sqlx::query_scalar("SELECT pg_catalog.to_regprocedure($1)::oid::bigint")
+            .bind(format!("{}.pubsub_runtime_attach_lock()", f.target))
+            .fetch_one(&f.admin)
+            .await
+            .expect("helper OID");
+    let mut relation_oids = [0_u32; 12];
+    for (index, table) in V1_HELPER_TABLES.iter().enumerate() {
+        let oid: i64 = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1)::oid::bigint")
+            .bind(format!("{}.{table}", f.target))
+            .fetch_one(&f.admin)
+            .await
+            .expect("relation OID");
+        relation_oids[index] = u32::try_from(oid).expect("valid relation OID");
+    }
+    let profile = RestrictedServingProfileV1 {
+        api: PgRoleName::new(api.clone()).unwrap(),
+        api_oid: role_oid(api.clone()).await,
+        helper: PgRoleName::new(helper.clone()).unwrap(),
+        helper_oid: role_oid(helper.clone()).await,
+        helper_function_oid: u32::try_from(helper_function_oid).unwrap(),
+        helper_relation_oids: relation_oids,
+    };
+    DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &profile)
+        .await
+        .expect("the exact H-owned helper and real store verify");
+    RoomEffectOutboxStore::verify_muc_room_runtime_v1(runtime.clone(), &profile)
+        .await
+        .expect("the A/H profile verifies the real MUC store");
+    assert!(
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone())
+            .await
+            .is_err(),
+        "legacy MUC schema ACL must not be silently broadened"
+    );
+    run_sql(
+        &f,
+        &format!(
+            "CREATE FUNCTION {}.v1_muc_relay() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'DELETE FROM {}.clustering_muc_rooms WHERE false'",
+            f.target, f.target
+        ),
+    ).await;
+    run_sql(
+        &f,
+        &format!(
+            "ALTER FUNCTION {}.v1_muc_relay() OWNER TO {owner}",
+            f.target
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "REVOKE ALL ON FUNCTION {}.v1_muc_relay() FROM PUBLIC",
+            f.target
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT EXECUTE ON FUNCTION {}.v1_muc_relay() TO {api}",
+            f.target
+        ),
+    )
+    .await;
+    assert!(
+        RoomEffectOutboxStore::verify_muc_room_runtime_v1(runtime.clone(), &profile)
+            .await
+            .is_err(),
+        "a non-runtime-callable A-to-owner definer relay must be rejected"
+    );
+    run_sql(&f, &format!("DROP FUNCTION {}.v1_muc_relay()", f.target)).await;
+    assert!(
+        DatabasePubSubStorage::attach_existing(runtime.clone())
+            .await
+            .is_err(),
+        "legacy verifier still rejects the new profile"
+    );
+    let mut wrong = profile.clone();
+    wrong.helper_function_oid += 1;
+    assert!(
+        DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &wrong)
+            .await
+            .is_err()
+    );
+    let mut wrong = profile.clone();
+    wrong.helper_relation_oids.swap(0, 1);
+    assert!(
+        DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &wrong)
+            .await
+            .is_err()
+    );
+    for statement in [
+        format!("GRANT SELECT ON {}.pubsub_nodes TO {helper}", f.target),
+        format!("GRANT SELECT ON {}.pubsub_nodes TO PUBLIC", f.target),
+        format!("GRANT USAGE ON SCHEMA {} TO {}", f.target, f.outsider),
+        format!("GRANT pg_read_all_data TO {helper}"),
+        format!("GRANT TEMP ON DATABASE {} TO {api}", f.database_name),
+        format!("GRANT CREATE ON DATABASE {} TO {api}", f.database_name),
+        format!("GRANT CREATE ON SCHEMA public TO {api}"),
+        format!("GRANT SET ON PARAMETER session_replication_role TO {api}"),
+        format!(
+            "GRANT EXECUTE ON FUNCTION {}.pubsub_runtime_attach_lock() TO {}",
+            f.target, f.outsider
+        ),
+        format!(
+            "GRANT TEMP ON DATABASE {} TO {}",
+            f.database_name, f.runtime
+        ),
+    ] {
+        run_sql(&f, &statement).await;
+        assert!(
+            DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &profile)
+                .await
+                .is_err(),
+            "drift must fail: {statement}"
+        );
+        let revoke = statement
+            .replacen("GRANT", "REVOKE", 1)
+            .replace(" TO ", " FROM ");
+        run_sql(&f, &revoke).await;
+    }
+    // A same-OID SECURITY DEFINER body replacement must be rejected before
+    // execution, including when the stored source is oversized/compressible.
+    let malicious = format!("SELECT NULL::void;{}", " ".repeat(16_384));
+    run_sql(
+        &f,
+        &format!(
+            "CREATE OR REPLACE FUNCTION {}.pubsub_runtime_attach_lock() RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $v1_pubsub_lock${malicious}$v1_pubsub_lock$",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &profile).await,
+        Err(PubSubRuntimeAttachError::InvalidAttachLock)
+    ));
+    let advisory_key = i64::from_be_bytes(
+        uuid::Uuid::new_v4().as_bytes()[..8]
+            .try_into()
+            .expect("UUID prefix"),
+    );
+    run_sql(
+        &f,
+        &format!(
+            "CREATE OR REPLACE FUNCTION {}.pubsub_runtime_attach_lock() RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'SELECT pg_catalog.pg_advisory_lock({advisory_key}::pg_catalog.int8)'",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &profile).await,
+        Err(PubSubRuntimeAttachError::InvalidAttachLock)
+    ));
+    let mut witness = f.admin.acquire().await.expect("advisory-lock witness");
+    let unheld: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock($1)")
+        .bind(advisory_key)
+        .fetch_one(&mut *witness)
+        .await
+        .expect("probe helper side effect");
+    assert!(unheld, "tampered helper executed before validation");
+    sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+        .bind(advisory_key)
+        .execute(&mut *witness)
+        .await
+        .expect("release witness lock");
+    drop(witness);
+    run_sql(
+        &f,
+        &format!(
+            "CREATE OR REPLACE FUNCTION {}.pubsub_runtime_attach_lock() RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $v1_pubsub_lock${body}$v1_pubsub_lock$",
+            f.target
+        ),
+    )
+    .await;
+    DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &profile)
+        .await
+        .expect("restored profile verifies");
+    drop(runtime);
+    drop(pool);
+    drop(owner_db);
+    f.cleanup().await;
+    let cluster = PgPool::connect(&url)
+        .await
+        .expect("reconnect for role cleanup");
+    for role in [&migrator, &owner, &api, &helper] {
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&cluster)
+            .await
+            .expect("drop v1 role");
+    }
+    cluster.close().await;
+}
 
 #[allow(dead_code)]
 struct Fixture {

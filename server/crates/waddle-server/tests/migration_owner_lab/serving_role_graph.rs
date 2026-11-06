@@ -101,21 +101,21 @@ impl Lab {
         let f = &self.fixture;
         let api = FIXED_API
             .replace("__SCHEMA_PATH__", &f.schema)
-            .replace("__SCHEMA__", &f.schema)
+            .replace("__SCHEMA__", &format!("\"{}\"", f.schema))
             .replace("__API_OWNER_LITERAL__", &self.api)
             .replace("__API_OWNER_IDENT__", &self.api)
             .replace("__RUNTIME_ROLE_LITERAL__", &f.runtime)
             .replace("__RUNTIME_ROLE_IDENT__", &f.runtime);
         let lookup = LOOKUP
             .replace("__SCHEMA_LITERAL__", &format!("'{}'", f.schema))
-            .replace("__SCHEMA__", &f.schema)
+            .replace("__SCHEMA__", &format!("\"{}\"", f.schema))
             .replace("__RUNTIME_ROLE__", &f.runtime);
         let mut sql = ROLE_GRAPH
             .replace("__FIXED_INGRESS_API__", &api)
             .replace("__FIXED_RECEIPT_LOOKUP__", &lookup)
             .replace("__SCHEMA_PATH__", &f.schema)
             .replace("__SCHEMA_LITERAL__", &f.schema)
-            .replace("__SCHEMA__", &f.schema)
+            .replace("__SCHEMA__", &format!("\"{}\"", f.schema))
             .replace("__TRUSTED_SCHEMA_LITERAL__", &self.trusted_schema);
         for (placeholder, role) in [
             ("S", &f.owner),

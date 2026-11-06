@@ -30,6 +30,12 @@ mod pinned_hook;
 pub use pinned_hook::{pinned_attested_pool, PinnedRuntimeAuthority};
 mod pinned_catalog;
 pub use pinned_catalog::PinnedCatalogError;
+#[cfg(feature = "test-support")]
+mod catalog_mutation_fence;
+#[cfg(feature = "test-support")]
+pub use catalog_mutation_fence::{
+    CatalogFenceExclusive, CatalogFenceIndex, CatalogFenceShared, CatalogMutationFenceError,
+};
 mod pinned_entry;
 pub use pinned_entry::DarkPinnedEntryError;
 mod pinned_mam;
