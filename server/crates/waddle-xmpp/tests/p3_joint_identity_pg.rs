@@ -3,7 +3,7 @@
 //! The synthetic tables, direct SQL and cooperating writers do not prove
 //! production claim authorization, P2 custody, endpoint publication or rollout.
 
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -111,6 +111,29 @@ async fn seed(conn: &mut PgConnection) {
     tx.commit()
         .await
         .expect("deferred exact references commit together");
+}
+
+async fn stage_terminal_archive(tx: &mut Transaction<'_, Postgres>) {
+    sqlx::query("UPDATE p3_resource SET state = 'retiring' WHERE resource_id = $1::uuid")
+        .bind(RESOURCE)
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE p3_sm_session SET state = 'terminal', resource_state = 'retiring' WHERE sm_key = $1::uuid")
+        .bind(SESSION).execute(&mut **tx).await.unwrap();
+    let changed = sqlx::query("UPDATE p3_sm_identity SET lifecycle = 'terminal' WHERE sm_key = $1::uuid AND lifecycle = 'current'")
+        .bind(SESSION).execute(&mut **tx).await.unwrap();
+    assert_eq!(changed.rows_affected(), 1);
+    let archived = sqlx::query("INSERT INTO p3_sm_tombstone (sm_key, resource_id, occupancy_id, binding_id, install_generation, sm_generation, sm_owner_node, sm_owner_epoch, sm_claim_epoch, user_owner_node, user_owner_epoch, user_claim_epoch, actor_incarnation, peer_acked, exposed, appended, inbound_handled) SELECT s.sm_key, s.resource_id, r.occupancy_id, s.binding_id, s.install_generation, s.sm_generation, s.sm_owner_node, s.sm_owner_epoch, s.sm_claim_epoch, r.user_owner_node, r.user_owner_epoch, r.user_claim_epoch, r.actor_incarnation, s.peer_acked, s.exposed, s.appended, s.inbound_handled FROM p3_sm_session s JOIN p3_resource r USING (resource_id) WHERE s.sm_key = $1::uuid AND s.state = 'terminal'")
+        .bind(SESSION).execute(&mut **tx).await.unwrap();
+    assert_eq!(archived.rows_affected(), 1);
+    let removed =
+        sqlx::query("DELETE FROM p3_sm_session WHERE sm_key = $1::uuid AND state = 'terminal'")
+            .bind(SESSION)
+            .execute(&mut **tx)
+            .await
+            .unwrap();
+    assert_eq!(removed.rows_affected(), 1);
 }
 
 #[tokio::test]
@@ -274,20 +297,7 @@ async fn terminal_archive_retains_old_payload_while_a_new_session_is_enabled() {
         .await
         .unwrap();
     let mut tx = conn.begin().await.unwrap();
-    sqlx::query("UPDATE p3_resource SET state = 'retiring' WHERE resource_id = $1::uuid")
-        .bind(RESOURCE)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE p3_sm_session SET state = 'terminal', resource_state = 'retiring' WHERE sm_key = $1::uuid")
-        .bind(SESSION).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO p3_sm_tombstone SELECT s.sm_key, s.resource_id, r.occupancy_id, s.binding_id, s.install_generation, s.sm_generation, s.sm_owner_node, s.sm_owner_epoch, s.sm_claim_epoch, r.user_owner_node, r.user_owner_epoch, r.user_claim_epoch, r.actor_incarnation, s.peer_acked, s.exposed, s.appended, s.inbound_handled FROM p3_sm_session s JOIN p3_resource r USING (resource_id) WHERE s.sm_key = $1::uuid AND s.state = 'terminal'")
-        .bind(SESSION).execute(&mut *tx).await.unwrap();
-    sqlx::query("DELETE FROM p3_sm_session WHERE sm_key = $1::uuid AND state = 'terminal'")
-        .bind(SESSION)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    stage_terminal_archive(&mut tx).await;
     sqlx::query(
         "INSERT INTO p3_sm_identity VALUES ($1::uuid, $2, 'alice@example.test', $3::uuid, 3, 7)",
     )
@@ -327,6 +337,141 @@ async fn terminal_archive_retains_old_payload_while_a_new_session_is_enabled() {
             .unwrap();
     assert_eq!(current, NEW_SESSION);
     drop(conn);
+    fixture.cleanup().await;
+}
+
+async fn attempt_same_key_resurrection(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    sqlx::query("INSERT INTO p3_sm_session VALUES ($1::uuid, $2::uuid, 'alice@example.test', $3::uuid, 3, 7, 'sm-node', 'lease-c', 5, 1, $4::uuid, 1, 'active', 'live', 0, 0, 0, 0)")
+        .bind(SESSION).bind(RESOURCE).bind(AUTH).bind(BINDING).execute(&mut *tx).await?;
+    sqlx::query("UPDATE p3_resource SET state = 'active', sm_key = $1::uuid, sm_generation = 1 WHERE resource_id = $2::uuid")
+        .bind(SESSION).bind(RESOURCE).execute(&mut *tx).await?;
+    tx.commit().await
+}
+
+fn assert_terminal_identity_rejected(error: sqlx::Error) {
+    let database = error
+        .as_database_error()
+        .expect("PostgreSQL constraint error");
+    assert_eq!(database.code().as_deref(), Some("23503"));
+    assert_eq!(
+        database.constraint(),
+        Some("p3_sm_session_current_identity_fk")
+    );
+}
+
+#[tokio::test]
+async fn terminal_sm_key_cannot_be_reinserted_during_or_after_archive() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut archiver = fixture.connect().await;
+    let mut observer = fixture.connect().await;
+    seed(&mut archiver).await;
+    sqlx::query("INSERT INTO p3_sm_retained VALUES ($1::uuid, 1, $2)")
+        .bind(SESSION)
+        .bind(b"retained-through-race".to_vec())
+        .execute(&mut archiver)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE p3_sm_session SET exposed = 1, appended = 1 WHERE sm_key = $1::uuid")
+        .bind(SESSION)
+        .execute(&mut archiver)
+        .await
+        .unwrap();
+
+    let mut tx = archiver.begin().await.unwrap();
+    stage_terminal_archive(&mut tx).await;
+    sqlx::query("UPDATE p3_resource SET state = 'prepared', sm_key = NULL, sm_generation = NULL WHERE resource_id = $1::uuid")
+        .bind(RESOURCE).execute(&mut *tx).await.unwrap();
+
+    let mut contender = fixture.connect().await;
+    let contender_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut contender)
+        .await
+        .unwrap();
+    let concurrent =
+        tokio::spawn(async move { attempt_same_key_resurrection(&mut contender).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                .bind(contender_pid)
+                .fetch_one(&mut observer)
+                .await
+                .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resurrection waits for the in-flight archive");
+    tx.commit().await.expect("terminal archive commits");
+    assert_terminal_identity_rejected(
+        concurrent
+            .await
+            .unwrap()
+            .expect_err("concurrent resurrection must fail"),
+    );
+
+    assert_terminal_identity_rejected(
+        attempt_same_key_resurrection(&mut observer)
+            .await
+            .expect_err("later resurrection must fail"),
+    );
+    let reset =
+        sqlx::query("UPDATE p3_sm_identity SET lifecycle = 'current' WHERE sm_key = $1::uuid")
+            .bind(SESSION)
+            .execute(&mut observer)
+            .await
+            .expect_err("terminal lifecycle is irreversible");
+    assert_eq!(
+        reset.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+    let mut removal = observer.begin().await.unwrap();
+    sqlx::query("DELETE FROM p3_sm_tombstone WHERE sm_key = $1::uuid")
+        .bind(SESSION)
+        .execute(&mut *removal)
+        .await
+        .unwrap();
+    let delete = sqlx::query("DELETE FROM p3_sm_identity WHERE sm_key = $1::uuid")
+        .bind(SESSION)
+        .execute(&mut *removal)
+        .await
+        .expect_err(
+            "terminal identity remains non-reusable even if tombstone removal is attempted",
+        );
+    assert_eq!(
+        delete.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+    removal.rollback().await.unwrap();
+
+    let live: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM p3_sm_session WHERE sm_key = $1::uuid")
+            .bind(SESSION)
+            .fetch_one(&mut observer)
+            .await
+            .unwrap();
+    let terminal: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM p3_sm_tombstone WHERE sm_key = $1::uuid")
+            .bind(SESSION)
+            .fetch_one(&mut observer)
+            .await
+            .unwrap();
+    let payload: Vec<u8> = sqlx::query_scalar(
+        "SELECT payload FROM p3_sm_retained WHERE sm_key = $1::uuid AND ordinal = 1",
+    )
+    .bind(SESSION)
+    .fetch_one(&mut observer)
+    .await
+    .unwrap();
+    assert_eq!((live, terminal), (0, 1));
+    assert_eq!(payload, b"retained-through-race");
+    drop(archiver);
+    drop(observer);
     fixture.cleanup().await;
 }
 

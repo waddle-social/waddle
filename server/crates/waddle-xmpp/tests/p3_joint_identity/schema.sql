@@ -68,8 +68,37 @@ CREATE TABLE p3_sm_identity (
     auth_context_id UUID NOT NULL,
     auth_context_version BIGINT NOT NULL CHECK (auth_context_version > 0),
     principal_auth_epoch BIGINT NOT NULL CHECK (principal_auth_epoch > 0),
-    UNIQUE (sm_key, principal_bare_jid, auth_context_id, auth_context_version, principal_auth_epoch)
+    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK (lifecycle IN ('current', 'terminal')),
+    UNIQUE (sm_key, lifecycle),
+    UNIQUE (sm_key, principal_bare_jid, auth_context_id, auth_context_version, principal_auth_epoch, lifecycle)
 );
+
+-- A retained terminal identity is irreversible in this laboratory. Future GC
+-- needs a separately reviewed no-reuse marker and retention contract.
+CREATE FUNCTION p3_sm_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.lifecycle = 'terminal' THEN
+            RAISE EXCEPTION 'terminal SM identity cannot be deleted' USING ERRCODE = '23514';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF (NEW.sm_key, NEW.previd_sha256, NEW.principal_bare_jid, NEW.auth_context_id,
+        NEW.auth_context_version, NEW.principal_auth_epoch)
+       IS DISTINCT FROM
+       (OLD.sm_key, OLD.previd_sha256, OLD.principal_bare_jid, OLD.auth_context_id,
+        OLD.auth_context_version, OLD.principal_auth_epoch) THEN
+        RAISE EXCEPTION 'SM identity cannot be reassigned' USING ERRCODE = '23514';
+    END IF;
+    IF OLD.lifecycle = 'terminal' AND NEW.lifecycle <> 'terminal' THEN
+        RAISE EXCEPTION 'terminal SM identity cannot be revived' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER p3_sm_identity_immutable_before_write
+    BEFORE UPDATE OR DELETE ON p3_sm_identity
+    FOR EACH ROW EXECUTE FUNCTION p3_sm_identity_immutable();
 
 CREATE TABLE p3_sm_session (
     sm_key UUID PRIMARY KEY,
@@ -90,6 +119,7 @@ CREATE TABLE p3_sm_session (
     exposed BIGINT NOT NULL CHECK (exposed >= peer_acked),
     appended BIGINT NOT NULL CHECK (appended >= exposed),
     inbound_handled BIGINT NOT NULL CHECK (inbound_handled >= 0),
+    identity_lifecycle TEXT NOT NULL DEFAULT 'current' CHECK (identity_lifecycle = 'current'),
     CHECK (appended - peer_acked < 2147483648),
     CHECK ((state = 'live' AND resource_state = 'active')
         OR (state = 'detached' AND resource_state = 'detached')
@@ -98,8 +128,9 @@ CREATE TABLE p3_sm_session (
         OR (state = 'terminal' AND resource_state = 'retiring')),
     UNIQUE (resource_id, sm_key, sm_generation, binding_id, install_generation),
     UNIQUE (resource_id),
-    FOREIGN KEY (sm_key, principal_bare_jid, auth_context_id, auth_context_version, principal_auth_epoch)
-        REFERENCES p3_sm_identity(sm_key, principal_bare_jid, auth_context_id, auth_context_version, principal_auth_epoch)
+    CONSTRAINT p3_sm_session_current_identity_fk
+    FOREIGN KEY (sm_key, principal_bare_jid, auth_context_id, auth_context_version, principal_auth_epoch, identity_lifecycle)
+        REFERENCES p3_sm_identity(sm_key, principal_bare_jid, auth_context_id, auth_context_version, principal_auth_epoch, lifecycle)
         DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (resource_id, principal_bare_jid) REFERENCES p3_resource(resource_id, bare_jid)
         DEFERRABLE INITIALLY DEFERRED,
@@ -117,7 +148,7 @@ CREATE TABLE p3_sm_session (
 -- session on the same logical resource. Retained rows continue to reference
 -- the stable identity, not the replaceable current-session row.
 CREATE TABLE p3_sm_tombstone (
-    sm_key UUID PRIMARY KEY REFERENCES p3_sm_identity(sm_key),
+    sm_key UUID PRIMARY KEY,
     resource_id UUID NOT NULL,
     occupancy_id UUID NOT NULL,
     binding_id UUID NOT NULL,
@@ -133,7 +164,11 @@ CREATE TABLE p3_sm_tombstone (
     peer_acked BIGINT NOT NULL CHECK (peer_acked >= 0),
     exposed BIGINT NOT NULL CHECK (exposed >= peer_acked),
     appended BIGINT NOT NULL CHECK (appended >= exposed),
-    inbound_handled BIGINT NOT NULL CHECK (inbound_handled >= 0)
+    inbound_handled BIGINT NOT NULL CHECK (inbound_handled >= 0),
+    identity_lifecycle TEXT NOT NULL DEFAULT 'terminal' CHECK (identity_lifecycle = 'terminal'),
+    CONSTRAINT p3_sm_tombstone_terminal_identity_fk
+        FOREIGN KEY (sm_key, identity_lifecycle) REFERENCES p3_sm_identity(sm_key, lifecycle)
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 -- Synthetic bytes represent retained rows only; this table does not implement
