@@ -42,6 +42,10 @@ mod incremental;
 pub(crate) mod ingress_append;
 mod joined_sessions;
 pub(crate) mod promotion_inventory;
+/// Unregistered #2244 recipient/source interlock exercise. No production
+/// writer or startup path selects this candidate.
+#[cfg(feature = "test-support")]
+pub mod recipient_route_interlock_candidate;
 mod runtime_attach;
 mod schema;
 pub use runtime_attach::SmRuntimeAttachError;

@@ -666,9 +666,12 @@ pub async fn prepare_dark_room_observation_schema(
         expected,
         identity,
         designated_migrator.as_str(),
-        attestation_definer.as_str(),
-        runtime.as_str(),
-        "0",
+        ObservationVerification {
+            attestation_definer: attestation_definer.as_str(),
+            runtime: runtime.as_str(),
+            marker_revision: "0",
+            profile: None,
+        },
     )
     .await?;
     let marker = qualified_table(&identity.schema.name.0, ROOM_OBSERVATION_OWNER_STATE_TABLE);
@@ -716,6 +719,27 @@ pub async fn verify_attested_room_observation_schema(
     db: &Database,
     expected: &AttestedLineage,
     designated_migrator: &PgRoleName,
+) -> Result<RoomObservationSchemaEvidence, RoomObservationSchemaError> {
+    verify_attested_room_observation_schema_inner(db, expected, designated_migrator, None).await
+}
+
+/// Diagnose the composed A/H role profile without selecting a store or worker.
+/// The supplied OIDs must come from an independent provisioning handoff.
+pub async fn verify_attested_room_observation_schema_v1(
+    db: &Database,
+    expected: &AttestedLineage,
+    designated_migrator: &PgRoleName,
+    profile: &crate::pubsub::RestrictedServingProfileV1,
+) -> Result<RoomObservationSchemaEvidence, RoomObservationSchemaError> {
+    verify_attested_room_observation_schema_inner(db, expected, designated_migrator, Some(profile))
+        .await
+}
+
+async fn verify_attested_room_observation_schema_inner(
+    db: &Database,
+    expected: &AttestedLineage,
+    designated_migrator: &PgRoleName,
+    profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
 ) -> Result<RoomObservationSchemaEvidence, RoomObservationSchemaError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(RoomObservationSchemaError::PostgresRequired);
@@ -774,6 +798,10 @@ pub async fn verify_attested_room_observation_schema(
         .map_err(|_| RoomObservationSchemaError::IdentityMismatch)?;
     verify_attested_lineage(&mut tx, &capability, expected, &identity).await?;
     verify_active_schema(&mut tx, &identity).await?;
+    if profile.is_some() {
+        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await?;
+    }
     verify_owner_marker(
         &mut tx,
         expected,
@@ -788,9 +816,12 @@ pub async fn verify_attested_room_observation_schema(
         expected,
         &identity,
         designated_migrator.as_str(),
-        capability.definer_role().as_str(),
-        &runtime,
-        "1",
+        ObservationVerification {
+            attestation_definer: capability.definer_role().as_str(),
+            runtime: &runtime,
+            marker_revision: "1",
+            profile,
+        },
     )
     .await?;
     tx.rollback().await?;
@@ -1372,18 +1403,49 @@ async fn verify_runtime_role(
     Ok(())
 }
 
+struct ObservationVerification<'a> {
+    attestation_definer: &'a str,
+    runtime: &'a str,
+    marker_revision: &'a str,
+    profile: Option<&'a crate::pubsub::RestrictedServingProfileV1>,
+}
+
 async fn verify_room_observation_schema_shape(
     tx: &mut Transaction<'_>,
     expected: &AttestedLineage,
     identity: &PgIdentity,
     designated_migrator: &str,
-    attestation_definer: &str,
-    runtime: &str,
-    marker_revision: &str,
+    verification: ObservationVerification<'_>,
 ) -> Result<(), RoomObservationSchemaError> {
+    let ObservationVerification {
+        attestation_definer,
+        runtime,
+        marker_revision,
+        profile,
+    } = verification;
     verify_runtime_role(tx, identity, runtime).await?;
     verify_schema_owner_role(tx, identity, designated_migrator).await?;
-    verify_schema_acl(tx, identity, runtime, attestation_definer).await?;
+    if let Some(profile) = profile {
+        crate::pubsub::runtime_attach::verify_restricted_v1_graph_tx(
+            tx,
+            identity,
+            attestation_definer,
+            profile,
+        )
+        .await
+        .map_err(|_| RoomObservationSchemaError::UnsafeRuntime)?;
+        let tables: Vec<_> = std::iter::once(OWNER_STATE_CONTRACT.name)
+            .chain(DATA_TABLES.iter().map(|table| table.name))
+            .collect();
+        crate::pubsub::runtime_attach::verify_no_definer_writers_tx(
+            tx,
+            &identity.schema.name.0,
+            &tables,
+        )
+        .await
+        .map_err(|_| RoomObservationSchemaError::UnsafeRuntime)?;
+    }
+    verify_schema_acl(tx, identity, runtime, attestation_definer, profile).await?;
     verify_no_runtime_callable_owner_definers(tx, identity, runtime).await?;
     verify_no_runtime_view_bypasses(tx, identity, runtime).await?;
     verify_no_runtime_definer_triggers(tx, identity, runtime).await?;
@@ -1806,9 +1868,15 @@ async fn verify_schema_acl(
     identity: &PgIdentity,
     runtime: &str,
     attestation_definer: &str,
+    profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
 ) -> Result<(), RoomObservationSchemaError> {
-    let mut rows = tx
-        .query(
+    let extra_roles = profile.map_or_else(String::new, |profile| {
+        format!(
+            ", {}::pg_catalog.oid, {}::pg_catalog.oid",
+            profile.api_oid, profile.helper_oid
+        )
+    });
+    let query = format!(
             "SELECT pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'USAGE') \
                AND NOT pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'CREATE') \
                AND pg_catalog.has_schema_privilege(definer.oid, namespace.oid, 'USAGE') \
@@ -1825,8 +1893,8 @@ async fn verify_schema_acl(
                AND NOT pg_catalog.has_schema_privilege(monitor.oid, namespace.oid, 'CREATE') \
                AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
                  COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))) acl \
-                 WHERE acl.grantee NOT IN (namespace.nspowner, runtime.oid, definer.oid, monitor.oid) \
-                    OR (acl.grantee IN (runtime.oid, definer.oid, monitor.oid) \
+                 WHERE acl.grantee NOT IN (namespace.nspowner, runtime.oid, definer.oid, monitor.oid{extra_roles}) \
+                    OR (acl.grantee IN (runtime.oid, definer.oid, monitor.oid{extra_roles}) \
                       AND (acl.grantor <> namespace.nspowner OR acl.is_grantable \
                         OR acl.privilege_type <> 'USAGE'))) \
                AND (SELECT pg_catalog.count(*) FROM pg_catalog.aclexplode( \
@@ -1845,7 +1913,11 @@ async fn verify_schema_acl(
              JOIN pg_catalog.pg_roles runtime ON runtime.rolname = ? \
              JOIN pg_catalog.pg_roles definer ON definer.rolname = ? \
              JOIN pg_catalog.pg_roles monitor ON monitor.rolname = 'pg_monitor' \
-             WHERE namespace.nspname = ?",
+             WHERE namespace.nspname = ?"
+    );
+    let mut rows = tx
+        .query(
+            &query,
             crate::db_params![runtime, attestation_definer, &identity.schema.name.0],
         )
         .await?;

@@ -509,21 +509,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     ) -> Result<(), SmPersistenceError> {
         let lock = self.lock_for(&stanza.stream_id);
         let _guard = lock.lock().await;
-        let xml = serialize_stanza(&stanza.stanza)?;
-        let receipt_ms = stanza.original_receipt_at.timestamp_millis();
-        self.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-            crate::db_params![
-                stanza.stream_id.as_str().to_string(),
-                i64::from(stanza.sequence),
-                xml,
-                receipt_ms,
-                crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
-                stanza.provenance.encode(),
-            ],
-        )
-        .await?;
+        let (sql, params) = unacked_insert_statement(&stanza)?;
+        self.execute(sql, params).await?;
         Ok(())
     }
 
@@ -927,4 +914,37 @@ pub async fn open_for_cluster_mode_with_lineage(
     }
     let storage = DatabaseSmPersistence::from_database(global_db.clone()).await?;
     Ok(Arc::new(storage))
+}
+
+/// Persist a replay frame inside a caller-owned transaction. Kept beside the
+/// existing autocommit writer so both paths share the same serialization, SQL,
+/// and parameters; used only by the dark recipient-route candidate.
+#[cfg(feature = "test-support")]
+pub(crate) async fn append_unacked_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    stanza: &PersistedUnackedStanza,
+) -> Result<(), SmPersistenceError> {
+    let (sql, params) = unacked_insert_statement(stanza)?;
+    tx.execute(sql, params)
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    Ok(())
+}
+
+fn unacked_insert_statement(
+    stanza: &PersistedUnackedStanza,
+) -> Result<(&'static str, Vec<crate::db::Value>), SmPersistenceError> {
+    let xml = serialize_stanza(&stanza.stanza)?;
+    let receipt_ms = stanza.original_receipt_at.timestamp_millis();
+    Ok((
+        "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            stanza.stream_id.as_str().to_string(),
+            i64::from(stanza.sequence),
+            xml,
+            receipt_ms,
+            crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
+            stanza.provenance.encode(),
+        ],
+    ))
 }

@@ -24,12 +24,12 @@ use waddle_server::inbox::{bootstrap_inbox_owner_schema, DatabaseInboxStorage};
 use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
 use waddle_server::ingress_uow::{
     prepare_dark_room_observation_schema, verify_attested_room_observation_schema,
-    RoomObservationSchemaError,
+    verify_attested_room_observation_schema_v1, RoomObservationSchemaError,
 };
 use waddle_server::pending_delivery::{
     bootstrap_pending_delivery_owner_schema, DatabasePendingDeliveryStorage,
 };
-use waddle_server::pubsub::DatabasePubSubStorage;
+use waddle_server::pubsub::{DatabasePubSubStorage, RestrictedServingProfileV1};
 use waddle_server::sm_persistence::{bootstrap_portable_sm_owner_schema, DatabaseSmPersistence};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
@@ -197,13 +197,14 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     let migrator = format!("profile_migrator_{suffix}");
     let runtime = format!("profile_runtime_{suffix}");
     let api = format!("profile_api_{suffix}");
+    let helper = format!("profile_helper_{suffix}");
     let installer = format!("profile_installer_{suffix}");
     let definer = format!("profile_definer_{suffix}");
     let password = format!("p{}", Uuid::new_v4().simple());
     let restricted = "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS";
-    for role in [&database_owner, &owner, &api, &definer] {
+    for role in [&database_owner, &owner, &api, &definer, &helper] {
         resources
-            .role(role, &format!("NOLOGIN {restricted}"))
+            .role(role, &format!("NOLOGIN NOINHERIT {restricted}"))
             .await?;
     }
     for role in [&migrator, &runtime, &installer] {
@@ -566,6 +567,153 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         ),
         "strict profile must reject the PubSub owner definer"
     );
+    // Replace only the legacy S-owned helper with the exact H-owned v1 body,
+    // and supply real PubSub rights alongside the existing observation store.
+    let helper_tables = [
+        "dnd_projection",
+        "dnd_projection_source_version",
+        "notification_settings_projection",
+        "notification_settings_projection_source_version",
+        "pubsub_affiliations",
+        "pubsub_items",
+        "pubsub_nodes",
+        "pubsub_owner_configured",
+        "pubsub_push_publications",
+        "pubsub_schema_marker",
+        "pubsub_schema_version",
+        "pubsub_subscriptions",
+    ];
+    for (table, rights) in [
+        ("dnd_projection", "SELECT,INSERT,UPDATE,DELETE"),
+        ("dnd_projection_source_version", "SELECT,INSERT,UPDATE"),
+        (
+            "notification_settings_projection",
+            "SELECT,INSERT,UPDATE,DELETE",
+        ),
+        (
+            "notification_settings_projection_source_version",
+            "SELECT,INSERT,UPDATE",
+        ),
+        ("pubsub_affiliations", "SELECT,INSERT,UPDATE,DELETE"),
+        ("pubsub_items", "SELECT,INSERT,UPDATE,DELETE"),
+        ("pubsub_nodes", "SELECT,INSERT,UPDATE,DELETE"),
+        ("pubsub_owner_configured", "SELECT,INSERT"),
+        ("pubsub_push_publications", "SELECT,INSERT,UPDATE"),
+        ("pubsub_schema_marker", "SELECT"),
+        ("pubsub_schema_version", "SELECT"),
+        ("pubsub_subscriptions", "SELECT,INSERT,DELETE"),
+    ] {
+        owner_sql(
+            &owner_db,
+            &format!("GRANT {rights} ON guarded.{table} TO {runtime}"),
+        )
+        .await?;
+        owner_sql(
+            &owner_db,
+            &format!("GRANT UPDATE ON guarded.{table} TO {helper}"),
+        )
+        .await?;
+    }
+    owner_sql(
+        &owner_db,
+        &format!("GRANT SELECT ON SEQUENCE guarded.pubsub_items_seq_seq TO {runtime}"),
+    )
+    .await?;
+    owner_sql(
+        &owner_db,
+        &format!("GRANT USAGE, CREATE ON SCHEMA guarded TO {helper}"),
+    )
+    .await?;
+    let asset = include_str!("../../src/db/migrations/owner/serving_role_graph_v1_candidate.sql");
+    let body = asset
+        .split_once("AS $v1_pubsub_lock$")
+        .context("helper source")?
+        .1
+        .split_once("$v1_pubsub_lock$")
+        .context("helper source end")?
+        .0
+        .replace("__SCHEMA__", "\"guarded\"");
+    for statement in [
+        "DROP FUNCTION guarded.pubsub_runtime_attach_lock()".to_owned(),
+        format!("CREATE FUNCTION guarded.pubsub_runtime_attach_lock() RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $v1_pubsub_lock${body}$v1_pubsub_lock$"),
+        format!("ALTER FUNCTION guarded.pubsub_runtime_attach_lock() OWNER TO {helper}"),
+        "REVOKE ALL ON FUNCTION guarded.pubsub_runtime_attach_lock() FROM PUBLIC".to_owned(),
+        format!("GRANT EXECUTE ON FUNCTION guarded.pubsub_runtime_attach_lock() TO {runtime}"),
+    ] {
+        sqlx::query(&statement).execute(&admin).await?;
+    }
+    owner_sql(
+        &owner_db,
+        &format!("REVOKE CREATE ON SCHEMA guarded FROM {helper}"),
+    )
+    .await?;
+    let helper_oid: Oid =
+        sqlx::query_scalar("SELECT oid FROM pg_catalog.pg_roles WHERE rolname=$1")
+            .bind(&helper)
+            .fetch_one(&admin)
+            .await?;
+    let helper_function_oid: Oid = sqlx::query_scalar(
+        "SELECT 'guarded.pubsub_runtime_attach_lock()'::pg_catalog.regprocedure::pg_catalog.oid",
+    )
+    .fetch_one(&admin)
+    .await?;
+    let mut helper_relation_oids = [0_u32; 12];
+    for (index, table) in helper_tables.iter().enumerate() {
+        let oid: Oid = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1)::pg_catalog.oid")
+            .bind(format!("guarded.{table}"))
+            .fetch_one(&admin)
+            .await?;
+        helper_relation_oids[index] = oid.0;
+    }
+    let serving_profile = RestrictedServingProfileV1 {
+        api: api_role.clone(),
+        api_oid: api_oid.0,
+        helper: PgRoleName::new(&helper)?,
+        helper_oid: helper_oid.0,
+        helper_function_oid: helper_function_oid.0,
+        helper_relation_oids,
+    };
+    DatabasePubSubStorage::verify_restricted_profile_v1(main, &serving_profile).await?;
+    verify_attested_room_observation_schema_v1(main, &lineage, &migrator_role, &serving_profile)
+        .await
+        .context("combined A/H room observation profile")?;
+    ensure!(
+        verify_attested_room_observation_schema(main, &lineage, &migrator_role)
+            .await
+            .is_err(),
+        "legacy observation verification must retain its exact schema ACL"
+    );
+    // A may call this S-owned definer, although R may not call it directly.
+    // The composed profile must reject the relay before returning evidence.
+    sqlx::query("CREATE FUNCTION guarded.v1_observation_relay() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'DELETE FROM guarded.extension_room_observers WHERE false'")
+        .execute(&admin).await?;
+    sqlx::query(&format!(
+        "ALTER FUNCTION guarded.v1_observation_relay() OWNER TO {owner}"
+    ))
+    .execute(&admin)
+    .await?;
+    sqlx::query("REVOKE ALL ON FUNCTION guarded.v1_observation_relay() FROM PUBLIC")
+        .execute(&admin)
+        .await?;
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION guarded.v1_observation_relay() TO {api}"
+    ))
+    .execute(&admin)
+    .await?;
+    ensure!(
+        verify_attested_room_observation_schema_v1(
+            main,
+            &lineage,
+            &migrator_role,
+            &serving_profile
+        )
+        .await
+        .is_err(),
+        "A-to-owner definer relay must be rejected"
+    );
+    sqlx::query("DROP FUNCTION guarded.v1_observation_relay()")
+        .execute(&admin)
+        .await?;
     drop(probe);
     drop(pending);
     drop(sm);
