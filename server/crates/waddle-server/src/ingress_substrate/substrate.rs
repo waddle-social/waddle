@@ -94,8 +94,12 @@ pub enum IngressSubstrateError {
     RelayedAliasUnproven,
     #[error("canonical source principal conflicts with its immutable source binding")]
     SourceBindingConflict,
+    #[error("canonical source principal is not durably asserted")]
+    PrincipalAssertionFailed,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
+    #[error("ingress definer API returned an invalid result")]
+    InvalidDefinerApiResult,
     #[error("ingress sm ordinal is already bound to a different message")]
     SmOrdinalConflict,
     #[error("ingress delivery key is already bound to a different message")]
@@ -563,6 +567,48 @@ pub(in crate::ingress_substrate) async fn insert_message(
     source: Option<&CanonicalSourceBinding>,
 ) -> Result<bool, IngressSubstrateError> {
     let (digest_version, digest_bytes) = digest.to_storage();
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_insert_message",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let sql = format!(
+            "SELECT {function}(?::uuid, ?::integer, ?::bytea, ?::smallint, ?::bytea, \
+             ?::text, ?::uuid, ?::numeric, ?::numeric, ?::uuid, ?::numeric)"
+        );
+        let principal = source.map(|source| source.principal());
+        let sm_occurrence = source.and_then(CanonicalSourceBinding::sm_occurrence);
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    i32::from(digest_version),
+                    digest_bytes.to_vec(),
+                    envelope.map(|value| value.version().to_storage()),
+                    envelope.map(authority::serialize_envelope).transpose()?,
+                    principal.map(|principal| principal.bare_jid().to_string()),
+                    principal.map(|principal| principal.auth_context_id().as_uuid().to_string()),
+                    principal.map(|principal| principal.auth_context_version().get().to_string()),
+                    principal.map(|principal| principal.auth_epoch().get().to_string()),
+                    sm_occurrence.map(|(id, _)| id.to_storage().to_string()),
+                    sm_occurrence.map(|(_, ordinal)| ordinal.to_storage().to_string()),
+                ],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let inserted: bool = row.get(0).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+        return Ok(inserted);
+    }
+
     let qualified;
     let postgres = if prepared.is_some() {
         qualified = format!(
@@ -701,6 +747,13 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
     source: Option<&CanonicalSourceBinding>,
     mint: impl FnOnce() -> MessageKey,
 ) -> Result<AliasResolution, IngressSubstrateError> {
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        return resolve_alias_via_definer_api(
+            tx, prepared, sender, target, origin_id, digest, source, mint,
+        )
+        .await;
+    }
+
     acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
     let alias_key = AliasStorageKey::new(sender, target, origin_id);
     if let Some(stored) = locked_alias(tx, prepared, &alias_key).await? {
@@ -778,6 +831,191 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
         assert_source_principal_if_recorded(tx, prepared, stored.key, source).await?;
     }
     Ok(resolve_alias(true, digest, Some(&stored), || candidate_key))
+}
+
+/// Resolve an origin alias through the dark fixed SECURITY DEFINER API.
+///
+/// The first call is a read-only miss probe so the application-owned key mint
+/// remains lazy. A second call with that key performs the insert and rechecks
+/// the alias under the function's canonical parent lock, all inside the same
+/// caller-owned transaction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_alias_via_definer_api(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    sender: &BareJid,
+    target: &NormalizedTarget,
+    origin_id: &OriginId,
+    digest: &SemanticDigest,
+    source: Option<&CanonicalSourceBinding>,
+    mint: impl FnOnce() -> MessageKey,
+) -> Result<AliasResolution, IngressSubstrateError> {
+    if tx.driver() != DatabaseDriver::Postgres {
+        return Err(IngressSubstrateError::SchemaIdentityMismatch);
+    }
+
+    let probe = call_definer_alias_api(
+        tx, prepared, sender, target, origin_id, digest, source, None,
+    )
+    .await?;
+    let result = match probe {
+        DefinerAliasResult::Missing => {
+            call_definer_alias_api(
+                tx,
+                prepared,
+                sender,
+                target,
+                origin_id,
+                digest,
+                source,
+                Some(mint()),
+            )
+            .await?
+        }
+        result => result,
+    };
+
+    match result {
+        DefinerAliasResult::Inserted(key) => Ok(AliasResolution::Aliased(
+            waddle_xmpp::ingress::AliasOutcome::Inserted(key),
+        )),
+        DefinerAliasResult::Existing(stored) => {
+            Ok(resolve_alias(true, digest, Some(&stored), MessageKey::new))
+        }
+        DefinerAliasResult::Missing => Err(IngressSubstrateError::AliasMissingAfterConflict),
+    }
+}
+
+enum DefinerAliasResult {
+    Missing,
+    Inserted(MessageKey),
+    Existing(StoredAlias),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn call_definer_alias_api(
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    sender: &BareJid,
+    target: &NormalizedTarget,
+    origin_id: &OriginId,
+    digest: &SemanticDigest,
+    source: Option<&CanonicalSourceBinding>,
+    candidate: Option<MessageKey>,
+) -> Result<DefinerAliasResult, IngressSubstrateError> {
+    let function = format!(
+        "{}.waddle_ingress_resolve_origin",
+        quote_postgres_identifier(prepared.schema())
+    );
+    let sql = format!(
+        "SELECT canonical_message_key::text, outcome, stored_digest_version, stored_digest \
+         FROM {function}(?::uuid, ?::integer, ?::bytea, ?::bytea, ?::text, ?::integer, \
+         ?::text, ?::text, ?::text, ?::uuid, ?::numeric, ?::numeric, ?::uuid, ?::numeric)"
+    );
+    let alias = AliasStorageKey::new(sender, target, origin_id);
+    let target = &alias.target;
+    let principal = source.map(|source| source.principal());
+    let sm_occurrence = source.and_then(CanonicalSourceBinding::sm_occurrence);
+    let (digest_version, digest_bytes) = digest.to_storage();
+    let mut rows = tx
+        .query(
+            &sql,
+            crate::db_params![
+                candidate.map(|key| key.to_storage().to_string()),
+                i32::from(digest_version),
+                digest_bytes.to_vec(),
+                alias.hash.to_vec(),
+                sender.to_string(),
+                target.kind(),
+                target.jid().to_owned(),
+                origin_id.as_str().to_owned(),
+                principal.map(|principal| principal.bare_jid().to_string()),
+                principal.map(|principal| principal.auth_context_id().as_uuid().to_string()),
+                principal.map(|principal| principal.auth_context_version().get().to_string()),
+                principal.map(|principal| principal.auth_epoch().get().to_string()),
+                sm_occurrence.map(|(id, _)| id.to_storage().to_string()),
+                sm_occurrence.map(|(_, ordinal)| ordinal.to_storage().to_string()),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::AliasMissingAfterConflict)?;
+    let key_text: Option<String> = row.get(0).map_err(discard_database_error)?;
+    let outcome: String = row.get(1).map_err(discard_database_error)?;
+    let stored_version: Option<i32> = row.get(2).map_err(discard_database_error)?;
+    let stored_bytes: Option<Vec<u8>> = row.get(3).map_err(discard_database_error)?;
+    if rows.next().await.map_err(discard_database_error)?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult);
+    }
+    let key = key_text
+        .map(|key| {
+            key.parse::<Uuid>()
+                .map(MessageKey::from_storage)
+                .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
+        })
+        .transpose()?;
+
+    match outcome.as_str() {
+        "missing"
+            if key.is_none()
+                && stored_version.is_none()
+                && stored_bytes.is_none()
+                && candidate.is_none() =>
+        {
+            Ok(DefinerAliasResult::Missing)
+        }
+        "inserted" => {
+            let key = key.ok_or(IngressSubstrateError::InvalidStoredMessageKey)?;
+            if Some(key) != candidate {
+                return Err(IngressSubstrateError::InvalidDefinerApiResult);
+            }
+            if stored_version != Some(i32::from(digest_version))
+                || stored_bytes.as_deref() != Some(digest_bytes.as_slice())
+            {
+                return Err(IngressSubstrateError::InvalidDefinerApiResult);
+            }
+            Ok(DefinerAliasResult::Inserted(key))
+        }
+        "existing" | "digest_conflict" => {
+            let key = key.ok_or(IngressSubstrateError::InvalidStoredMessageKey)?;
+            let version = stored_version
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or(IngressSubstrateError::InvalidStoredDigest)?;
+            let bytes: [u8; 32] = stored_bytes
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(IngressSubstrateError::InvalidStoredDigest)?;
+            let stored = SemanticDigest::from_storage(version, bytes)
+                .map_err(|_| IngressSubstrateError::InvalidStoredDigest)?;
+            if (outcome == "existing") != (stored == *digest) {
+                return Err(IngressSubstrateError::InvalidStoredDigest);
+            }
+            Ok(DefinerAliasResult::Existing(StoredAlias {
+                key,
+                digest: stored,
+            }))
+        }
+        "message_key_conflict"
+            if key.is_none() && stored_version.is_none() && stored_bytes.is_none() =>
+        {
+            Err(IngressSubstrateError::MessageContentConflict)
+        }
+        "alias_identity_conflict" if key.is_some() => {
+            Err(IngressSubstrateError::AliasIdentityConflict)
+        }
+        "source_binding_conflict" if key.is_some() => {
+            Err(IngressSubstrateError::SourceBindingConflict)
+        }
+        "principal_assertion_failed"
+            if key.is_none() && stored_version.is_none() && stored_bytes.is_none() =>
+        {
+            Err(IngressSubstrateError::PrincipalAssertionFailed)
+        }
+        _ => Err(IngressSubstrateError::InvalidDefinerApiResult),
+    }
 }
 
 /// Prove an existing relayed origin against its exact canonical parent.
@@ -875,6 +1113,73 @@ pub(crate) async fn insert_sm_ref_in_prepared_transaction(
         return Ok(MessageWriteOutcome::MessageVanished);
     }
     let generation = authority::wire_generation(tx, prepared, sm_ingress_id, wire_h).await?;
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_insert_sm_ref",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let mut rows = tx
+            .query(
+                &format!("SELECT {function}(?::uuid, ?::numeric, ?::bigint, ?::bigint, ?::uuid)"),
+                crate::db_params![
+                    sm_ingress_id.to_storage().to_string(),
+                    ordinal.to_storage().to_string(),
+                    i64::from(wire_h.to_storage()),
+                    generation,
+                    message_key.to_storage().to_string(),
+                ],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let inserted: bool = row.get(0).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+        if inserted {
+            super::retention::invalidate_retention_in_prepared_transaction(
+                tx,
+                Some(prepared),
+                message_key,
+            )
+            .await?;
+            return Ok(MessageWriteOutcome::Recorded);
+        }
+        let read = prepared_ingress_sql(
+            tx.driver(),
+            Some(prepared),
+            PreparedIngressRelation::SmRefs,
+            READ_SM_REF_POSTGRES,
+            READ_SM_REF_SQLITE,
+        );
+        let existing = stored_child_message_key(
+            tx,
+            &read,
+            crate::db_params![
+                sm_ingress_id.to_storage().to_string(),
+                ordinal.to_storage().to_string(),
+            ],
+        )
+        .await?;
+        if existing == Some(message_key)
+            && authority::lookup_wire_binding_in_prepared_transaction(
+                tx,
+                Some(prepared),
+                sm_ingress_id,
+                wire_h,
+            )
+            .await?
+                == Some((message_key, ordinal))
+        {
+            return Ok(MessageWriteOutcome::AlreadyRecorded);
+        }
+        return Err(IngressSubstrateError::SmOrdinalConflict);
+    }
+
     let insert = prepared_ingress_sql(
         tx.driver(),
         prepared,
@@ -965,6 +1270,67 @@ async fn record_delivery_after_epoch_lock(
     if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_record_delivery",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let mut rows = tx
+            .query(
+                &format!("SELECT {function}(?::uuid, ?::uuid)"),
+                crate::db_params![
+                    delivery_key.to_storage().to_string(),
+                    message_key.to_storage().to_string(),
+                ],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let inserted: bool = row.get(0).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+        if inserted {
+            return Ok(MessageWriteOutcome::Recorded);
+        }
+        let function = format!(
+            "{}.waddle_ingress_lookup_delivery",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let mut rows = tx
+            .query(
+                &format!("SELECT {function}(?::uuid)::text"),
+                crate::db_params![delivery_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let existing_text: Option<String> = row.get(0).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+        let existing = existing_text
+            .map(|key| {
+                key.parse::<Uuid>()
+                    .map(MessageKey::from_storage)
+                    .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
+            })
+            .transpose()?;
+        return if existing == Some(message_key) {
+            Ok(MessageWriteOutcome::AlreadyRecorded)
+        } else {
+            Err(IngressSubstrateError::DeliveryKeyConflict)
+        };
+    }
+
     let insert = prepared_ingress_sql(
         tx.driver(), prepared, PreparedIngressRelation::Deliveries,
         ("INSERT INTO ", " (delivery_key, message_key) VALUES (?::uuid, ?::uuid) ON CONFLICT (delivery_key) DO NOTHING"),
@@ -1831,6 +2197,7 @@ pub(crate) async fn prepare_attested_receipt_transaction(
         protocol_epoch: locked_epoch,
         schema: expected.name.0.clone(),
         relation_guard: false,
+        definer_api_candidate: false,
     })
 }
 
@@ -1841,6 +2208,7 @@ pub(crate) struct PreparedAttestedReceiptWriter {
     protocol_epoch: ProtocolEpoch,
     schema: String,
     relation_guard: bool,
+    definer_api_candidate: bool,
 }
 
 impl PreparedAttestedReceiptWriter {
@@ -1854,6 +2222,7 @@ impl PreparedAttestedReceiptWriter {
             protocol_epoch,
             schema: capability.identity().schema.name.0.clone(),
             relation_guard: true,
+            definer_api_candidate: false,
         }
     }
 
@@ -1867,6 +2236,43 @@ impl PreparedAttestedReceiptWriter {
 
     pub(crate) fn uses_relation_guard(&self) -> bool {
         self.relation_guard
+    }
+
+    pub(crate) fn uses_definer_api_candidate(&self) -> bool {
+        self.definer_api_candidate
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn enable_definer_api_candidate_for_test(&mut self) {
+        self.definer_api_candidate = true;
+    }
+}
+
+/// Lexical authority for calling only the unregistered definer API while a
+/// restricted-login candidate is under test. The context borrows the
+/// prepared proof from the same transaction and carries only its attested
+/// schema; it cannot acquire another connection or enable the candidate.
+pub(crate) struct DefinerApiCandidateContext<'a> {
+    prepared: &'a PreparedAttestedReceiptWriter,
+}
+
+impl<'a> DefinerApiCandidateContext<'a> {
+    pub(crate) fn from_prepared(prepared: &'a PreparedAttestedReceiptWriter) -> Option<Self> {
+        prepared
+            .uses_definer_api_candidate()
+            .then_some(Self { prepared })
+    }
+
+    pub(crate) fn schema(&self) -> &str {
+        self.prepared.schema()
+    }
+
+    pub(crate) fn prepared(&self) -> &'a PreparedAttestedReceiptWriter {
+        self.prepared
+    }
+
+    pub(crate) fn qualified_function(&self, function: &'static str) -> String {
+        format!("{}.{}", quote_postgres_identifier(self.schema()), function)
     }
 }
 
@@ -2206,11 +2612,35 @@ pub(in crate::ingress_substrate) async fn stored_child_message_key(
         .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
 }
 
-pub(in crate::ingress_substrate) async fn lock_message_for_child_in_prepared_transaction(
+pub(crate) async fn lock_message_for_child_in_prepared_transaction(
     tx: &mut Transaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_lock_message",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let mut rows = tx
+            .query(
+                &format!("SELECT {function}(?::uuid)"),
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(discard_database_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let found: bool = row.get(0).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+        return Ok(found);
+    }
+
     let qualified;
     let postgres = if prepared.is_some() {
         qualified = format!(

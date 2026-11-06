@@ -9,6 +9,7 @@ use super::{
 };
 use crate::db::DatabaseDriver;
 use crate::db::Transaction;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_uow::EffectDescendantRepository;
 use crate::push_service::CanonicalNotificationTerminalProof;
 use crate::push_service::DatabasePushServiceStore;
@@ -1478,8 +1479,20 @@ pub(super) async fn lock_outbox_ancestry_tx(
     tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
+    lock_outbox_ancestry_with_api(tx, None, job_id).await
+}
+
+pub(super) async fn lock_outbox_ancestry_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
     if let Ok(id) = uuid::Uuid::parse_str(job_id) {
-        EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        if let Some(api) = api {
+            EffectDescendantRepository::lock_all_with_candidate_api(tx, api, id).await?;
+        } else {
+            EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        }
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
         } else {
@@ -1487,7 +1500,11 @@ pub(super) async fn lock_outbox_ancestry_tx(
         };
         let mut rows = tx.query(sql, crate::db_params![job_id]).await?;
         while rows.next().await?.is_some() {}
-        EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        if let Some(api) = api {
+            EffectDescendantRepository::lock_all_with_candidate_api(tx, api, id).await?;
+        } else {
+            EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        }
     }
     Ok(())
 }
@@ -1496,8 +1513,21 @@ pub(super) async fn settle_outbox_ancestry_tx(
     tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
+    settle_outbox_ancestry_with_api(tx, None, job_id).await
+}
+
+pub(super) async fn settle_outbox_ancestry_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
     if let Ok(id) = uuid::Uuid::parse_str(job_id) {
-        EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
+        if let Some(api) = api {
+            EffectDescendantRepository::settle_with_candidate_api(tx, api, id, chrono::Utc::now())
+                .await?;
+        } else {
+            EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
+        }
         tx.execute("UPDATE notification_outbox_lineage SET settled_at_ms = ? WHERE job_id = ? AND settled_at_ms IS NULL",
             crate::db_params![crate::time::now_ms(), job_id]).await?;
     }
@@ -1509,6 +1539,16 @@ pub(super) async fn settle_outbox_ancestry_tx(
 /// Call after cancelling provider-owned work in the same transaction.
 pub(crate) async fn retire_registration_outbox_tx(
     tx: &mut Transaction<'_>,
+    owner: &BareJid,
+    service: Option<&BareJid>,
+    node: Option<&str>,
+) -> Result<u64, NotificationOutboxError> {
+    retire_registration_outbox_with_api(tx, None, owner, service, node).await
+}
+
+pub(crate) async fn retire_registration_outbox_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
     owner: &BareJid,
     service: Option<&BareJid>,
     node: Option<&str>,
@@ -1533,9 +1573,16 @@ pub(crate) async fn retire_registration_outbox_tx(
     let has_foundation = rows.next().await?.is_some();
     drop(rows);
     let canonical_custody = if has_foundation {
-        "EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = notification_outbox.job_id AND settled_at IS NULL)"
+        if let Some(api) = api {
+            format!(
+                "{}(notification_outbox.job_id, TRUE)",
+                api.qualified_function("waddle_ingress_descendant_exists")
+            )
+        } else {
+            "EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = notification_outbox.job_id AND settled_at IS NULL)".to_owned()
+        }
     } else {
-        "0 = 1"
+        "0 = 1".to_owned()
     };
     // Settled known failures are terminal history, including their original
     // diagnosis and retention tail. Only outstanding custody permits retirement.
@@ -1554,14 +1601,14 @@ pub(crate) async fn retire_registration_outbox_tx(
     for job_id in jobs {
         // Registration/node locks are held by the caller, so never wait while
         // reversing the canonical-parent-before-scheduler lock order.
-        lock_outbox_ancestry_tx(tx, &job_id).await?;
+        lock_outbox_ancestry_with_api(tx, api, &job_id).await?;
         let changed = tx.execute(
             &format!("UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = 0, last_error = 'registration-revoked', next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND {eligible}"),
             crate::db_params![STATUS_FAILED, crate::time::now_ms(), job_id.as_str(), owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some())],
         ).await?;
         if changed > 0 {
             retired += changed;
-            settle_outbox_if_unowned_tx(tx, &job_id).await?;
+            settle_outbox_if_unowned_with_api(tx, api, &job_id).await?;
             crate::push_service::acknowledge_completed_outbox_tx(tx, &job_id).await?;
         }
     }
@@ -1572,6 +1619,14 @@ pub(crate) async fn retire_registration_outbox_tx(
 /// durable provider queue. The provider worker settles that remaining custody.
 pub(super) async fn settle_outbox_if_unowned_tx(
     tx: &mut Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    settle_outbox_if_unowned_with_api(tx, None, job_id).await
+}
+
+pub(super) async fn settle_outbox_if_unowned_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     let has_queue = if tx.driver() == DatabaseDriver::Postgres {
@@ -1597,7 +1652,7 @@ pub(super) async fn settle_outbox_if_unowned_tx(
             return Ok(());
         }
     }
-    settle_outbox_ancestry_tx(tx, job_id).await
+    settle_outbox_ancestry_with_api(tx, api, job_id).await
 }
 
 #[cfg(test)]

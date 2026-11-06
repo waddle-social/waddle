@@ -136,8 +136,42 @@ impl SendAttemptRepository {
             recovered,
             previously_started,
         };
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::text, ?::text, \
+                 ?::uuid, ?::bigint, ?::boolean)",
+                api.qualified_function("waddle_ingress_claim_send_attempt"),
+            );
+            if !super::candidate_boolean(
+                transaction,
+                &query,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string(),
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    lease.token.to_string(),
+                    ttl,
+                    i64::from(previously_started)
+                ],
+            )
+            .await?
+            {
+                return Err(IngressUowError::InvalidStoredSendAttempt);
+            }
+            return Ok(SendClaim::Acquired(lease));
+        }
         let attempts = attempt_relation(tx);
-        let sql = format!("INSERT INTO {attempts} (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
+        let sql = format!(
+            "INSERT INTO {attempts} (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered"
+        );
         tx.transaction_mut()
             .execute(
                 &sql,
@@ -164,13 +198,57 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<Option<SendAttemptStatus>, IngressUowError> {
         lock(tx, obligation).await?;
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT * FROM {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+                api.qualified_function("waddle_ingress_send_attempt_status"),
+            );
+            let mut rows = transaction
+                .query(
+                    &query,
+                    crate::db_params![
+                        obligation.message.to_storage().to_string(),
+                        obligation.receipt.kind.to_storage(),
+                        obligation.receipt.semantic_identity_hash.to_vec(),
+                        obligation.recipient.to_string()
+                    ],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(None);
+            };
+            let state: i64 = row.get(0)?;
+            let expired: i64 = row.get(1)?;
+            let recovered: i64 = row.get(2)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return match state {
+                0 if expired == 1 && recovered == 1 => Ok(Some(SendAttemptStatus::ExpiredStarted)),
+                0 if expired == 1 => Ok(Some(SendAttemptStatus::ExpiredLease)),
+                0 => Ok(Some(SendAttemptStatus::Leased)),
+                1 if expired == 1 => Ok(Some(SendAttemptStatus::ExpiredStarted)),
+                1 => Ok(Some(SendAttemptStatus::Started)),
+                2 => Ok(Some(SendAttemptStatus::Completed)),
+                _ => Err(IngressUowError::InvalidStoredSendAttempt),
+            };
+        }
         let (key, clock) = dialect(tx);
         let (transaction, prepared) = tx.prepared_parts();
         let attempts = crate::ingress_substrate::prepared_ingress_relation(
             prepared,
             crate::ingress_substrate::PreparedIngressRelation::SendAttempts,
         );
-        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM {attempts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let sql = format!(
+            "SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM {attempts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?"
+        );
         let mut rows = transaction
             .query(
                 &sql,
@@ -207,7 +285,34 @@ impl SendAttemptRepository {
         message: MessageKey,
     ) -> Result<Option<Duration>, IngressUowError> {
         let (key, clock) = dialect(tx);
-        let sql = format!("SELECT MIN(expires_at_ms - {clock}) FROM ingress_send_attempts WHERE message_key = {key} AND state IN (0, 1)");
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid)",
+                api.qualified_function("waddle_ingress_next_send_attempt_delay"),
+            );
+            let mut rows = transaction
+                .query(&query, crate::db_params![message.to_storage().to_string()])
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let delay: Option<i64> = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return Ok(delay.map(|delay| Duration::from_millis(u64::try_from(delay).unwrap_or(0))));
+        }
+        let sql = format!(
+            "SELECT MIN(expires_at_ms - {clock}) FROM ingress_send_attempts WHERE message_key = {key} AND state IN (0, 1)"
+        );
         let mut rows = tx
             .transaction_mut()
             .query(&sql, crate::db_params![message.to_storage().to_string()])
@@ -240,8 +345,33 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<(), IngressUowError> {
         lock(tx, obligation).await?;
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+                api.qualified_function("waddle_ingress_retire_expired_send_attempt"),
+            );
+            let _ = super::candidate_boolean(
+                transaction,
+                &query,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
+            return Ok(());
+        }
         let (key, clock) = dialect(tx);
-        let sql = format!("DELETE FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND state IN (0, 1) AND expires_at_ms <= {clock}");
+        let sql = format!(
+            "DELETE FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND state IN (0, 1) AND expires_at_ms <= {clock}"
+        );
         tx.transaction_mut()
             .execute(
                 &sql,
@@ -269,7 +399,9 @@ impl SendAttemptRepository {
             prepared,
             crate::ingress_substrate::PreparedIngressRelation::SmAppends,
         );
-        let sql = format!("SELECT 1 FROM {appends} WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?");
+        let sql = format!(
+            "SELECT 1 FROM {appends} WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?"
+        );
         let mut rows = transaction
             .query(
                 &sql,
@@ -288,13 +420,37 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+                api.qualified_function("waddle_ingress_carbon_receipt_exists"),
+            );
+            return super::candidate_boolean(
+                transaction,
+                &query,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await;
+        }
         let (key, _) = dialect(tx);
         let (transaction, prepared) = tx.prepared_parts();
         let receipts = crate::ingress_substrate::prepared_ingress_relation(
             prepared,
             crate::ingress_substrate::PreparedIngressRelation::CarbonReceipts,
         );
-        let sql = format!("SELECT 1 FROM {receipts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let sql = format!(
+            "SELECT 1 FROM {receipts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?"
+        );
         let mut rows = transaction
             .query(
                 &sql,
@@ -316,6 +472,18 @@ impl SendAttemptRepository {
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
         lock(tx, &lease.obligation).await?;
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::text, ?::text, ?::uuid)",
+                api.qualified_function("waddle_ingress_start_send_attempt"),
+            );
+            return super::candidate_boolean(transaction, &query, lease_params(lease)).await;
+        }
         let driver = tx.transaction_mut().driver();
         let attempts = attempt_relation(tx);
         let sql = start_sql(driver, &attempts, false);
@@ -332,6 +500,19 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
+        if tx.uses_definer_api_candidate() {
+            lock(tx, &lease.obligation).await?;
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::text, ?::text, ?::uuid)",
+                api.qualified_function("waddle_ingress_complete_send_attempt"),
+            );
+            return super::candidate_boolean(transaction, &query, lease_params(lease)).await;
+        }
         let attempts = attempt_relation(tx);
         transition(
             tx,
@@ -348,6 +529,25 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
+        if tx.uses_definer_api_candidate() {
+            lock(tx, &lease.obligation).await?;
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let mut params = lease_params(lease);
+            params.extend(crate::db_params![
+                i64::from(lease.recovered),
+                i64::from(lease.previously_started)
+            ]);
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::text, ?::text, \
+                 ?::uuid, ?::integer, ?::integer)",
+                api.qualified_function("waddle_ingress_release_send_attempt"),
+            );
+            return super::candidate_boolean(transaction, &query, params).await;
+        }
         let attempts = attempt_relation(tx);
         let action = if lease.recovered && lease.previously_started {
             // A definite failure of THIS retry does not prove the older
@@ -417,7 +617,9 @@ fn transition_sql(driver: DatabaseDriver, action: &str, condition: &str) -> Stri
     } else {
         "?"
     };
-    format!("{action} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND node_id = ? AND node_incarnation = ? AND lease_token = ? AND {condition}")
+    format!(
+        "{action} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND node_id = ? AND node_incarnation = ? AND lease_token = ? AND {condition}"
+    )
 }
 
 fn start_sql(driver: DatabaseDriver, attempts: &str, fresh: bool) -> String {

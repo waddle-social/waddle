@@ -159,8 +159,8 @@ async fn candidate_prune_preserves_late_attachment_after_snapshot(
         .await
         .expect("outbox");
     if repeatable_read {
-        let mut tx = store
-            .begin_prune_transaction()
+        let (mut tx, _prepared) = store
+            .begin_prune_transaction(super::PruneMode::ordinary())
             .await
             .expect("bounded prune transaction");
         let mut rows = tx
@@ -471,7 +471,7 @@ async fn postgres_candidate_prune_waits_for_frontier_and_full_settlement_tail() 
 async fn standalone_candidate_prune_preserves_null_identity_and_ordered_batch_contract() {
     let store = crate::notification_outbox::test_support::store().await;
     assert!(!store
-        .has_canonical_descendants()
+        .has_canonical_descendants(super::PruneMode::ordinary())
         .await
         .expect("standalone schema"));
     for id in ["first-null", "second", "quarantined", "pending"] {

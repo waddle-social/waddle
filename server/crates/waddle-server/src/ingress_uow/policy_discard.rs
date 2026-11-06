@@ -28,6 +28,28 @@ impl EffectReceiptRepository {
         receipt: &EffectReceiptKey,
         reason: PolicyDiscardReason,
     ) -> Result<bool, IngressUowError> {
+        if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+                api.qualified_function("waddle_ingress_effect_receipt_exists"),
+            );
+            return super::candidate_boolean(
+                transaction,
+                &query,
+                crate::db_params![
+                    key.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    reason.as_storage()
+                ],
+            )
+            .await;
+        }
         let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
             "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND policy_discard_reason = ?"
         } else {
@@ -57,6 +79,26 @@ impl EffectReceiptRepository {
         reason: PolicyDiscardReason,
     ) -> Result<(), IngressUowError> {
         let (transaction, prepared) = tx.prepared_parts();
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+                api.qualified_function("waddle_ingress_record_policy_discard"),
+            );
+            let _ = super::candidate_boolean(
+                transaction,
+                &query,
+                crate::db_params![
+                    key.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    reason.as_storage()
+                ],
+            )
+            .await?;
+            return Ok(());
+        }
         let key_param = if transaction.driver() == DatabaseDriver::Postgres {
             "?::uuid"
         } else {
@@ -70,7 +112,9 @@ impl EffectReceiptRepository {
             prepared,
             crate::ingress_substrate::PreparedIngressRelation::Effects,
         );
-        let sql = format!("INSERT INTO {receipts} (message_key, kind, semantic_identity_hash, policy_discard_reason) SELECT message_key, kind, semantic_identity_hash, ? FROM {intents} WHERE message_key = {key_param} AND kind = ? AND semantic_identity_hash = ? ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING");
+        let sql = format!(
+            "INSERT INTO {receipts} (message_key, kind, semantic_identity_hash, policy_discard_reason) SELECT message_key, kind, semantic_identity_hash, ? FROM {intents} WHERE message_key = {key_param} AND kind = ? AND semantic_identity_hash = ? ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING"
+        );
         transaction
             .execute(
                 &sql,

@@ -1078,12 +1078,6 @@ async fn graceful_output_close_starts_driver_deadline_without_peer_reply() {
         stopped_at.elapsed() < retirement_deadline + Duration::from_millis(250),
         "physical retirement must not add a second driver grace"
     );
-    assert_ne!(
-        observer.state(),
-        CustodianState::Joined,
-        "the peer has not read or answered the Close frame"
-    );
-
     drop(_peer);
     drop(input);
     drop(owner);

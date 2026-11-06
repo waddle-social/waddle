@@ -21,8 +21,10 @@ or losing its eventual typed result.
   `wire_bytes`) plus a 64 KiB result reservation. It is not a hard memory
   bound. The task measures the returned typed result after the handler; when
   it exceeds its reservation, it retains the result as `CompletionUnknown`,
-  seals new admission, and stops the worker. Establishing a hard output bound
-  or durable oversized-result custody remains a blocking activation gate.
+  seals new admission, and stops the worker. `ResultReservationExceeded`
+  takes precedence over `AuthorityRevoked` when both apply to the same
+  returned result. Establishing a hard output bound or durable oversized-result
+  custody remains a blocking activation gate.
 - Use a separate small bounded control queue. Its barrier marker proves
   admission and service after a stalled handler returns; controls that require
   worker-owned state do not progress during the handler. Exact-ID lookup and
@@ -86,11 +88,16 @@ task-handle drops; stale references cannot reach the record.
 Stop and lease-loss seal admission immediately. The attached permit retains
 the exact identity source revision captured by `SocketAdmission`, in addition
 to the serving generation. Admission and completion both revalidate that
-authority; a result observed after source-revision loss is retained as
-`CompletionUnknown(AuthorityRevoked)` even if node lifecycle still says
-`Serving`. The custodian synchronously notifies its owner before either a pump
+authority; a result within its reservation that returns after source-revision
+loss is retained as `CompletionUnknown(AuthorityRevoked)` even if node
+lifecycle still says `Serving`. An oversized returned result instead uses the
+`ResultReservationExceeded` classification described above. The custodian
+synchronously notifies its owner before either a pump
 stop or graceful-close transition becomes visible. That notification seals
-driver admission and completion on the shared ledger gate. The driver's timer
+driver admission and completion on the shared ledger gate. After dequeue, the
+worker must claim `Accepted` to `Running` under that same gate before entering
+the handler; if stop wins first, the operation remains `NotStarted`. The core
+lifecycle stop is recorded before the gate is released. The driver's timer
 uses the first stop `Instant` captured under that gate, so asynchronous timer
 scheduling cannot extend grace; it covers pump stop, graceful close without a
 peer reply, and identity/lease revocation without waiting for pump retirement.
@@ -107,10 +114,12 @@ operation identity and never replay from caller cancellation.
 The new deterministic tests cover handle-independent lookup/ack, one handler
 execution, stale references, duplicate and late attachment rejection, direct
 ticket acknowledgement after the join task's prune check, stop versus submit
-and result publication gates, source-revision loss without node lifecycle
-demotion, pump-triggered stop while another pump is held, graceful close with
-no peer reply, identity-only deadline abort, concurrent join callers, and
-control admission behind a stalled handler. Existing owner and pump tests
+and result publication gates, and stop versus the dequeue/start claim,
+including proof that a dequeued operation does not enter its handler when stop
+wins. They also cover source-revision loss without node lifecycle demotion,
+pump-triggered stop while another pump is held, graceful close with no peer
+reply, identity-only deadline abort, concurrent join callers, and control
+admission behind a stalled handler. Existing owner and pump tests
 continue to cover bounded inventory, lease loss, panic, stalled physical
 cleanup, and successor fencing.
 Keep `/ws` selection, endpoint publication, stream-management advancement,

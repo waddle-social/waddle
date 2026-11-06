@@ -1,5 +1,6 @@
 //! Atomic notification candidate and recovery writes beneath the canonical lock.
 use crate::db::DatabaseDriver;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_substrate::MessageEnvelope;
 use std::collections::BTreeSet;
 use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
@@ -21,61 +22,113 @@ async fn pending_notification_sources(
     tx: &mut IngressUowTransaction<'_>,
     row: &waddle_xmpp::pending_delivery::PendingRow,
 ) -> Result<Vec<PendingNotificationSource>, IngressUowError> {
-    let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
+    let waddle_xmpp::pending_delivery::PendingPayload::Archived(_) = &row.payload else {
         return Err(IngressUowError::EffectIntentConflict);
     };
     let (routes, route_seed) = pending_route_notification_sources(tx, row).await?;
-    let mut rows = tx.transaction_mut().query(
-        "SELECT CAST(d.message_key AS TEXT), d.kind, d.semantic_identity_hash, i.payload_version, i.payload, d.pending_row_id FROM ingress_archive_dispatch d JOIN ingress_effect_intents i ON i.message_key = d.message_key AND i.kind = d.kind AND i.semantic_identity_hash = d.semantic_identity_hash WHERE d.archive_jid = ? AND d.pending_row_id <> '' AND d.archive_seq IN (SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND pending_row_id = ?) ORDER BY d.message_key, d.kind, d.semantic_identity_hash, d.pending_row_id",
-        crate::db_params![row.recipient.to_string(), row.recipient.to_string(), row.id.as_str()],
-    ).await?;
     let mut sources = Vec::new();
-    while let Some(source) = rows.next().await? {
-        let key: String = source.get(0)?;
-        let message = MessageKey::from_storage(
-            key.parse()
-                .map_err(|_| IngressUowError::EffectIntentConflict)?,
-        );
-        let kind = i32::try_from(source.get::<i64>(1)?)
-            .map_err(|_| IngressUowError::EffectIntentConflict)?;
-        let hash: Vec<u8> = source.get(2)?;
-        if source.get::<i64>(3)? != 1 {
-            return Err(IngressUowError::EffectIntentConflict);
+    let (transaction, prepared) = tx.prepared_parts();
+    if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+        let function = api.qualified_function("waddle_ingress_list_pending_archive_sources");
+        let (mut after_message, mut after_kind, mut after_hash, mut after_pending) =
+            (None::<String>, None::<i32>, None::<Vec<u8>>, None::<String>);
+        loop {
+            let mut rows = transaction
+                .query(
+                    &format!(
+                        "SELECT message_key, kind, semantic_identity_hash, payload_version, payload, pending_row_id FROM {function}(?::text, ?::text, ?::uuid, ?::integer, ?::bytea, ?::text, 256)"
+                    ),
+                    crate::db_params![
+                        row.recipient.to_string(),
+                        row.id.as_str(),
+                        after_message.clone(),
+                        after_kind,
+                        after_hash.clone(),
+                        after_pending.clone(),
+                    ],
+                )
+                .await?;
+            let mut count = 0usize;
+            while let Some(source) = rows.next().await? {
+                after_message = Some(source.get(0)?);
+                after_kind = Some(source.get(1)?);
+                after_hash = Some(source.get(2)?);
+                after_pending = Some(source.get(5)?);
+                append_pending_archive_source(&source, row, &routes, &mut sources)?;
+                count += 1;
+            }
+            drop(rows);
+            if count < 256 {
+                break;
+            }
         }
-        let payload: Vec<u8> = source.get(4)?;
-        let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
-        let pending_id: String = source.get(5)?;
-        match &intent {
-            IngressEffectIntent::PendingDelivery {
-                mutation:
-                    waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
-                        recipient,
-                        row_id,
-                        archive_stanza_id,
-                    },
-            } if recipient == &row.recipient
-                && archive_stanza_id == stamp
-                && row_id.as_str() == pending_id => {}
-            IngressEffectIntent::RouteDirect { .. }
-                if routes.contains(&PendingNotificationSource {
-                    message,
-                    intent: intent.clone(),
-                }) => {}
-            _ => return Err(IngressUowError::EffectIntentConflict),
+    } else {
+        let mut rows = transaction
+            .query(
+                "SELECT CAST(d.message_key AS TEXT), d.kind, d.semantic_identity_hash, i.payload_version, i.payload, d.pending_row_id FROM ingress_archive_dispatch d JOIN ingress_effect_intents i ON i.message_key = d.message_key AND i.kind = d.kind AND i.semantic_identity_hash = d.semantic_identity_hash WHERE d.archive_jid = ? AND d.pending_row_id <> '' AND d.archive_seq IN (SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND pending_row_id = ?) ORDER BY d.message_key, d.kind, d.semantic_identity_hash, d.pending_row_id",
+                crate::db_params![row.recipient.to_string(), row.recipient.to_string(), row.id.as_str()],
+            )
+            .await?;
+        while let Some(source) = rows.next().await? {
+            append_pending_archive_source(&source, row, &routes, &mut sources)?;
         }
-        let receipt = crate::ingress::receipt_key(&intent)?;
-        if receipt.kind.to_storage() != kind || receipt.semantic_identity_hash.as_slice() != hash {
-            return Err(IngressUowError::EffectIntentConflict);
-        }
-        sources.push(PendingNotificationSource { message, intent });
+        drop(rows);
     }
-    drop(rows);
     if !sources.is_empty() || route_seed {
         sources.extend(routes);
     }
     sources.sort_by_key(|source| source.message.to_storage());
     sources.dedup();
     Ok(sources)
+}
+
+fn append_pending_archive_source(
+    source: &crate::db::Row,
+    row: &waddle_xmpp::pending_delivery::PendingRow,
+    routes: &[PendingNotificationSource],
+    sources: &mut Vec<PendingNotificationSource>,
+) -> Result<(), IngressUowError> {
+    let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
+        return Err(IngressUowError::EffectIntentConflict);
+    };
+    let key: String = source.get(0)?;
+    let message = MessageKey::from_storage(
+        key.parse()
+            .map_err(|_| IngressUowError::EffectIntentConflict)?,
+    );
+    let kind =
+        i32::try_from(source.get::<i64>(1)?).map_err(|_| IngressUowError::EffectIntentConflict)?;
+    let hash: Vec<u8> = source.get(2)?;
+    if source.get::<i64>(3)? != 1 {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let payload: Vec<u8> = source.get(4)?;
+    let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
+    let pending_id: String = source.get(5)?;
+    match &intent {
+        IngressEffectIntent::PendingDelivery {
+            mutation:
+                waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
+                    recipient,
+                    row_id,
+                    archive_stanza_id,
+                },
+        } if recipient == &row.recipient
+            && archive_stanza_id == stamp
+            && row_id.as_str() == pending_id => {}
+        IngressEffectIntent::RouteDirect { .. }
+            if routes.contains(&PendingNotificationSource {
+                message,
+                intent: intent.clone(),
+            }) => {}
+        _ => return Err(IngressUowError::EffectIntentConflict),
+    }
+    let receipt = crate::ingress::receipt_key(&intent)?;
+    if receipt.kind.to_storage() != kind || receipt.semantic_identity_hash.as_slice() != hash {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    sources.push(PendingNotificationSource { message, intent });
+    Ok(())
 }
 
 async fn pending_route_notification_sources(
@@ -96,48 +149,98 @@ async fn pending_route_notification_sources(
         archived_at: row.original_receipt_at,
     };
     let archive_receipt = crate::ingress::receipt_key(&archive_lookup)?;
-    let mut rows = tx.transaction_mut().query(
-        "SELECT CAST(r.message_key AS TEXT), r.kind, r.semantic_identity_hash, r.payload_version, r.payload, a.payload_version, a.payload FROM ingress_effect_intents r JOIN ingress_effect_intents a ON a.message_key = r.message_key WHERE r.kind = ? AND a.kind = ? AND a.semantic_identity_hash = ? ORDER BY r.message_key, r.semantic_identity_hash",
-        crate::db_params![IngressEffectKind::RouteDirect.storage_tag(), IngressEffectKind::ArchiveAuthoritative.storage_tag(), archive_receipt.semantic_identity_hash.to_vec()],
-    ).await?;
     let mut sources = Vec::new();
     let mut seeded = false;
-    while let Some(source) = rows.next().await? {
-        let key: String = source.get(0)?;
-        let message = MessageKey::from_storage(
-            key.parse()
-                .map_err(|_| IngressUowError::EffectIntentConflict)?,
-        );
-        if source.get::<i64>(3)? != 1 || source.get::<i64>(5)? != 1 {
-            return Err(IngressUowError::EffectIntentConflict);
+    let (transaction, prepared) = tx.prepared_parts();
+    if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+        let function = api.qualified_function("waddle_ingress_list_pending_route_sources");
+        let (mut after_message, mut after_hash) = (None::<String>, None::<Vec<u8>>);
+        loop {
+            let mut rows = transaction
+                .query(
+                    &format!(
+                        "SELECT message_key, route_kind, route_hash, route_payload_version, route_payload, archive_payload_version, archive_payload FROM {function}(?::integer, ?::integer, ?::bytea, ?::uuid, ?::bytea, 256)"
+                    ),
+                    crate::db_params![
+                        IngressEffectKind::RouteDirect.storage_tag(),
+                        IngressEffectKind::ArchiveAuthoritative.storage_tag(),
+                        archive_receipt.semantic_identity_hash.to_vec(),
+                        after_message.clone(),
+                        after_hash.clone(),
+                    ],
+                )
+                .await?;
+            let mut count = 0usize;
+            while let Some(source) = rows.next().await? {
+                after_message = Some(source.get(0)?);
+                after_hash = Some(source.get(2)?);
+                let (candidate, is_seeded) = decode_pending_route_source(&source, row)?;
+                seeded |= is_seeded;
+                sources.push(candidate);
+                count += 1;
+            }
+            drop(rows);
+            if count < 256 {
+                break;
+            }
         }
-        let archive_payload: Vec<u8> = source.get(6)?;
-        let archive = IngressEffectIntent::decode_v1(
-            IngressEffectKind::ArchiveAuthoritative.storage_tag(),
-            &archive_payload,
-        )?;
-        if !matches!(&archive, IngressEffectIntent::ArchiveAuthoritative { archive, by, stanza_id, .. }
-            if archive == &row.recipient && by == &stamp.by.to_bare() && stanza_id == stamp)
-        {
-            return Err(IngressUowError::EffectIntentConflict);
+    } else {
+        let mut rows = transaction
+            .query(
+                "SELECT CAST(r.message_key AS TEXT), r.kind, r.semantic_identity_hash, r.payload_version, r.payload, a.payload_version, a.payload FROM ingress_effect_intents r JOIN ingress_effect_intents a ON a.message_key = r.message_key WHERE r.kind = ? AND a.kind = ? AND a.semantic_identity_hash = ? ORDER BY r.message_key, r.semantic_identity_hash",
+                crate::db_params![IngressEffectKind::RouteDirect.storage_tag(), IngressEffectKind::ArchiveAuthoritative.storage_tag(), archive_receipt.semantic_identity_hash.to_vec()],
+            )
+            .await?;
+        while let Some(source) = rows.next().await? {
+            let (candidate, is_seeded) = decode_pending_route_source(&source, row)?;
+            seeded |= is_seeded;
+            sources.push(candidate);
         }
-        let kind = i32::try_from(source.get::<i64>(1)?)
-            .map_err(|_| IngressUowError::EffectIntentConflict)?;
-        let payload: Vec<u8> = source.get(4)?;
-        let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
-        if !matches!(&intent, IngressEffectIntent::RouteDirect { recipient, .. } if recipient == &row.recipient)
-        {
-            return Err(IngressUowError::EffectIntentConflict);
-        }
-        let receipt = crate::ingress::receipt_key(&intent)?;
-        let hash: Vec<u8> = source.get(2)?;
-        if receipt.semantic_identity_hash.as_slice() != hash {
-            return Err(IngressUowError::EffectIntentConflict);
-        }
-        seeded |= crate::ingress::ambiguous_offline_pending_id(message, &receipt) == row.id;
-        sources.push(PendingNotificationSource { message, intent });
     }
     Ok((sources, seeded))
+}
+
+fn decode_pending_route_source(
+    source: &crate::db::Row,
+    row: &waddle_xmpp::pending_delivery::PendingRow,
+) -> Result<(PendingNotificationSource, bool), IngressUowError> {
+    use waddle_xmpp::ingress::IngressEffectKind;
+    let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
+        return Err(IngressUowError::EffectIntentConflict);
+    };
+    let key: String = source.get(0)?;
+    let message = MessageKey::from_storage(
+        key.parse()
+            .map_err(|_| IngressUowError::EffectIntentConflict)?,
+    );
+    if source.get::<i64>(3)? != 1 || source.get::<i64>(5)? != 1 {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let archive_payload: Vec<u8> = source.get(6)?;
+    let archive = IngressEffectIntent::decode_v1(
+        IngressEffectKind::ArchiveAuthoritative.storage_tag(),
+        &archive_payload,
+    )?;
+    if !matches!(&archive, IngressEffectIntent::ArchiveAuthoritative { archive, by, stanza_id, .. }
+        if archive == &row.recipient && by == &stamp.by.to_bare() && stanza_id == stamp)
+    {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let kind =
+        i32::try_from(source.get::<i64>(1)?).map_err(|_| IngressUowError::EffectIntentConflict)?;
+    let payload: Vec<u8> = source.get(4)?;
+    let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
+    if !matches!(&intent, IngressEffectIntent::RouteDirect { recipient, .. } if recipient == &row.recipient)
+    {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let receipt = crate::ingress::receipt_key(&intent)?;
+    let hash: Vec<u8> = source.get(2)?;
+    if receipt.semantic_identity_hash.as_slice() != hash {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let seeded = crate::ingress::ambiguous_offline_pending_id(message, &receipt) == row.id;
+    Ok((PendingNotificationSource { message, intent }, seeded))
 }
 
 async fn lock_pending_notification_row(
@@ -236,6 +339,54 @@ pub(crate) enum PendingNotificationPreparation {
 }
 
 impl RecoveryReceiptRepository {
+    async fn attach_existing_candidate_lineage(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+        effect: &waddle_xmpp::ingress::IngressEffectKey,
+        candidate: &NotificationCandidate,
+    ) -> Result<bool, IngressUowError> {
+        let (transaction, prepared) = tx.prepared_parts();
+        let api =
+            match prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+                Some(prepared) => Some(DefinerApiCandidateContext::from_prepared(prepared).ok_or(
+                    crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                )?),
+                None => None,
+            };
+        NotificationOutboxStore::attach_existing_candidate_lineage_with_api(
+            transaction,
+            api.as_ref(),
+            message,
+            effect,
+            candidate,
+        )
+        .await
+    }
+
+    async fn attach_candidate_lineage(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+        effect: &waddle_xmpp::ingress::IngressEffectKey,
+        candidate: &NotificationCandidate,
+    ) -> Result<(), IngressUowError> {
+        let (transaction, prepared) = tx.prepared_parts();
+        let api =
+            match prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+                Some(prepared) => Some(DefinerApiCandidateContext::from_prepared(prepared).ok_or(
+                    crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                )?),
+                None => None,
+            };
+        NotificationOutboxStore::attach_candidate_lineage_with_api(
+            transaction,
+            api.as_ref(),
+            message,
+            effect,
+            candidate,
+        )
+        .await
+    }
+
     pub(crate) async fn attach_existing_pending_notification(
         tx: &mut IngressUowTransaction<'_>,
         message: MessageKey,
@@ -246,13 +397,8 @@ impl RecoveryReceiptRepository {
         let Some(candidate) = pending_candidate_from_envelope(envelope, row)? else {
             return Ok(false);
         };
-        NotificationOutboxStore::attach_existing_candidate_lineage_in_transaction(
-            tx.transaction_mut(),
-            message,
-            &intent.semantic_key(),
-            &candidate,
-        )
-        .await
+        Self::attach_existing_candidate_lineage(tx, message, &intent.semantic_key(), &candidate)
+            .await
     }
 
     /// Resolve host-owned pending provenance before taking any pending or
@@ -339,8 +485,8 @@ impl RecoveryReceiptRepository {
             )
             .await?;
             for source in &fresh.sources {
-                NotificationOutboxStore::attach_candidate_lineage_in_transaction(
-                    tx.transaction_mut(),
+                Self::attach_candidate_lineage(
+                    tx,
                     source.message,
                     &source.intent.semantic_key(),
                     candidate,
@@ -399,13 +545,8 @@ impl RecoveryReceiptRepository {
             created_at_ms,
         )
         .await?;
-        NotificationOutboxStore::attach_candidate_lineage_in_transaction(
-            tx.transaction_mut(),
-            message_key,
-            &authority.semantic_key(),
-            candidate,
-        )
-        .await?;
+        Self::attach_candidate_lineage(tx, message_key, &authority.semantic_key(), candidate)
+            .await?;
         Ok(outcome)
     }
 

@@ -216,6 +216,12 @@ pub(super) enum ConnectionActorDriverTaskInput {
         result: &'static str,
     },
     #[cfg(any(test, feature = "test-support"))]
+    StartPaused {
+        dequeued: Arc<Notify>,
+        release: Arc<Notify>,
+        effect_runs: Arc<std::sync::atomic::AtomicUsize>,
+    },
+    #[cfg(any(test, feature = "test-support"))]
     Panic,
     #[cfg(any(test, feature = "test-support"))]
     Immediate {
@@ -250,6 +256,8 @@ impl ConnectionActorDriverTaskInput {
             Self::PeerStanza(stanza) => accounted_debug_bytes(stanza),
             #[cfg(any(test, feature = "test-support"))]
             Self::Paused { .. } => 0,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::StartPaused { .. } => 0,
             #[cfg(any(test, feature = "test-support"))]
             Self::Panic => 0,
             #[cfg(any(test, feature = "test-support"))]
@@ -430,6 +438,20 @@ impl ConnectionActorDriverTask {
             entered,
             release,
             result,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn submit_start_paused(
+        &self,
+        dequeued: Arc<Notify>,
+        release: Arc<Notify>,
+        effect_runs: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
+        self.submit(ConnectionActorDriverTaskInput::StartPaused {
+            dequeued,
+            release,
+            effect_runs,
         })
     }
 
@@ -940,19 +962,43 @@ impl DriverShared {
     }
 
     fn request_stop(&self, reason: StopReason) {
-        {
-            let mut ledger = self.lock_state();
-            if ledger.stop_reason.is_none() {
-                ledger.stop_reason = Some(reason);
-                ledger.stop_started_at = Some(Instant::now());
-            }
-            ledger.accepting = false;
-            // Admission and result publication use this same ledger lock. The
-            // first stop therefore closes both boundaries before the token
-            // wakes the worker or its shutdown timer.
-            self.stop.cancel();
+        let mut ledger = self.lock_state();
+        if ledger.stop_reason.is_none() {
+            ledger.stop_reason = Some(reason);
+            ledger.stop_started_at = Some(Instant::now());
         }
-        self.lifecycle.request_stop(reason);
+        let effective_reason = ledger.stop_reason.unwrap_or(reason);
+        ledger.accepting = false;
+        // Admission, operation start, and result publication use this same
+        // ledger lock. Mark the core stopped before releasing the gate so a
+        // worker cannot pass its core preflight after stop has won the ledger.
+        self.lifecycle.request_stop(effective_reason);
+        self.stop.cancel();
+    }
+
+    fn begin_operation(&self, operation: &Arc<DriverOperation>) -> bool {
+        let ledger = self.lock_state();
+        if !ledger.accepting
+            || self.stop.is_cancelled()
+            || self.shutdown.is_cancelled()
+            || operation.connection_ref != self.connection_ref
+            || !ledger
+                .operations
+                .get(&operation.id)
+                .is_some_and(|current| Arc::ptr_eq(current, operation))
+        {
+            return false;
+        }
+        let mut snapshot = operation.lock_snapshot();
+        if !matches!(*snapshot, ConnectionActorDriverTaskSnapshot::Accepted) {
+            return false;
+        }
+        *snapshot = ConnectionActorDriverTaskSnapshot::Running;
+        operation
+            .runs
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        operation.changed.notify_waiters();
+        true
     }
 
     fn publish_completion(
@@ -994,7 +1040,7 @@ impl DriverShared {
         }
         drop(ledger);
         if exceeds_reservation {
-            self.lifecycle.request_stop(StopReason::OutboundOverload);
+            self.request_stop(StopReason::OutboundOverload);
         }
     }
 
@@ -1244,13 +1290,27 @@ async fn run_driver(worker: DriverWorker) {
                 });
             continue;
         }
-        command
-            .operation
-            .set_snapshot(ConnectionActorDriverTaskSnapshot::Running);
-        command
-            .operation
-            .runs
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(any(test, feature = "test-support"))]
+        if let DriverInput::StartPaused {
+            dequeued, release, ..
+        } = &command.operation.input
+        {
+            dequeued.notify_one();
+            release.notified().await;
+        }
+        match permit.with_current(|| shared.begin_operation(&command.operation)) {
+            Ok(true) => {}
+            Ok(false) => {
+                if shutdown.is_cancelled() {
+                    shared.request_stop(StopReason::ShutdownDeadline);
+                }
+                return;
+            }
+            Err(_) => {
+                shared.request_stop(StopReason::LeaseLost);
+                return;
+            }
+        }
         let mut active =
             ActiveOperationGuard::new(Arc::clone(&command.operation), Arc::clone(&shared));
         let result = match &command.operation.input {
@@ -1282,6 +1342,11 @@ async fn run_driver(worker: DriverWorker) {
                 entered.notify_one();
                 release.notified().await;
                 ConnectionActorDriverTaskResultValue::Paused(result)
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            DriverInput::StartPaused { effect_runs, .. } => {
+                effect_runs.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                ConnectionActorDriverTaskResultValue::Immediate
             }
             #[cfg(any(test, feature = "test-support"))]
             DriverInput::Panic => panic!("synthetic driver panic"),
@@ -1816,6 +1881,49 @@ mod tests {
         ));
         active.acknowledge().expect("late result custody settled");
         queued.acknowledge().expect("queued input custody settled");
+    }
+
+    #[tokio::test]
+    async fn stop_after_dequeue_before_start_claim_keeps_operation_not_started() {
+        let task = test_task().await;
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let effect_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticket = task
+            .submit_start_paused(
+                Arc::clone(&dequeued),
+                Arc::clone(&release),
+                Arc::clone(&effect_runs),
+            )
+            .expect("operation accepted");
+
+        tokio::time::timeout(Duration::from_secs(1), dequeued.notified())
+            .await
+            .expect("worker dequeued and paused before the start claim");
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::Accepted
+        ));
+
+        task.request_stop(StopReason::Requested);
+        release.notify_one();
+        task.wait_joined().await;
+
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        assert_eq!(
+            ticket.run_count(),
+            0,
+            "the start claim never won the ledger"
+        );
+        assert_eq!(
+            effect_runs.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the handler/effect body was never entered"
+        );
+        ticket.acknowledge().expect("not-started custody settled");
     }
 
     #[tokio::test]

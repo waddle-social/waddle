@@ -136,6 +136,7 @@ pub use substrate::AliasGcFailure;
 pub use substrate::AliasGcOutcome;
 pub use substrate::AliasGcProgress;
 pub use substrate::DatabaseTimeoutKind;
+pub(crate) use substrate::DefinerApiCandidateContext;
 pub use substrate::IngressSubstrateError;
 pub use substrate::MessageWriteOutcome;
 pub use substrate::PostgresIngressSubstrate;
@@ -145,7 +146,8 @@ pub use substrate::ALIAS_RETENTION;
 pub use substrate::EPOCH_GUARDED_TABLES;
 pub(crate) use substrate::{
     assert_relayed_alias_in_prepared_transaction, insert_sm_ref_in_prepared_transaction,
-    prepared_ingress_relation, prepared_ingress_sql, record_delivery_in_prepared_transaction,
+    lock_message_for_child_in_prepared_transaction, prepared_ingress_relation,
+    prepared_ingress_sql, record_delivery_in_prepared_transaction,
     record_message_in_prepared_transaction, resolve_alias_in_prepared_transaction,
     terminalize_message_in_prepared_transaction, PreparedIngressRelation,
 };
