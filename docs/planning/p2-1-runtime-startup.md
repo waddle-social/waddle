@@ -47,9 +47,10 @@ primary. Version 1 and incomplete pin bundles are refused.
 
 `WADDLE_DEPLOYMENT_UUID` must equal the document's deployment UUID; enrollment
 or adoption actions are refused in this mode. The runtime PostgreSQL URL must
-name the expected database and login and select the expected schema when the
-connection opens; the physical hook checks the active schema before normalizing
-the search path. TCP connections require
+name the expected database and login. The opt-in pinned checkout hook proves
+the independently pinned physical and lineage identities, then sets a known
+schema path before lending a connection; it does not require an inherited
+active schema. The v2 production attachment is still closed. TCP connections require
 `sslmode=verify-full`; Unix sockets depend on operator-controlled filesystem
 permissions. A direct, session-preserving endpoint and the operator's fencing
 of the authoritative primary and old sessions remain prerequisites. The

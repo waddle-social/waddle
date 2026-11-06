@@ -276,6 +276,13 @@ impl AttestedPgPool {
     pub(crate) fn into_parts(
         self,
     ) -> Result<(PgPool, AttestedPostgresWriterCapability), PhysicalAttestationError> {
+        // The pinned checkout proves only the physical/lineage boundary.
+        // Existing Database consumers can start unrestricted transactions or
+        // call the legacy attestor directly, so keep this dark pool outside
+        // every DatabasePool conversion until those entries are migrated.
+        if matches!(&self.writer_capability.mode, AttestationMode::Pinned(_)) {
+            return Err(PhysicalAttestationError::UnconvertedPinnedTransaction);
+        }
         self.ensure_no_active_leases()?;
         Ok((self.pool, self.writer_capability))
     }

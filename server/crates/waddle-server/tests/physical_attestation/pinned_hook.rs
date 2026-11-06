@@ -220,6 +220,26 @@ async fn pinned_bundle_rejects_inconsistent_or_different_pairs() {
             ))
         ));
     }
+    let dark = pinned_attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        authority(&fixture, &config, attestor, 3),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("dark pinned pool");
+    assert!(matches!(
+        waddle_server::db::DatabasePool::from_attested_postgres_pool(
+            "unconverted pinned pool",
+            dark,
+            1,
+            1,
+        )
+        .await,
+        Err(DatabaseError::PhysicalAttestation(
+            PhysicalAttestationError::UnconvertedPinnedTransaction
+        ))
+    ));
     fixture.cleanup().await;
 }
 
