@@ -115,7 +115,7 @@ pub fn escape(raw: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
-#[derive(Clone, Eq, Debug)]
+#[derive(Eq, Debug)]
 /// A struct representing a DOM Element.
 pub struct Element {
     name: String,
@@ -124,6 +124,91 @@ pub struct Element {
     pub prefixes: Prefixes,
     attributes: AttrMap,
     children: Vec<Node>,
+}
+
+impl Clone for Element {
+    fn clone(&self) -> Self {
+        struct Frame<'a> {
+            source: &'a Element,
+            cloned: Element,
+            next_child: usize,
+        }
+
+        fn clone_header(source: &Element) -> Element {
+            Element {
+                name: source.name.clone(),
+                namespace: source.namespace.clone(),
+                prefixes: source.prefixes.clone(),
+                attributes: source.attributes.clone(),
+                children: Vec::new(),
+            }
+        }
+
+        let mut stack = vec![Frame {
+            source: self,
+            cloned: clone_header(self),
+            next_child: 0,
+        }];
+
+        loop {
+            let next_child = {
+                let Some(frame) = stack.last_mut() else {
+                    unreachable!("the root clone frame returns the completed element")
+                };
+                if frame.next_child == frame.source.children.len() {
+                    None
+                } else {
+                    let source = frame.source;
+                    let child = &source.children[frame.next_child];
+                    frame.next_child += 1;
+                    Some(child)
+                }
+            };
+
+            match next_child {
+                Some(Node::Text(text)) => {
+                    let Some(frame) = stack.last_mut() else {
+                        unreachable!("a child can only be read from an active frame")
+                    };
+                    frame.cloned.children.push(Node::Text(text.clone()));
+                }
+                Some(Node::Element(child)) => stack.push(Frame {
+                    source: child,
+                    cloned: clone_header(child),
+                    next_child: 0,
+                }),
+                None => {
+                    let Some(frame) = stack.pop() else {
+                        unreachable!("the root clone frame returns the completed element")
+                    };
+                    if let Some(parent) = stack.last_mut() {
+                        parent.cloned.children.push(Node::Element(frame.cloned));
+                    } else {
+                        return frame.cloned;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Element {
+    fn drop(&mut self) {
+        let mut pending = vec![core::mem::take(&mut self.children).into_iter()];
+
+        while let Some(frame) = pending.last_mut() {
+            match frame.next() {
+                Some(Node::Element(mut child)) => {
+                    pending.push(core::mem::take(&mut child.children).into_iter());
+                    drop(child);
+                }
+                Some(Node::Text(text)) => drop(text),
+                None => {
+                    pending.pop();
+                }
+            }
+        }
+    }
 }
 
 impl<'a> From<&'a Element> for String {

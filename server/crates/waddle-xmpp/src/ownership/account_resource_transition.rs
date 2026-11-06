@@ -1904,6 +1904,16 @@ mod tests {
         )
     }
 
+    fn deep_payload(depth: usize) -> Element {
+        let mut child = Element::bare("node", "urn:deep");
+        for _ in 0..depth {
+            let mut parent = Element::bare("node", "urn:deep");
+            parent.append_child(child);
+            child = parent;
+        }
+        child
+    }
+
     fn assert_payload_update_rejected(
         slot: &mut AccountResourceSlot,
         claim_identity: &UserClaimIdentity,
@@ -2728,16 +2738,6 @@ mod tests {
 
     #[test]
     fn conflicting_deep_payload_is_drained_without_recursive_drop() {
-        fn chain(depth: usize) -> Element {
-            let mut child = Element::bare("node", "urn:deep");
-            for _ in 0..depth {
-                let mut parent = Element::bare("node", "urn:deep");
-                parent.append_child(child);
-                child = parent;
-            }
-            child
-        }
-
         let mut slot = slot();
         let claim_identity = slot.claim_identity().clone();
         let binding_ref = binding(local_connection());
@@ -2753,7 +2753,7 @@ mod tests {
                 None,
                 None,
                 0,
-                vec![chain(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH)],
+                vec![deep_payload(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH)],
                 false,
                 false,
                 false,
@@ -2774,7 +2774,7 @@ mod tests {
                     None,
                     None,
                     0,
-                    vec![chain(100_000)],
+                    vec![deep_payload(100_000)],
                     false,
                     false,
                     false,
@@ -2797,6 +2797,202 @@ mod tests {
             .expect("spawn small-stack test thread")
             .join()
             .expect("deep payload rejection must not overflow the thread stack");
+    }
+
+    #[test]
+    fn accepted_and_rejected_deep_updates_clone_on_a_small_stack() {
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let binding_ref = binding(local_connection());
+        bind_active(&mut slot, &claim_identity, &binding_ref);
+
+        let accepted_payload = deep_payload(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH);
+        let rejected_payload = deep_payload(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH);
+        let (accepted_result, rejected_result, accepted_snapshot_retained) =
+            std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    let accepted_revision = slot.revision();
+                    let accepted =
+                        slot.execute(operation(AccountResourceMutation::UpdateSnapshot {
+                            claim_identity: claim_identity.clone(),
+                            expected_revision: accepted_revision,
+                            binding_ref: binding_ref.clone(),
+                            snapshot: snapshot(
+                                true,
+                                None,
+                                None,
+                                0,
+                                vec![accepted_payload],
+                                false,
+                                false,
+                                false,
+                                None,
+                            ),
+                        }));
+                    let rejected =
+                        slot.execute(operation(AccountResourceMutation::UpdateSnapshot {
+                            claim_identity,
+                            expected_revision: AccountResourceRevision::INITIAL,
+                            binding_ref,
+                            snapshot: snapshot(
+                                true,
+                                None,
+                                None,
+                                0,
+                                vec![rejected_payload],
+                                false,
+                                false,
+                                false,
+                                None,
+                            ),
+                        }));
+                    let accepted_snapshot_retained = slot
+                        .snapshot()
+                        .is_some_and(AccountResourceSnapshot::within_bounds);
+                    drop(slot);
+                    (accepted, rejected, accepted_snapshot_retained)
+                })
+                .expect("spawn small-stack update test thread")
+                .join()
+                .expect("snapshot update cloning and drop must not overflow the thread stack");
+
+        assert!(matches!(
+            accepted_result,
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Committed { .. }
+            ))
+        ));
+        assert!(matches!(
+            rejected_result,
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::RevisionConflict
+                )
+            ))
+        ));
+        assert!(accepted_snapshot_retained);
+    }
+
+    #[test]
+    fn accepted_and_rejected_deep_resumes_clone_and_drop_without_recursion() {
+        let mut accepted_slot = slot();
+        let accepted_claim = accepted_slot.claim_identity().clone();
+        let accepted_previous = binding(local_connection());
+        bind_active(&mut accepted_slot, &accepted_claim, &accepted_previous);
+        let retained_snapshot = snapshot(
+            true,
+            None,
+            None,
+            0,
+            vec![deep_payload(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH)],
+            false,
+            false,
+            false,
+            Some(SmSessionId::new("sm-deep")),
+        );
+        commit(
+            AccountResourceMutation::UpdateSnapshot {
+                claim_identity: accepted_claim.clone(),
+                expected_revision: accepted_slot.revision(),
+                binding_ref: accepted_previous.clone(),
+                snapshot: retained_snapshot.clone(),
+            },
+            &mut accepted_slot,
+        );
+        let accepted_resume_binding = binding(local_connection());
+        let accepted_receipt = SuccessfulResumeReceipt::observed(
+            BindingEvidence::for_binding(&accepted_previous),
+            BindingEvidence::for_binding(&accepted_resume_binding),
+            SmSessionId::new("sm-deep"),
+            BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+        );
+
+        let mut rejected_slot = slot();
+        let rejected_claim = rejected_slot.claim_identity().clone();
+        let shared_connection = local_connection();
+        let rejected_previous = binding(shared_connection.clone());
+        bind_active(&mut rejected_slot, &rejected_claim, &rejected_previous);
+        commit(
+            AccountResourceMutation::UpdateSnapshot {
+                claim_identity: rejected_claim.clone(),
+                expected_revision: rejected_slot.revision(),
+                binding_ref: rejected_previous.clone(),
+                snapshot: retained_snapshot.clone(),
+            },
+            &mut rejected_slot,
+        );
+        let rejected_resume_binding = binding(shared_connection);
+        let rejected_receipt = SuccessfulResumeReceipt::observed(
+            BindingEvidence::for_binding(&rejected_previous),
+            BindingEvidence::for_binding(&rejected_resume_binding),
+            SmSessionId::new("sm-deep"),
+            BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+        );
+
+        let (
+            accepted_result,
+            accepted_snapshot_matches,
+            rejected_result,
+            rejected_snapshot_matches,
+        ) = std::thread::Builder::new()
+            // A shallow-snapshot probe also overflows before `successful_resume`
+            // enters on 64 KiB, so use 128 KiB for this pre-existing transition
+            // call path while keeping every owned deep tree on the test thread.
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let accepted_revision = accepted_slot.revision();
+                let accepted_operation = operation(AccountResourceMutation::SuccessfulResume {
+                    claim_identity: accepted_claim,
+                    expected_revision: accepted_revision,
+                    previous_binding_ref: accepted_previous,
+                    binding_ref: accepted_resume_binding,
+                    receipt: accepted_receipt,
+                });
+                let accepted = accepted_slot.execute(accepted_operation);
+                let accepted_snapshot_matches =
+                    accepted_slot.snapshot() == Some(&retained_snapshot);
+                let rejected_revision = rejected_slot.revision();
+                let rejected =
+                    rejected_slot.execute(operation(AccountResourceMutation::SuccessfulResume {
+                        claim_identity: rejected_claim,
+                        expected_revision: rejected_revision,
+                        previous_binding_ref: rejected_previous,
+                        binding_ref: rejected_resume_binding,
+                        receipt: rejected_receipt,
+                    }));
+                let rejected_snapshot_matches =
+                    rejected_slot.snapshot() == Some(&retained_snapshot);
+                drop(accepted_slot);
+                drop(rejected_slot);
+                drop(retained_snapshot);
+                (
+                    accepted,
+                    accepted_snapshot_matches,
+                    rejected,
+                    rejected_snapshot_matches,
+                )
+            })
+            .expect("spawn small-stack resume test thread")
+            .join()
+            .expect("resume snapshot cloning and drop must not overflow the thread stack");
+
+        assert!(matches!(
+            accepted_result,
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Committed { .. }
+            ))
+        ));
+        assert!(accepted_snapshot_matches);
+        assert!(matches!(
+            rejected_result,
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::ResumeConnectionMismatch
+                )
+            ))
+        ));
+        assert!(rejected_snapshot_matches);
     }
 
     #[test]

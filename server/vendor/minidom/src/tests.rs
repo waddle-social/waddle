@@ -39,6 +39,80 @@ fn build_test_tree() -> Element {
     root
 }
 
+fn assert_iteratively_equal(source: &Element, cloned: &Element) {
+    let mut pending = vec![(source, cloned)];
+    while let Some((source, cloned)) = pending.pop() {
+        assert_eq!(source.name(), cloned.name());
+        assert_eq!(source.ns_ref(), cloned.ns_ref());
+        assert_eq!(source.prefixes.declared_prefixes(), cloned.prefixes.declared_prefixes());
+        assert_eq!(source.attrs(), cloned.attrs());
+
+        let mut source_nodes = source.nodes();
+        let mut cloned_nodes = cloned.nodes();
+        loop {
+            match (source_nodes.next(), cloned_nodes.next()) {
+                (None, None) => break,
+                (Some(crate::node::Node::Text(source)), Some(crate::node::Node::Text(cloned))) => {
+                    assert_eq!(source, cloned);
+                }
+                (
+                    Some(crate::node::Node::Element(source)),
+                    Some(crate::node::Node::Element(cloned)),
+                ) => pending.push((source, cloned)),
+                _ => panic!("iterative clone changed node type or order"),
+            }
+        }
+    }
+}
+
+#[test]
+fn clone_is_iterative_on_a_small_stack_and_preserves_nodes() {
+    let mut nested = Element::builder("leaf", "urn:leaf")
+        .prefix(Some("p".to_owned()), "urn:leaf-prefix")
+        .expect("unique leaf prefix")
+        .attr(xml_ncname!("id").to_owned(), "leaf")
+        .build();
+
+    for depth in 0..256 {
+        let mut parent = Element::builder("node", format!("urn:node:{depth}"))
+            .prefix(
+                Some("p".to_owned()),
+                format!("urn:prefix:{depth}"),
+            )
+            .expect("unique node prefix")
+            .attr(xml_ncname!("depth").to_owned(), depth.to_string())
+            .build();
+        parent.append_text_node("before");
+        parent.append_child(nested);
+        parent.append_text_node("after");
+        nested = parent;
+    }
+
+    let mut root = Element::builder("root", "urn:root")
+        .prefix(Some("p".to_owned()), "urn:outer-prefix")
+        .expect("unique root prefix")
+        .build();
+    for index in 0..1024 {
+        root.append_text_node(index.to_string());
+    }
+    root.append_text_node("before nested tree");
+    root.append_child(nested);
+    root.append_text_node("after nested tree");
+
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            let cloned = root.clone();
+            assert_iteratively_equal(&root, &cloned);
+            let empty = Element::bare("empty", "");
+            let cloned_empty = empty.clone();
+            assert_iteratively_equal(&empty, &cloned_empty);
+        })
+        .expect("spawn small-stack clone thread")
+        .join()
+        .expect("iterative Element::clone and drop must not overflow a small stack");
+}
+
 #[test]
 fn reader_works() {
     assert_eq!(
