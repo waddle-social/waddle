@@ -2787,6 +2787,62 @@ REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_refresh_retention(UUID) FROM PU
 GRANT EXECUTE ON FUNCTION __SCHEMA__.waddle_ingress_refresh_retention(UUID)
     TO __RUNTIME_ROLE_IDENT__;
 
+-- Standalone post-commit completion is one closed operation. The canonical
+-- parent lock serializes cooperating intent/child mutators and GC; each query
+-- after a lock wait takes a fresh READ COMMITTED snapshot.
+-- Results: 0 incomplete, 1 newly terminal, 2 already terminal, 3 absent.
+CREATE OR REPLACE FUNCTION __SCHEMA__.waddle_ingress_terminalize_if_complete(
+    p_message_key UUID
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    was_terminal BOOLEAN;
+BEGIN
+    IF p_message_key IS NULL THEN
+        RAISE EXCEPTION 'waddle: malformed terminalization request'
+            USING ERRCODE = '22023';
+    END IF;
+    PERFORM __SCHEMA__.waddle_ingress_definer_prepare();
+    SELECT m.terminal_at IS NOT NULL INTO was_terminal
+    FROM __SCHEMA__.ingress_messages AS m
+    WHERE m.message_key = p_message_key
+    FOR UPDATE OF m;
+    IF NOT FOUND THEN
+        RETURN 3;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __SCHEMA__.ingress_effect_intents AS i
+        WHERE i.message_key = p_message_key
+          AND NOT EXISTS (
+              SELECT 1 FROM __SCHEMA__.ingress_effect_receipts AS r
+              WHERE r.message_key = i.message_key
+                AND r.kind = i.kind
+                AND r.semantic_identity_hash = i.semantic_identity_hash)
+    ) THEN
+        RETURN 0;
+    END IF;
+    IF was_terminal THEN
+        RETURN 2;
+    END IF;
+    UPDATE __SCHEMA__.ingress_messages
+    SET terminal_at = pg_catalog.clock_timestamp()
+    WHERE message_key = p_message_key;
+    PERFORM __SCHEMA__.waddle_ingress_refresh_retention(p_message_key);
+    RETURN 1;
+END
+$$;
+
+ALTER FUNCTION __SCHEMA__.waddle_ingress_terminalize_if_complete(UUID)
+    OWNER TO __API_OWNER_IDENT__;
+REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_terminalize_if_complete(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION __SCHEMA__.waddle_ingress_terminalize_if_complete(UUID)
+    TO __RUNTIME_ROLE_IDENT__;
+
 DROP FUNCTION IF EXISTS __SCHEMA__.waddle_ingress_settle_descendant(UUID, TIMESTAMPTZ);
 DROP FUNCTION IF EXISTS __SCHEMA__.waddle_ingress_refresh_retention(UUID, TIMESTAMPTZ);
 

@@ -59,7 +59,7 @@ impl RestrictedTransactionProbe {
             .ok_or(PhysicalAttestationError::WrongPool)?;
         database.verify_attested_pg_writer_capability(&capability)?;
         if !database.is_main_lane()
-            || expected.manifest_version != 1
+            || expected.manifest_version != super::MANIFEST_VERSION
             || expected.schema_oid != capability.identity().schema.oid
         {
             return Err(RestrictedIngressProfileError::Mismatch("probe binding"));

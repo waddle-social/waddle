@@ -16,6 +16,8 @@ use super::{
     prepare_candidate_application_fixture, test_url, url_with_schema, Fixture, CATALOG_GRANT_LOCK,
 };
 
+#[path = "restricted_completion_transaction.rs"]
+mod completion_transaction;
 #[path = "restricted_receipt_transaction.rs"]
 mod receipt_transaction;
 #[path = "restricted_transaction_probe.rs"]
@@ -103,7 +105,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         .inspect_restricted_ingress_profile(&api_role, epoch_oid)
         .await
         .expect("exact restricted profile");
-    assert_eq!(observed.manifest_version, 1);
+    assert_eq!(observed.manifest_version, 2);
     assert_eq!(observed.epoch_relation_oid, epoch_oid);
     transaction_probe::exercise(&fixture, &config, &api_role, epoch_oid).await;
     assert!(
@@ -269,6 +271,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
     }
     drop(raw);
     receipt_transaction::exercise(&fixture, &config, &api_role, epoch_oid).await;
+    completion_transaction::exercise(&fixture, &config, &api_role, &observed).await;
     execute(
         &fixture.admin,
         &format!("DROP OWNED BY {api}; DROP ROLE {api}"),

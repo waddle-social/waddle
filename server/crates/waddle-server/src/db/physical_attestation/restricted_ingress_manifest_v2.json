@@ -1,8 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "postgres_major": 17,
   "source_sha256": {
-    "candidate": "345935aa0ebe6392270e6ee937e19902fc98c84bbb52c4c228cd8b61ff8e97f4",
+    "candidate": "3f583d9986d70c33861b31ec54e08efa70a06271ffb3b4805e27241429bdf735",
     "relation": "2a66930709b7cd08b6ba4d20da97992f16766d2708739f6d5c54cde82c167a35",
     "waddle": "285e3e59dffc764ff94139d5871410b8ab81cd9fffbbd0da21dc94987ae3c977",
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
@@ -3725,6 +3725,46 @@
       "source_file": "candidate",
       "source_start": 62452,
       "source_end": 63469
+    },
+    {
+      "name": "waddle_ingress_terminalize_if_complete",
+      "owner": "api",
+      "properties": {
+        "probin": null,
+        "procost": 100,
+        "prokind": "f",
+        "proname": "waddle_ingress_terminalize_if_complete",
+        "prorows": 0,
+        "pronargs": 1,
+        "proconfig": [
+          "search_path=pg_catalog, pg_temp"
+        ],
+        "proretset": false,
+        "prosecdef": true,
+        "prorettype": "23",
+        "prosqlbody": null,
+        "prosupport": "-",
+        "proargmodes": null,
+        "proargnames": [
+          "p_message_key"
+        ],
+        "proargtypes": [
+          "2950"
+        ],
+        "proisstrict": false,
+        "proparallel": "u",
+        "protrftypes": null,
+        "provariadic": "0",
+        "provolatile": "v",
+        "proleakproof": false,
+        "proallargtypes": null,
+        "proargdefaults": null,
+        "pronargdefaults": 0
+      },
+      "public_execute": false,
+      "source_file": "candidate",
+      "source_start": 108331,
+      "source_end": 109480
     },
     {
       "name": "waddle_ingress_truncate_guard",

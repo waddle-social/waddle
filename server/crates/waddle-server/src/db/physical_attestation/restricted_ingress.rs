@@ -26,7 +26,7 @@ mod receipt_transaction;
 #[cfg(feature = "test-support")]
 pub use receipt_transaction::{
     RestrictedEffectReceipt, RestrictedReceiptPilot, RestrictedReceiptReadback,
-    RestrictedReceiptWrite,
+    RestrictedReceiptWrite, RestrictedTerminalization, RestrictedTerminalizationWrite,
 };
 #[cfg(feature = "test-support")]
 mod transaction_probe;
@@ -54,6 +54,8 @@ pub enum RestrictedIngressProfileError {
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
+
+const MANIFEST_VERSION: u32 = 2;
 
 type Result<T> = std::result::Result<T, RestrictedIngressProfileError>;
 
@@ -139,7 +141,7 @@ async fn inspect_profile_on_connection(
     manifest::verify(connection, schema, runtime, api_owner).await?;
     restore_application_path(connection, schema, runtime).await?;
     Ok(RestrictedIngressProfileObservation {
-        manifest_version: 1,
+        manifest_version: MANIFEST_VERSION,
         schema_oid,
         epoch_relation_oid: epoch_oid,
         runtime_role_oid: runtime_oid,
