@@ -4,10 +4,14 @@
 //! unselected candidate. The session-row lock pauses the actual SQL writer;
 //! the source handoff and completion commit before that writer can continue.
 
+use std::any::Any;
+use std::panic::{resume_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt;
 use sqlx::{Connection, PgConnection};
+use tokio::task::JoinHandle;
 use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::ingress_substrate::{EffectReceiptKind, TerminalizeOutcome};
@@ -20,7 +24,7 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedDetachedAppend,
     PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, SmClaimFence,
-    SmPersistenceStorage,
+    SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::stream_management::{SmFrameProvenance, SmIngressFrameReceipt};
 use waddle_xmpp::Stanza;
@@ -58,9 +62,60 @@ fn earlier_frame(stream: &SmSessionId, sequence: u32) -> PersistedUnackedStanza 
     }
 }
 
-async fn characterize(writer: Writer, drain: Drain) {
+struct FixtureIdentity {
+    database: String,
+    roles: Vec<String>,
+}
+
+type WriterTask = JoinHandle<Result<(), SmPersistenceError>>;
+type PanicResult = Result<(), Box<dyn Any + Send>>;
+
+async fn run_fixture(
+    writer: Writer,
+    drain: Drain,
+    inject_panic: bool,
+) -> (PanicResult, FixtureIdentity) {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let c = Candidate::new().await;
+    let identity = FixtureIdentity {
+        database: c.fixture.database_name.clone(),
+        roles: vec![
+            c.fixture.runtime.clone(),
+            c.fixture.outsider.clone(),
+            c.fixture.installer.clone(),
+            c.fixture.definer.clone(),
+        ],
+    };
+    let mut writer_task = None;
+    let result = AssertUnwindSafe(exercise(&c, writer, drain, inject_panic, &mut writer_task))
+        .catch_unwind()
+        .await;
+    // Dropping a JoinHandle detaches its task. Stop and join a paused writer
+    // before removing its database, including when an assertion panics.
+    if let Some(task) = writer_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    let Candidate { fixture, uow, .. } = c;
+    drop(uow);
+    fixture.cleanup().await;
+    (result, identity)
+}
+
+async fn characterize(writer: Writer, drain: Drain) {
+    let (result, _) = run_fixture(writer, drain, false).await;
+    if let Err(panic) = result {
+        resume_unwind(panic);
+    }
+}
+
+async fn exercise(
+    c: &Candidate,
+    writer: Writer,
+    drain: Drain,
+    inject_panic: bool,
+    writer_task: &mut Option<WriterTask>,
+) {
     // The shared retention fixture seeds an old terminal source. Reopen it
     // before the race so this test observes a new completion transaction.
     let mut setup = c.uow.begin().await.expect("source setup transaction");
@@ -208,7 +263,7 @@ async fn characterize(writer: Writer, drain: Drain) {
     let writer_proof = proof.clone();
     let principal = c.capture.principal.clone();
     let writer_fence = fence.clone();
-    let writer_task = tokio::spawn(async move {
+    *writer_task = Some(tokio::spawn(async move {
         match drain {
             Drain::Snapshot => writer_storage
                 .store_session_atomic_with_principal_and_ingress_appends(
@@ -235,12 +290,15 @@ async fn characterize(writer: Writer, drain: Drain) {
                 .await
                 .map(|outcome| assert_eq!(outcome, KeyedSnapshotOutcome::Committed)),
         }
-    });
+    }));
     wait_for_blocked_application(&c.fixture.admin, &application, blocker_pid).await;
     assert!(
-        !writer_task.is_finished(),
+        !writer_task.as_ref().expect("writer task").is_finished(),
         "writer is still waiting at the row lock"
     );
+    if inject_panic {
+        panic!("injected panic while writer is blocked");
+    }
 
     let handoff = repo
         .resume_preaccept(c.frame.operation_id)
@@ -287,7 +345,7 @@ async fn characterize(writer: Writer, drain: Drain) {
     .await
     .expect("completion before legacy writer");
     assert_eq!(state, (2, true, true, 1, 1));
-    assert!(!writer_task.is_finished());
+    assert!(!writer_task.as_ref().expect("writer task").is_finished());
 
     // A new-delivery write checks the source completion. The delayed frame
     // follows the separate already-counted path and must retain its payload.
@@ -309,8 +367,15 @@ async fn characterize(writer: Writer, drain: Drain) {
         .is_none());
 
     lock.commit().await.expect("release legacy session row");
-    tokio::time::timeout(Duration::from_secs(10), writer_task)
-        .await
+    let joined = tokio::time::timeout(
+        Duration::from_secs(10),
+        writer_task.as_mut().expect("writer task"),
+    )
+    .await;
+    if joined.is_ok() {
+        drop(writer_task.take());
+    }
+    joined
         .expect("legacy writer resolves")
         .expect("writer task joins")
         .expect("already-counted writer commits");
@@ -371,12 +436,6 @@ async fn characterize(writer: Writer, drain: Drain) {
         eligible,
         "the existing writer does not clear the earlier eligibility stamp"
     );
-
-    drop(repo);
-    drop(storage);
-    drop(claims);
-    drop(blocker);
-    c.fixture.cleanup().await;
 }
 
 #[tokio::test]
@@ -386,6 +445,31 @@ async fn postgres_portable_snapshot_preserves_delayed_counted_frames() {
 
 #[tokio::test]
 async fn postgres_portable_incremental_preserves_delayed_counted_frames() {
+    let (panic, identity) = run_fixture(Writer::Portable, Drain::Incremental, true).await;
+    let panic = panic.expect_err("the injected assertion must panic");
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+    assert_eq!(message, Some("injected panic while writer is blocked"));
+    let url = std::env::var("WADDLE_TEST_POSTGRES_URL").expect("PostgreSQL test URL");
+    let mut admin = PgConnection::connect(&url).await.expect("verify cleanup");
+    let database_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1)",
+    )
+    .bind(&identity.database)
+    .fetch_one(&mut admin)
+    .await
+    .expect("database inventory");
+    let roles: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_roles WHERE rolname = ANY($1)")
+            .bind(&identity.roles)
+            .fetch_one(&mut admin)
+            .await
+            .expect("role inventory");
+    assert!(!database_exists);
+    assert_eq!(roles, 0);
+    drop(admin);
     characterize(Writer::Portable, Drain::Incremental).await;
 }
 
