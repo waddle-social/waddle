@@ -6,8 +6,8 @@ use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection, Row};
 
 use super::{
-    attestor_probe_was_called, create_attestor_probe, postgres_proxy, test_url, Fixture,
-    CATALOG_GRANT_LOCK,
+    attestor_probe_was_called, create_attestor_probe, lose_commit_reply_proxy, postgres_proxy,
+    test_url, Fixture, CATALOG_GRANT_LOCK,
 };
 use waddle_server::db::physical_attestation::{
     inspect_pinned_installation, prepare_pinned_install, DarkInstallationStatus,
