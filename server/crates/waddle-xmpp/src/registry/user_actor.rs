@@ -28,12 +28,123 @@ use crate::Stanza;
 
 pub mod delivery;
 
-/// Cross-crate test controls, kept behind the existing `test-utils` feature.
-#[cfg(feature = "test-utils")]
+/// Test controls, compiled for unit tests and the `test-utils` feature only.
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_support {
     use super::UserActor;
+    use crate::registry::connection_registry::LocalConnectionBindingId;
     use std::sync::Arc;
     use tokio::sync::{oneshot, Notify};
+
+    /// Maximum copied child-mutation outcomes retained by one actor fixture.
+    pub const RESOURCE_MUTATION_OBSERVATION_CAPACITY: usize = 64;
+
+    /// The child actor's observed decision, not a model prediction.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ResourceMutationDisposition {
+        Inserted,
+        Replaced,
+        Removed,
+        Retained,
+        AlreadyAbsent,
+        Rejected,
+    }
+
+    /// Copied identity evidence for one actual child mutation decision.
+    /// Child messages alone do not prove publication, claim authority,
+    /// custody, or teardown, so this is characterization only.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ResourceMutationObservation {
+        Register {
+            previous: Option<LocalConnectionBindingId>,
+            candidate: LocalConnectionBindingId,
+            candidate_binding: Option<crate::ownership::BindingRef>,
+            disposition: ResourceMutationDisposition,
+        },
+        RegisterIfOwnerOrAbsent {
+            previous: Option<LocalConnectionBindingId>,
+            candidate: LocalConnectionBindingId,
+            candidate_binding: Option<crate::ownership::BindingRef>,
+            owner: LocalConnectionBindingId,
+            disposition: ResourceMutationDisposition,
+        },
+        ProvisionalMirror {
+            previous: Option<LocalConnectionBindingId>,
+            candidate: LocalConnectionBindingId,
+            candidate_binding: Option<crate::ownership::BindingRef>,
+            expected: Option<LocalConnectionBindingId>,
+            disposition: ResourceMutationDisposition,
+        },
+        Remove {
+            previous: Option<LocalConnectionBindingId>,
+            owner: Option<LocalConnectionBindingId>,
+            disposition: ResourceMutationDisposition,
+        },
+        ConflictClose {
+            resource_count: usize,
+        },
+    }
+
+    /// Bounded observation batch. Overflow means later decisions were not
+    /// retained and must not be interpreted as absent mutations.
+    #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
+    pub struct ResourceMutationObservationBatch {
+        pub observations: Vec<ResourceMutationObservation>,
+        pub overflow_count: usize,
+        /// Existing-slot replacement has no witnessed retirement receipts,
+        /// so the typed model's Bind transition is unsupported for it.
+        pub unsupported_direct_replacement_count: usize,
+        /// This child decision journal does not contain endpoint publication,
+        /// claim authorization, custody, or teardown receipts. The typed
+        /// transition model is therefore deliberately not invoked here.
+        pub model_comparison: ModelComparison,
+        /// Stable for this fixture actor lifetime; synthetic only.
+        pub synthetic_claim_identity: crate::ownership::UserClaimIdentity,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ModelComparison {
+        InconclusiveMissingExternalReceipts,
+    }
+
+    /// Read and clear the test-only child-mutation journal.
+    pub struct TakeResourceMutationObservations;
+
+    impl kameo::message::Message<TakeResourceMutationObservations> for UserActor {
+        type Reply = ResourceMutationObservationBatch;
+
+        async fn handle(
+            &mut self,
+            _msg: TakeResourceMutationObservations,
+            _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+        ) -> Self::Reply {
+            let unsupported_direct_replacement_count = self
+                .transition_observations
+                .iter()
+                .filter(|observation| match observation {
+                    ResourceMutationObservation::Register { disposition, .. }
+                    | ResourceMutationObservation::RegisterIfOwnerOrAbsent {
+                        disposition, ..
+                    }
+                    | ResourceMutationObservation::ProvisionalMirror { disposition, .. } => {
+                        *disposition == ResourceMutationDisposition::Replaced
+                    }
+                    ResourceMutationObservation::Remove { .. }
+                    | ResourceMutationObservation::ConflictClose { .. } => false,
+                })
+                .count();
+            ResourceMutationObservationBatch {
+                observations: std::mem::replace(
+                    &mut self.transition_observations,
+                    Vec::with_capacity(RESOURCE_MUTATION_OBSERVATION_CAPACITY),
+                ),
+                overflow_count: std::mem::take(&mut self.transition_observation_overflow),
+                unsupported_direct_replacement_count,
+                model_comparison: ModelComparison::InconclusiveMissingExternalReceipts,
+                synthetic_claim_identity: self.synthetic_claim_identity.clone(),
+            }
+        }
+    }
 
     pub struct GateMailbox {
         pub entered: Arc<Notify>,
