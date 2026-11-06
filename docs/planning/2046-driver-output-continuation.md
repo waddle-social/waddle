@@ -59,3 +59,69 @@ custody, direct-frame or control ordering through a physical writer, actual
 `WebSocketInput`/`WebSocketOutput` integration, receipt retention across
 caller cancellation, or joined cleanup. Those transport guarantees remain
 required before calling P3.1 complete.
+
+## Phase 2 architecture gate
+
+The independent review approved implementation subject to these blocking
+conditions:
+
+1. A worker taking physical I/O stays parked until the exact endpoint cleanup
+   record accepts it. Validate the input, output, state and registered direct
+   custody against the same complete `ConnectionRef` before release.
+2. Keep the typed frame, cursor, reserved credits and actual write receipt
+   discoverable through the exact cleanup record after a worker exits. An
+   unresolved output cannot be acknowledged or pruned until the receipt is
+   terminal, both physical pumps and the worker have joined, and the exact
+   owner explicitly reconciles it.
+3. SM control uses separately bounded capacity. The worker polls effect,
+   admission, input and stop independently; a control response joins the
+   same writer at a safe yield. No latency claim applies while a checkpoint
+   or the current physical write is stalled.
+4. Record each countable synthetic or direct frame exactly once in actual
+   arbiter order. Keep outbound append, exposure, local flush and peer `<a/>`
+   separate, including at a full send window. In-memory replay is not durable
+   replay. A durable inbound-checkpoint claim additionally requires an enrolled
+   resumable stream, a genuinely dirty handled-prefix tracker and ingress
+   authority readback before the wire acknowledgement.
+
+Do not hold lifecycle or ledger locks over an await or callback. Preserve the
+existing index-to-lifecycle-to-ledger lock order.
+
+The hard producer byte bound applies only when the synthetic producer's
+maximum encoding is established before its effect starts. If a producer
+violates that contract, the model seals and retains its typed result and the
+full reservation for reconciliation. Retaining an unexpectedly oversized
+result cannot retroactively bound the allocation made by an arbitrary effect;
+generic effect-producing handlers remain unsupported.
+
+## Physical arbiter redesign for review
+
+An initial transport draft awaited the SM checkpoint inside a writer-select
+branch; a stalled checkpoint could therefore prevent polling the already
+pinned writer admission, receipt and stop. That draft was removed. The next
+design requires an independent challenge before implementation:
+
+- One parked driver loop holds separate pinned slots for the pre-reserved
+  effect, an SM checkpoint, writer admission and the resulting receipt. Each
+  turn polls those slots and stop/lease control independently; none of the
+  select branches waits inline for another operation.
+- Before starting a checkpoint, retain the original input permit and an
+  independently bounded control reservation in the app-owned ledger. The
+  checkpoint temporarily owns the sole connection core and returns it with its
+  typed result. A drop guard must escrow that core on abort, including when the
+  future has never been polled. The design must prove drop ordering and avoid
+  holding any lifecycle or ledger lock across an await or callback.
+- Keep an admission future pinned until it resolves or stop wins. Store its
+  exact-connection receipt synchronously before any further await. While an
+  admitted write is active, continue observing its attempt/terminal progress,
+  checkpoint completion and stop. Control output uses the same writer at the
+  next safe yield; a stuck sink has no promised control latency.
+- Bound and retain typed replay independently from the producer and distinguish
+  append, possible exposure at `start_send`, local flush and peer ACK. Do not
+  accept an ACK past the actually attempted prefix. Explicitly review races
+  between receipt progress and incoming ACKs, abort and joined reconciliation,
+  exact owner replacement, and memory accounting of cloned frames.
+
+The retained startup and model changes do not yet implement this state
+machine, attach a continuation to the physical writer, or prove transport
+custody. The PR remains a draft until those gates and their tests are complete.

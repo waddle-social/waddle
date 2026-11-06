@@ -4,11 +4,33 @@
 //! does not own a WebSocket pump and is not transport custody proof.
 
 use std::collections::HashSet;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use waddle_xmpp::ownership::ConnectionRef;
 use waddle_xmpp::Stanza;
 
 const MAX_HANDLED_WINDOW: u64 = 256;
+
+struct BoundedByteCounter {
+    count: usize,
+    limit: usize,
+}
+
+impl Write for BoundedByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self
+            .count
+            .checked_add(bytes.len())
+            .filter(|next| *next <= self.limit)
+            .ok_or_else(|| io::Error::other("serialized frame exceeds its reservation"))?;
+        self.count = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContinuationLimits {
@@ -19,6 +41,11 @@ pub struct ContinuationLimits {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContinuationPhase {
+    /// Credits are reserved and the producer's effect is still running.
+    Producing,
+    /// The effect returned a frame that could not fit its reservation.
+    /// Its exact typed result and reservation remain held for reconciliation.
+    Rejected,
     Prepared,
     Admitted,
     Attempted,
@@ -62,7 +89,7 @@ pub enum ContinuationError {
 
 struct RetainedFrame {
     ticket: ContinuationTicket,
-    stanza: Stanza,
+    stanza: Option<Stanza>,
     serialized_bytes: usize,
     phase: ContinuationPhase,
 }
@@ -109,18 +136,16 @@ impl OutputContinuation {
         })
     }
 
-    /// Lazily produce one typed stanza after reserving one frame and its
-    /// maximum serialized size. A retained frame is returned by ticket on
-    /// repeated calls, so cancellation of a waiter cannot re-run its effect.
-    pub fn prepare_next(
-        &mut self,
-        effect: impl FnOnce(u64) -> Option<Stanza>,
-    ) -> Result<Option<ContinuationTicket>, ContinuationError> {
+    /// Reserve one frame and its maximum encoded size before starting an
+    /// asynchronous effect. A repeated observation returns the existing ticket.
+    /// The exclusive owner must start the effect only once; a ticket is an
+    /// identity for observation, not permission to start another effect.
+    pub fn reserve_next(&mut self) -> Result<ContinuationTicket, ContinuationError> {
         if self.stopped {
             return Err(ContinuationError::Stopped);
         }
         if let Some(current) = &self.current {
-            return Ok(Some(current.ticket.clone()));
+            return Ok(current.ticket.clone());
         }
         if self.next_ordinal == u64::MAX {
             self.stopped = true;
@@ -134,38 +159,70 @@ impl OutputContinuation {
         {
             return Err(ContinuationError::CreditsExhausted);
         }
-
-        // Reserve before invoking the effect. Shrink to actual encoded size
-        // only after typed serialization succeeds within the reserved ceiling.
         self.used_frames += 1;
         self.used_bytes += self.limits.max_frame_bytes;
-        let ordinal = self.next_ordinal;
-        let Some(stanza) = effect(ordinal) else {
+        let ticket = ContinuationTicket {
+            connection: self.connection.clone(),
+            ordinal: self.next_ordinal,
+        };
+        self.current = Some(RetainedFrame {
+            ticket: ticket.clone(),
+            stanza: None,
+            serialized_bytes: self.limits.max_frame_bytes,
+            phase: ContinuationPhase::Producing,
+        });
+        Ok(ticket)
+    }
+
+    /// Finish a previously reserved effect even after stop has won. The
+    /// returned typed result remains recoverable without starting it again.
+    pub fn finish_preparation(
+        &mut self,
+        ticket: &ContinuationTicket,
+        stanza: Option<Stanza>,
+    ) -> Result<Option<ContinuationTicket>, ContinuationError> {
+        if self.current(ticket)?.phase != ContinuationPhase::Producing {
+            return Err(ContinuationError::InvalidTransition);
+        }
+        let Some(stanza) = stanza else {
+            self.current = None;
             self.release_reservation(self.limits.max_frame_bytes);
             self.stopped = true;
             return Ok(None);
         };
-        let mut encoded = Vec::new();
-        if stanza.to_element().write_to(&mut encoded).is_err()
-            || encoded.len() > self.limits.max_frame_bytes
-        {
-            self.release_reservation(self.limits.max_frame_bytes);
+        let mut counter = BoundedByteCounter {
+            count: 0,
+            limit: self.limits.max_frame_bytes,
+        };
+        if stanza.to_element().write_to(&mut counter).is_err() {
+            let current = self.current_mut(ticket)?;
+            current.stanza = Some(stanza);
+            current.phase = ContinuationPhase::Rejected;
             self.stopped = true;
             return Err(ContinuationError::FrameTooLarge);
         }
-        let serialized_bytes = encoded.len();
-        self.used_bytes -= self.limits.max_frame_bytes - serialized_bytes;
-        let ticket = ContinuationTicket {
-            connection: self.connection.clone(),
-            ordinal,
-        };
-        self.current = Some(RetainedFrame {
-            ticket: ticket.clone(),
-            stanza,
-            serialized_bytes,
-            phase: ContinuationPhase::Prepared,
-        });
-        Ok(Some(ticket))
+        self.used_bytes -= self.limits.max_frame_bytes - counter.count;
+        let current = self.current_mut(ticket)?;
+        current.stanza = Some(stanza);
+        current.serialized_bytes = counter.count;
+        current.phase = ContinuationPhase::Prepared;
+        Ok(Some(ticket.clone()))
+    }
+
+    /// Lazily produce one typed stanza after reserving one frame and its
+    /// maximum serialized size. This synchronous wrapper is for model tests.
+    pub fn prepare_next(
+        &mut self,
+        effect: impl FnOnce(u64) -> Option<Stanza>,
+    ) -> Result<Option<ContinuationTicket>, ContinuationError> {
+        if self.stopped {
+            return Err(ContinuationError::Stopped);
+        }
+        if let Some(current) = &self.current {
+            return Ok(Some(current.ticket.clone()));
+        }
+        let ticket = self.reserve_next()?;
+        self.finish_preparation(&ticket, effect(ticket.ordinal()))
     }
 
     /// Return a typed snapshot without transferring frame ownership.
@@ -174,7 +231,10 @@ impl OutputContinuation {
         ticket: &ContinuationTicket,
     ) -> Result<Stanza, ContinuationError> {
         let current = self.current(ticket)?;
-        Ok(current.stanza.clone())
+        current
+            .stanza
+            .clone()
+            .ok_or(ContinuationError::InvalidTransition)
     }
 
     pub fn phase(

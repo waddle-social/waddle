@@ -85,9 +85,17 @@ pub enum OutputError<E> {
 
 /// Input preserves all raw WebSocket frames and their original read error.
 pub struct WebSocketInput<E> {
+    connection_ref: ConnectionRef,
     frames: mpsc::Receiver<QueueItem<Message>>,
     terminal: oneshot::Receiver<OrderedInboundTerminal<Message, E>>,
     finished: bool,
+}
+
+impl<E> WebSocketInput<E> {
+    /// Exact physical connection whose reader owns these frames.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
 }
 
 /// One raw transport item retained under its original pump budget. Terminal
@@ -2008,6 +2016,7 @@ impl SocketAdmission {
             let _ = watch.await;
         });
         let input = WebSocketInput {
+            connection_ref: authority.connection_ref.clone(),
             frames,
             terminal: terminal_rx,
             finished: false,

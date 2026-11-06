@@ -11,7 +11,7 @@ use waddle_server::test_support::connection_actor::{
 };
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::Stanza;
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Lang, Message};
 
 fn connection() -> ConnectionRef {
     ConnectionRef::fresh(NodeLeaseIdentity::local_process())
@@ -75,6 +75,67 @@ fn output_is_lazy_effect_once_and_dropping_a_ticket_observer_keeps_the_cursor() 
         continuation.phase(&current),
         Ok(ContinuationPhase::Prepared)
     );
+}
+
+#[test]
+fn async_effect_reserves_first_and_retains_its_result_after_stop() {
+    let exact = encoded_len(&stanza());
+    let mut continuation =
+        OutputContinuation::new(connection(), limits(1, exact)).expect("valid exact budget");
+    let ticket = continuation.reserve_next().expect("reserve before effect");
+    assert_eq!(continuation.retained_credits(), (1, exact));
+    assert_eq!(
+        continuation.phase(&ticket),
+        Ok(ContinuationPhase::Producing)
+    );
+    assert_eq!(continuation.reserve_next(), Ok(ticket.clone()));
+
+    continuation.stop();
+    assert_eq!(
+        continuation.finish_preparation(&ticket, Some(stanza())),
+        Ok(Some(ticket.clone()))
+    );
+    assert_eq!(continuation.phase(&ticket), Ok(ContinuationPhase::Prepared));
+    assert_eq!(continuation.retained_credits(), (1, exact));
+    assert!(continuation.stanza_snapshot(&ticket).is_ok());
+    assert_eq!(continuation.admit(&ticket), Err(ContinuationError::Stopped));
+}
+
+#[test]
+fn overrun_retains_the_effect_result_and_credits_without_rerunning() {
+    let exact = encoded_len(&stanza());
+    let mut continuation =
+        OutputContinuation::new(connection(), limits(1, exact)).expect("valid exact budget");
+    let ticket = continuation.reserve_next().expect("reserve before effect");
+    let oversized = Stanza::Message(
+        Message::new(None::<jid::Jid>).with_body(Lang::new(), "larger than budget".to_owned()),
+    );
+    assert_eq!(
+        continuation.finish_preparation(&ticket, Some(oversized.clone())),
+        Err(ContinuationError::FrameTooLarge)
+    );
+    assert_eq!(continuation.phase(&ticket), Ok(ContinuationPhase::Rejected));
+    assert_eq!(continuation.retained_credits(), (1, exact));
+    assert_eq!(
+        continuation.finish_preparation(&ticket, Some(stanza())),
+        Err(ContinuationError::InvalidTransition)
+    );
+    assert_eq!(
+        continuation
+            .stanza_snapshot(&ticket)
+            .expect("effect result retained")
+            .to_element(),
+        oversized.to_element()
+    );
+    let calls = AtomicUsize::new(0);
+    assert_eq!(
+        continuation.prepare_next(|_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some(stanza())
+        }),
+        Err(ContinuationError::Stopped)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

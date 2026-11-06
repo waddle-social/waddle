@@ -185,6 +185,8 @@ struct DriverShared {
     settlement_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     joined: Mutex<bool>,
     joined_changed: Notify,
+    #[cfg(test)]
+    worker_parked: Notify,
 }
 
 struct DriverLedger {
@@ -365,6 +367,7 @@ pub(super) struct ConnectionActorDriverTicket {
 impl ConnectionActorDriverTask {
     /// Spawn a production-compiled owner task. The worker owns `core` for its
     /// full lifetime; the separate supervisor retains and joins its handle.
+    #[cfg(test)]
     pub(super) fn spawn(
         state: super::state::WsConnState,
         websocket: Arc<WebSocketState>,
@@ -380,12 +383,43 @@ impl ConnectionActorDriverTask {
         )
     }
 
+    #[cfg(test)]
     fn spawn_with_limits(
         state: super::state::WsConnState,
         websocket: Arc<WebSocketState>,
         permit: NodeAdmissionPermit,
         shutdown: CancellationToken,
         limits: ConnectionActorDriverTaskLimits,
+    ) -> Result<Self, ConnectionActorDriverTaskAdmissionError> {
+        Self::spawn_with_start_gate(state, websocket, permit, shutdown, limits, None)
+    }
+
+    /// Keep the worker parked until its exact endpoint cleanup record owns it.
+    pub(super) fn spawn_parked(
+        state: super::state::WsConnState,
+        websocket: Arc<WebSocketState>,
+        permit: NodeAdmissionPermit,
+        shutdown: CancellationToken,
+    ) -> Result<(Self, oneshot::Sender<()>), ConnectionActorDriverTaskAdmissionError> {
+        let (release, start) = oneshot::channel();
+        let task = Self::spawn_with_start_gate(
+            state,
+            websocket,
+            permit,
+            shutdown,
+            ConnectionActorDriverTaskLimits::default(),
+            Some(start),
+        )?;
+        Ok((task, release))
+    }
+
+    fn spawn_with_start_gate(
+        state: super::state::WsConnState,
+        websocket: Arc<WebSocketState>,
+        permit: NodeAdmissionPermit,
+        shutdown: CancellationToken,
+        limits: ConnectionActorDriverTaskLimits,
+        start: Option<oneshot::Receiver<()>>,
     ) -> Result<Self, ConnectionActorDriverTaskAdmissionError> {
         let limits = limits.validate()?;
         let core = ConnectionActorCore::new(state);
@@ -413,13 +447,15 @@ impl ConnectionActorDriverTask {
             settlement_callback: Mutex::new(None),
             joined: Mutex::new(false),
             joined_changed: Notify::new(),
+            #[cfg(test)]
+            worker_parked: Notify::new(),
         });
         let (data, receiver) = mpsc::channel(limits.data_capacity);
         let (control, control_receiver) = mpsc::channel(limits.control_capacity);
         let worker_shared = Arc::clone(&shared);
         let worker_permit = permit.clone();
         let worker_shutdown = shutdown.clone();
-        let worker = tokio::spawn(run_driver(DriverWorker {
+        let worker = DriverWorker {
             core,
             websocket,
             permit: worker_permit,
@@ -428,7 +464,22 @@ impl ConnectionActorDriverTask {
             shared: worker_shared,
             receiver,
             control_receiver,
-        }));
+        };
+        let worker = tokio::spawn(async move {
+            if let Some(start) = start {
+                #[cfg(test)]
+                worker.shared.worker_parked.notify_one();
+                let released = tokio::select! {
+                    biased;
+                    _ = worker.stop.cancelled() => false,
+                    result = start => result.is_ok(),
+                };
+                if !released {
+                    return;
+                }
+            }
+            run_driver(worker).await;
+        });
         let abort = worker.abort_handle();
         let supervisor = tokio::spawn(supervise_driver(worker, Arc::clone(&shared)));
         let cleanup = ConnectionActorDriverTaskCleanup {
@@ -1629,6 +1680,64 @@ mod tests {
     use crate::clustering::NodeLifecycle;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn parked_worker_cannot_start_work_before_attachment_release() {
+        let websocket = create_test_websocket_state().await;
+        let lifecycle = NodeLifecycle::new();
+        let (task, release) = ConnectionActorDriverTask::spawn_parked(
+            super::super::state::WsConnState::new(),
+            websocket,
+            lifecycle.admit().expect("serving permit"),
+            CancellationToken::new(),
+        )
+        .expect("parked worker starts");
+        tokio::time::timeout(Duration::from_secs(5), task.shared.worker_parked.notified())
+            .await
+            .expect("worker reaches start gate");
+        let ticket = task.submit_immediate(0).expect("operation admitted");
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::Accepted
+        ));
+        assert_eq!(ticket.run_count(), 0);
+        release.send(()).expect("attachment releases worker");
+        assert!(matches!(
+            ticket.wait().await,
+            ConnectionActorDriverTaskSnapshot::Completed(_)
+        ));
+        assert_eq!(ticket.run_count(), 1);
+        ticket.acknowledge().expect("completed operation settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn stopped_parked_worker_never_runs_admitted_work() {
+        let websocket = create_test_websocket_state().await;
+        let lifecycle = NodeLifecycle::new();
+        let (task, release) = ConnectionActorDriverTask::spawn_parked(
+            super::super::state::WsConnState::new(),
+            websocket,
+            lifecycle.admit().expect("serving permit"),
+            CancellationToken::new(),
+        )
+        .expect("parked worker starts");
+        tokio::time::timeout(Duration::from_secs(5), task.shared.worker_parked.notified())
+            .await
+            .expect("worker reaches start gate");
+        let ticket = task.submit_immediate(0).expect("operation admitted");
+        task.request_stop(StopReason::Requested);
+        let _ = release.send(());
+        task.wait_joined().await;
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        assert_eq!(ticket.run_count(), 0);
+        ticket.acknowledge().expect("not-started operation settled");
+    }
 
     async fn test_task() -> ConnectionActorDriverTask {
         test_task_with_limits(ConnectionActorDriverTaskLimits::default()).await

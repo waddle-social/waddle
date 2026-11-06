@@ -728,7 +728,7 @@ impl ActorLocalEndpointOwner {
         if state.connection_ref != *self.connection_ref() {
             return Err(ActorLocalEndpointError::DriverConnectionMismatch);
         }
-        let mut task = ConnectionActorDriverTask::spawn(
+        let (mut task, release) = ConnectionActorDriverTask::spawn_parked(
             state,
             websocket,
             self.authority.admission_permit(),
@@ -748,6 +748,10 @@ impl ActorLocalEndpointOwner {
             settlement_callback,
         )?;
         task.mark_app_owned();
+        if release.send(()).is_err() {
+            self.request_stop(StopReason::Requested);
+            return Err(ActorLocalEndpointError::DriverTaskUnavailable);
+        }
         Ok(task)
     }
 
