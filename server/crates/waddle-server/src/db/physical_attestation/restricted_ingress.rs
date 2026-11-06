@@ -21,6 +21,10 @@ use super::{
 
 mod catalog;
 mod manifest;
+#[cfg(feature = "test-support")]
+mod transaction_probe;
+#[cfg(feature = "test-support")]
+pub use transaction_probe::{RestrictedTransactionProbe, RestrictedTransactionProbeObservation};
 
 /// A diagnostic receipt only; it cannot select or prepare ingress transactions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +76,7 @@ impl AttestedPgPool {
                 .execute(&mut *tx)
                 .await?;
             attest_connection(&mut tx, config).await?;
-            let result = inspect_catalog(
+            let result = inspect_profile_on_connection(
                 &mut tx,
                 &config.postgres().schema.name.0,
                 config.postgres().schema.oid,
@@ -89,7 +93,7 @@ impl AttestedPgPool {
     }
 }
 
-async fn inspect_catalog(
+async fn inspect_profile_on_connection(
     connection: &mut PgConnection,
     schema: &str,
     schema_oid: u32,
@@ -126,6 +130,7 @@ async fn inspect_catalog(
     )
     .await?;
     manifest::verify(connection, schema, runtime, api_owner).await?;
+    restore_application_path(connection, schema, runtime).await?;
     Ok(RestrictedIngressProfileObservation {
         manifest_version: 1,
         schema_oid,
@@ -133,4 +138,34 @@ async fn inspect_catalog(
         runtime_role_oid: runtime_oid,
         api_owner_oid: api_oid,
     })
+}
+
+// A catalog scan must not leave pg_catalog as the application's active schema.
+// The fixed rollback probe and public observer share this complete verifier.
+async fn restore_application_path(
+    connection: &mut PgConnection,
+    schema: &str,
+    runtime: &str,
+) -> Result<()> {
+    let path = format!("{}, pg_temp", quote_identifier(schema));
+    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
+        .bind(&path)
+        .execute(&mut *connection)
+        .await?;
+    let row = sqlx::query(
+        "SELECT pg_catalog.current_setting('search_path'), pg_catalog.current_schema()::text, \
+         session_user::text, current_user::text",
+    )
+    .fetch_one(connection)
+    .await?;
+    if row.try_get::<String, _>(0)? != path
+        || row.try_get::<Option<String>, _>(1)?.as_deref() != Some(schema)
+        || row.try_get::<String, _>(2)? != runtime
+        || row.try_get::<String, _>(3)? != runtime
+    {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "restored application session",
+        ));
+    }
+    Ok(())
 }
