@@ -89,13 +89,27 @@ pub(super) async fn exercise(
             .await
             .expect("insert excess manifest rows");
         } else {
+            execute(
+                &fixture.admin,
+                &format!(
+                    "ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row"
+                ),
+            )
+            .await;
             sqlx::query(&format!(
-                "INSERT INTO {s}.ingress_epoch_guard_manifest (table_name) VALUES ($1)"
+                "UPDATE {s}.ingress_epoch_guard_manifest SET table_name = $1 WHERE table_name = 'ingress_messages'"
             ))
             .bind("x".repeat(2048))
             .execute(&fixture.admin)
             .await
-            .expect("insert long manifest key");
+            .expect("replace one manifest key with a long value");
+            execute(
+                &fixture.admin,
+                &format!(
+                    "ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row"
+                ),
+            )
+            .await;
         }
         let rejected = pool
             .inspect_restricted_ingress_profile(api, epoch_oid)
@@ -110,16 +124,20 @@ pub(super) async fn exercise(
             "malformed manifest contents were not refused: {rejected:?}"
         );
         assert_sentinel_not_called(fixture).await;
-        execute(
-            &fixture.admin,
-            &format!(
-                "ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
-                 DELETE FROM {s}.ingress_epoch_guard_manifest WHERE pg_catalog.length(table_name) > 100 \
-                   OR table_name LIKE 'preflight_extra_%'; \
-                 ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row"
-            ),
-        )
-        .await;
+        let restore = if extra_rows {
+            format!(
+                "DELETE FROM {s}.ingress_epoch_guard_manifest WHERE table_name LIKE 'preflight_extra_%'"
+            )
+        } else {
+            format!(
+                "UPDATE {s}.ingress_epoch_guard_manifest SET table_name = 'ingress_messages' WHERE pg_catalog.length(table_name) > 100"
+            )
+        };
+        execute(&fixture.admin, &format!(
+            "ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
+             {restore}; \
+             ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row"
+        )).await;
         assert_pool_restored(fixture, pool, api, epoch_oid, backend_pid).await;
     }
 
