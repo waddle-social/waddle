@@ -85,6 +85,12 @@ grants, and check it after each relevant lock wait before granting a transaction
 capability. The role administrator and privileged DDL process must honor the
 same trusted mutation or independently proven quiescence boundary.
 
+The dark lookup profile checks journal table, column and function grants. It
+does not establish that R lacks separately granted server-file functions or
+`pg_read_server_files`: PostgreSQL's [generic file functions](https://www.postgresql.org/docs/17/functions-admin.html#FUNCTIONS-ADMIN-GENFILE)
+can bypass in-database table privileges. The serving role matrix must exclude
+those direct and inherited capabilities before making a confidentiality claim.
+
 The handoff order is: attest the authoritative primary against the
 pre-transition pins; fence old login and reconnection; drain and verify old
 backends; hold the owner transition barrier; apply V1030 if absent without
