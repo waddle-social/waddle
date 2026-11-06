@@ -1726,6 +1726,46 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .await
     .expect("read bounded archive position page");
     assert_eq!(archive_positions, vec![("archive@example.test".into(), 1)]);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT guarded.waddle_ingress_message_is_terminal($1)")
+            .bind(legacy_key)
+            .fetch_one(&mut runtime)
+            .await
+            .expect("read terminal state through fixed API");
+    assert!(!terminal);
+    let created_at: String =
+        sqlx::query_scalar("SELECT created_at FROM guarded.waddle_ingress_message_created_at($1)")
+            .bind(legacy_key)
+            .fetch_one(&mut runtime)
+            .await
+            .expect("read message creation timestamp through fixed API");
+    assert!(created_at.ends_with('Z'));
+    let initial_envelope: (Option<i32>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT envelope_version, envelope FROM guarded.waddle_ingress_load_message_envelope($1)",
+    )
+    .bind(legacy_key)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("read absent message envelope through fixed API");
+    assert_eq!(initial_envelope, (None, None));
+    let envelope = b"<message/>".to_vec();
+    let envelope_updated: bool = sqlx::query_scalar(
+        "SELECT guarded.waddle_ingress_update_message_envelope($1, 1::smallint, $2)",
+    )
+    .bind(legacy_key)
+    .bind(&envelope)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("update message envelope through fixed API");
+    assert!(envelope_updated);
+    let stored_envelope: (Option<i32>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT envelope_version, envelope FROM guarded.waddle_ingress_load_message_envelope($1)",
+    )
+    .bind(legacy_key)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("read updated message envelope through fixed API");
+    assert_eq!(stored_envelope, (Some(1), Some(envelope)));
     let source_key = uuid::Uuid::new_v4();
     let child_key = uuid::Uuid::new_v4();
     let bound_source_inserted: bool = sqlx::query_scalar(
