@@ -5,21 +5,31 @@ use waddle_xmpp::ingress::IngressEffectIntent;
 use super::repository::{commit, pg};
 use super::types::db;
 use super::{
-    CandidateSmMemory, CommittedAdmission, CommittedSlot, CustodyError, PreparedDirectFrame,
-    SmCustodyRepository,
+    CandidateSmMemory, CommittedAdmission, CommittedSlot, CustodyError, HandoffRecovery,
+    PreparedDirectFrame, SmCustodyRepository,
 };
 use crate::ingress_substrate::{EnvelopeVersion, MessageEnvelope};
 use crate::ingress_uow::{start_fresh_postgres, IngressUowTransaction, SendLease};
 
 impl SmCustodyRepository {
-    /// Positive readback of this exact gate's immutable admitted operation.
+    /// Positive readback of an exact caller-retained immutable identity.
     /// This cannot infer rollback or mint a capability for an absent operation.
     pub async fn committed_admission(
         &self,
-        operation: uuid::Uuid,
+        recovery: &HandoffRecovery,
     ) -> Result<CommittedAdmission, CustodyError> {
+        if recovery.capture() != &self.capture {
+            return Err(CustodyError::Rejected);
+        }
         let mut tx = self.guarded(false).await?;
-        let saved = self.operation(&mut tx, operation).await?;
+        let saved = self.operation(&mut tx, recovery.operation_id()).await?;
+        if !recovery.matches_frame(&saved.frame)
+            || recovery.ordinal().is_some_and(|expected| {
+                saved.slot.as_ref().map(CommittedSlot::ordinal) != Some(expected)
+            })
+        {
+            return Err(CustodyError::Conflict);
+        }
         self.canonical(&mut tx, saved.frame.key.message_key).await?;
         if saved.terminal.is_some() {
             return Err(CustodyError::Rejected);
@@ -27,7 +37,7 @@ impl SmCustodyRepository {
         commit(tx).await?;
         Ok(CommittedAdmission {
             gate: self.capture.gate_id,
-            operation,
+            operation: recovery.operation_id(),
         })
     }
 

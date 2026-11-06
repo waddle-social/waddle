@@ -220,8 +220,8 @@ async fn wait_for_application(pool: &PgPool, application: &str, blocker_pid: i32
     .expect("owner blocked on ledger")
 }
 
-/// Return a fully migrated fixture to its coherent V1027 state so V1028 is
-/// the only pending migration. V1027's ACK table and ledger row stay intact.
+/// Return a fully migrated fixture to its coherent V1027 state so V1028 onward
+/// is pending. V1027's ACK table and ledger row stay intact.
 async fn make_v1028_pending(fixture: &Fixture) {
     let mut tx = fixture
         .admin
@@ -230,6 +230,11 @@ async fn make_v1028_pending(fixture: &Fixture) {
         .expect("begin V1028 fixture rollback");
     let schema = &fixture.schema;
     let statements = [
+        format!(
+            "DROP FUNCTION {schema}.waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA)"
+        ),
+        format!("DROP TABLE {schema}.p21_receipt_operation_results"),
+        format!("ALTER TABLE {schema}.sm_unacked DROP COLUMN provenance"),
         format!(
             "DROP TRIGGER ingress_messages_source_binding_guard ON {schema}.ingress_messages"
         ),
@@ -275,7 +280,7 @@ async fn make_v1028_pending(fixture: &Fixture) {
         format!(
             "ALTER TABLE {schema}.ingress_messages DROP COLUMN source_binding_version, DROP COLUMN source_bare_jid, DROP COLUMN source_auth_context_id, DROP COLUMN source_auth_context_version, DROP COLUMN source_auth_epoch, DROP COLUMN source_sm_ingress_id, DROP COLUMN source_ingress_ordinal, DROP COLUMN owner_decision"
         ),
-        format!("DELETE FROM {schema}._migrations WHERE version = 1028"),
+        format!("DELETE FROM {schema}._migrations WHERE version >= 1028"),
     ];
     for statement in statements {
         sqlx::query(&statement)
@@ -528,8 +533,8 @@ async fn v1009_epoch_id_grant_requires_exact_guard_and_valid_pending_ledger() {
     assert_eq!(
         run(&fixture)
             .await
-            .expect("pending V1028 with scoped V1009 ACL"),
-        vec![1028]
+            .expect("pending catalog from V1028 with scoped V1009 ACL"),
+        vec![1028, 1029, 1030]
     );
     sqlx::query(&format!(
         "UPDATE {epoch} SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1"
@@ -627,7 +632,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         run_dark_postgres_owner(&options, &config, &migrator),
         observe
     );
-    assert_eq!(result.expect("owner commits"), vec![1028]);
+    assert_eq!(result.expect("owner commits"), vec![1028, 1029, 1030]);
     let (v1027, v1028, ack_table, rejection_table): (i64, i64, bool, bool) =
         sqlx::query_as(&format!(
             "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
@@ -762,7 +767,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     }
 
     // A conflicting epoch holder times out before any ledger bootstrap or
-    // catalog application, leaving the intentionally pending migration so.
+    // catalog application, leaving the intentionally pending catalog intact.
     make_v1028_pending(&fixture).await;
     let mut epoch_holder = fixture.admin.begin().await.expect("epoch holder");
     sqlx::query(&format!(
@@ -817,7 +822,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         )
         .await
         .expect("apply at supported epoch"),
-        vec![1028]
+        vec![1028, 1029, 1030]
     );
     make_v1028_pending(&fixture).await;
     sqlx::query(&update_epoch)
@@ -1073,7 +1078,7 @@ async fn owner_handoff_rejects_unsafe_role_graph_before_migration() {
         )
         .await
         .expect("restored graph applies migration"),
-        vec![1028]
+        vec![1028, 1029, 1030]
     );
     fixture.cleanup().await;
 }
@@ -1363,7 +1368,7 @@ async fn sqlite_runner_still_applies_and_rechecks_the_catalog() {
         .expect("open SQLite");
     let runner = MigrationRunner::single();
     let applied = runner.run(&db).await.expect("apply SQLite catalog");
-    assert!(applied.contains(&1008) && applied.contains(&1027) && applied.contains(&1028));
+    assert!(applied.contains(&1008) && applied.contains(&1027) && applied.contains(&1030));
     assert!(runner.run(&db).await.expect("recheck catalog").is_empty());
     let conn = db.guard().await.expect("SQLite guard");
     let mut rows = conn

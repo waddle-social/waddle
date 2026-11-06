@@ -26,6 +26,10 @@ pub use installer::{
     InstallationStatus,
 };
 mod restricted_ingress;
+pub use restricted_ingress::{
+    ReceiptAuthorityError, ReceiptCommit, ReceiptOperation, ReceiptOperationAuthority,
+    ReceiptOperationPins, ReceiptReadback,
+};
 #[cfg(feature = "test-support")]
 pub use restricted_ingress::{
     RestrictedEffectReceipt, RestrictedReceiptPilot, RestrictedReceiptReadback,

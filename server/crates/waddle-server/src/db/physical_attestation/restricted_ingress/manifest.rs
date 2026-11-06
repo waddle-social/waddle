@@ -69,6 +69,18 @@ pub(super) async fn verify(
     runtime: &str,
     api: &str,
 ) -> Result<()> {
+    verify_with_receipt_journal(connection, schema, runtime, api, false).await
+}
+
+/// Preserve strict v2 for existing callers. The journal profile must separately
+/// verify the extra function's pinned OID, body, owner and ACL before use.
+pub(super) async fn verify_with_receipt_journal(
+    connection: &mut PgConnection,
+    schema: &str,
+    runtime: &str,
+    api: &str,
+    receipt_journal: bool,
+) -> Result<()> {
     let manifest: Manifest = serde_json::from_str(MANIFEST)
         .map_err(|_| RestrictedIngressProfileError::Mismatch("manifest encoding"))?;
     if manifest.version != super::MANIFEST_VERSION
@@ -163,7 +175,8 @@ pub(super) async fn verify(
                 .functions
                 .iter()
                 .filter(|f| f.owner == "api")
-                .count(),
+                .count()
+                + usize::from(receipt_journal),
         )
     {
         return Err(RestrictedIngressProfileError::Mismatch(
@@ -171,6 +184,10 @@ pub(super) async fn verify(
         ));
     }
     let guarded: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    let mut names = names;
+    if receipt_journal {
+        names.push("waddle_p21_record_effect_receipt");
+    }
     let alternate: bool = sqlx::query_scalar(r#"
         SELECT EXISTS (
           SELECT 1 FROM pg_catalog.pg_proc p

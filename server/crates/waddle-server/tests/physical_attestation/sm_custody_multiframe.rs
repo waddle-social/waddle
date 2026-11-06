@@ -103,7 +103,7 @@ async fn postgres_multiframe_concurrent_bind_hydration_exposure_and_ack_prefix()
     let mut handoffs = Vec::new();
     for (_, frame) in &ordered {
         handoffs.push(
-            repo.resume_preaccept(frame.operation_id)
+            repo.resume_preaccept(&repo.handoff_recovery(frame))
                 .await
                 .expect("source handoff"),
         );
@@ -170,7 +170,7 @@ async fn postgres_multiframe_wrap_gap_and_transfer_conflict() {
             .await
             .expect("handoff");
         let admission = repo
-            .committed_admission(frame.operation_id)
+            .committed_admission(&handoff.recovery())
             .await
             .expect("admission");
         let slot = repo.bind(&admission).await.expect("slot");
@@ -265,7 +265,7 @@ async fn postgres_multiframe_retained_quota_counts_utf8_bytes_and_identity() {
         exact.admit(&third.0, &third.1).await,
         Err(CustodyError::Capacity)
     ));
-    repo.resume_preaccept(first.0.operation_id)
+    repo.resume_preaccept(&repo.handoff_recovery(&first.0))
         .await
         .expect("source marker");
     repo.transfer(&admission)
@@ -351,7 +351,7 @@ async fn postgres_multiframe_sealed_multipage_successor_recovery_and_replay() {
     for (frame, lease) in &frames {
         let admission = repo.admit(frame, lease).await.expect("admit");
         repo.bind(&admission).await.expect("bind");
-        repo.resume_preaccept(frame.operation_id)
+        repo.resume_preaccept(&repo.handoff_recovery(frame))
             .await
             .expect("source handoff marker");
         admissions.push(admission);
@@ -568,7 +568,7 @@ async fn postgres_multiframe_opposite_orders_lock_canonical_parents_in_same_orde
                 .await
                 .expect("handoff");
             let admission = repo
-                .committed_admission(frame.operation_id)
+                .committed_admission(&handoff.recovery())
                 .await
                 .expect("admission");
             let slot = repo.bind(&admission).await.expect("slot");

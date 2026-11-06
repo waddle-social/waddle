@@ -18,6 +18,8 @@ use super::{
 
 #[path = "restricted_completion_transaction.rs"]
 mod completion_transaction;
+#[path = "restricted_receipt_journal.rs"]
+mod receipt_journal;
 #[path = "restricted_receipt_transaction.rs"]
 mod receipt_transaction;
 #[path = "restricted_transaction_probe.rs"]
@@ -272,6 +274,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
     drop(raw);
     receipt_transaction::exercise(&fixture, &config, &api_role, epoch_oid).await;
     completion_transaction::exercise(&fixture, &config, &api_role, &observed).await;
+    receipt_journal::exercise(&fixture, &config, &api_role, epoch_oid).await;
     execute(
         &fixture.admin,
         &format!("DROP OWNED BY {api}; DROP ROLE {api}"),

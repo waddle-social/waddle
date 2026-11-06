@@ -7,8 +7,9 @@ use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 use waddle_server::ingress_uow::SendAttemptRepository;
 use waddle_server::sm_custody::{
-    CandidateHydration, CandidateSmMemory, CustodyCapture, CustodyLimits, CustodyRecoveryAuthority,
-    HandoffStage, SessionGeneration, SmCustodyRepository,
+    CandidateHydration, CandidateSmMemory, CustodyCapture, CustodyError, CustodyLimits,
+    CustodyRecoveryAuthority, HandoffRecovery, HandoffStage, SessionGeneration,
+    SmCustodyRepository,
 };
 use waddle_xmpp::ownership::{BindingRef, ClaimEpoch, NodeIdentity};
 
@@ -147,7 +148,7 @@ async fn postgres_preaccept_waits_for_payload_slot_and_source_commits_before_hyd
             (1, Some(1))
         );
         let restored = repo
-            .resume_preaccept(c.frame.operation_id)
+            .resume_preaccept(&repo.handoff_recovery(&c.frame))
             .await
             .expect("exact-ID positive handoff");
         assert_eq!(restored.ordinal(), 1);
@@ -197,6 +198,210 @@ async fn postgres_preaccept_wrong_repository_retains_handoff_recovery_identity()
     drop(other);
     drop(repo);
     c.fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_preaccept_readback_requires_the_complete_recovery_identity() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let c = Candidate::new().await;
+    let repo = c.repository();
+    let expected = repo.handoff_recovery(&c.frame);
+    let admission = repo.admit(&c.frame, &c.lease).await.expect("admission");
+
+    let identity = |capture: CustodyCapture, source, operation, attempt, ordinal| {
+        HandoffRecovery::new(capture, operation, source, attempt, ordinal).expect("lookup identity")
+    };
+    let known_before_binding = identity(
+        c.capture.clone(),
+        c.frame.key.clone(),
+        c.frame.operation_id,
+        expected.attempt(),
+        Some(1),
+    );
+    let failed = repo
+        .resume_preaccept(&known_before_binding)
+        .await
+        .expect_err("an expected slot cannot be allocated by readback");
+    assert_eq!(failed.recovery(), &known_before_binding);
+    assert_eq!(snapshot(&c).await, (1, 1, 0, 0));
+
+    let slot = repo.bind(&admission).await.expect("known slot");
+    assert_eq!(slot.ordinal(), 1);
+    let mut captures = Vec::new();
+    let mut changed = c.capture.clone();
+    changed.gate_id = Uuid::new_v4();
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.token = Uuid::new_v4();
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.binding = BindingRef::fresh(c.capture.binding.connection_ref().clone());
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.session = waddle_xmpp::pending_delivery::SmSessionId::new("different-session");
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.generation = SessionGeneration::new(8).expect("different generation");
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.owner = NodeIdentity::new("other-node", "other-incarnation");
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.claim = ClaimEpoch(c.capture.claim.0 + 1);
+    captures.push(changed);
+    let mut changed = c.capture.clone();
+    changed.principal = waddle_xmpp::auth::AuthenticatedPrincipalRef::new(
+        c.capture.principal.bare_jid().clone(),
+        waddle_xmpp::auth::AuthContextId::new(Uuid::new_v4()),
+        waddle_xmpp::auth::AuthContextVersion::new(3),
+        waddle_xmpp::auth::PrincipalAuthEpoch::new(5),
+    );
+    captures.push(changed);
+
+    let mut mismatches: Vec<_> = captures
+        .into_iter()
+        .map(|capture| {
+            identity(
+                capture,
+                c.frame.key.clone(),
+                c.frame.operation_id,
+                expected.attempt(),
+                Some(1),
+            )
+        })
+        .collect();
+    let mut other_resource = c.capture.clone();
+    other_resource.resource = "bob@example.test/other".parse().expect("resource");
+    let mut other_source = c.frame.key.clone();
+    other_source.resource = other_resource.resource.clone();
+    mismatches.push(identity(
+        other_resource,
+        other_source,
+        c.frame.operation_id,
+        expected.attempt(),
+        Some(1),
+    ));
+    let mut changed_source = c.frame.key.clone();
+    changed_source.semantic_identity_hash[0] ^= 1;
+    let mut changed_message = c.frame.key.clone();
+    changed_message.message_key = waddle_xmpp::ingress::MessageKey::new();
+    let mut changed_kind = c.frame.key.clone();
+    changed_kind.kind = waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+        c.frame.key.kind.to_storage() + 1,
+    );
+    for source in [changed_source, changed_message, changed_kind] {
+        mismatches.push(identity(
+            c.capture.clone(),
+            source,
+            c.frame.operation_id,
+            expected.attempt(),
+            Some(1),
+        ));
+    }
+    for (operation, attempt, ordinal) in [
+        (Uuid::new_v4(), expected.attempt(), Some(1)),
+        (c.frame.operation_id, Uuid::new_v4(), Some(1)),
+        (c.frame.operation_id, expected.attempt(), Some(2)),
+    ] {
+        mismatches.push(identity(
+            c.capture.clone(),
+            c.frame.key.clone(),
+            operation,
+            attempt,
+            ordinal,
+        ));
+    }
+    for mismatch in mismatches {
+        let failed = repo
+            .resume_preaccept(&mismatch)
+            .await
+            .expect_err("mismatched lookup cannot complete source");
+        assert_eq!(failed.stage(), HandoffStage::Admission);
+        assert_eq!(failed.recovery(), &mismatch);
+        assert_eq!(snapshot(&c).await, (1, 1, 1, 0));
+    }
+    assert!(HandoffRecovery::new(
+        c.capture.clone(),
+        c.frame.operation_id,
+        c.frame.key.clone(),
+        expected.attempt(),
+        Some(0),
+    )
+    .is_err());
+    assert!(HandoffRecovery::new(
+        c.capture.clone(),
+        c.frame.operation_id,
+        c.frame.key.clone(),
+        expected.attempt(),
+        Some(i64::MAX as u64 + 1),
+    )
+    .is_err());
+    let handoff = repo
+        .resume_preaccept(&known_before_binding)
+        .await
+        .expect("exact known slot");
+    assert_eq!(handoff.recovery(), known_before_binding);
+    assert_eq!(handoff.recovery().capture(), &c.capture);
+    assert_eq!(handoff.recovery().source(), &c.frame.key);
+    assert_eq!(handoff.recovery().ordinal(), Some(1));
+    drop(repo);
+    c.fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_preaccept_failed_commit_retains_exact_lookup_without_claiming_absence() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    for (table, stage, ordinal, expected_snapshot) in [
+        (
+            "sm_custody_operations",
+            HandoffStage::Admission,
+            None,
+            (0, 0, 0, 0),
+        ),
+        ("sm_custody_slots", HandoffStage::Slot, None, (1, 1, 0, 0)),
+        (
+            "sm_custody_handoffs",
+            HandoffStage::SourceCompletion,
+            Some(1),
+            (1, 1, 1, 0),
+        ),
+    ] {
+        let c = Candidate::new().await;
+        let repo = c.repository();
+        let expected = repo.handoff_recovery(&c.frame);
+        let q = &c.fixture.target;
+        sqlx::raw_sql(&format!("CREATE FUNCTION {q}.fail_handoff_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected COMMIT failure'; END $$; CREATE CONSTRAINT TRIGGER fail_handoff_commit AFTER INSERT ON {q}.{table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {q}.fail_handoff_commit();"))
+            .execute(&c.fixture.admin).await.expect("install deferred COMMIT failure");
+        let failed = repo
+            .preaccept_local_direct(&c.frame, &c.lease)
+            .await
+            .expect_err("COMMIT response cannot mint a handoff");
+        assert_eq!(failed.stage(), stage);
+        assert!(matches!(failed.cause(), CustodyError::CommitUnknown));
+        assert_eq!(failed.recovery().capture(), expected.capture());
+        assert_eq!(failed.recovery().source(), expected.source());
+        assert_eq!(failed.recovery().attempt(), expected.attempt());
+        assert_eq!(failed.recovery().operation_id(), expected.operation_id());
+        assert_eq!(failed.recovery().ordinal(), ordinal);
+        assert_eq!(snapshot(&c).await, expected_snapshot);
+        sqlx::query(&format!("DROP TRIGGER fail_handoff_commit ON {q}.{table}"))
+            .execute(&c.fixture.admin)
+            .await
+            .expect("remove fault");
+        if stage == HandoffStage::Admission {
+            assert!(repo.resume_preaccept(failed.recovery()).await.is_err());
+            assert_eq!(snapshot(&c).await, expected_snapshot);
+        } else {
+            let handoff = repo
+                .resume_preaccept(failed.recovery())
+                .await
+                .expect("exact positive admission readback");
+            assert_eq!(handoff.recovery().source(), &c.frame.key);
+            assert_eq!(handoff.recovery().ordinal(), Some(1));
+        }
+        drop(repo);
+        c.fixture.cleanup().await;
+    }
 }
 
 #[tokio::test]
@@ -332,7 +537,9 @@ async fn postgres_preaccept_rejects_already_started_source_and_missing_marker() 
         .expect("complete"));
     tx.commit().await.expect("completed row alone");
     assert!(
-        repo.resume_preaccept(c.frame.operation_id).await.is_err(),
+        repo.resume_preaccept(&repo.handoff_recovery(&c.frame))
+            .await
+            .is_err(),
         "Completed row is not a handoff marker"
     );
     assert_eq!(snapshot(&c).await, (2, 1, 1, 0));
@@ -477,8 +684,8 @@ async fn postgres_preaccept_hydration_commit_failure_or_cancellation_discards_on
 #[tokio::test]
 #[ignore = "native subprocess entry explicitly invoked by the handoff COMMIT test"]
 async fn sm_preaccept_process_child() {
-    let (repo, operation) = child_repository().await;
-    repo.resume_preaccept(operation)
+    let (repo, recovery) = child_repository().await;
+    repo.resume_preaccept(&recovery)
         .await
         .expect("committed source handoff");
 }
