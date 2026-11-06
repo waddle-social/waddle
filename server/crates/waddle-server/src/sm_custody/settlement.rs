@@ -14,76 +14,123 @@ impl SmCustodyRepository {
     /// Validate and settle one contiguous exposed prefix in a single commit.
     /// The gate stays open. No socket or XMPP response is produced here.
     pub async fn acknowledge(&self, h: u32) -> Result<(), CustodyError> {
-        let mut tx = self.guarded(false).await?;
-        let q = &self.schema;
-        let (acked, exposed): (i64, i64) = sqlx::query_as(&format!(
-            "SELECT peer_acked, exposed FROM {q}.sm_custody_gates WHERE gate_id = $1"
-        ))
-        .bind(self.capture.gate_id)
-        .fetch_one(pg(&mut tx)?)
-        .await
-        .map_err(db)?;
-        let window = exposed - acked;
-        if window >= (1_i64 << 32) {
-            return Err(CustodyError::Conflict);
-        }
-        let advance = i64::from(h.wrapping_sub(acked as u32));
-        if advance > window {
-            return Err(CustodyError::Rejected);
-        }
-        if advance == 0 {
-            commit(tx).await?;
-            return Ok(());
-        }
-        let through = acked.checked_add(advance).ok_or(CustodyError::Overflow)?;
-        let slots: Vec<(uuid::Uuid, i64, uuid::Uuid, Option<i32>)> = sqlx::query_as(&format!(
-            "SELECT s.operation_id, s.ordinal, o.message_key, t.disposition FROM {q}.sm_custody_slots s JOIN {q}.sm_custody_operations o ON (o.operation_id,o.gate_id) = (s.operation_id,s.gate_id) LEFT JOIN {q}.sm_custody_terminals t ON t.operation_id = s.operation_id WHERE s.gate_id = $1 AND s.ordinal > $2 AND s.ordinal <= $3 ORDER BY s.ordinal"
-        )).bind(self.capture.gate_id).bind(acked).bind(through).fetch_all(pg(&mut tx)?).await.map_err(db)?;
-        if slots.len() as i64 != advance
-            || slots
-                .iter()
-                .enumerate()
-                .any(|(i, row)| row.1 != acked + i as i64 + 1 || row.3.is_some())
-        {
-            return Err(CustodyError::Conflict);
-        }
-        // Multiple gates can settle overlapping parents in different ordinal
-        // orders. Always acquire all distinct canonical locks in UUID order.
-        let mut parents: Vec<_> = slots.iter().map(|row| row.2).collect();
-        parents.sort_unstable();
-        parents.dedup();
-        for key in &parents {
-            self.lock_canonical(&mut tx, MessageKey::from_storage(*key))
-                .await?;
-        }
-        self.fresh_principal(&mut tx).await?;
-        for (operation, _, _, _) in slots {
-            sqlx::query(&format!(
-                "INSERT INTO {q}.sm_custody_terminals (operation_id, disposition) VALUES ($1,$2)"
+        // A changed provisional prefix releases every lock and starts a fresh
+        // transaction. Four attempts bound contention; exhaustion is Conflict.
+        for _ in 0..4 {
+            let mut tx = self.authority().await?;
+            let q = &self.schema;
+            let frontier: (i64, i64) = sqlx::query_as(&format!(
+                "SELECT peer_acked, exposed FROM {q}.sm_custody_gates WHERE gate_id = $1"
             ))
-            .bind(operation)
-            .bind(CustodyTerminal::Ack.code())
-            .execute(pg(&mut tx)?)
+            .bind(self.capture.gate_id)
+            .fetch_optional(pg(&mut tx)?)
+            .await
+            .map_err(db)?
+            .ok_or(CustodyError::Rejected)?;
+            let (acked, exposed) = frontier;
+            let window = exposed - acked;
+            let advance = i64::from(h.wrapping_sub(acked as u32));
+            let in_window = window < (1_i64 << 32) && advance <= window;
+            let excessive = advance > 1024;
+            let through = if in_window && !excessive {
+                Some(acked.checked_add(advance).ok_or(CustodyError::Overflow)?)
+            } else {
+                None
+            };
+            let slots = match through {
+                Some(through) if advance > 0 => self.ack_prefix(&mut tx, acked, through).await?,
+                _ => Vec::new(),
+            };
+            if slots
+                .iter()
+                .any(|row| row.3 != self.capture.resource.to_string())
+            {
+                return Err(CustodyError::Conflict);
+            }
+            let mut parents: Vec<_> = slots.iter().map(|row| row.2).collect();
+            parents.sort_unstable();
+            parents.dedup();
+            match self.lock_sources_and_routes(&mut tx, &parents).await {
+                Ok(()) => {}
+                Err(CustodyError::SourceMissing) => continue,
+                Err(error) => return Err(error),
+            }
+            self.lock_gate(&mut tx, Some(false)).await?;
+            self.fresh_principal(&mut tx).await?;
+            let current: (i64, i64) = sqlx::query_as(&format!(
+                "SELECT peer_acked, exposed FROM {q}.sm_custody_gates WHERE gate_id = $1"
+            ))
+            .bind(self.capture.gate_id)
+            .fetch_one(pg(&mut tx)?)
             .await
             .map_err(db)?;
-        }
-        sqlx::query(&format!(
-            "UPDATE {q}.sm_custody_gates SET peer_acked = $2 WHERE gate_id = $1"
-        ))
-        .bind(self.capture.gate_id)
-        .bind(through)
-        .execute(pg(&mut tx)?)
-        .await
-        .map_err(db)?;
-        for key in parents {
-            let key = MessageKey::from_storage(key);
-            if self.no_other_custody(&mut tx, key).await? {
-                sqlx::query(&format!("UPDATE {q}.ingress_messages SET retention_eligible_at = pg_catalog.clock_timestamp() WHERE message_key = $1"))
-                    .bind(key.to_storage()).execute(pg(&mut tx)?).await.map_err(db)?;
+            if current != frontier {
+                continue;
             }
+            if let Some(through) = through.filter(|_| advance > 0) {
+                if self.ack_prefix(&mut tx, acked, through).await? != slots {
+                    continue;
+                }
+            }
+            if window >= (1_i64 << 32) || (in_window && excessive) {
+                return Err(CustodyError::Conflict);
+            }
+            let through = through.ok_or(CustodyError::Rejected)?;
+            if slots.len() as i64 != advance
+                || slots
+                    .iter()
+                    .enumerate()
+                    .any(|(i, row)| row.1 != acked + i as i64 + 1 || row.4.is_some())
+            {
+                return Err(CustodyError::Conflict);
+            }
+            for (operation, _, _, _, _) in slots {
+                sqlx::query(&format!(
+                    "INSERT INTO {q}.sm_custody_terminals (operation_id, disposition) VALUES ($1,$2)"
+                ))
+                .bind(operation)
+                .bind(CustodyTerminal::Ack.code())
+                .execute(pg(&mut tx)?)
+                .await
+                .map_err(db)?;
+            }
+            if advance > 0 {
+                sqlx::query(&format!(
+                    "UPDATE {q}.sm_custody_gates SET peer_acked = $2 WHERE gate_id = $1"
+                ))
+                .bind(self.capture.gate_id)
+                .bind(through)
+                .execute(pg(&mut tx)?)
+                .await
+                .map_err(db)?;
+            }
+            for key in parents {
+                let key = MessageKey::from_storage(key);
+                if self.no_other_custody(&mut tx, key).await? {
+                    sqlx::query(&format!("UPDATE {q}.ingress_messages SET retention_eligible_at = pg_catalog.clock_timestamp() WHERE message_key = $1"))
+                        .bind(key.to_storage()).execute(pg(&mut tx)?).await.map_err(db)?;
+                }
+            }
+            self.fresh_principal(&mut tx).await?;
+            return commit(tx).await;
         }
-        self.fresh_principal(&mut tx).await?;
-        commit(tx).await
+        Err(CustodyError::Conflict)
+    }
+
+    async fn ack_prefix(
+        &self,
+        tx: &mut IngressUowTransaction<'_>,
+        acked: i64,
+        through: i64,
+    ) -> Result<Vec<(uuid::Uuid, i64, uuid::Uuid, String, Option<i32>)>, CustodyError> {
+        let q = &self.schema;
+        // The candidate's global admission quota is 1024 rows. Limit the read
+        // even if a corrupt frontier claims a much larger exposed prefix.
+        sqlx::query_as(&format!(
+            "SELECT s.operation_id, s.ordinal, o.message_key, o.resource, t.disposition FROM {q}.sm_custody_slots s JOIN {q}.sm_custody_operations o ON (o.operation_id,o.gate_id) = (s.operation_id,s.gate_id) LEFT JOIN {q}.sm_custody_terminals t ON t.operation_id = s.operation_id WHERE s.gate_id = $1 AND s.ordinal > $2 AND s.ordinal <= $3 ORDER BY s.ordinal LIMIT 1025"
+        ))
+        .bind(self.capture.gate_id).bind(acked).bind(through)
+        .fetch_all(pg(tx)?).await.map_err(db)
     }
 
     /// A source-marked slot's full payload/time/resource transfer commits
@@ -113,9 +160,15 @@ impl SmCustodyRepository {
         recovery: Option<&CustodyRecoveryAuthority>,
     ) -> Result<(), CustodyError> {
         self.check_admission(admission)?;
-        let mut tx = match recovery {
-            Some(authority) => self.recovery_guard(authority, true).await?,
-            None => self.guarded(true).await?,
+        let mut tx = match self
+            .guarded_operation(admission.operation, true, recovery)
+            .await
+        {
+            Ok(tx) => tx,
+            Err(CustodyError::SourceMissing) => {
+                return self.collected_transfer_readback(admission, recovery).await;
+            }
+            Err(error) => return Err(error),
         };
         let saved = self.operation(&mut tx, admission.operation).await?;
         let q = &self.schema;
@@ -157,11 +210,6 @@ impl SmCustodyRepository {
             commit(tx).await?;
             return Ok(());
         }
-        self.lock_canonical(&mut tx, saved.frame.key.message_key)
-            .await?;
-        if recovery.is_none() {
-            self.fresh_principal(&mut tx).await?;
-        }
         sqlx::query(&format!("INSERT INTO {q}.sm_custody_transfers (operation_id, resource, payload, received_at) SELECT operation_id,resource,payload,received_at FROM {q}.sm_custody_operations WHERE operation_id = $1"))
             .bind(admission.operation).execute(pg(&mut tx)?).await.map_err(db)?;
         sqlx::query(&format!(
@@ -185,6 +233,44 @@ impl SmCustodyRepository {
         commit(tx).await
     }
 
+    /// A collected source cannot be locked. An already sealed, exact transfer
+    /// can still be confirmed from immutable candidate evidence under the gate.
+    /// This path performs no source-bearing write or later source lock.
+    async fn collected_transfer_readback(
+        &self,
+        admission: &CommittedAdmission,
+        recovery: Option<&CustodyRecoveryAuthority>,
+    ) -> Result<(), CustodyError> {
+        let mut tx = match recovery {
+            Some(authority) => self.recovery_guard(authority, true).await?,
+            None => self.guarded(true).await?,
+        };
+        let saved = self.operation(&mut tx, admission.operation).await?;
+        if saved.terminal == Some(CustodyTerminal::Ack) {
+            return Err(CustodyError::Conflict);
+        }
+        if saved.slot.is_none()
+            || !self
+                .has_source_handoff(&mut tx, admission.operation)
+                .await?
+        {
+            return Err(CustodyError::Rejected);
+        }
+        if saved.terminal != Some(CustodyTerminal::Transfer) {
+            return Err(CustodyError::SourceMissing);
+        }
+        let q = &self.schema;
+        let exact: bool = sqlx::query_scalar(&format!("SELECT g.sealed AND EXISTS (SELECT 1 FROM {q}.sm_custody_transfers t JOIN {q}.sm_custody_operations o USING (operation_id) WHERE o.operation_id=$1 AND o.gate_id=g.gate_id AND (t.resource,t.payload,t.received_at)=(o.resource,o.payload,o.received_at)) FROM {q}.sm_custody_gates g WHERE g.gate_id=$2"))
+            .bind(admission.operation).bind(self.capture.gate_id).fetch_one(pg(&mut tx)?).await.map_err(db)?;
+        if !exact {
+            return Err(CustodyError::Conflict);
+        }
+        if recovery.is_none() {
+            self.fresh_principal(&mut tx).await?;
+        }
+        commit(tx).await
+    }
+
     /// Narrow candidate collector. Existing production blockers are rechecked
     /// under the canonical lock. It does not establish old-writer quiescence or
     /// replace production GC. Journals/transfers remain for exact reconciliation.
@@ -196,8 +282,7 @@ impl SmCustodyRepository {
         if sealed.gate != self.capture.gate_id || sealed.token != self.capture.token {
             return Err(CustodyError::Rejected);
         }
-        let mut tx = self.guarded(true).await?;
-        self.canonical(&mut tx, key).await?;
+        let mut tx = self.guarded_source(true, key).await?;
         let q = &self.schema;
         let own: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.sm_custody_operations o JOIN {q}.sm_custody_terminals t ON t.operation_id = o.operation_id WHERE o.gate_id = $1 AND o.message_key = $2)"))
             .bind(self.capture.gate_id).bind(key.to_storage()).fetch_one(pg(&mut tx)?).await.map_err(db)?;

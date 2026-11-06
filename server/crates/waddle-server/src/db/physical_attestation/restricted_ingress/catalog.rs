@@ -6,6 +6,14 @@ use sqlx::{PgConnection, Row};
 use super::{RestrictedIngressProfileError, Result};
 use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CatalogPin {
+    pub(super) runtime_oid: u32,
+    pub(super) api_oid: u32,
+    pub(super) schema_owner_oid: u32,
+    pub(super) relations: Vec<(String, Oid)>,
+}
+
 pub(super) async fn verify_roles_and_tables(
     connection: &mut PgConnection,
     schema: &str,
@@ -13,9 +21,9 @@ pub(super) async fn verify_roles_and_tables(
     runtime: &str,
     api: &str,
     epoch_oid: u32,
-) -> Result<(u32, u32)> {
+) -> Result<CatalogPin> {
     let row = sqlx::query(r#"
-        SELECT r.oid AS runtime_oid, a.oid AS api_oid,
+        SELECT r.oid AS runtime_oid, a.oid AS api_oid, n.nspowner AS schema_owner_oid,
           r.rolcanlogin AND NOT a.rolcanlogin
           AND NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
           AND NOT (a.rolsuper OR a.rolcreatedb OR a.rolcreaterole OR a.rolreplication OR a.rolbypassrls)
@@ -90,6 +98,9 @@ pub(super) async fn verify_roles_and_tables(
     let exact: bool = sqlx::query_scalar(r#"
         SELECT COALESCE(bool_and(
           c.relkind='r' AND c.relpersistence='p' AND c.relowner=n.nspowner
+          AND c.relam=(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap')
+          AND NOT c.relhasrules
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class=c.oid)
           AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition
           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy pol WHERE pol.polrelid=c.oid)
           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid)
@@ -136,6 +147,9 @@ pub(super) async fn verify_roles_and_tables(
         JOIN pg_catalog.pg_roles a ON a.rolname=$2
         WHERE n.nspname=$1 AND c.relname IN ('sessions','pending_delivery')
           AND c.relkind='r' AND c.relpersistence='p' AND c.relowner=n.nspowner
+          AND c.relam=(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap')
+          AND NOT c.relhasrules
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class=c.oid)
           AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition
           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid)
@@ -157,18 +171,64 @@ pub(super) async fn verify_roles_and_tables(
             "API dependency privileges",
         ));
     }
-    let actual_manifest: Vec<String> = sqlx::query_scalar(&format!(
-        "SELECT table_name::text FROM {}.ingress_epoch_guard_manifest ORDER BY table_name",
-        crate::db::physical_attestation::quote_identifier(schema),
-    ))
+    expected.extend(["sessions".to_owned(), "pending_delivery".to_owned()]);
+    expected.sort();
+    let relations: Vec<(String, Oid)> = sqlx::query_as(
+        "SELECT c.relname::text, c.oid FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+         WHERE n.oid=$1 AND n.nspname=$2 AND c.relname=ANY($3) ORDER BY c.relname",
+    )
+    .bind(Oid(schema_oid))
+    .bind(schema)
+    .bind(&expected)
     .fetch_all(&mut *connection)
     .await?;
-    let mut expected_manifest = guarded;
-    expected_manifest.sort();
-    if actual_manifest != expected_manifest {
+    if relations.iter().map(|(name, _)| name).ne(expected.iter()) {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "catalog relation identities",
+        ));
+    }
+    Ok(CatalogPin {
+        runtime_oid,
+        api_oid,
+        schema_owner_oid: row.try_get::<Oid, _>("schema_owner_oid")?.0,
+        relations,
+    })
+}
+
+pub(super) async fn verify_manifest_rows(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<()> {
+    let mut expected = EPOCH_GUARDED_TABLES.to_vec();
+    expected.sort_unstable();
+    let max_name = expected.iter().map(|name| name.len()).max().unwrap_or(0);
+    let name_limit = i32::try_from(max_name.saturating_add(1))
+        .map_err(|_| RestrictedIngressProfileError::Mismatch("guard manifest rows"))?;
+    let row_limit = i64::try_from(expected.len().saturating_add(1))
+        .map_err(|_| RestrictedIngressProfileError::Mismatch("guard manifest rows"))?;
+    // The manifest heap is pinned, but its contents can still be malformed.
+    // Bound rows and text before SQLx decodes them. Sorting happens locally so
+    // PostgreSQL never sorts arbitrary-length row values before the LIMIT.
+    let actual: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.substr(table_name, 1, $1) FROM ONLY {}.ingress_epoch_guard_manifest LIMIT $2",
+        crate::db::physical_attestation::quote_identifier(schema),
+    ))
+    .bind(name_limit)
+    .bind(row_limit)
+    .fetch_all(&mut *connection)
+    .await?;
+    if actual.len() > expected.len() || actual.iter().any(|name| name.len() > max_name) {
         return Err(RestrictedIngressProfileError::Mismatch(
             "guard manifest rows",
         ));
     }
-    Ok((runtime_oid, api_oid))
+    let mut actual = actual;
+    actual.sort_unstable();
+    if actual.iter().map(String::as_str).ne(expected) {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "guard manifest rows",
+        ));
+    }
+    Ok(())
 }

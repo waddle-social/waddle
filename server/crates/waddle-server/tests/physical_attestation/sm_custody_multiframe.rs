@@ -583,6 +583,9 @@ async fn postgres_multiframe_opposite_orders_lock_canonical_parents_in_same_orde
         pair_b[0].0.key.message_key.to_storage(),
     ];
     parents.sort_unstable();
+    let guards: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.sm_custody_route_guards WHERE message_key = ANY($1) AND recipient='bob@example.test'", c.fixture.target))
+        .bind(parents.to_vec()).fetch_one(&c.fixture.admin).await.expect("bare-recipient guards");
+    assert_eq!(guards, 2, "both resources share one guard per source");
     let mut blocker = sqlx::PgConnection::connect_with(&c.fixture.admin_options)
         .await
         .expect("blocker");

@@ -49,6 +49,8 @@ struct Candidate {
 
 #[path = "sm_custody_drain_races.rs"]
 mod drain_races;
+#[path = "sm_custody_lock_order.rs"]
+mod lock_order;
 #[path = "sm_custody_marker_transfer.rs"]
 mod marker_transfer;
 #[path = "sm_custody_multiframe.rs"]
@@ -98,6 +100,7 @@ impl Candidate {
             .expect("unregistered schema");
         for table in [
             "sm_custody_quota",
+            "sm_custody_route_guards",
             "sm_custody_gates",
             "sm_custody_operations",
             "sm_custody_slots",

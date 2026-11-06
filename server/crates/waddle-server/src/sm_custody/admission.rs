@@ -21,7 +21,9 @@ impl SmCustodyRepository {
         if recovery.capture() != &self.capture {
             return Err(CustodyError::Rejected);
         }
-        let mut tx = self.guarded(false).await?;
+        let mut tx = self
+            .guarded_operation(recovery.operation_id(), false, None)
+            .await?;
         let saved = self.operation(&mut tx, recovery.operation_id()).await?;
         if !recovery.matches_frame(&saved.frame)
             || recovery.ordinal().is_some_and(|expected| {
@@ -30,7 +32,6 @@ impl SmCustodyRepository {
         {
             return Err(CustodyError::Conflict);
         }
-        self.canonical(&mut tx, saved.frame.key.message_key).await?;
         if saved.terminal.is_some() {
             return Err(CustodyError::Rejected);
         }
@@ -62,8 +63,7 @@ impl SmCustodyRepository {
             return Err(CustodyError::Rejected);
         }
         let payload = encode_payload(frame)?;
-        let mut tx = self.guarded(false).await?;
-        self.canonical(&mut tx, frame.key.message_key).await?;
+        let mut tx = self.guarded_source(false, frame.key.message_key).await?;
         let q = &self.schema;
         let prior: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(&format!(
             "SELECT operation_id, gate_id FROM {q}.sm_custody_operations WHERE operation_id = $1 OR attempt_token = $2 OR (message_key = $3 AND receipt_kind = $4 AND semantic_identity_hash = $5 AND resource = $6)"
@@ -210,9 +210,10 @@ impl SmCustodyRepository {
         admission: &CommittedAdmission,
     ) -> Result<CommittedSlot, CustodyError> {
         self.check_admission(admission)?;
-        let mut tx = self.guarded(false).await?;
+        let mut tx = self
+            .guarded_operation(admission.operation, false, None)
+            .await?;
         let saved = self.operation(&mut tx, admission.operation).await?;
-        self.canonical(&mut tx, saved.frame.key.message_key).await?;
         if saved.terminal.is_some() {
             return Err(CustodyError::Rejected);
         }
@@ -265,9 +266,10 @@ impl SmCustodyRepository {
     ) -> Result<(), CustodyError> {
         self.check_admission(&slot.admission)?;
         receiver.check_exposure(&self.capture, slot)?;
-        let mut tx = self.guarded(false).await?;
+        let mut tx = self
+            .guarded_operation(slot.admission.operation, false, None)
+            .await?;
         let saved = self.operation(&mut tx, slot.admission.operation).await?;
-        self.canonical(&mut tx, saved.frame.key.message_key).await?;
         if saved.slot.as_ref() != Some(slot) || saved.terminal.is_some() {
             return Err(CustodyError::Rejected);
         }

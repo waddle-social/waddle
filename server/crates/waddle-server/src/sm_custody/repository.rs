@@ -23,8 +23,10 @@ use crate::ingress_uow::{
 };
 
 /// Unselected candidate over the exact shared, physically attested UOW.
-/// All operations use epoch -> principal -> exact claim -> gate -> canonical
-/// -> attempt -> quota -> journal/slot. No transaction spans transport I/O.
+/// Source-bearing operations acquire epoch -> principal -> exact claim ->
+/// sorted canonical sources -> sorted recipient guards -> gate -> attempts
+/// and journals. Gate-only operations never subsequently acquire a source.
+/// No transaction spans transport I/O.
 pub struct SmCustodyRepository {
     pub(super) uow: IngressUnitOfWork,
     pub(super) schema: String,
@@ -107,7 +109,7 @@ impl SmCustodyRepository {
             .map_err(|_| CustodyError::InvalidStored)
     }
 
-    async fn authority(&self) -> Result<IngressUowTransaction<'_>, CustodyError> {
+    pub(super) async fn authority(&self) -> Result<IngressUowTransaction<'_>, CustodyError> {
         let mut tx = self
             .uow
             .begin_read_committed_with_timeouts(Duration::from_secs(3), Duration::from_secs(5))
@@ -150,15 +152,78 @@ impl SmCustodyRepository {
         allow_sealed: bool,
     ) -> Result<IngressUowTransaction<'_>, CustodyError> {
         let mut tx = self.authority().await?;
+        self.lock_gate(&mut tx, (!allow_sealed).then_some(false))
+            .await?;
+        self.fresh_principal(&mut tx).await?;
+        Ok(tx)
+    }
+
+    pub(super) async fn lock_gate(
+        &self,
+        tx: &mut IngressUowTransaction<'_>,
+        required_sealed: Option<bool>,
+    ) -> Result<(), CustodyError> {
         let q = &self.schema;
         let row = sqlx::query(&format!("SELECT token, resource, session_id, generation, endpoint, node_id, node_incarnation, claim_epoch, sealed FROM {q}.sm_custody_gates WHERE gate_id = $1 FOR UPDATE"))
-            .bind(self.capture.gate_id).fetch_optional(pg(&mut tx)?).await.map_err(db)?
+            .bind(self.capture.gate_id).fetch_optional(pg(tx)?).await.map_err(db)?
             .ok_or(CustodyError::Rejected)?;
         self.assert_stored_capture(&row)?;
-        if !allow_sealed && row.try_get::<bool, _>("sealed").map_err(db)? {
+        if required_sealed
+            .is_some_and(|required| row.try_get::<bool, _>("sealed").ok() != Some(required))
+        {
             return Err(CustodyError::Rejected);
         }
+        Ok(())
+    }
+
+    pub(super) async fn guarded_source(
+        &self,
+        allow_sealed: bool,
+        key: MessageKey,
+    ) -> Result<IngressUowTransaction<'_>, CustodyError> {
+        let mut tx = self.authority().await?;
+        self.lock_sources_and_routes(&mut tx, &[key.to_storage()])
+            .await?;
+        self.lock_gate(&mut tx, (!allow_sealed).then_some(false))
+            .await?;
         self.fresh_principal(&mut tx).await?;
+        Ok(tx)
+    }
+
+    /// The journal is immutable, but the provisional key is still rechecked
+    /// after locking the source and gate before any operation can act on it.
+    pub(super) async fn guarded_operation(
+        &self,
+        operation: Uuid,
+        allow_sealed: bool,
+        recovery: Option<&CustodyRecoveryAuthority>,
+    ) -> Result<IngressUowTransaction<'_>, CustodyError> {
+        let mut tx = match recovery {
+            Some(authority) => self.recovery_authority(authority).await?,
+            None => self.authority().await?,
+        };
+        let q = &self.schema;
+        let source: (Uuid, String) = sqlx::query_as(&format!("SELECT message_key, resource FROM {q}.sm_custody_operations WHERE operation_id = $1 AND gate_id = $2"))
+            .bind(operation).bind(self.capture.gate_id).fetch_optional(pg(&mut tx)?).await.map_err(db)?
+            .ok_or(CustodyError::Rejected)?;
+        if source.1 != self.capture.resource.to_string() {
+            return Err(CustodyError::Conflict);
+        }
+        self.lock_sources_and_routes(&mut tx, &[source.0]).await?;
+        let required_sealed = if recovery.is_some() {
+            Some(true)
+        } else {
+            (!allow_sealed).then_some(false)
+        };
+        self.lock_gate(&mut tx, required_sealed).await?;
+        let current: Option<(Uuid, String)> = sqlx::query_as(&format!("SELECT message_key, resource FROM {q}.sm_custody_operations WHERE operation_id = $1 AND gate_id = $2"))
+            .bind(operation).bind(self.capture.gate_id).fetch_optional(pg(&mut tx)?).await.map_err(db)?;
+        if current.as_ref() != Some(&source) {
+            return Err(CustodyError::Conflict);
+        }
+        if recovery.is_none() {
+            self.fresh_principal(&mut tx).await?;
+        }
         Ok(tx)
     }
 
@@ -235,6 +300,15 @@ impl SmCustodyRepository {
         authority: &CustodyRecoveryAuthority,
         sealed: bool,
     ) -> Result<IngressUowTransaction<'_>, CustodyError> {
+        let mut tx = self.recovery_authority(authority).await?;
+        self.lock_gate(&mut tx, sealed.then_some(true)).await?;
+        Ok(tx)
+    }
+
+    async fn recovery_authority(
+        &self,
+        authority: &CustodyRecoveryAuthority,
+    ) -> Result<IngressUowTransaction<'_>, CustodyError> {
         let mut tx = self
             .uow
             .begin_read_committed_with_timeouts(Duration::from_secs(3), Duration::from_secs(5))
@@ -246,17 +320,6 @@ impl SmCustodyRepository {
             authority.claim,
         )
         .await?;
-        let q = &self.schema;
-        let row = sqlx::query(&format!("SELECT token, resource, session_id, generation, endpoint, node_id, node_incarnation, claim_epoch, sealed FROM {q}.sm_custody_gates WHERE gate_id = $1 FOR UPDATE"))
-        .bind(self.capture.gate_id)
-        .fetch_optional(pg(&mut tx)?)
-        .await
-        .map_err(db)?
-        .ok_or(CustodyError::Rejected)?;
-        self.assert_stored_capture(&row)?;
-        if sealed && !row.try_get::<bool, _>("sealed").map_err(db)? {
-            return Err(CustodyError::Rejected);
-        }
         Ok(tx)
     }
 
@@ -399,29 +462,35 @@ impl SmCustodyRepository {
         decode_operation(row)
     }
 
-    pub(super) async fn canonical(
+    /// Lock the complete set of parents before any recipient guard. Callers
+    /// must discover all sources before this point and must not add more after
+    /// acquiring a gate. Guard rows persist after canonical collection.
+    pub(super) async fn lock_sources_and_routes(
         &self,
         tx: &mut IngressUowTransaction<'_>,
-        key: MessageKey,
+        sources: &[Uuid],
     ) -> Result<(), CustodyError> {
-        self.lock_canonical(tx, key).await?;
-        self.fresh_principal(tx).await
-    }
-
-    pub(super) async fn lock_canonical(
-        &self,
-        tx: &mut IngressUowTransaction<'_>,
-        key: MessageKey,
-    ) -> Result<(), CustodyError> {
-        sqlx::query(&format!(
-            "SELECT 1 FROM {}.ingress_messages WHERE message_key = $1 FOR UPDATE",
-            self.schema
-        ))
-        .bind(key.to_storage())
-        .fetch_optional(pg(tx)?)
-        .await
-        .map_err(db)?
-        .ok_or(CustodyError::SourceMissing)?;
+        let mut sources = sources.to_vec();
+        sources.sort_unstable();
+        sources.dedup();
+        for key in &sources {
+            sqlx::query(&format!(
+                "SELECT 1 FROM {}.ingress_messages WHERE message_key = $1 FOR UPDATE",
+                self.schema
+            ))
+            .bind(key)
+            .fetch_optional(pg(tx)?)
+            .await
+            .map_err(db)?
+            .ok_or(CustodyError::SourceMissing)?;
+        }
+        let recipient = self.capture.resource.to_bare().to_string();
+        for key in sources {
+            sqlx::query(&format!("INSERT INTO {}.sm_custody_route_guards (message_key, recipient) VALUES ($1,$2) ON CONFLICT DO NOTHING", self.schema))
+                .bind(key).bind(&recipient).execute(pg(tx)?).await.map_err(db)?;
+            sqlx::query(&format!("SELECT 1 FROM {}.sm_custody_route_guards WHERE message_key = $1 AND recipient = $2 FOR UPDATE", self.schema))
+                .bind(key).bind(&recipient).fetch_one(pg(tx)?).await.map_err(db)?;
+        }
         Ok(())
     }
 

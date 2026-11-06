@@ -331,9 +331,93 @@ impl MigrationRunner {
         let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
-        self.validate_ledger(&applied_rows, driver, false)?;
+        self.verify_applied_through_rows(&applied_rows, driver, required_version)
+    }
+
+    /// Read only the already-pinned, locked PostgreSQL heap. The caller must
+    /// establish its catalog shape and safe search path before calling this.
+    pub(super) async fn verify_applied_through_locked_postgres(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        ledger_table: &str,
+        required_version: i64,
+    ) -> Result<(), DatabaseError> {
+        // Bound both rows and text before SQLx decodes them. An untrusted
+        // ledger may contain arbitrarily many rows or very large TEXT fields;
+        // a statement timeout does not bound client allocation. One extra
+        // row/character is enough to refuse a malformed ledger. No ORDER BY
+        // means no ordering operator is needed for prefix validation.
+        let max_description = self
+            .migrations
+            .iter()
+            .map(|migration| migration.description.chars().count())
+            .max()
+            .unwrap_or(0);
+        let description_limit = i32::try_from(max_description.saturating_add(1))
+            .map_err(|_| MigrationLedgerError::OversizedLedger)?;
+        let row_limit = i64::try_from(self.migrations.len().saturating_add(1))
+            .map_err(|_| MigrationLedgerError::OversizedLedger)?;
+        let sql = format!(
+            "SELECT version, pg_catalog.substr(description, 1, $1), \
+             pg_catalog.substr(checksum, 1, 65) FROM ONLY {ledger_table} LIMIT $2"
+        );
+        let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(&sql)
+            .bind(description_limit)
+            .bind(row_limit)
+            .fetch_all(connection)
+            .await?;
+        if rows.len() > self.migrations.len()
+            || rows.iter().any(|(_, description, checksum)| {
+                description.chars().count() > max_description
+                    || checksum.as_ref().is_some_and(|value| value.len() > 64)
+            })
+        {
+            return Err(MigrationLedgerError::OversizedLedger.into());
+        }
+        let applied_rows = rows
+            .into_iter()
+            .map(|(version, description, checksum)| LedgerRow {
+                version,
+                description,
+                checksum,
+            })
+            .collect::<Vec<_>>();
+        self.verify_applied_through_rows(
+            &applied_rows,
+            DatabaseDriver::Postgres,
+            required_version,
+        )?;
+
+        // The bootstrap sentinel query is deliberately unavailable here. A
+        // committed single-catalog prefix must instead contain both owned
+        // namespaces through the requested version.
+        for migration in self
+            .migrations
+            .iter()
+            .filter(|m| m.version <= required_version)
+        {
+            if !applied_rows
+                .iter()
+                .any(|row| row.version == migration.version)
+            {
+                return Err(MigrationLedgerError::PendingMigration {
+                    version: migration.version,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_applied_through_rows(
+        &self,
+        applied_rows: &[LedgerRow],
+        driver: DatabaseDriver,
+        required_version: i64,
+    ) -> Result<(), DatabaseError> {
+        self.validate_ledger(applied_rows, driver, false)?;
         let mut seen = HashSet::new();
-        for row in &applied_rows {
+        for row in applied_rows {
             if self.owns_version(row.version) && !seen.insert(row.version) {
                 return Err(MigrationLedgerError::DuplicateVersion {
                     version: row.version,
