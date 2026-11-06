@@ -38,6 +38,9 @@ pub mod actor_local_endpoint {
         ConnectionActorDriverTestAdmissionError, ConnectionActorDriverTestGate,
         ConnectionActorDriverTestHandle, ConnectionActorDriverTestSnapshot,
         ConnectionActorDriverTestTicket, ConnectionActorDriverTestUnknownReason,
+        PhysicalControlRecovery, PhysicalDirectRecovery, PhysicalEnrollment, PhysicalLimits,
+        PhysicalProducerRecovery, PhysicalRecovery, PhysicalReplayPayload, PhysicalReplayRecovery,
+        PhysicalSnapshot, PhysicalWriteKind, PhysicalWriteRecovery,
     };
 }
 #[cfg(feature = "test-support")]

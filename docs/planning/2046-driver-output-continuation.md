@@ -117,11 +117,30 @@ design requires an independent challenge before implementation:
   checkpoint completion and stop. Control output uses the same writer at the
   next safe yield; a stuck sink has no promised control latency.
 - Bound and retain typed replay independently from the producer and distinguish
-  append, possible exposure at `start_send`, local flush and peer ACK. Do not
-  accept an ACK past the actually attempted prefix. Explicitly review races
-  between receipt progress and incoming ACKs, abort and joined reconciliation,
-  exact owner replacement, and memory accounting of cloned frames.
+  append, possible exposure at `start_send`, local flush and peer ACK. A peer
+  ACK can arrive after `start_send` begins but before the receipt publishes
+  `Attempted`: retain that ACK under its control slot until the receipt
+  advances or exact cleanup resolves it. Do not reject it against a stale
+  observed frontier. Explicitly review abort and joined reconciliation, exact
+  owner replacement, and memory accounting of cloned frames.
 
-The retained startup and model changes do not yet implement this state
-machine, attach a continuation to the physical writer, or prove transport
-custody. The PR remains a draft until those gates and their tests are complete.
+The follow-up gate permits the fixture to use an app-owned, exact-connection
+Tokio mutex for core escrow. Acquire its owned guard synchronously before
+constructing the checkpoint future; the future's drop only releases that guard.
+The sole worker uses nonblocking acquisition at safe yields. Fixture replay and
+peer-ACK bookkeeping are typed and in-memory; they do not invoke durable ACK
+processing or claim the P3.3 serving boundary.
+
+The physical fixture attaches its parked worker to the exact cleanup record
+before release. Once the committed I/O reaper is running, the attached driver
+can hand off a stop request without taking the fence held across `start_send`.
+The reaper retains and joins the stop child and both pumps; a deadline publishes
+`CleanupPending` without treating an in-flight enqueue as joined. The first
+actual acquisition of the existing stop fence determines the stop reason.
+
+The physical integration and its tests are still under review. Forwarding a
+stop request is not guaranteed if the driver is aborted before forwarding;
+that case retains cleanup without a liveness claim. Neither prompt return from
+an external synchronous `request_stop` nor progress on a single-thread runtime
+whose only thread is blocked in a sink is claimed. The PR remains a draft until
+the integration gates and tests are complete.
