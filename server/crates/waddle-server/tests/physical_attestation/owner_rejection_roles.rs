@@ -116,6 +116,7 @@ async fn owner_grant_and_attested_ingress_lab() {
         format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"),
         format!("ALTER SCHEMA {} OWNER TO {owner}", fixture.target),
         format!("ALTER TABLE {}.ingress_owner_rejections OWNER TO {owner}", fixture.target),
+        format!("ALTER TABLE {}.ingress_protocol_epoch OWNER TO {owner}", fixture.target),
         format!("GRANT SELECT ON {}._lineage, {}._migrations TO {owner}", fixture.target, fixture.target),
         format!("GRANT SELECT ON {}.ingress_protocol_epoch, {}.ingress_messages TO {owner}", fixture.target, fixture.target),
         format!("GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}", fixture.target, fixture.runtime),
@@ -464,6 +465,8 @@ async fn owner_grant_and_attested_ingress_lab() {
         OwnerRejectionGrantState::Missing
     );
 
+    exercise_epoch_barrier(&fixture, &owner_options, &config, &migrator_role).await;
+
     let hostile_owner =
         PgConnectOptions::from_str(&url_with_search_path(&fixture.base_url, "public,pg_temp"))
             .expect("hostile owner options")
@@ -747,4 +750,255 @@ async fn owner_grant_and_attested_ingress_lab() {
         .await
         .expect("drop owner role");
     cluster.close().await;
+}
+
+async fn wait_relation_waiter(
+    admin: &PgPool,
+    application: &str,
+    relation: &str,
+    mode: &str,
+) -> i32 {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT a.pid FROM pg_catalog.pg_stat_activity a \
+                 JOIN pg_catalog.pg_locks l ON l.pid=a.pid \
+                 WHERE a.application_name=$1 AND l.relation=$2::regclass \
+                   AND l.mode=$3 AND NOT l.granted",
+            )
+            .bind(application)
+            .bind(relation)
+            .bind(mode)
+            .fetch_optional(admin)
+            .await
+            .expect("observe real relation waiter");
+            if let Some(pid) = pid {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("relation waiter before timeout")
+}
+
+fn spawn_grant(
+    owner: PgConnectOptions,
+    runtime: PgConnectOptions,
+    config: DarkMigrationOwnerConfig,
+    migrator: PgRoleName,
+) -> tokio::task::JoinHandle<Result<(), OwnerRejectionGrantError>> {
+    tokio::spawn(async move {
+        grant_dark_owner_rejection_runtime_access(&owner, &runtime, &config, &migrator).await
+    })
+}
+
+async fn exercise_epoch_barrier(
+    fixture: &Fixture,
+    owner_options: &PgConnectOptions,
+    config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
+) {
+    let schema = &fixture.target;
+    let epoch = format!("{schema}.ingress_protocol_epoch");
+    let mapping = format!("{schema}.ingress_owner_rejections");
+    let function = format!("{schema}.waddle_ingress_owner_rejection_insert_guard()");
+    let original: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+        .bind(&function)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("original guard");
+    for mutation in ["body", "ACL", "cancel"] {
+        let mut reader = PgConnection::connect_with(&fixture.runtime_options)
+            .await
+            .expect("reader session");
+        let mut held = reader.begin().await.expect("reader transaction");
+        sqlx::query(&format!("LOCK TABLE ONLY {epoch} IN ACCESS SHARE MODE"))
+            .execute(&mut *held)
+            .await
+            .expect("runtime AS barrier");
+        let application = format!("owner-ax-{}", Uuid::new_v4().simple());
+        let grant = spawn_grant(
+            owner_options.clone().application_name(&application),
+            fixture.runtime_options.clone(),
+            config.clone(),
+            migrator.clone(),
+        );
+        let pid =
+            wait_relation_waiter(&fixture.admin, &application, &epoch, "AccessExclusiveLock").await;
+        let early_locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_locks WHERE pid=$1 AND relation IN \
+             ($2::regclass,$3::regclass,$4::regclass)",
+        )
+        .bind(pid)
+        .bind(format!("{schema}._lineage"))
+        .bind(format!("{schema}._migrations"))
+        .bind(&mapping)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("covered lock order");
+        assert_eq!(
+            early_locks, 0,
+            "AX must precede lineage, ledger and mapping reads"
+        );
+        if mutation == "cancel" {
+            grant.abort();
+            assert!(grant
+                .await
+                .expect_err("cancelled grant task")
+                .is_cancelled());
+            // Fence the exact observed backend before treating absence as a
+            // rollback verdict; client cancellation by itself proves no fence.
+            let _: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(&fixture.admin)
+                .await
+                .expect("fence cancelled attempt backend");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)",
+                    )
+                    .bind(pid)
+                    .fetch_one(&fixture.admin)
+                    .await
+                    .expect("observe fence completion");
+                    if !exists {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancelled backend is gone before reconciliation");
+        } else {
+            let sql = if mutation == "body" {
+                format!("CREATE OR REPLACE FUNCTION {function} RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$ BEGIN RETURN NEW; END $$")
+            } else {
+                format!("GRANT UPDATE ON {mapping} TO {}", fixture.runtime)
+            };
+            sqlx::raw_sql(&sql)
+                .execute(&fixture.admin)
+                .await
+                .expect("same-epoch hostile drift");
+            held.rollback().await.expect("release runtime AS");
+            assert!(
+                grant.await.expect("join refused grant").is_err(),
+                "post-wait {mutation} drift must refuse"
+            );
+            let restore = if mutation == "body" {
+                original.clone()
+            } else {
+                format!("REVOKE UPDATE ON {mapping} FROM {}", fixture.runtime)
+            };
+            sqlx::raw_sql(&restore)
+                .execute(&fixture.admin)
+                .await
+                .expect("restore hostile drift");
+            continue;
+        }
+        held.rollback().await.expect("release cancelled barrier");
+    }
+    assert_eq!(
+        inspect_dark_owner_rejection_runtime_access(
+            owner_options,
+            &fixture.runtime_options,
+            config,
+            migrator
+        )
+        .await
+        .expect("refusals and cancellation did not grant"),
+        OwnerRejectionGrantState::Missing
+    );
+
+    // Hold the mapping only in this disposable coordinator. Once the owner
+    // reaches it, the owner must already hold epoch AX and exclude new AS.
+    let mut coordinator = fixture.admin.begin().await.expect("coordinator");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {mapping} IN ACCESS EXCLUSIVE MODE"
+    ))
+    .execute(&mut *coordinator)
+    .await
+    .expect("hold mapping");
+    let application = format!("owner-ax-{}", Uuid::new_v4().simple());
+    let grant = spawn_grant(
+        owner_options.clone().application_name(&application),
+        fixture.runtime_options.clone(),
+        config.clone(),
+        migrator.clone(),
+    );
+    let pid = wait_relation_waiter(&fixture.admin, &application, &mapping, "AccessShareLock").await;
+    let holds_ax: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND relation=$2::regclass AND mode='AccessExclusiveLock' AND granted)")
+        .bind(pid).bind(&epoch).fetch_one(&fixture.admin).await.expect("owner epoch AX");
+    assert!(holds_ax);
+    let reader_name = format!("runtime-as-{}", Uuid::new_v4().simple());
+    let reader_options = fixture
+        .runtime_options
+        .clone()
+        .application_name(&reader_name);
+    let reader_epoch = epoch.clone();
+    let reader = tokio::spawn(async move {
+        let mut connection = PgConnection::connect_with(&reader_options)
+            .await
+            .expect("new runtime reader");
+        let mut tx = connection.begin().await.expect("new runtime transaction");
+        sqlx::query(&format!(
+            "LOCK TABLE ONLY {reader_epoch} IN ACCESS SHARE MODE"
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("runtime waits for owner AX");
+        tx.rollback().await.expect("runtime read-only rollback");
+    });
+    wait_relation_waiter(&fixture.admin, &reader_name, &epoch, "AccessShareLock").await;
+    coordinator
+        .rollback()
+        .await
+        .expect("let fixed owner operation finish");
+    grant
+        .await
+        .expect("join mutation")
+        .expect("AX grant commits");
+    reader.await.expect("join runtime AS reader");
+
+    // A separate externally held AX barrier lets the owner diagnostic reach
+    // its AS wait without first queuing behind the mutator's advisory locks.
+    let mut epoch_holder = fixture.admin.begin().await.expect("epoch coordinator");
+    sqlx::query(&format!("LOCK TABLE ONLY {epoch} IN ACCESS EXCLUSIVE MODE"))
+        .execute(&mut *epoch_holder)
+        .await
+        .expect("hold epoch AX for observer");
+    let observer_name = format!("owner-as-{}", Uuid::new_v4().simple());
+    let observer_owner = owner_options.clone().application_name(&observer_name);
+    let runtime = fixture.runtime_options.clone();
+    let observer_config = config.clone();
+    let observer_migrator = migrator.clone();
+    let observer = tokio::spawn(async move {
+        inspect_dark_owner_rejection_runtime_access(
+            &observer_owner,
+            &runtime,
+            &observer_config,
+            &observer_migrator,
+        )
+        .await
+    });
+    wait_relation_waiter(&fixture.admin, &observer_name, &epoch, "AccessShareLock").await;
+    epoch_holder
+        .rollback()
+        .await
+        .expect("release observer barrier");
+    assert_eq!(
+        observer
+            .await
+            .expect("join AS observer")
+            .expect("AS read-only result"),
+        OwnerRejectionGrantState::Granted
+    );
+    sqlx::query(&format!(
+        "REVOKE SELECT, INSERT ON {mapping} FROM {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("reset scoped fixture grant");
 }

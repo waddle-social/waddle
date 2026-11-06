@@ -56,7 +56,8 @@ pub enum OwnerRejectionGrantError {
 /// The operator supplies the independent expected physical lineage and roles
 /// in `config`, provides a direct authoritative primary, fences old attempts,
 /// and keeps privileged DDL, role membership and ACL changes quiescent. The
-/// NOLOGIN owner must own the schema and relation and read pg_control_system();
+/// NOLOGIN owner must own the schema and relation, acquire epoch AX, and read
+/// pg_control_system();
 /// the independently configured migrator login must be allowed to assume it.
 /// The checks do not audit arbitrary SECURITY DEFINER functions or all schema
 /// objects. Failure/cancellation around COMMIT is indeterminate; a later read
@@ -221,6 +222,33 @@ async fn run_on_connection(
         )
         .await?;
     }
+    // Catalog-only physical preflight does not lock lineage, ledger or
+    // guarded relations. The dedicated owner session must take this barrier
+    // before any such read; mutation uses AX, observation alone uses AS.
+    let epoch_oid = verify_physical_epoch(&mut tx, config, schema).await?;
+    let epoch_mode = if grant {
+        "ACCESS EXCLUSIVE"
+    } else {
+        "ACCESS SHARE"
+    };
+    tx.execute(
+        &format!("LOCK TABLE ONLY {quoted}.ingress_protocol_epoch IN {epoch_mode} MODE"),
+        (),
+    )
+    .await?;
+    // A role, namespace or relation may have changed while LOCK waited.
+    tx.execute("SET LOCAL ROLE NONE", ()).await?;
+    check_migration_login_and_assume_owner(
+        &mut tx,
+        config,
+        migrator,
+        schema,
+        i64::from(identity.schema.oid),
+    )
+    .await?;
+    if verify_physical_epoch(&mut tx, config, schema).await? != epoch_oid {
+        return Err(DarkMigrationOwnerError::Identity.into());
+    }
     let lineage_config = LineageConfig {
         deployment_uuid: Some(config.expected.deployment_uuid),
         action: None,
@@ -237,13 +265,6 @@ async fn run_on_connection(
     }
     correlate_runtime(&mut tx, config, pid, nonce).await?;
     verify_v1028_ledger(&mut tx, &quoted).await?;
-    // Take the epoch relation before the protected mapping relation. This
-    // avoids a target-first lock against an epoch-first migration.
-    tx.execute(
-        &format!("LOCK TABLE ONLY {quoted}.ingress_protocol_epoch IN ACCESS SHARE MODE"),
-        (),
-    )
-    .await?;
     // Lock the exact qualified relation before inspecting or modifying its
     // ACL. Errors after the GRANT drop this uncommitted transaction.
     tx.execute(
@@ -274,6 +295,23 @@ async fn run_on_connection(
     }
     correlate_runtime(&mut tx, config, pid, nonce).await?;
     if grant {
+        // Commit only the exact scoped direct-grant profile. This deliberately
+        // is not the incompatible DML-denied restricted definer profile.
+        verify_v1028_ledger(&mut tx, &quoted).await?;
+        verify_relation_manifest(&mut tx, config, schema).await?;
+        if inspect_locked(&mut tx, config, schema).await? != OwnerRejectionGrantState::Granted
+            || verify_physical_epoch(&mut tx, config, schema).await? != epoch_oid
+            || lineage::verify_qualified_in_transaction(
+                &mut tx,
+                DatabaseDriver::Postgres,
+                &lineage_config,
+                &format!("{quoted}._lineage"),
+            )
+            .await?
+                != config.expected
+        {
+            return Err(OwnerRejectionGrantError::RelationMismatch);
+        }
         match tokio::time::timeout(COMMIT_DEADLINE, tx.commit()).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) | Err(_) => return Err(OwnerRejectionGrantError::CommitUnknown),
@@ -282,6 +320,46 @@ async fn run_on_connection(
         tx.rollback().await?;
     }
     Ok(state)
+}
+
+// Inspect catalogs and the built-in control function only, before locking any
+// covered relation. Repeating this in RC after the barrier gets fresh state.
+async fn verify_physical_epoch(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+) -> Result<i64, OwnerRejectionGrantError> {
+    let expected = config
+        .expected
+        .postgres_identity
+        .as_ref()
+        .ok_or(DarkMigrationOwnerError::MissingPostgresIdentity)?;
+    let mut rows = tx
+        .query(
+            "SELECT control.system_identifier::text, db.oid::bigint, db.datname::text, \
+         n.oid::bigint, epoch.oid::bigint, pg_catalog.pg_is_in_recovery() \
+         FROM pg_catalog.pg_control_system() control \
+         JOIN pg_catalog.pg_database db ON db.datname=pg_catalog.current_database() \
+         JOIN pg_catalog.pg_namespace n ON n.nspname=? \
+         JOIN pg_catalog.pg_class epoch ON epoch.relnamespace=n.oid \
+           AND epoch.relname='ingress_protocol_epoch' AND epoch.relkind='r' \
+           AND epoch.relpersistence='p' AND NOT epoch.relispartition",
+            crate::db_params![schema],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(DarkMigrationOwnerError::Identity)?;
+    if row.get::<String>(0)? != expected.system_identifier.0.to_string()
+        || row.get::<i64>(1)? != i64::from(expected.database.oid)
+        || row.get::<String>(2)? != expected.database.name.0
+        || row.get::<i64>(3)? != i64::from(expected.schema.oid)
+        || row.get::<bool>(5)?
+    {
+        return Err(DarkMigrationOwnerError::Identity.into());
+    }
+    row.get(4).map_err(OwnerRejectionGrantError::from)
 }
 
 async fn verify_v1028_ledger(

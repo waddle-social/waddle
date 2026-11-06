@@ -111,3 +111,29 @@ Trusted lineage/ledger then epoch-AX mutation, transaction-local profile refresh
 after epoch AS, exact pool binding, lexical transaction ownership and explicit
 commit-unknown custody remain prerequisites for the later grouped tranche.
 No migration is registered, no epoch is advanced, and startup stays disabled.
+
+## Scoped owner-rejection barrier correction
+
+The existing dedicated owner-rejection grant transaction now takes lineage
+then migration-ledger advisory locks, performs a catalog-only primary/system,
+database/schema and epoch identity check, and acquires epoch ACCESS EXCLUSIVE
+before reading lineage, migration ledger or guarded relations. After waiting,
+it revalidates the owner role graph, physical identity and the same epoch OID.
+It verifies the scoped V1028 ledger/trigger/ACL profile again before COMMIT.
+Read-only inspection uses ACCESS SHARE and rolls back its transaction. The
+owner must have permission to acquire epoch AX; the fixture provisions epoch
+ownership explicitly.
+
+This operation intentionally grants direct runtime SELECT/INSERT on the
+owner-rejection mapping. Its fixed scoped verifier is therefore distinct from
+the DML-denied restricted-definer manifest. Neither path selects serving.
+
+This correction covers one cooperating mutator. It does not supply a generic
+provider mutation entry, a caller-owned durable attempt/commit receipt, or a
+runtime UOW that refreshes the restricted manifest in the same READ COMMITTED
+transaction after epoch AS. The existing CommitUnknown refusal remains
+non-advancing, but lacks an operation receipt: callers must fence the original
+backend/primary before reconciliation or retry. A later matching grant alone
+cannot establish which attempt committed. Ordinary migrations, legacy startup,
+external provider/role mutators, the independent attestor and serving selection
+remain gated.
