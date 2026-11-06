@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::Utc;
 use futures::FutureExt;
 use sqlx::{Connection, PgConnection};
+use tokio::sync::oneshot;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::DeploymentUuid;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
@@ -37,12 +38,21 @@ fn role_url(fixture: &Fixture, role: &str, app: &str) -> String {
 }
 
 async fn uow(url: &str, deployment: DeploymentUuid) -> IngressUnitOfWork {
-    let db = Database::from_config(
-        "observer-quarantine-fixture",
-        &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_owned()),
-    )
-    .await
-    .expect("fixture database");
+    uow_with_pool_size(url, deployment, None).await
+}
+
+async fn uow_with_pool_size(
+    url: &str,
+    deployment: DeploymentUuid,
+    pool_size: Option<u32>,
+) -> IngressUnitOfWork {
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_owned());
+    if let Some(pool_size) = pool_size {
+        config.pool_size = pool_size;
+    }
+    let db = Database::from_config("observer-quarantine-fixture", &config)
+        .await
+        .expect("fixture database");
     IngressUnitOfWork::open(
         db,
         LineageConfig {
@@ -687,6 +697,48 @@ async fn wait_file(path: &Path) {
     .expect("fixture process signal");
 }
 
+// Hold the actual PostgreSQL COMMIT response until a fresh backend has read
+// the committed row, then close both sides without forwarding the response.
+async fn lose_start_commit_reply(
+    listener: tokio::net::TcpListener,
+    upstream: sqlx::postgres::PgConnectOptions,
+    held: oneshot::Sender<()>,
+    disconnect: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (client, _) = listener.accept().await?;
+    let server = crate::postgres_proxy::connect_local_postgres(&upstream).await?;
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = tokio::io::split(server);
+    let forward = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+    });
+    loop {
+        let tag = server_read.read_u8().await?;
+        let length = server_read.read_u32().await?;
+        if !(4..=1_048_576).contains(&length) {
+            return Err(std::io::Error::other("invalid backend frame"));
+        }
+        let mut body = vec![0; (length - 4) as usize];
+        server_read.read_exact(&mut body).await?;
+        if tag == b'C' && body == b"COMMIT\0" {
+            held.send(())
+                .map_err(|_| std::io::Error::other("holder dropped"))?;
+            disconnect
+                .await
+                .map_err(|_| std::io::Error::other("disconnect dropped"))?;
+            break;
+        }
+        client_write.write_u8(tag).await?;
+        client_write.write_u32(length).await?;
+        client_write.write_all(&body).await?;
+    }
+    forward.abort();
+    let _ = forward.await;
+    client_write.shutdown().await
+}
+
 #[tokio::test]
 #[ignore = "subprocess entry for observer quarantine crash schedules"]
 async fn observer_child() {
@@ -700,7 +752,9 @@ async fn observer_child() {
     ))
     .expect("seed");
     let claimer = uow(text("claim_url"), deployment).await;
-    let starter = uow(text("start_url"), deployment).await;
+    let expect_error = value["expect_commit_error"].as_bool() == Some(true);
+    let starter =
+        uow_with_pool_size(text("start_url"), deployment, expect_error.then_some(1)).await;
     let now = value["now"].as_i64().expect("clock");
     let work = claim_observer_pilot(&claimer, &seed, now)
         .await
@@ -717,12 +771,22 @@ async fn observer_child() {
         .expect("start");
     std::fs::write(text("prepared"), "prepared").expect("signal prepared");
     wait_file(Path::new(text("commit"))).await;
-    let grant = start.commit().await.expect("child acknowledged commit");
+    let result = start.commit().await;
+    let grant = match result {
+        Err(_) if expect_error => {
+            std::fs::write(text("commit_error"), "error").expect("signal COMMIT error");
+            return;
+        }
+        result => result.expect("child acknowledged commit"),
+    };
     std::fs::write(text("granted"), "granted").expect("signal grant");
-    wait_file(Path::new(text("invoke"))).await;
+    if !expect_error {
+        wait_file(Path::new(text("invoke"))).await;
+    }
     grant
         .invoke(|| async {
-            let mut conn = PgConnection::connect(text("start_url"))
+            std::fs::write(text("callback"), "callback").expect("signal callback");
+            let mut conn = PgConnection::connect(text("effect_url"))
                 .await
                 .expect("effect connection");
             sqlx::query(&format!(
@@ -748,6 +812,15 @@ async fn postgres_observer_quarantine_process_crash_schedules() {
     }
 }
 
+#[tokio::test]
+async fn postgres_observer_quarantine_lost_commit_response() {
+    let Some(_) = test_url() else {
+        return;
+    };
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    process_schedule("lost_response").await;
+}
+
 async fn process_schedule(mode: &str) {
     let pilot = Pilot::new().await;
     let outcome = std::panic::AssertUnwindSafe(exercise_process_schedule(&pilot, mode))
@@ -766,6 +839,8 @@ async fn exercise_process_schedule(pilot: &Pilot, mode: &str) {
     let commit = file("commit");
     let granted = file("granted");
     let invoke = file("invoke");
+    let callback = file("callback");
+    let commit_error = file("commit_error");
     let probe = file("probe");
     let mut blocker = if mode == "lost_ack" {
         let mut conn = PgConnection::connect_with(&pilot.fixture.admin_options)
@@ -781,15 +856,41 @@ async fn exercise_process_schedule(pilot: &Pilot, mode: &str) {
     } else {
         None
     };
+    let effect_url = role_url(
+        &pilot.fixture,
+        &pilot.fixture.runtime,
+        "observer-pilot-child-start",
+    );
+    let (start_url, response_drop) = if mode == "lost_response" {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local proxy listener");
+        let port = listener.local_addr().expect("proxy port").port();
+        let (held, waiting) = oneshot::channel();
+        let (disconnect, disconnected) = oneshot::channel();
+        let proxy = tokio::spawn(lose_start_commit_reply(
+            listener,
+            pilot.fixture.admin_options.clone(),
+            held,
+            disconnected,
+        ));
+        let start_url = crate::postgres_proxy::local_proxy_url(&effect_url, port)
+            .expect("local proxy URL")
+            .to_string();
+        (start_url, Some((waiting, disconnect, proxy)))
+    } else {
+        (effect_url.clone(), None)
+    };
     let input = serde_json::json!({
         "deployment": pilot.fixture.lineage.deployment_uuid.0.to_string(),
         "message": pilot.seed.message_key().to_storage().to_string(),
         "claim_url": role_url(&pilot.fixture, &pilot.fixture.outsider, "observer-pilot-child-claim"),
-        "start_url": role_url(&pilot.fixture, &pilot.fixture.runtime, "observer-pilot-child-start"),
+        "start_url": start_url, "effect_url": effect_url,
         "now": pilot.now,
         "schema": pilot.fixture.target,
         "prepared": prepared, "commit": commit, "granted": granted, "invoke": invoke,
-        "probe": probe,
+        "callback": callback, "commit_error": commit_error, "probe": probe,
+        "expect_commit_error": mode == "lost_response",
     });
     let mut child = tokio::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--ignored")
@@ -818,7 +919,60 @@ async fn exercise_process_schedule(pilot: &Pilot, mode: &str) {
         assert!(retry.is_some(), "rolled back start remains reclaimable");
     } else {
         std::fs::write(&commit, "commit").expect("release commit");
-        if mode == "lost_ack" {
+        if let Some((waiting, disconnect, proxy)) = response_drop {
+            tokio::time::timeout(Duration::from_secs(10), waiting)
+                .await
+                .expect("COMMIT response held")
+                .expect("server emitted CommandComplete COMMIT");
+            assert!(child.try_wait().expect("child state").is_none());
+            let mut reader = PgConnection::connect_with(
+                &pilot
+                    .fixture
+                    .admin_options
+                    .clone()
+                    .application_name("observer-pilot-fresh-reader"),
+            )
+            .await
+            .expect("fresh readback connection");
+            let reader_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+                .fetch_one(&mut reader)
+                .await
+                .expect("reader backend");
+            let starter_pid: i32 = sqlx::query_scalar(
+                "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name='observer-pilot-child-start'",
+            )
+            .fetch_one(&mut reader)
+            .await
+            .expect("original start backend");
+            assert_ne!(reader_pid, starter_pid);
+            let (work_id, status, snapshot): (String, String, String) = sqlx::query_as(&format!(
+                "SELECT id, status, dark_snapshot::text FROM {}.extension_room_observation_work",
+                pilot.fixture.target
+            ))
+            .fetch_one(&mut reader)
+            .await
+            .expect("fresh committed row");
+            let snapshot: serde_json::Value = serde_json::from_str(&snapshot).expect("snapshot");
+            assert_eq!(status, "dark_started");
+            assert_eq!(snapshot["work"]["id"], work_id);
+            assert_eq!(
+                snapshot["work"]["message_key"],
+                pilot.seed.message_key().to_storage().to_string()
+            );
+            drop(reader);
+            assert!(child.try_wait().expect("child remains live").is_none());
+            disconnect.send(()).expect("drop COMMIT response");
+            proxy.await.expect("proxy task").expect("proxy");
+            let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+                .await
+                .expect("live caller returned")
+                .expect("child exit");
+            assert!(status.success(), "caller did not return cleanly");
+            assert!(commit_error.exists(), "caller did not observe COMMIT error");
+            assert!(!granted.exists(), "indeterminate COMMIT minted a grant");
+            assert!(!callback.exists(), "indeterminate COMMIT entered callback");
+            assert_eq!(pilot.effects().await, 0);
+        } else if mode == "lost_ack" {
             tokio::time::timeout(Duration::from_secs(8), async {
                 loop {
                     let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name = 'observer-pilot-child-start' AND query = 'COMMIT' AND wait_event_type = 'Lock')")
@@ -885,6 +1039,7 @@ async fn exercise_process_schedule(pilot: &Pilot, mode: &str) {
         let mut replacement = input.clone();
         replacement["check_only"] = true.into();
         replacement["now"] = (pilot.now + 180_000).into();
+        replacement["start_url"] = replacement["effect_url"].clone();
         let status =
             tokio::process::Command::new(std::env::current_exe().expect("test executable"))
                 .arg("--ignored")
