@@ -271,8 +271,8 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         },
     )
     .await?;
-    // Match the established owner fixture: startup creates the original
-    // observation tables/indexes before registered migrations upgrade them.
+    // Model a pre-existing observation schema upgraded by registered
+    // migrations, as in the established owner fixture.
     waddle_server::test_support::initialize_room_observations_for_test(&owner_db).await?;
     MigrationRunner::single().run(&owner_db).await?;
     bootstrap_pending_delivery_owner_schema(&owner_db).await?;
@@ -360,10 +360,10 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
 
     // Two simultaneously held distinct backend PIDs establish real slots,
     // not just independent semaphore budgets over one connection.
-    let main_guard = main.guard().await?;
+    let mut main_transaction = main.begin().await?;
     let ingress_db = pool.ingress();
-    let ingress_guard = ingress_db.guard().await?;
-    let mut main_rows = main_guard
+    let mut ingress_transaction = ingress_db.begin().await?;
+    let mut main_rows = main_transaction
         .query("SELECT pg_backend_pid()::bigint", ())
         .await?;
     let main_pid: i64 = main_rows
@@ -371,7 +371,7 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         .await?
         .context("main backend pid")?
         .get(0)?;
-    let mut ingress_rows = ingress_guard
+    let mut ingress_rows = ingress_transaction
         .query("SELECT pg_backend_pid()::bigint", ())
         .await?;
     let ingress_pid: i64 = ingress_rows
@@ -385,8 +385,14 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     );
     drop(main_rows);
     drop(ingress_rows);
-    drop(main_guard);
-    drop(ingress_guard);
+    main_transaction
+        .rollback()
+        .await
+        .context("acknowledge main-lane rollback")?;
+    ingress_transaction
+        .rollback()
+        .await
+        .context("acknowledge ingress-lane rollback")?;
 
     let mut owner_connection = PgConnection::connect_with(
         &PgConnectOptions::from_str(base_url)?
