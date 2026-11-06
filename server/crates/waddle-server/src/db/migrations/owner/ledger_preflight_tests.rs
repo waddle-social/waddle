@@ -20,7 +20,9 @@ const CUSTOM_RESTORE_PATH: &str = "public, pg_catalog";
 
 struct Fixture {
     admin: PgPool,
+    bootstrap_admin: Option<PgPool>,
     reader: PgPool,
+    database_name: Option<String>,
     schema: String,
     owner: String,
     runtime: String,
@@ -28,7 +30,48 @@ struct Fixture {
 
 impl Fixture {
     async fn new(url: &str) -> Self {
-        let admin = PgPool::connect(url).await.expect("admin connection");
+        Self::new_in_database(url, None, None).await
+    }
+
+    async fn new_without_temp(url: &str) -> Self {
+        let bootstrap_admin = PgPool::connect(url)
+            .await
+            .expect("bootstrap admin connection");
+        let database_name = format!("ledger_no_temp_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!(
+            "CREATE DATABASE {database_name} TEMPLATE template0"
+        ))
+        .execute(&bootstrap_admin)
+        .await
+        .expect("create isolated no-temp database");
+        sqlx::query(&format!(
+            "REVOKE TEMP ON DATABASE {database_name} FROM PUBLIC"
+        ))
+        .execute(&bootstrap_admin)
+        .await
+        .expect("remove public TEMP privilege");
+        sqlx::query(&format!(
+            "GRANT CONNECT ON DATABASE {database_name} TO PUBLIC"
+        ))
+        .execute(&bootstrap_admin)
+        .await
+        .expect("allow isolated fixture connections");
+        Self::new_in_database(url, Some(database_name), Some(bootstrap_admin)).await
+    }
+
+    async fn new_in_database(
+        url: &str,
+        database_name: Option<String>,
+        bootstrap_admin: Option<PgPool>,
+    ) -> Self {
+        let mut admin_options = PgConnectOptions::from_str(url).expect("connection options");
+        if let Some(database_name) = &database_name {
+            admin_options = admin_options.database(database_name);
+        }
+        let admin = PgPoolOptions::new()
+            .connect_with(admin_options)
+            .await
+            .expect("admin connection");
         let version: i32 =
             sqlx::query_scalar("SELECT pg_catalog.current_setting('server_version_num')::integer")
                 .fetch_one(&admin)
@@ -53,9 +96,12 @@ impl Fixture {
                 .await
                 .expect("setup");
         }
-        let options = PgConnectOptions::from_str(url)
+        let mut options = PgConnectOptions::from_str(url)
             .expect("connection options")
             .username(&runtime);
+        if let Some(database_name) = &database_name {
+            options = options.database(database_name);
+        }
         let reader = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(options)
@@ -63,7 +109,9 @@ impl Fixture {
             .expect("runtime connection");
         let fixture = Self {
             admin,
+            bootstrap_admin,
             reader,
+            database_name,
             schema,
             owner,
             runtime,
@@ -205,6 +253,16 @@ impl Fixture {
                 .expect("drop role");
         }
         self.admin.close().await;
+        if let Some(database_name) = self.database_name {
+            let bootstrap_admin = self
+                .bootstrap_admin
+                .expect("bootstrap admin for isolated DB");
+            sqlx::query(&format!("DROP DATABASE {database_name}"))
+                .execute(&bootstrap_admin)
+                .await
+                .expect("drop isolated no-temp database");
+            bootstrap_admin.close().await;
+        }
     }
 }
 
@@ -213,8 +271,15 @@ async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() 
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
-    let fixture = Fixture::new(&url).await;
+    let fixture = Fixture::new_without_temp(&url).await;
     fixture.seed_v1030().await;
+    let runtime_has_temp: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'TEMP')"
+    ).fetch_one(&fixture.reader).await.expect("inspect effective TEMP privilege");
+    assert!(
+        !runtime_has_temp,
+        "durable write fixture must have no effective TEMP privilege"
+    );
     let db = fixture.database();
     let pins = fixture.pins().await;
 
@@ -311,21 +376,60 @@ async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() 
         .fetch_one(&mut *tx.postgres_connection().expect("postgres tx"))
         .await
         .expect("backend pid");
-    let result = acquire_dark_shared_migration_ledger_v1030_write(
+    let mut proof_future = Box::pin(acquire_dark_shared_migration_ledger_v1030_write(
         &mut tx,
         &fixture.schema,
         pins,
         RESTORE_PATH,
-    )
-    .await;
+    ));
+    let mut lineage_wait_observed = false;
+    let mut ledger_lock_observed_while_waiting = false;
+    let result = loop {
+        match timeout(Duration::from_millis(10), &mut proof_future).await {
+            Ok(result) => break result,
+            Err(_) => {
+                let (lineage_waiting, ledger_lock): (bool, bool) = sqlx::query_as(
+                    "SELECT \
+                     EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                       AND objsubid=1 AND classid=(($2::bigint >> 32)::oid) \
+                       AND objid=(($2::bigint & 4294967295)::oid) AND mode='ShareLock' AND NOT granted), \
+                     EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                       AND objsubid=1 AND classid=(($3::bigint >> 32)::oid) \
+                       AND objid=(($3::bigint & 4294967295)::oid))",
+                )
+                .bind(backend_pid)
+                .bind(LINEAGE_ADVISORY_LOCK_KEY)
+                .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+                .fetch_one(&fixture.admin)
+                .await
+                .expect("inspect blocked lock order");
+                if lineage_waiting {
+                    lineage_wait_observed = true;
+                    ledger_lock_observed_while_waiting |= ledger_lock;
+                }
+            }
+        }
+    };
+    drop(proof_future);
+    let sqlstate = match result {
+        Err(error) => error_sqlstate(&error),
+        Ok(proof) => {
+            drop(proof);
+            None
+        }
+    };
+    assert_eq!(
+        sqlstate.as_deref(),
+        Some("55P03"),
+        "must fail on lock timeout"
+    );
     assert!(
-        result.is_err(),
-        "blocked lineage acquisition unexpectedly succeeded: {}",
-        result
-            .as_ref()
-            .map(|_| "ok".to_owned())
-            .map_err(ToString::to_string)
-            .unwrap_or_default()
+        lineage_wait_observed,
+        "must observe the ungranted lineage advisory lock"
+    );
+    assert!(
+        !ledger_lock_observed_while_waiting,
+        "ledger lock must not be acquired while lineage waits"
     );
     let ledger_lock: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 \
@@ -437,17 +541,18 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
+    cleanup_failed_big_acl_witness(&url).await;
     let fixture = Fixture::new(&url).await;
     fixture.seed_v1030().await;
     let mut roles = Vec::new();
-    for index in 0..550 {
+    for index in 0..2_500 {
         let role = format!("ledger_big_acl_{index}_{}", Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
             .execute(&fixture.admin)
             .await
             .expect("create ACL grantee");
         sqlx::query(&format!(
-            "GRANT SELECT ON {}._migrations TO {role}",
+            "GRANT USAGE ON SCHEMA {} TO {role}",
             fixture.schema
         ))
         .execute(&fixture.admin)
@@ -456,11 +561,18 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
         roles.push(role);
     }
     let (raw_size, compression): (i32, Option<String>) = sqlx::query_as(&format!(
-        "SELECT pg_catalog.pg_column_size(relacl), pg_catalog.pg_column_compression(relacl) \
-         FROM pg_catalog.pg_class WHERE oid = (SELECT c.oid FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname='_migrations')"
-    )).bind(&fixture.schema).fetch_one(&fixture.admin).await.expect("inspect raw ACL witness");
+        "SELECT pg_catalog.pg_column_size(nspacl), pg_catalog.pg_column_compression(nspacl) \
+         FROM pg_catalog.pg_namespace WHERE nspname=$1"
+    ))
+    .bind(&fixture.schema)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect raw ACL witness");
     assert!(raw_size > 0);
+    assert!(
+        compression.as_ref().is_some(),
+        "fixture must produce a PostgreSQL-compressed ACL: {raw_size} bytes"
+    );
     let db = fixture.database();
     let mut tx = db.begin().await.expect("write transaction");
     tx.execute(
@@ -476,20 +588,19 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
         RESTORE_PATH,
     )
     .await;
-    match (compression, raw_size > 8192, result) {
-        (Some(_), _, Err(DarkLedgerPreflightError::CompressedAcl)) => {}
-        (None, true, Err(DarkLedgerPreflightError::OversizedAcl)) => {}
-        (compression, oversized, result) => {
+    match result {
+        Err(DarkLedgerPreflightError::CompressedAcl) => {}
+        result => {
             let outcome = result
                 .as_ref()
                 .map(|_| "accepted".to_owned())
                 .map_err(ToString::to_string);
-            panic!("raw ACL witness did not fail at its guard stage: compression={compression:?}, oversized={oversized}, outcome={outcome:?}");
+            panic!("compressed ACL did not fail at the compression guard stage: compression={compression:?}, raw_size={raw_size}, outcome={outcome:?}");
         }
     }
     tx.rollback().await.expect("rollback oversized ACL");
     sqlx::query(&format!(
-        "REVOKE ALL ON {}._migrations FROM {}",
+        "REVOKE ALL ON SCHEMA {} FROM {}",
         fixture.schema,
         roles.join(", ")
     ))
@@ -503,6 +614,60 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
             .expect("drop test ACL role");
     }
     fixture.close().await;
+}
+
+async fn cleanup_failed_big_acl_witness(url: &str) {
+    let admin = PgPool::connect(url)
+        .await
+        .expect("cleanup admin connection");
+    let schemas: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT n.nspname::text FROM pg_catalog.pg_namespace n \
+         JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname='_migrations' \
+         CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl \
+         JOIN pg_catalog.pg_roles r ON r.oid=acl.grantee \
+         WHERE n.nspname LIKE 'ledger_p21_%' AND r.rolname LIKE 'ledger_big_acl_%'"
+    ).fetch_all(&admin).await.expect("find stale ACL witness schema");
+    for schema in schemas {
+        let suffix = schema
+            .strip_prefix("ledger_p21_")
+            .expect("fixture schema prefix");
+        sqlx::query(&format!(
+            "DROP SCHEMA \"{}\" CASCADE",
+            schema.replace('"', "\"\"")
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop stale ACL witness schema");
+        for role in [format!("ledger_o_{suffix}"), format!("ledger_r_{suffix}")] {
+            sqlx::query(&format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                role.replace('"', "\"\"")
+            ))
+            .execute(&admin)
+            .await
+            .expect("drop stale fixture role");
+        }
+    }
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT rolname::text FROM pg_catalog.pg_roles WHERE rolname LIKE 'ledger_big_acl_%'",
+    )
+    .fetch_all(&admin)
+    .await
+    .expect("find stale ACL grantee roles");
+    for role in roles {
+        sqlx::query(&format!("DROP OWNED BY \"{}\"", role.replace('"', "\"\"")))
+            .execute(&admin)
+            .await
+            .expect("revoke stale ACL grantee privileges");
+        sqlx::query(&format!(
+            "DROP ROLE IF EXISTS \"{}\"",
+            role.replace('"', "\"\"")
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop stale ACL grantee role");
+    }
+    admin.close().await;
 }
 
 #[tokio::test]
@@ -616,6 +781,18 @@ async fn holds_shared_advisory_lock(tx: &mut crate::db::Transaction<'_>, key: i6
     .fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
     .await
     .expect("inspect advisory lock")
+}
+
+fn error_sqlstate(error: &DarkLedgerPreflightError) -> Option<String> {
+    match error {
+        DarkLedgerPreflightError::Postgres(sqlx::Error::Database(error)) => {
+            error.code().map(|code| code.into_owned())
+        }
+        DarkLedgerPreflightError::Database(DatabaseError::Internal(sqlx::Error::Database(
+            error,
+        ))) => error.code().map(|code| code.into_owned()),
+        _ => None,
+    }
 }
 
 async fn reject_without_relation_lock(fixture: &Fixture, pins: DarkMigrationLedgerPins) {
