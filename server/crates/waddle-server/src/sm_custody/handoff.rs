@@ -363,7 +363,7 @@ impl SmCustodyRepository {
     ) -> Result<CommittedPreacceptHandoff, CustodyError> {
         self.check_admission(admission)?;
         let mut tx = self
-            .guarded_operation(admission.operation, false, None)
+            .guarded_operation(admission.operation, false, true, None)
             .await?;
         let saved = self.operation(&mut tx, admission.operation).await?;
         if saved.terminal.is_some()
@@ -415,7 +415,7 @@ impl SmCustodyRepository {
             if handoff.capture != self.capture {
                 return Err(CustodyError::Rejected);
             }
-            let mut tx = self.guarded_operation(operation, false, None).await?;
+            let mut tx = self.guarded_operation(operation, false, true, None).await?;
             let saved = self.operation(&mut tx, operation).await?;
             self.check_handoff(&saved, handoff)?;
             if !self.has_source_handoff(&mut tx, operation).await? {

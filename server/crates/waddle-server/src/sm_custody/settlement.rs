@@ -50,7 +50,7 @@ impl SmCustodyRepository {
             let mut parents: Vec<_> = slots.iter().map(|row| row.2).collect();
             parents.sort_unstable();
             parents.dedup();
-            match self.lock_sources_and_routes(&mut tx, &parents).await {
+            match self.lock_sources_and_routes(&mut tx, &parents, false).await {
                 Ok(()) => {}
                 Err(CustodyError::SourceMissing) => continue,
                 Err(error) => return Err(error),
@@ -161,7 +161,7 @@ impl SmCustodyRepository {
     ) -> Result<(), CustodyError> {
         self.check_admission(admission)?;
         let mut tx = match self
-            .guarded_operation(admission.operation, true, recovery)
+            .guarded_operation(admission.operation, true, false, recovery)
             .await
         {
             Ok(tx) => tx,
@@ -282,7 +282,7 @@ impl SmCustodyRepository {
         if sealed.gate != self.capture.gate_id || sealed.token != self.capture.token {
             return Err(CustodyError::Rejected);
         }
-        let mut tx = self.guarded_source(true, key).await?;
+        let mut tx = self.guarded_source(true, false, key).await?;
         let q = &self.schema;
         let own: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.sm_custody_operations o JOIN {q}.sm_custody_terminals t ON t.operation_id = o.operation_id WHERE o.gate_id = $1 AND o.message_key = $2)"))
             .bind(self.capture.gate_id).bind(key.to_storage()).fetch_one(pg(&mut tx)?).await.map_err(db)?;
