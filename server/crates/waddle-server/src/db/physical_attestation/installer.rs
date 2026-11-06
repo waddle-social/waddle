@@ -8,6 +8,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection, Row};
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::{
@@ -18,6 +19,7 @@ use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
 mod observation;
 pub use observation::{observe_installation, InstallationObservation};
+mod pinned_preflight;
 
 // The two-key advisory namespace is distinct from the existing one-key
 // lineage and migration locks. The second key is derived from the trusted
@@ -31,6 +33,208 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 pub enum InstallationStatus {
     Committed,
     Indeterminate,
+}
+
+/// Independently provisioned pre-install identities. `existing_function_oid`
+/// is absent for a first install or operation reconciliation; an OID observed
+/// from the installation is not itself an independent runtime pin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DarkInstallerPins {
+    pub database_owner_role_oid: u32,
+    pub schema_owner_role_oid: u32,
+    pub runtime_role_oid: u32,
+    pub installer_role_oid: u32,
+    pub definer_role_oid: u32,
+    pub trusted_schema_oid: u32,
+    pub lineage_relation_oid: u32,
+    pub lineage_primary_index_oid: u32,
+    pub existing_function_oid: Option<u32>,
+    pub operation_id: Uuid,
+}
+
+impl DarkInstallerPins {
+    fn valid(self) -> bool {
+        [
+            self.database_owner_role_oid,
+            self.schema_owner_role_oid,
+            self.runtime_role_oid,
+            self.installer_role_oid,
+            self.definer_role_oid,
+            self.trusted_schema_oid,
+            self.lineage_relation_oid,
+            self.lineage_primary_index_oid,
+        ]
+        .into_iter()
+        .all(|oid| oid != 0)
+            && self.existing_function_oid != Some(0)
+            && !self.operation_id.is_nil()
+            && self.runtime_role_oid != self.installer_role_oid
+            && self.runtime_role_oid != self.definer_role_oid
+            && self.installer_role_oid != self.definer_role_oid
+            && ![
+                self.runtime_role_oid,
+                self.installer_role_oid,
+                self.definer_role_oid,
+            ]
+            .contains(&self.database_owner_role_oid)
+            && ![
+                self.runtime_role_oid,
+                self.installer_role_oid,
+                self.definer_role_oid,
+            ]
+            .contains(&self.schema_owner_role_oid)
+    }
+}
+
+/// Identifiers needed to fence an original backend on the independently
+/// authenticated primary. They are not themselves proof that it is fenced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DarkInstallerFence {
+    pub operation_id: Uuid,
+    pub backend_pid: i32,
+    pub backend_started_at: chrono::DateTime<chrono::Utc>,
+    pub postmaster_started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A function OID here is an observation, not an independent runtime pin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DarkInstallationStatus {
+    Committed { observed_function_oid: u32 },
+    Indeterminate,
+}
+
+#[derive(Debug, Error)]
+pub enum DarkInstallerError {
+    #[error("pinned installer requires independent nonzero object identities")]
+    InvalidPins,
+    #[error("pinned installer connection configuration is invalid")]
+    InvalidConnection,
+    #[error("pinned installer catalog, role, ACL or identity drifted")]
+    CatalogDrift,
+    #[error("pinned installer found a conflicting attestation function")]
+    Conflict,
+    #[error("pinned installer operation remains indeterminate")]
+    Indeterminate,
+    #[error("pinned installer commit outcome is unknown for operation {fence:?}")]
+    CommitUnknown { fence: DarkInstallerFence },
+    #[error("pinned installer committed but readback failed for operation {fence:?}")]
+    PostCommitUnverified {
+        fence: DarkInstallerFence,
+        #[source]
+        source: Box<DarkInstallerError>,
+    },
+    #[error(transparent)]
+    Attestation(#[from] PhysicalAttestationError),
+    #[error("pinned installer PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+}
+
+/// A prepared, non-cloneable installation whose transaction is still open.
+/// The caller must durably retain [`Self::fence`] before calling `commit`.
+pub struct DarkPreparedInstallation {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    pool: sqlx::PgPool,
+    options: PgConnectOptions,
+    config: PhysicalAttestationConfig,
+    pins: DarkInstallerPins,
+    fence: DarkInstallerFence,
+    observed_function_oid: u32,
+}
+
+impl DarkPreparedInstallation {
+    pub fn fence(&self) -> &DarkInstallerFence {
+        &self.fence
+    }
+
+    /// The caller must have durably recorded the original fence and must keep
+    /// the primary fenced across uncertain outcomes, including cancellation.
+    pub async fn commit(self) -> Result<DarkInstallationStatus, DarkInstallerError> {
+        let Self {
+            tx,
+            pool,
+            options,
+            config,
+            pins,
+            fence,
+            observed_function_oid: oid,
+        } = self;
+        match tokio::time::timeout(COMMIT_DEADLINE, tx.commit()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => return Err(DarkInstallerError::CommitUnknown { fence }),
+        }
+        drop(pool);
+        match inspect_pinned_installation(&options, &config, pins).await {
+            Ok(DarkInstallationStatus::Committed {
+                observed_function_oid,
+            }) if observed_function_oid == oid => Ok(DarkInstallationStatus::Committed {
+                observed_function_oid,
+            }),
+            Ok(_) => Err(DarkInstallerError::PostCommitUnverified {
+                fence,
+                source: Box::new(DarkInstallerError::Indeterminate),
+            }),
+            Err(source) => Err(DarkInstallerError::PostCommitUnverified {
+                fence,
+                source: Box::new(source),
+            }),
+        }
+    }
+}
+
+/// Prepare a dark, independently pinned installation. The caller must provide
+/// a direct, authenticated, authoritative PG17 primary and enforce quiescence
+/// or the cooperative lineage/installer mutation protocol across privileged
+/// DDL, role/ACL changes and lineage writes. No COMMIT is sent by this method.
+/// Reconciliation retains the original operation and primary/backend fence;
+/// an absent marker never proves rollback, and an observed function OID is not
+/// runtime authority.
+pub async fn prepare_pinned_install(
+    options: &PgConnectOptions,
+    config: &PhysicalAttestationConfig,
+    pins: DarkInstallerPins,
+) -> Result<DarkPreparedInstallation, DarkInstallerError> {
+    let (pool, mut tx, fence) = pinned_preflight::begin(options, config, pins, false).await?;
+    let observed = pinned_preflight::inspect_function(&mut tx, config, pins).await?;
+    let oid = match observed {
+        Some(oid) => oid,
+        None if pins.existing_function_oid.is_none() => {
+            create_function(&mut tx, config, &marker(config, pins.operation_id)).await?;
+            pinned_preflight::verify_locked_lineage(&mut tx, config, pins).await?;
+            pinned_preflight::inspect_function(&mut tx, config, pins)
+                .await?
+                .ok_or(DarkInstallerError::Conflict)?
+        }
+        None => return Err(DarkInstallerError::Indeterminate),
+    };
+    Ok(DarkPreparedInstallation {
+        tx,
+        pool,
+        options: options.clone(),
+        config: config.clone(),
+        pins,
+        fence,
+        observed_function_oid: oid,
+    })
+}
+
+/// Fresh read-only reconciliation. It never invokes the attestor; absence is
+/// indeterminate and an observed OID must be independently handed off before
+/// a runtime verifier may pin it.
+pub async fn inspect_pinned_installation(
+    options: &PgConnectOptions,
+    config: &PhysicalAttestationConfig,
+    pins: DarkInstallerPins,
+) -> Result<DarkInstallationStatus, DarkInstallerError> {
+    let (pool, mut tx, _) = pinned_preflight::begin(options, config, pins, true).await?;
+    let observed = pinned_preflight::inspect_function(&mut tx, config, pins).await?;
+    tx.rollback().await?;
+    drop(pool);
+    Ok(match observed {
+        Some(observed_function_oid) => DarkInstallationStatus::Committed {
+            observed_function_oid,
+        },
+        None => DarkInstallationStatus::Indeterminate,
+    })
 }
 
 /// Install or verify one operation against independently provisioned roles.

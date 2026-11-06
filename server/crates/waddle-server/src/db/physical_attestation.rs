@@ -22,8 +22,9 @@ use super::DatabaseError;
 
 mod installer;
 pub use installer::{
-    inspect_installation, install, observe_installation, InstallationObservation,
-    InstallationStatus,
+    inspect_installation, inspect_pinned_installation, install, observe_installation,
+    prepare_pinned_install, DarkInstallationStatus, DarkInstallerError, DarkInstallerFence,
+    DarkInstallerPins, DarkPreparedInstallation, InstallationObservation, InstallationStatus,
 };
 mod pinned_hook;
 pub use pinned_hook::{pinned_attested_pool, PinnedRuntimeAuthority};

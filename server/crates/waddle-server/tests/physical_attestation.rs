@@ -7422,3 +7422,6 @@ mod combined_restricted_profile;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_hook.rs"]
 mod pinned_hook_tests;
+
+#[path = "physical_attestation/pinned_installer.rs"]
+mod pinned_installer;
