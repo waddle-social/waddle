@@ -10,6 +10,10 @@ use xmpp_parsers::message::Message;
 
 use crate::ingress_uow::{IngressUowError, SendLease};
 
+/// Keep the durable outstanding window below the live ACK validator's
+/// unambiguous half of the wrapping XEP-0198 counter space.
+pub(super) const ACK_HALF_RANGE: i64 = 1_i64 << 31;
+
 /// Durable session generation, deliberately distinct from physical transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionGeneration(i64);

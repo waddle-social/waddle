@@ -72,6 +72,20 @@ pub struct RestrictedServingProfileV1 {
     pub helper_relation_oids: [u32; 12],
 }
 
+/// Additional independent pins for a partial, unselected store profile.
+///
+/// V1009's invoker trigger needs the API owner to lock the epoch row. The
+/// provisioner pins that heap independently; this diagnostic checks only its
+/// role ACL, not the complete epoch, trigger, or serving authority contract.
+#[derive(Clone, Debug)]
+pub struct RestrictedServingProfileV2 {
+    pub v1: RestrictedServingProfileV1,
+    pub epoch_relation_oid: u32,
+    pub effect_relation_oid: u32,
+    /// `mam_messages`, followed by `mam_archive_sequences`.
+    pub mam_relation_oids: [u32; 2],
+}
+
 #[derive(Clone, Copy)]
 struct Column {
     name: &'static str,
@@ -397,7 +411,7 @@ const TABLES: &[Table] = &[
 ];
 
 pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError> {
-    verify_with_profile(db, None).await
+    verify_with_profile(db, None, None).await
 }
 
 /// Inspect the H-owned helper and PubSub schema without returning a store.
@@ -405,12 +419,20 @@ pub(super) async fn verify_restricted_v1(
     db: &Database,
     profile: &RestrictedServingProfileV1,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    verify_with_profile(db, Some(profile)).await
+    verify_with_profile(db, Some(profile), None).await
+}
+
+pub(super) async fn verify_restricted_v2(
+    db: &Database,
+    profile: &RestrictedServingProfileV2,
+) -> Result<(), PubSubRuntimeAttachError> {
+    verify_with_profile(db, Some(&profile.v1), Some(profile)).await
 }
 
 async fn verify_with_profile(
     db: &Database,
     profile: Option<&RestrictedServingProfileV1>,
+    v2: Option<&RestrictedServingProfileV2>,
 ) -> Result<(), PubSubRuntimeAttachError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(PubSubRuntimeAttachError::AttestedPostgresRequired);
@@ -440,6 +462,15 @@ async fn verify_with_profile(
         tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
             .await?;
     }
+    if let Some(profile) = v2 {
+        verify_restricted_v2_graph_tx(
+            &mut tx,
+            identity,
+            capability.definer_role().as_str(),
+            profile,
+        )
+        .await?;
+    }
     lock_runtime_attach_relations_with_profile_tx(
         &mut tx,
         identity,
@@ -454,6 +485,15 @@ async fn verify_with_profile(
         profile,
     )
     .await?;
+    if let Some(profile) = v2 {
+        verify_restricted_v2_graph_tx(
+            &mut tx,
+            identity,
+            capability.definer_role().as_str(),
+            profile,
+        )
+        .await?;
+    }
     tx.rollback().await?;
     Ok(())
 }
@@ -871,6 +911,143 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
         .await?;
     if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
         return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Check the partial v2 role graph on the same attested transaction as a
+/// participating store. Privileged catalog/ACL mutators must remain fenced.
+pub(crate) async fn verify_restricted_v2_graph_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+    definer: &str,
+    profile: &RestrictedServingProfileV2,
+) -> Result<(), PubSubRuntimeAttachError> {
+    verify_restricted_v1_graph_tx(tx, identity, definer, &profile.v1).await?;
+    let mut unique: std::collections::HashSet<_> =
+        profile.v1.helper_relation_oids.iter().copied().collect();
+    if [profile.epoch_relation_oid, profile.effect_relation_oid]
+        .into_iter()
+        .chain(profile.mam_relation_oids)
+        .any(|oid| oid == 0 || !unique.insert(oid))
+    {
+        return Err(PubSubRuntimeAttachError::InvalidAttachLock);
+    }
+    let mut rows = tx
+        .query(
+            r#"SELECT c.oid::bigint=? AND n.oid::bigint=? AND c.relowner=n.nspowner
+          AND c.relkind='r' AND c.relpersistence='p' AND NOT c.relispartition
+          AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
+                          WHERE i.inhrelid=c.oid OR i.inhparent=c.oid)
+          AND pg_catalog.has_table_privilege(r.oid,c.oid,'SELECT')
+          AND pg_catalog.has_table_privilege(a.oid,c.oid,'SELECT')
+          AND NOT pg_catalog.has_table_privilege(r.oid,c.oid,
+              'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
+          AND NOT pg_catalog.has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')
+          AND NOT pg_catalog.has_table_privilege(a.oid,c.oid,
+              'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
+          AND NOT pg_catalog.has_any_column_privilege(a.oid,c.oid,'INSERT,REFERENCES')
+          AND pg_catalog.has_column_privilege(a.oid,c.oid,'id','UPDATE')
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
+              WHERE col.attrelid=c.oid AND col.attnum>0 AND NOT col.attisdropped
+                AND col.attname<>'id'
+                AND pg_catalog.has_column_privilege(a.oid,c.oid,col.attnum,'UPDATE'))
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+              COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) acl
+              WHERE acl.grantee<>c.relowner AND (
+                acl.grantee NOT IN (r.oid,a.oid,pg_catalog.to_regrole('pg_monitor'))
+                OR acl.grantor<>c.relowner OR acl.privilege_type<>'SELECT' OR acl.is_grantable))
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
+              CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) acl
+              WHERE col.attrelid=c.oid AND col.attnum>0 AND NOT col.attisdropped
+                AND (col.attname<>'id' OR acl.grantee<>a.oid OR acl.grantor<>c.relowner
+                     OR acl.privilege_type<>'UPDATE' OR acl.is_grantable))
+          AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
+              CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) acl
+              WHERE col.attrelid=c.oid AND col.attname='id' AND col.attnum>0
+                AND NOT col.attisdropped AND acl.grantee=a.oid AND acl.grantor=c.relowner
+                AND acl.privilege_type='UPDATE' AND NOT acl.is_grantable)
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          JOIN pg_catalog.pg_roles r ON r.rolname=current_user
+          JOIN pg_catalog.pg_roles a ON a.oid=?::bigint::oid
+          WHERE n.nspname=? AND c.relname='ingress_protocol_epoch'"#,
+            crate::db_params![
+                i64::from(profile.epoch_relation_oid),
+                i64::from(identity.schema.oid),
+                i64::from(profile.v1.api_oid),
+                &identity.schema.name.0
+            ],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(PubSubRuntimeAttachError::InvalidAttachLock);
+    }
+    drop(rows);
+
+    // A and H cannot access another application namespace. R needs USAGE on
+    // the attestor namespace but cannot create objects or access relations
+    // there. System and temporary namespaces have separate built-in ACLs.
+    let mut rows = tx.query(
+        r#"SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n
+             WHERE n.oid<>?::bigint::oid AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+               AND n.nspname<>'information_schema' AND (
+                 pg_catalog.has_schema_privilege(a.oid,n.oid,'USAGE,CREATE')
+                 OR pg_catalog.has_schema_privilege(h.oid,n.oid,'USAGE,CREATE')
+                 OR pg_catalog.has_schema_privilege(r.oid,n.oid,'CREATE')))
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+             WHERE n.oid<>?::bigint::oid AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+               AND n.nspname<>'information_schema' AND CASE
+                 WHEN c.relkind IN ('r','p','v','m','f') THEN
+                   pg_catalog.has_table_privilege(a.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
+                   OR pg_catalog.has_any_column_privilege(a.oid,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
+                   OR pg_catalog.has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
+                   OR pg_catalog.has_any_column_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
+                 WHEN c.relkind='S' THEN pg_catalog.has_sequence_privilege(a.oid,c.oid,'SELECT,USAGE,UPDATE')
+                   OR pg_catalog.has_sequence_privilege(r.oid,c.oid,'SELECT,USAGE,UPDATE')
+                 ELSE false END)
+           FROM pg_catalog.pg_roles a JOIN pg_catalog.pg_roles h ON h.oid=?::bigint::oid
+           JOIN pg_catalog.pg_roles r ON r.rolname=current_user WHERE a.oid=?::bigint::oid"#,
+        crate::db_params![i64::from(identity.schema.oid), i64::from(identity.schema.oid),
+            i64::from(profile.v1.helper_oid), i64::from(profile.v1.api_oid)],
+    ).await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(PubSubRuntimeAttachError::InvalidAttachLock);
+    }
+    Ok(())
+}
+
+/// Catalog-only heap preflight for a separately pinned participating store.
+pub(crate) async fn verify_v2_relation_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+    name: &str,
+    oid: u32,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let mut rows = tx
+        .query(
+            r#"SELECT c.oid::bigint=? AND n.oid::bigint=? AND c.relowner=n.nspowner
+          AND c.relkind='r' AND c.relpersistence='p' AND NOT c.relispartition
+          AND c.relam=(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap')
+          AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND c.reloftype=0
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
+                          WHERE i.inhrelid=c.oid OR i.inhparent=c.oid)
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class=c.oid)
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr
+                          WHERE tr.tgrelid=c.oid AND NOT tr.tgisinternal)
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname=? AND c.relname=?"#,
+            crate::db_params![
+                i64::from(oid),
+                i64::from(identity.schema.oid),
+                &identity.schema.name.0,
+                name
+            ],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(PubSubRuntimeAttachError::InvalidAttachLock);
     }
     Ok(())
 }

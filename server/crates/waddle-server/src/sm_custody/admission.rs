@@ -3,7 +3,7 @@ use sqlx::Row;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 use super::repository::{commit, pg};
-use super::types::db;
+use super::types::{db, ACK_HALF_RANGE};
 use super::{
     CandidateSmMemory, CommittedAdmission, CommittedSlot, CustodyError, HandoffRecovery,
     PreparedDirectFrame, SmCustodyRepository,
@@ -231,7 +231,7 @@ impl SmCustodyRepository {
         .fetch_one(pg(&mut tx)?)
         .await
         .map_err(db)?;
-        if appended - acked >= i64::from(u32::MAX) {
+        if appended - acked >= ACK_HALF_RANGE - 1 {
             return Err(CustodyError::Capacity);
         }
         let ordinal = appended.checked_add(1).ok_or(CustodyError::Overflow)?;
@@ -244,14 +244,18 @@ impl SmCustodyRepository {
         .execute(pg(&mut tx)?)
         .await
         .map_err(db)?;
-        sqlx::query(&format!(
-            "UPDATE {q}.sm_custody_gates SET appended = $2 WHERE gate_id = $1"
+        let changed = sqlx::query(&format!(
+            "UPDATE {q}.sm_custody_gates SET appended = $2 WHERE gate_id = $1 AND $2 - peer_acked < 2147483648"
         ))
         .bind(admission.gate)
         .bind(ordinal)
         .execute(pg(&mut tx)?)
         .await
-        .map_err(db)?;
+        .map_err(db)?
+        .rows_affected();
+        if changed != 1 {
+            return Err(CustodyError::Capacity);
+        }
         self.fresh_principal(&mut tx).await?;
         commit(tx).await?;
         Ok(CommittedSlot {

@@ -111,7 +111,7 @@ pub(super) async fn store_session_atomic_with_ingress_delivery(
 }
 
 /// How a snapshot write touches the ingress allocation ledger.
-enum Ledger {
+pub(super) enum Ledger {
     Untouched,
     /// One obligation gates the whole write: a conflict commits nothing.
     Exclusive(Box<PersistedIngressAppend>),
@@ -121,7 +121,7 @@ enum Ledger {
     Drained(Vec<PersistedIngressAppend>),
 }
 
-enum StoreOutcome {
+pub(super) enum StoreOutcome {
     ObligationAlreadyResolved,
     Committed {
         withheld: Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
@@ -141,12 +141,7 @@ async fn store_session_atomic_inner(
     let lock = storage.lock_for(&session.stream_id);
     let _guard = lock.lock().await;
 
-    let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
-        .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
-    let detached_at_ms = session.detached_at.timestamp_millis();
-    let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
-    let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
-    let encoded_principal = principal.map(encode_session_principal).transpose()?;
+    let prepared = PreparedSnapshot::new(principal, &session, &unacked)?;
 
     let mut tx = storage
         .db
@@ -162,6 +157,94 @@ async fn store_session_atomic_inner(
         }
     }
 
+    let outcome = match apply_snapshot_in_transaction(&mut tx, &prepared, &ledger).await {
+        Ok(outcome) => outcome,
+        Err(SnapshotApplyError::Storage(error)) => return Err(error),
+        Err(SnapshotApplyError::LedgerError { error, conflict }) => {
+            let append = match &ledger {
+                Ledger::Exclusive(append) | Ledger::NewDelivery(append) => append,
+                Ledger::Untouched | Ledger::Drained(_) => {
+                    return Err(SmPersistenceError::Other(
+                        "unexpected snapshot ledger conflict".into(),
+                    ));
+                }
+            };
+            tx.rollback()
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            if !conflict {
+                return Err(SmPersistenceError::Other(error.to_string()));
+            }
+            let winner = ingress_append::get(&storage.db, &append.key)
+                .await?
+                .ok_or_else(|| {
+                    SmPersistenceError::Other(
+                        "ingress append conflict winner missing after rollback".into(),
+                    )
+                })?;
+            return Ok(StoreOutcome::ObligationAlreadyAllocated {
+                accepting_stream: winner.accepting_stream,
+            });
+        }
+    };
+    tx.commit()
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    Ok(outcome)
+}
+
+/// A snapshot's encoding is prepared before the existing wrapper opens a
+/// transaction, preserving its failure and lock behavior.
+pub(super) struct PreparedSnapshot<'a> {
+    session: &'a PersistedSession,
+    unacked: &'a [PersistedUnackedStanza],
+    max_resume_duration_ms: i64,
+    detached_at_ms: i64,
+    presence_show_str: Option<&'static str>,
+    presence_payloads_xml: Option<String>,
+    encoded_principal: Option<crate::sm_persistence::codec::EncodedSessionPrincipal>,
+}
+
+impl<'a> PreparedSnapshot<'a> {
+    pub(super) fn new(
+        principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        session: &'a PersistedSession,
+        unacked: &'a [PersistedUnackedStanza],
+    ) -> Result<Self, SmPersistenceError> {
+        Ok(Self {
+            session,
+            unacked,
+            max_resume_duration_ms: i64::try_from(session.max_resume_duration.as_millis())
+                .map_err(|_| {
+                    SmPersistenceError::Other("max_resume_duration overflows i64".into())
+                })?,
+            detached_at_ms: session.detached_at.timestamp_millis(),
+            presence_show_str: session.presence_show.as_ref().map(show_wire_str),
+            presence_payloads_xml: serialize_presence_payloads(&session.presence_payloads)?,
+            encoded_principal: principal.map(encode_session_principal).transpose()?,
+        })
+    }
+}
+
+pub(super) enum SnapshotApplyError {
+    Storage(SmPersistenceError),
+    /// PostgreSQL has aborted this transaction. Roll it back before reading
+    /// the winning allocation on another connection.
+    LedgerError {
+        error: crate::db::DatabaseError,
+        conflict: bool,
+    },
+}
+
+/// Apply the existing portable snapshot SQL in the caller's transaction.
+/// The caller must authorize any new delivery before entering this function;
+/// this body never acquires a canonical-source lock after the session gate.
+pub(super) async fn apply_snapshot_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    prepared: &PreparedSnapshot<'_>,
+    ledger: &Ledger,
+) -> Result<StoreOutcome, SnapshotApplyError> {
+    let session = prepared.session;
     // Drop any pre-existing unacked rows for this stream_id
     // BEFORE the inserts so a previous `persist_delete_session`
     // failure (eviction path logs-and-swallows) doesn't trip the
@@ -179,7 +262,7 @@ async fn store_session_atomic_inner(
         crate::db_params![session.stream_id.as_str().to_string()],
     )
     .await
-    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    .map_err(|e| SnapshotApplyError::Storage(SmPersistenceError::Other(e.to_string())))?;
 
     // Refreshes preserve the first durable detach timestamp: traffic cannot
     // renew the existing session's resume window. A later detach after source
@@ -226,36 +309,36 @@ async fn store_session_atomic_inner(
             i64::from(session.outbound_count),
             i64::from(session.last_acked),
             session.max_resume_time.map(i64::from),
-            detached_at_ms,
-            max_resume_duration_ms,
+            prepared.detached_at_ms,
+            prepared.max_resume_duration_ms,
             i64::from(session.carbons_enabled),
             i64::from(session.roster_interested),
             i64::from(session.blocklist_interested),
             i64::from(session.presence_available),
-            presence_show_str.map(str::to_string),
+            prepared.presence_show_str.map(str::to_string),
             session.presence_status.clone(),
             i64::from(session.presence_priority),
             session.replay_gap_through.map(i64::from),
-            presence_payloads_xml,
-            encoded_principal
+            prepared.presence_payloads_xml.clone(),
+            prepared.encoded_principal
                 .as_ref()
                 .map(|principal| principal.bare_jid.clone()),
-            encoded_principal
+            prepared.encoded_principal
                 .as_ref()
                 .map(|principal| principal.auth_context_id.clone()),
-            encoded_principal
+            prepared.encoded_principal
                 .as_ref()
                 .map(|principal| principal.auth_context_version),
-            encoded_principal
+            prepared.encoded_principal
                 .as_ref()
                 .map(|principal| principal.principal_auth_epoch),
         ],
     )
     .await
-    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    .map_err(|e| SnapshotApplyError::Storage(SmPersistenceError::Other(e.to_string())))?;
 
-    for stanza in &unacked {
-        let xml = serialize_stanza(&stanza.stanza)?;
+    for stanza in prepared.unacked {
+        let xml = serialize_stanza(&stanza.stanza).map_err(SnapshotApplyError::Storage)?;
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
         tx.execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \
@@ -270,42 +353,22 @@ async fn store_session_atomic_inner(
             ],
         )
         .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        .map_err(|e| SnapshotApplyError::Storage(SmPersistenceError::Other(e.to_string())))?;
     }
 
     let mut withheld = Vec::new();
     if let Ledger::Drained(appends) = &ledger {
-        withheld = ingress_append::insert_or_withhold(&mut tx, appends)
+        withheld = ingress_append::insert_or_withhold(tx, appends)
             .await
-            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            .map_err(|error| {
+                SnapshotApplyError::Storage(SmPersistenceError::Other(error.to_string()))
+            })?;
     }
     if let Ledger::Exclusive(append) | Ledger::NewDelivery(append) = ledger {
-        match ingress_append::insert(&mut tx, &append).await {
-            Ok(()) => {}
-            Err(error) => {
-                let conflict = ingress_append::is_ledger_conflict(&error);
-                tx.rollback()
-                    .await
-                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-                if conflict {
-                    let winner = ingress_append::get(&storage.db, &append.key)
-                        .await?
-                        .ok_or_else(|| {
-                            SmPersistenceError::Other(
-                                "ingress append conflict winner missing after rollback".into(),
-                            )
-                        })?;
-                    return Ok(StoreOutcome::ObligationAlreadyAllocated {
-                        accepting_stream: winner.accepting_stream,
-                    });
-                }
-                return Err(SmPersistenceError::Other(error.to_string()));
-            }
+        if let Err(error) = ingress_append::insert(tx, append).await {
+            let conflict = ingress_append::is_ledger_conflict(&error);
+            return Err(SnapshotApplyError::LedgerError { error, conflict });
         }
     }
-
-    tx.commit()
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     Ok(StoreOutcome::Committed { withheld })
 }

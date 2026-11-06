@@ -92,8 +92,8 @@ against V1030.
    set before the gate, then revalidate the entire contiguous prefix.
    Convert the existing gate-first Rust paths and SQL admission/handoff
    triggers together so no gate-to-canonical inversion survives.
-   Preserve contiguous ordered exposure/replay and a durable exposed window
-   smaller than 2^32 before validating a wrapping XEP-0198 ACK. Quiesce the
+   Preserve contiguous ordered exposure/replay and a durable outstanding window
+   smaller than 2^31 before validating a wrapping XEP-0198 ACK. Quiesce the
    exact published pump and in-flight socket output outside the DB transaction,
    then re-enter and revalidate sibling inventory before pending acceptance.
    ACK, transfer, tombstone, late counted drains, pending and canonical GC
@@ -207,3 +207,27 @@ prove the full selected path; a partial store or writer conversion cannot
 relax either startup refusal. GitHub Actions and workflow files stay disabled
 until the whole #2046 implementation is finished, then `cuenv sync -A` and
 exact-release CI are required.
+
+## Dark #2245 boundary limits
+
+The v2 A/H/MAM/effect profile is an opt-in partial diagnostic. It neither
+registers a serving profile nor reconciles every enabled store and definer
+chain. Its MAM inspection uses a separate transaction and is not one atomic
+all-store receipt; privileged mutators and MAM writers must be quiescent.
+The same-session catalog-fence observation holds its shared advisory
+lock from before the pinned attestor's reads through acknowledged rollback;
+it does not enter the pool hook. The attestor also takes a blocking lineage
+lock, so a mutator with an incompatible catalog/lineage lock order can still
+create a cycle or force a bounded failure, even if it uses the fence. Every
+privileged mutator and old backend must participate with a consistent order or
+be independently quiesced before a selected startup can rely on this fence.
+
+The SM snapshot laboratory owns its transaction through a complete apply,
+but its caller must supply an authoritative captured occurrence or generation
+before a stale input can replace a newer durable frame. Borrowed append and
+promotion interfaces require the caller to roll back on cancellation; an
+interrupted partial write can leave untracked state that conservatively
+blocks pending acceptance. The candidate is not wired to the production
+writer, socket, pending selector, or GC. The durable custody candidate now
+limits `appended - peer_acked` to less than 2^31, matching the live validator,
+but replay selection and restart qualification remain open.

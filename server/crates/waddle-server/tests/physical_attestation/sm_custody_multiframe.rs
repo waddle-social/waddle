@@ -152,6 +152,64 @@ async fn postgres_multiframe_concurrent_bind_hydration_exposure_and_ack_prefix()
 }
 
 #[tokio::test]
+async fn postgres_multiframe_refuses_ambiguous_ack_window_at_half_range() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let c = Candidate::new().await;
+    let repo = c.repository();
+    let first = repo
+        .admit(&c.frame, &c.lease)
+        .await
+        .expect("first admission");
+    let second = source(&c, "half-range limit").await;
+    let second = repo
+        .admit(&second.0, &second.1)
+        .await
+        .expect("second admission");
+    sqlx::query(&format!(
+        "UPDATE {}.sm_custody_gates SET appended=2147483646,exposed=2147483646 WHERE gate_id=$1",
+        c.fixture.target
+    ))
+    .bind(c.capture.gate_id)
+    .execute(&c.fixture.admin)
+    .await
+    .expect("seed pre-boundary frontier");
+
+    assert_eq!(
+        repo.bind(&first)
+            .await
+            .expect("last unambiguous slot")
+            .ordinal(),
+        2147483647
+    );
+    assert!(matches!(
+        repo.bind(&second).await,
+        Err(CustodyError::Capacity)
+    ));
+    assert!(
+        sqlx::query(&format!(
+            "UPDATE {}.sm_custody_gates SET appended=2147483648 WHERE gate_id=$1",
+            c.fixture.target
+        ))
+        .bind(c.capture.gate_id)
+        .execute(&c.fixture.admin)
+        .await
+        .is_err(),
+        "durable check also rejects a raw ambiguous frontier"
+    );
+    let frontier: (i64, i64, i64) = sqlx::query_as(&format!(
+        "SELECT appended,exposed,peer_acked FROM {}.sm_custody_gates WHERE gate_id=$1",
+        c.fixture.target
+    ))
+    .bind(c.capture.gate_id)
+    .fetch_one(&c.fixture.admin)
+    .await
+    .expect("frontier is unchanged after refusal");
+    assert_eq!(frontier, (2147483647, 2147483646, 0));
+    drop(repo);
+    c.fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_multiframe_wrap_gap_and_transfer_conflict() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let c = Candidate::new().await;

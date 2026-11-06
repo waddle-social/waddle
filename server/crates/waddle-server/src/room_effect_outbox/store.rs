@@ -170,6 +170,19 @@ impl RoomEffectOutboxStore {
             },
         })
     }
+
+    /// Diagnose the effect relation against the partial v2 role profile. The
+    /// evidence exposes no mutation or serving authority.
+    pub async fn verify_effect_outbox_v2(
+        db: Database,
+        profile: &crate::pubsub::RestrictedServingProfileV2,
+    ) -> Result<VerifiedRoomEffectOutbox, super::RoomEffectRuntimeAttachError> {
+        let capability = super::runtime_attach::verify_effect_outbox_v2(&db, profile).await?;
+        Ok(VerifiedRoomEffectOutbox {
+            capability,
+            _db: db,
+        })
+    }
     pub fn database(&self) -> &Database {
         &self.db
     }

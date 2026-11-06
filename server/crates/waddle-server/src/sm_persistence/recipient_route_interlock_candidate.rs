@@ -13,7 +13,6 @@ use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::pending_delivery::{InsertOutcome, PendingRow, QuotaPolicy};
 use waddle_xmpp::stream_management::persistence::PersistedUnackedStanza;
-use waddle_xmpp::stream_management::SmFrameProvenance;
 use waddle_xmpp::Stanza;
 
 use crate::db::{DatabaseDriver, Rows, Transaction};
@@ -48,6 +47,12 @@ pub enum CandidateRouteError {
     OutstandingSm,
     #[error("candidate recipient and payload identities differ")]
     Identity,
+    #[error("frame provenance or owner is unsupported")]
+    UnsupportedProvenance,
+    #[error("snapshot inventory changed; roll back and retry in a new transaction")]
+    Retry,
+    #[error("snapshot ledger conflict; roll back before looking up the winner")]
+    LedgerConflict,
     #[error("recipient route candidate requires PostgreSQL")]
     PostgresRequired,
     #[error("recipient route candidate requires READ COMMITTED")]
@@ -56,15 +61,25 @@ pub enum CandidateRouteError {
     Storage(String),
 }
 
-/// Acquire canonical sources in UUID order, then source guards in that order,
-/// then the bare-recipient route row. Keep the caller transaction open through
-/// the selected append or pending insert.
-pub async fn lock_sources_then_recipient(
+/// Lock the complete route set before any session gate. Ordering is global:
+/// all distinct sources, then all (source, recipient) pairs, then recipients.
+/// A caller must never add another source to this transaction after the gate.
+pub async fn lock_source_recipient_set(
     tx: &mut Transaction<'_>,
     schema: &str,
-    sources: &[Uuid],
-    recipient: &BareJid,
+    routes: &[(Uuid, BareJid)],
 ) -> Result<bool, CandidateRouteError> {
+    lock_route_set(tx, schema, routes, &[]).await
+}
+
+async fn lock_route_set(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    routes: &[(Uuid, BareJid)],
+    extra_recipients: &[BareJid],
+) -> Result<bool, CandidateRouteError> {
+    use std::collections::BTreeSet;
+
     if tx.driver() != DatabaseDriver::Postgres {
         return Err(CandidateRouteError::PostgresRequired);
     }
@@ -91,11 +106,18 @@ pub async fn lock_sources_then_recipient(
     )
     .await
     .map_err(storage)?;
-    let mut sources = sources.to_vec();
-    sources.sort_unstable();
-    sources.dedup();
+    let routes: BTreeSet<(Uuid, String)> = routes
+        .iter()
+        .map(|(source, recipient)| (*source, recipient.to_string()))
+        .collect();
+    let sources: BTreeSet<Uuid> = routes.iter().map(|(source, _)| *source).collect();
+    let recipients: BTreeSet<String> = routes
+        .iter()
+        .map(|(_, recipient)| recipient.clone())
+        .chain(extra_recipients.iter().map(ToString::to_string))
+        .collect();
 
-    for source in &sources {
+    for source in sources {
         let rows = tx
             .query(
                 &format!("SELECT 1 FROM {schema}.ingress_messages WHERE message_key = ?::uuid FOR UPDATE"),
@@ -109,9 +131,7 @@ pub async fn lock_sources_then_recipient(
             ));
         }
     }
-
-    let recipient = recipient.to_string();
-    for source in sources {
+    for (source, recipient) in &routes {
         tx.execute(
             &format!("INSERT INTO {schema}.sm_recipient_route_source_guards (message_key, recipient) VALUES (?::uuid, ?) ON CONFLICT DO NOTHING"),
             crate::db_params![source.to_string(), recipient.clone()],
@@ -131,30 +151,50 @@ pub async fn lock_sources_then_recipient(
             ));
         }
     }
-
-    tx.execute(
-        &format!("INSERT INTO {schema}.sm_recipient_route_guards (recipient) VALUES (?) ON CONFLICT DO NOTHING"),
-        crate::db_params![recipient.clone()],
-    )
-    .await
-    .map_err(storage)?;
-    let mut rows = tx
-        .query(
-            &format!("SELECT closed FROM {schema}.sm_recipient_route_guards WHERE recipient = ? FOR UPDATE"),
-            crate::db_params![recipient],
+    let mut all_open = true;
+    for recipient in recipients {
+        tx.execute(
+            &format!("INSERT INTO {schema}.sm_recipient_route_guards (recipient) VALUES (?) ON CONFLICT DO NOTHING"),
+            crate::db_params![recipient.clone()],
         )
         .await
         .map_err(storage)?;
-    let Some(row) = rows.next().await.map_err(storage)? else {
-        return Err(CandidateRouteError::Storage(
-            "recipient guard disappeared".into(),
-        ));
-    };
-    let closed: bool = row.get(0).map_err(storage)?;
-    Ok(!closed)
+        let mut rows = tx
+            .query(
+                &format!("SELECT closed FROM {schema}.sm_recipient_route_guards WHERE recipient = ? FOR UPDATE"),
+                crate::db_params![recipient],
+            )
+            .await
+            .map_err(storage)?;
+        let Some(row) = rows.next().await.map_err(storage)? else {
+            return Err(CandidateRouteError::Storage(
+                "recipient guard disappeared".into(),
+            ));
+        };
+        let closed: bool = row.get(0).map_err(storage)?;
+        all_open &= !closed;
+    }
+    Ok(all_open)
 }
 
-/// Exercise the existing portable SM INSERT after the shared interlock.
+/// Compatibility wrapper for the original single-recipient laboratory.
+pub async fn lock_sources_then_recipient(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    sources: &[Uuid],
+    recipient: &BareJid,
+) -> Result<bool, CandidateRouteError> {
+    let routes: Vec<_> = sources
+        .iter()
+        .map(|source| (*source, recipient.clone()))
+        .collect();
+    if routes.is_empty() {
+        return Err(CandidateRouteError::Identity);
+    }
+    lock_source_recipient_set(tx, schema, &routes).await
+}
+
+/// The old laboratory API accepts a single canonical source only.
 pub async fn append_unacked_if_open(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -162,44 +202,430 @@ pub async fn append_unacked_if_open(
     recipient: &BareJid,
     stanza: &PersistedUnackedStanza,
 ) -> Result<(), CandidateRouteError> {
-    if stanza_recipient(stanza) != Some(recipient.clone()) {
+    if !stanza.provenance.claims().is_some_and(|claims| {
+        !claims.is_empty()
+            && claims
+                .iter()
+                .all(|claim| claim.message_key.to_storage() == source)
+    }) {
         return Err(CandidateRouteError::Identity);
     }
-    if !lock_sources_then_recipient(tx, schema, &[source], recipient).await? {
+    append_complete_sources_if_open(tx, schema, recipient, stanza).await
+}
+
+/// Exercise the production ordinary append after every claimed source and the
+/// recipient route. The caller owns commit and must roll back on every error
+/// or cancellation. Committing after interruption can leave an ownerless frame
+/// that conservatively blocks pending acceptance; this remains a dark lab.
+pub async fn append_complete_sources_if_open(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    recipient: &BareJid,
+    stanza: &PersistedUnackedStanza,
+) -> Result<(), CandidateRouteError> {
+    let full = frame_resource(stanza, recipient)?;
+    let routes = frame_routes(stanza, &full)?;
+    if !lock_source_recipient_set(tx, schema, &routes).await? {
         return Err(CandidateRouteError::Closed);
     }
-    let qualified_schema = validated_schema(schema)?;
-    let mut sessions = tx
-        .query(
-            &format!("SELECT bare_jid, full_jid FROM {qualified_schema}.sm_sessions WHERE stream_id = ? FOR UPDATE"),
-            crate::db_params![stanza.stream_id.as_str().to_string()],
-        )
+    lock_stream_gate(tx, &stanza.stream_id).await?;
+    require_session(tx, schema, &stanza.stream_id, &full).await?;
+    super::implementation::append_unacked_in_transaction(tx, stanza)
         .await
         .map_err(storage)?;
+    insert_owner(tx, schema, stanza, recipient).await
+}
+
+/// Exercise the real promotion suffix allocator under the same route locks.
+/// The caller must roll back after any error or cancellation, including a SQL
+/// conflict. Committing an interrupted append can leave owner or watermark
+/// state incomplete; this borrowed transaction interface remains unselected.
+pub async fn append_promotion_if_open(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    recipient: &BareJid,
+    stanza: PersistedUnackedStanza,
+) -> Result<waddle_xmpp::stream_management::persistence::PromotionAppendOutcome, CandidateRouteError>
+{
+    use waddle_xmpp::stream_management::persistence::PromotionAppendOutcome;
+
+    let full = frame_resource(&stanza, recipient)?;
+    let routes = frame_routes(&stanza, &full)?;
+    if !lock_source_recipient_set(tx, schema, &routes).await? {
+        return Err(CandidateRouteError::Closed);
+    }
+    lock_stream_gate(tx, &stanza.stream_id).await?;
+    require_session(tx, schema, &stanza.stream_id, &full).await?;
+    let outcome = super::promotion_inventory::append(tx, stanza.clone(), DatabaseDriver::Postgres)
+        .await
+        .map_err(storage)?;
+    match outcome {
+        PromotionAppendOutcome::Appended => insert_owner(tx, schema, &stanza, recipient).await?,
+        PromotionAppendOutcome::AlreadyRecorded => {
+            let schema = validated_schema(schema)?;
+            let mut rows = tx.query(
+                &format!("SELECT recipient FROM {schema}.sm_recipient_route_frame_owners WHERE stream_id = ? AND sequence = ?"),
+                crate::db_params![stanza.stream_id.as_str(), i64::from(stanza.sequence)],
+            ).await.map_err(storage)?;
+            let owner = rows
+                .next()
+                .await
+                .map_err(storage)?
+                .ok_or(CandidateRouteError::UnsupportedProvenance)?;
+            let owner: String = owner.get(0).map_err(storage)?;
+            if owner != recipient.to_string() {
+                return Err(CandidateRouteError::Identity);
+            }
+        }
+        PromotionAppendOutcome::Retired => {}
+    }
+    Ok(outcome)
+}
+
+async fn lock_stream_gate(
+    tx: &mut Transaction<'_>,
+    stream: &waddle_xmpp::pending_delivery::SmSessionId,
+) -> Result<(), CandidateRouteError> {
+    // This candidate-only two-key advisory namespace also serializes creation
+    // when no sm_sessions row exists. Hash collisions only serialize streams.
+    tx.execute(
+        "SELECT pg_catalog.pg_advisory_xact_lock(1463895108, pg_catalog.hashtext(?))",
+        crate::db_params![stream.as_str()],
+    )
+    .await
+    .map_err(storage)?;
+    Ok(())
+}
+
+async fn require_session(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    stream: &waddle_xmpp::pending_delivery::SmSessionId,
+    full: &jid::FullJid,
+) -> Result<(), CandidateRouteError> {
+    let schema = validated_schema(schema)?;
+    let mut sessions = tx.query(
+        &format!("SELECT bare_jid, full_jid FROM {schema}.sm_sessions WHERE stream_id = ? FOR UPDATE"),
+        crate::db_params![stream.as_str()],
+    ).await.map_err(storage)?;
     let Some(session) = sessions.next().await.map_err(storage)? else {
         return Err(CandidateRouteError::Identity);
     };
     let session_bare: Option<String> = session.get(0).map_err(storage)?;
     let session_full: String = session.get(1).map_err(storage)?;
-    let session_full = session_full
-        .parse::<jid::FullJid>()
-        .map_err(|_| CandidateRouteError::Identity)?;
-    if session_bare.as_deref() != Some(recipient.to_string().as_str())
-        || session_full.to_bare() != *recipient
-        || !provenance_matches_source(&stanza.provenance, source, &session_full)
+    if session_bare.as_deref() != Some(full.to_bare().to_string().as_str())
+        || session_full != full.to_string()
     {
         return Err(CandidateRouteError::Identity);
     }
-    super::implementation::append_unacked_in_transaction(tx, stanza)
-        .await
-        .map_err(|error| CandidateRouteError::Storage(error.to_string()))?;
-    tx.execute(
-        &format!("INSERT INTO {qualified_schema}.sm_recipient_route_frame_owners (stream_id, sequence, recipient) VALUES (?, ?, ?)"),
-        crate::db_params![stanza.stream_id.as_str().to_string(), i64::from(stanza.sequence), recipient.to_string()],
-    )
-    .await
-    .map_err(storage)?;
     Ok(())
+}
+
+async fn insert_owner(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    stanza: &PersistedUnackedStanza,
+    recipient: &BareJid,
+) -> Result<(), CandidateRouteError> {
+    let schema = validated_schema(schema)?;
+    tx.execute(
+        &format!("INSERT INTO {schema}.sm_recipient_route_frame_owners (stream_id, sequence, recipient) VALUES (?, ?, ?)"),
+        crate::db_params![stanza.stream_id.as_str(), i64::from(stanza.sequence), recipient.to_string()],
+    ).await.map_err(storage)?;
+    Ok(())
+}
+
+fn frame_resource(
+    stanza: &PersistedUnackedStanza,
+    recipient: &BareJid,
+) -> Result<jid::FullJid, CandidateRouteError> {
+    if stanza_recipient(stanza) != Some(recipient.clone()) {
+        return Err(CandidateRouteError::Identity);
+    }
+    let claims = stanza
+        .provenance
+        .claims()
+        .ok_or(CandidateRouteError::UnsupportedProvenance)?;
+    let first = claims
+        .first()
+        .ok_or(CandidateRouteError::UnsupportedProvenance)?;
+    if first.resource.to_bare() != *recipient
+        || claims.iter().any(|claim| claim.resource != first.resource)
+    {
+        return Err(CandidateRouteError::Identity);
+    }
+    Ok(first.resource.clone())
+}
+
+fn frame_routes(
+    stanza: &PersistedUnackedStanza,
+    full: &jid::FullJid,
+) -> Result<Vec<(Uuid, BareJid)>, CandidateRouteError> {
+    let claims = stanza
+        .provenance
+        .claims()
+        .ok_or(CandidateRouteError::UnsupportedProvenance)?;
+    if claims.is_empty() || claims.iter().any(|claim| claim.resource != *full) {
+        return Err(CandidateRouteError::UnsupportedProvenance);
+    }
+    Ok(claims
+        .iter()
+        .map(|claim| (claim.message_key.to_storage(), full.to_bare()))
+        .collect())
+}
+
+/// Which existing snapshot ledger behavior to exercise in the dark candidate.
+pub enum CandidateSnapshotLedger {
+    Untouched,
+    Exclusive(waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
+    NewDelivery(waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
+    Drained(Vec<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CandidateSnapshotOutcome {
+    Applied {
+        withheld: Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
+    },
+    AlreadyResolved,
+}
+
+/// Replace a portable snapshot under its complete old/new route inventory.
+///
+/// The operation owns its transaction until the complete mutation succeeds.
+/// Cancellation drops that transaction; an error explicitly rolls it back.
+/// A conflict winner may be read only after the returned error, using a fresh
+/// transaction. Success returns the transaction and is not a commit; an
+/// uncertain COMMIT requires positive reconciliation by the owner. This dark
+/// laboratory assumes every competing SM writer uses the same gates. The
+/// inventory recheck does not prove that the caller's snapshot includes writes
+/// already committed before discovery; selecting this path requires a separate
+/// captured-occurrence or generation authority for that input.
+pub async fn store_snapshot_if_open<'a>(
+    mut tx: Transaction<'a>,
+    schema: &str,
+    principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+    session: &waddle_xmpp::stream_management::persistence::PersistedSession,
+    unacked: &[PersistedUnackedStanza],
+    ledger: CandidateSnapshotLedger,
+) -> Result<(Transaction<'a>, CandidateSnapshotOutcome), CandidateRouteError> {
+    match store_snapshot_in_transaction(&mut tx, schema, principal, session, unacked, ledger).await
+    {
+        Ok(outcome) => Ok((tx, outcome)),
+        Err(error) => {
+            tx.rollback().await.map_err(storage)?;
+            Err(error)
+        }
+    }
+}
+
+async fn store_snapshot_in_transaction(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+    session: &waddle_xmpp::stream_management::persistence::PersistedSession,
+    unacked: &[PersistedUnackedStanza],
+    ledger: CandidateSnapshotLedger,
+) -> Result<CandidateSnapshotOutcome, CandidateRouteError> {
+    use super::atomic_store::{Ledger, PreparedSnapshot, SnapshotApplyError, StoreOutcome};
+
+    if principal.is_some_and(|principal| principal.bare_jid() != &session.jid.to_bare()) {
+        return Err(CandidateRouteError::Identity);
+    }
+    let prepared = PreparedSnapshot::new(principal, session, unacked).map_err(storage)?;
+    let mut routes = Vec::new();
+    for frame in unacked {
+        if frame.stream_id != session.stream_id
+            || frame_resource(frame, &session.jid.to_bare())? != session.jid
+        {
+            return Err(CandidateRouteError::Identity);
+        }
+        routes.extend(frame_routes(frame, &session.jid)?);
+    }
+    let ledger = match ledger {
+        CandidateSnapshotLedger::Untouched => Ledger::Untouched,
+        CandidateSnapshotLedger::Exclusive(append) => Ledger::Exclusive(Box::new(append)),
+        CandidateSnapshotLedger::NewDelivery(append) => Ledger::NewDelivery(Box::new(append)),
+        CandidateSnapshotLedger::Drained(appends) => Ledger::Drained(appends),
+    };
+    let appends: Vec<_> = match &ledger {
+        Ledger::Untouched => Vec::new(),
+        Ledger::Exclusive(append) | Ledger::NewDelivery(append) => vec![append.as_ref()],
+        Ledger::Drained(appends) => appends.iter().collect(),
+    };
+    for append in appends {
+        if append.accepting_stream != session.stream_id
+            || append.key.resource != session.jid
+            || append.disposition
+                != waddle_xmpp::stream_management::persistence::IngressCustodyDisposition::Pending
+        {
+            return Err(CandidateRouteError::Identity);
+        }
+        routes.push((append.key.message_key.to_storage(), session.jid.to_bare()));
+    }
+
+    let old = read_snapshot_inventory(tx, schema, &session.stream_id, false).await?;
+    if let Some((bare, full, _)) = &old.session {
+        if *bare != session.jid.to_bare().to_string() || *full != session.jid.to_string() {
+            return Err(CandidateRouteError::Identity);
+        }
+    } else if principal.is_none() {
+        return Err(CandidateRouteError::Identity);
+    }
+    routes.extend(old.routes()?);
+    let mut recipients = vec![session.jid.to_bare()];
+    if let Some((bare, _, _)) = &old.session {
+        recipients.push(bare.parse().map_err(|_| CandidateRouteError::Identity)?);
+    }
+    if !lock_route_set(tx, schema, &routes, &recipients).await? {
+        return Err(CandidateRouteError::Closed);
+    }
+    // New-delivery authorization's source is already in `routes`. This call
+    // deliberately precedes the gate; no helper below may discover a source.
+    if let Ledger::NewDelivery(append) = &ledger {
+        if super::ingress_append::authorize_new_delivery(tx, &append.key)
+            .await
+            .map_err(storage)?
+            == super::ingress_append::NewDeliveryAuthorization::AlreadyResolved
+        {
+            return Ok(CandidateSnapshotOutcome::AlreadyResolved);
+        }
+    }
+    lock_stream_gate(tx, &session.stream_id).await?;
+    let current = read_snapshot_inventory(tx, schema, &session.stream_id, true).await?;
+    if current != old {
+        return Err(CandidateRouteError::Retry);
+    }
+
+    let outcome = match super::atomic_store::apply_snapshot_in_transaction(tx, &prepared, &ledger)
+        .await
+    {
+        Ok(StoreOutcome::Committed { withheld }) => CandidateSnapshotOutcome::Applied { withheld },
+        Ok(
+            StoreOutcome::ObligationAlreadyResolved
+            | StoreOutcome::ObligationAlreadyAllocated { .. },
+        ) => {
+            return Err(CandidateRouteError::Storage(
+                "unexpected snapshot apply outcome".into(),
+            ));
+        }
+        Err(SnapshotApplyError::LedgerError { conflict: true, .. }) => {
+            return Err(CandidateRouteError::LedgerConflict)
+        }
+        Err(SnapshotApplyError::LedgerError {
+            error,
+            conflict: false,
+        }) => return Err(storage(error)),
+        Err(SnapshotApplyError::Storage(error)) => return Err(storage(error)),
+    };
+    for frame in unacked {
+        insert_owner(tx, schema, frame, &session.jid.to_bare()).await?;
+    }
+    Ok(outcome)
+}
+
+#[derive(PartialEq, Eq)]
+struct SnapshotInventory {
+    session: Option<(String, String, String)>,
+    frames: Vec<SnapshotFrame>,
+}
+
+#[derive(PartialEq, Eq)]
+struct SnapshotFrame {
+    sequence: i64,
+    stanza_xml: String,
+    receipt_ms: i64,
+    ingress_receipts: Option<Vec<u8>>,
+    provenance: Option<Vec<u8>>,
+    owner: Option<String>,
+}
+
+impl SnapshotInventory {
+    fn routes(&self) -> Result<Vec<(Uuid, BareJid)>, CandidateRouteError> {
+        let Some((bare, full, _)) = &self.session else {
+            return if self.frames.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(CandidateRouteError::UnsupportedProvenance)
+            };
+        };
+        let full: jid::FullJid = full.parse().map_err(|_| CandidateRouteError::Identity)?;
+        let bare: BareJid = bare.parse().map_err(|_| CandidateRouteError::Identity)?;
+        if full.to_bare() != bare {
+            return Err(CandidateRouteError::Identity);
+        }
+        let mut routes = Vec::new();
+        for frame in &self.frames {
+            if frame.owner.as_deref() != Some(bare.to_string().as_str()) {
+                return Err(CandidateRouteError::UnsupportedProvenance);
+            }
+            let provenance = frame
+                .provenance
+                .as_deref()
+                .map(waddle_xmpp::stream_management::SmFrameProvenance::decode)
+                .ok_or(CandidateRouteError::UnsupportedProvenance)?;
+            let claims = provenance
+                .claims()
+                .ok_or(CandidateRouteError::UnsupportedProvenance)?;
+            if claims.is_empty() || claims.iter().any(|claim| claim.resource != full) {
+                return Err(CandidateRouteError::UnsupportedProvenance);
+            }
+            routes.extend(
+                claims
+                    .iter()
+                    .map(|claim| (claim.message_key.to_storage(), bare.clone())),
+            );
+        }
+        Ok(routes)
+    }
+}
+
+async fn read_snapshot_inventory(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    stream: &waddle_xmpp::pending_delivery::SmSessionId,
+    lock_session: bool,
+) -> Result<SnapshotInventory, CandidateRouteError> {
+    let schema = validated_schema(schema)?;
+    let suffix = if lock_session { " FOR UPDATE" } else { "" };
+    let mut sessions = tx.query(
+        &format!("SELECT s.bare_jid, s.full_jid, pg_catalog.row_to_json(s)::text FROM {schema}.sm_sessions s WHERE s.stream_id = ?{suffix}"),
+        crate::db_params![stream.as_str()],
+    ).await.map_err(storage)?;
+    let session = match sessions.next().await.map_err(storage)? {
+        Some(row) => {
+            let bare: Option<String> = row.get(0).map_err(storage)?;
+            let full: String = row.get(1).map_err(storage)?;
+            let state: String = row.get(2).map_err(storage)?;
+            Some((
+                bare.ok_or(CandidateRouteError::UnsupportedProvenance)?,
+                full,
+                state,
+            ))
+        }
+        None => None,
+    };
+    let bounded =
+        super::codec::bounded_provenance_projection(DatabaseDriver::Postgres, "u.provenance");
+    let mut rows = tx.query(
+        &format!("SELECT u.sequence, u.stanza_xml, u.original_receipt_at_ms, u.ingress_receipts, {bounded}, f.recipient FROM {schema}.sm_unacked u LEFT JOIN {schema}.sm_recipient_route_frame_owners f ON f.stream_id = u.stream_id AND f.sequence = u.sequence WHERE u.stream_id = ? ORDER BY u.sequence"),
+        crate::db_params![stream.as_str()],
+    ).await.map_err(storage)?;
+    let mut frames = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        frames.push(SnapshotFrame {
+            sequence: row.get(0).map_err(storage)?,
+            stanza_xml: row.get(1).map_err(storage)?,
+            receipt_ms: row.get(2).map_err(storage)?,
+            ingress_receipts: row.get(3).map_err(storage)?,
+            provenance: row.get(4).map_err(storage)?,
+            owner: row.get(5).map_err(storage)?,
+        });
+    }
+    let inventory = SnapshotInventory { session, frames };
+    // Malformed or untracked inventory never authorizes destructive replacement.
+    inventory.routes()?;
+    Ok(inventory)
 }
 
 /// Close the recipient route and exercise the real pending-delivery insert in
@@ -284,19 +710,6 @@ fn stanza_recipient(stanza: &PersistedUnackedStanza) -> Option<BareJid> {
         return None;
     };
     message.to.as_ref().map(jid::Jid::to_bare)
-}
-
-fn provenance_matches_source(
-    provenance: &SmFrameProvenance,
-    source: Uuid,
-    session_full: &jid::FullJid,
-) -> bool {
-    provenance.claims().is_some_and(|claims| {
-        !claims.is_empty()
-            && claims.iter().all(|claim| {
-                claim.message_key.to_storage() == source && claim.resource == *session_full
-            })
-    })
 }
 
 fn storage(error: impl std::fmt::Display) -> CandidateRouteError {
