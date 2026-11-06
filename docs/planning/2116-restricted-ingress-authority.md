@@ -61,3 +61,51 @@ proof, complete store attachment, durable pre-count SM custody for every
 outbound path, and a GC/reconciliation contract that survives unknown commits
 and late detached writers. No production readiness is inferred from a dark
 capability or a passing fixture.
+
+## Step 1 diagnostic contract
+
+`AttestedPgPool::inspect_restricted_ingress_profile` issues a diagnostic
+`RestrictedIngressProfileObservation`, not a transaction or serving capability.
+It leases an existing hook-bearing physical pool, verifies its configured
+lineage/schema/runtime identity again in a read-only repeatable-read
+transaction, and requires an independently trusted epoch relation OID. It
+normalizes retained connection search paths through the existing pool hook;
+unexpected effective roles or physical identities must pass that hook before
+any catalog observation is returned.
+
+The version-1 PostgreSQL 17 manifest pins 78 functions: the unregistered fixed
+API, inherited ingress guards, and the canonical pending recovery trigger
+function. Function bodies are exact byte slices of checksum-pinned source
+assets. Their catalog properties include input/output signatures, argument
+names/defaults, language, security mode, volatility, configuration, owner and
+execution grants. All non-internal ingress triggers are checked independently.
+The structural manifest covers the thirteen guarded tables, epoch and guard
+manifest tables, `sessions`, and the canonical owner-prepared `pending_delivery`
+table. It pins columns/defaults, checks, unique/foreign-key constraints,
+indexes and internal/non-internal trigger definitions. Physical catalog OIDs
+and planner statistics are excluded from the portable structural comparison;
+the attested schema identity and supplied epoch OID are checked separately.
+The manifest producer executes the actual ordered migration SQL and canonical
+pending owner DDL inside one rollback-only disposable transaction. The PG17
+test independently runs `MigrationRunner` and the actual pending owner bootstrap
+in a different schema before comparing the profile.
+
+The diagnostic refuses direct runtime guarded-table access, unexpected table
+or column grants, role memberships, elevated roles, row security/policies,
+partitions/inheritance, additional API-owner functions anywhere in the
+database, and alternate security-definer functions owned by roles with guarded
+write authority. The last exclusion is conservative even when the runtime
+cannot directly execute the alternate function: differently owned wrappers
+could otherwise chain execution grants. The pending owner schema is required;
+absence is not treated as a serving-compatible profile.
+
+Independent quiescence of catalog, role and ACL mutation remains a precondition
+throughout inspection. Repeatable-read does not turn PostgreSQL privilege
+caches into a catalog-generation barrier, and the observation is stale when
+returned. The separately installed physical-identity attestor is an independent
+trust prerequisite; this diagnostic does not verify its body or fence its
+installer. Its pool-hook calls also precede any future ingress epoch lock.
+Trusted lineage/ledger then epoch-AX mutation, transaction-local profile refresh
+after epoch AS, exact pool binding, lexical transaction ownership and explicit
+commit-unknown custody remain prerequisites for the later grouped tranche.
+No migration is registered, no epoch is advanced, and startup stays disabled.
