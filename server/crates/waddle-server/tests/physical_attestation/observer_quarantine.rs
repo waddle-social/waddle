@@ -616,6 +616,7 @@ async fn exercise_exact_start(pilot: &Pilot) {
                 .execute(&mut starter)
                 .await
                 .expect("fixture callback");
+            uuid::Uuid::new_v4()
         })
         .await
         .expect("fixture callback entered");
@@ -696,11 +697,6 @@ async fn postgres_observer_quarantine_rollback_and_competing_start() {
     }
 }
 
-// Deliberately non-cloneable: retries borrow the one returned fixture value.
-struct FixtureResult {
-    token: uuid::Uuid,
-}
-
 #[tokio::test]
 async fn postgres_observer_quarantine_result_custody() {
     let Some(_) = test_url() else {
@@ -737,7 +733,7 @@ async fn exercise_result_custody(pilot: &Pilot, scenario: &str) {
             .expect("duplicate start")
             .is_none()
     );
-    let mut custody = grant.into_custody::<FixtureResult>();
+    let mut custody = grant.into_custody();
     match scenario {
         "identity_and_retry" => exercise_identity_and_retry(&claim, &mut custody).await,
         "cancel_during" => exercise_cancel_during(&claim, &mut custody).await,
@@ -750,7 +746,7 @@ async fn exercise_result_custody(pilot: &Pilot, scenario: &str) {
 
 async fn exercise_identity_and_retry(
     claim: &ObserverPilotClaim,
-    custody: &mut ObserverPilotCustody<FixtureResult>,
+    custody: &mut ObserverPilotCustody,
 ) {
     let calls = Cell::new(0);
     let token = uuid::Uuid::new_v4();
@@ -780,7 +776,7 @@ async fn exercise_identity_and_retry(
             custody
                 .invoke(&wrong, || async {
                     calls.set(calls.get() + 1);
-                    FixtureResult { token }
+                    token
                 })
                 .await
                 .is_err(),
@@ -792,14 +788,14 @@ async fn exercise_identity_and_retry(
     // Creating and dropping a future without polling does not enter its body.
     let unpolled = custody.invoke(claim, || async {
         calls.set(calls.get() + 1);
-        FixtureResult { token }
+        token
     });
     drop(unpolled);
     assert_eq!(calls.get(), 0);
     assert!(custody.retry(claim, |_| ()).is_err());
     let invocation = custody.invoke(claim, || async {
         calls.set(calls.get() + 1);
-        FixtureResult { token }
+        token
     });
     let mut invocation = Box::pin(invocation);
     assert!(matches!(
@@ -819,15 +815,19 @@ async fn exercise_identity_and_retry(
         );
     }
     let original = custody
-        .retry(claim, |result| result as *const FixtureResult)
+        .retry(claim, std::convert::identity)
         .expect("original returned value");
+    assert_eq!(original, token);
     let attempts = Cell::new(0);
     let attempts_ref = &attempts;
     let retry = custody
         .retry(claim, |result| async move {
             attempts_ref.set(attempts_ref.get() + 1);
-            assert_eq!(result.token, token);
-            assert_eq!(result as *const FixtureResult, original);
+            assert_eq!(result, token);
+            // Altering the retry's own copy cannot alter the value in custody.
+            let mut altered_bytes = result.into_bytes();
+            altered_bytes[0] ^= 0xff;
+            assert_ne!(uuid::Uuid::from_bytes(altered_bytes), result);
             std::future::pending::<()>().await;
         })
         .expect("fixture retry");
@@ -835,31 +835,26 @@ async fn exercise_identity_and_retry(
     assert!(matches!(futures::poll!(retry.as_mut()), Poll::Pending));
     drop(retry);
     assert_eq!(attempts.get(), 1);
-    let (reused, actual) = custody
-        .retry(claim, |result| {
-            (result as *const FixtureResult, result.token)
-        })
+    let actual = custody
+        .retry(claim, std::convert::identity)
         .expect("retry after cancellation");
-    assert_eq!(reused, original);
+    assert_eq!(actual, original);
     assert_eq!(actual, token);
     assert!(custody
         .invoke(claim, || async {
             calls.set(calls.get() + 1);
-            FixtureResult { token }
+            token
         })
         .await
         .is_err());
     assert_eq!(calls.get(), 1, "retry never invoked the callback again");
 }
 
-async fn exercise_cancel_during(
-    claim: &ObserverPilotClaim,
-    custody: &mut ObserverPilotCustody<FixtureResult>,
-) {
+async fn exercise_cancel_during(claim: &ObserverPilotClaim, custody: &mut ObserverPilotCustody) {
     let calls = Cell::new(0);
     let invocation = custody.invoke(claim, || async {
         calls.set(calls.get() + 1);
-        std::future::pending::<FixtureResult>().await
+        std::future::pending::<uuid::Uuid>().await
     });
     let mut invocation = Box::pin(invocation);
     assert!(matches!(futures::poll!(invocation.as_mut()), Poll::Pending));
@@ -869,19 +864,14 @@ async fn exercise_cancel_during(
     assert!(custody
         .invoke(claim, || async {
             calls.set(calls.get() + 1);
-            FixtureResult {
-                token: uuid::Uuid::new_v4(),
-            }
+            uuid::Uuid::new_v4()
         })
         .await
         .is_err());
     assert_eq!(calls.get(), 1, "a cancelled invocation stays uncertain");
 }
 
-async fn exercise_panic_during(
-    claim: &ObserverPilotClaim,
-    custody: &mut ObserverPilotCustody<FixtureResult>,
-) {
+async fn exercise_panic_during(claim: &ObserverPilotClaim, custody: &mut ObserverPilotCustody) {
     let calls = Cell::new(0);
     let invocation = custody.invoke(claim, || async {
         calls.set(calls.get() + 1);
@@ -895,9 +885,7 @@ async fn exercise_panic_during(
     assert!(custody
         .invoke(claim, || async {
             calls.set(calls.get() + 1);
-            FixtureResult {
-                token: uuid::Uuid::new_v4(),
-            }
+            uuid::Uuid::new_v4()
         })
         .await
         .is_err());
@@ -1015,6 +1003,7 @@ async fn observer_child() {
             .execute(&mut conn)
             .await
             .expect("independent effect");
+            uuid::Uuid::new_v4()
         })
         .await
         .expect("fixture callback entered");

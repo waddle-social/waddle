@@ -6,11 +6,13 @@
 //! The starter and claimer are trusted test processes; this does not attest
 //! production roles, protect against a compromised fixture role or privileged
 //! DDL, or establish observer/canonical garbage-collection safety. The grant
-//! only controls the fixture callback, not a real guest or provider.
+//! only controls the fixture callback, not a real guest or provider. Its
+//! synthetic UUID result does not freeze arbitrary guest or provider output.
 
 use anyhow::{ensure, Context};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use waddle_extensions::{
     ConfiguredRoomObserver, DisplayText, MessageRevision, ObservationGeneration, PluginId,
     RoomObservationScope, RoomObservationSubscription, Sha256Digest,
@@ -156,21 +158,21 @@ pub struct ObserverPilotGrant {
 
 // Result custody is private, non-cloneable and tied to the acknowledged start.
 // It exists only after the callback returned in this process.
-struct ReturnedObserverPilotResult<T> {
+struct ReturnedObserverPilotResult {
     identity: ObserverPilotStartIdentity,
-    value: T,
+    value: Uuid,
 }
 
-enum ObserverPilotState<T> {
+enum ObserverPilotState {
     Ready,
     Invoking,
-    Returned(ReturnedObserverPilotResult<T>),
+    Returned(ReturnedObserverPilotResult),
 }
 
 /// Fixture-only state owned by the live caller, not recoverable after a crash.
-pub struct ObserverPilotCustody<T> {
+pub struct ObserverPilotCustody {
     identity: Option<ObserverPilotStartIdentity>,
-    state: ObserverPilotState<T>,
+    state: ObserverPilotState,
 }
 
 impl PreparedObserverPilotStart<'_> {
@@ -185,7 +187,7 @@ impl PreparedObserverPilotStart<'_> {
 
 impl ObserverPilotGrant {
     /// Transfer the single-use grant into caller-owned fixture custody.
-    pub fn into_custody<T>(self) -> ObserverPilotCustody<T> {
+    pub fn into_custody(self) -> ObserverPilotCustody {
         ObserverPilotCustody {
             identity: Some(self.identity),
             state: ObserverPilotState::Ready,
@@ -193,7 +195,7 @@ impl ObserverPilotGrant {
     }
 }
 
-impl<T> ObserverPilotCustody<T> {
+impl ObserverPilotCustody {
     /// Enter the callback at most once. Dropping an unpolled future does not
     /// enter it; cancellation or panic after entry leaves the outcome unknown.
     pub async fn invoke<F, Fut>(
@@ -203,7 +205,7 @@ impl<T> ObserverPilotCustody<T> {
     ) -> anyhow::Result<()>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = T>,
+        Fut: std::future::Future<Output = Uuid>,
     {
         ensure!(
             matches!(self.state, ObserverPilotState::Ready),
@@ -227,17 +229,17 @@ impl<T> ObserverPilotCustody<T> {
     /// Use the exact returned value for a fixture retry without invoking again.
     /// This rechecks the caller-held claim against the frozen start snapshot,
     /// not current database authority. It cannot authorize a production receipt
-    /// or publication. A returned future may borrow the value; dropping it
-    /// leaves custody here.
-    pub fn retry<'a, F, R>(&'a self, claim: &ObserverPilotClaim, retry: F) -> anyhow::Result<R>
+    /// or publication. The retry receives a copy of the synthetic UUID, so
+    /// it cannot mutate the held value; dropping its future leaves custody here.
+    pub fn retry<F, R>(&self, claim: &ObserverPilotClaim, retry: F) -> anyhow::Result<R>
     where
-        F: FnOnce(&'a T) -> R,
+        F: FnOnce(Uuid) -> R,
     {
         let ObserverPilotState::Returned(returned) = &self.state else {
             anyhow::bail!("fixture callback result unavailable");
         };
         returned.identity.verify(claim)?;
-        Ok(retry(&returned.value))
+        Ok(retry(returned.value))
     }
 }
 
