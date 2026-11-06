@@ -25,10 +25,17 @@ Sealed inventory lists bound operations by ordinal followed by unbound ones,
 with at most 16 returned rows per page. Replay inventory includes pending bound
 operations only after their source handoff marker commits, in ordinal order,
 preserving gaps and the original operation, payload, timestamp, and resource.
-Incomplete source handoffs remain visible in general recovery inventory. Neither
-inventory allocates a send attempt or grants permission to replay on a transport. Immutable admissions stay charged
-even after terminal settlement; an exact-copy constraint bounds all transfer
-payloads by the retained admission total.
+Incomplete source handoffs remain visible in general recovery inventory.
+Neither inventory allocates a send attempt or grants permission to replay on a
+transport. Immutable admissions stay charged even after terminal settlement;
+an exact-copy constraint bounds all transfer payloads by the retained
+admission total.
+
+The raw admission guard updates the canonical parent before incrementing the
+quota-row revision. Those row versions fence a stale repeatable-read collector
+or quota contender: it must abort rather than evaluate retained custody from an
+old snapshot. Read-committed contenders recheck the committed journal after
+the wait. The immutable journal, not the revision, remains the quota authority.
 
 ## Verification and later gates
 

@@ -1,6 +1,9 @@
 -- Dark candidate only. Immutable journals remain bounded and are not reclaimed.
-CREATE TABLE __SCHEMA__.sm_custody_quota (id INTEGER PRIMARY KEY CHECK (id = 1));
-INSERT INTO __SCHEMA__.sm_custody_quota VALUES (1);
+CREATE TABLE __SCHEMA__.sm_custody_quota (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    revision BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO __SCHEMA__.sm_custody_quota (id) VALUES (1);
 CREATE TABLE __SCHEMA__.sm_custody_gates (
     gate_id UUID PRIMARY KEY,
     token UUID NOT NULL,
@@ -90,10 +93,17 @@ DECLARE closed BOOLEAN; retained_rows BIGINT; retained_bytes BIGINT;
 BEGIN
     SELECT sealed INTO closed FROM __SCHEMA__.sm_custody_gates WHERE gate_id = NEW.gate_id FOR UPDATE;
     IF closed IS DISTINCT FROM FALSE THEN RAISE EXCEPTION 'SM custody gate is closed'; END IF;
-    PERFORM 1 FROM __SCHEMA__.ingress_messages WHERE message_key = NEW.message_key FOR UPDATE;
+    -- Produce a new parent tuple even when the retention field is already
+    -- NULL. A stale REPEATABLE READ deleter must abort instead of evaluating
+    -- the deletion guard against a snapshot that predates this admission.
+    UPDATE __SCHEMA__.ingress_messages SET retention_eligible_at = NULL
+      WHERE message_key = NEW.message_key;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody canonical source is absent'; END IF;
-    -- Enforce the hard retained-journal bound even for a delayed raw writer.
-    PERFORM 1 FROM __SCHEMA__.sm_custody_quota WHERE id = 1 FOR UPDATE;
+    -- Updating, rather than merely locking, forces a stale REPEATABLE READ
+    -- writer to abort after a concurrent admission commits. At READ COMMITTED
+    -- the following count sees the latest committed journal under this lock.
+    UPDATE __SCHEMA__.sm_custody_quota SET revision = revision + 1 WHERE id = 1;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody quota row is absent'; END IF;
     SELECT count(*), coalesce(sum(octet_length(payload)), 0) INTO retained_rows, retained_bytes
       FROM __SCHEMA__.sm_custody_operations;
     IF retained_rows >= 1024 OR retained_bytes + octet_length(NEW.payload) > 16777216 THEN

@@ -51,6 +51,8 @@ struct Candidate {
 mod multiframe;
 #[path = "preaccept_handoff.rs"]
 mod preaccept_handoff;
+#[path = "sm_custody_quota_race.rs"]
+mod quota_race;
 
 impl Candidate {
     async fn new() -> Self {
