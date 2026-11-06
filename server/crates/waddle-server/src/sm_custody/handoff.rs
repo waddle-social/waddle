@@ -1,11 +1,14 @@
-//! Unselected pre-start source contract and concrete one-frame memory owner.
+//! Unselected pre-start source contract and bounded ordered memory owner.
 //! No production routing, transport, replay or endpoint publication uses it.
+
+use std::collections::BTreeMap;
 
 use jid::FullJid;
 use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::pending_delivery::SmSessionId;
 
+use super::admission::encode_payload;
 use super::repository::{commit, pg};
 use super::types::db;
 use super::{
@@ -96,7 +99,13 @@ pub enum CandidateHydration {
 pub struct CandidateSmMemory {
     capture: CustodyCapture,
     retired: bool,
-    frame: Option<CommittedPreacceptHandoff>,
+    frames: BTreeMap<i64, MemoryEntry>,
+    bytes: usize,
+}
+
+struct MemoryEntry {
+    handoff: CommittedPreacceptHandoff,
+    bytes: usize,
 }
 
 impl CandidateSmMemory {
@@ -104,28 +113,63 @@ impl CandidateSmMemory {
         Self {
             capture,
             retired: false,
-            frame: None,
+            frames: BTreeMap::new(),
+            bytes: 0,
         }
     }
     pub fn retire(&mut self) {
         self.retired = true;
     }
     pub fn queued_count(&self) -> usize {
-        usize::from(self.frame.is_some())
+        self.frames.len()
     }
     pub fn accepted_ordinal(&self) -> Option<u64> {
-        self.frame.as_ref().map(CommittedPreacceptHandoff::ordinal)
+        self.frames
+            .keys()
+            .copied()
+            .zip(1_i64..)
+            .take_while(|(actual, expected)| actual == expected)
+            .last()
+            .map(|(ordinal, _)| ordinal as u64)
     }
     pub fn queued_frame(&self) -> Option<&PreparedDirectFrame> {
-        self.frame.as_ref().map(|handoff| &handoff.frame)
+        self.frames
+            .values()
+            .next()
+            .map(|entry| &entry.handoff.frame)
+    }
+    pub fn frame_at(&self, ordinal: u64) -> Option<&PreparedDirectFrame> {
+        i64::try_from(ordinal)
+            .ok()
+            .and_then(|ordinal| self.frames.get(&ordinal).map(|entry| &entry.handoff.frame))
+    }
+
+    pub(super) fn check_exposure(
+        &self,
+        capture: &CustodyCapture,
+        slot: &CommittedSlot,
+    ) -> Result<(), CustodyError> {
+        if self.retired
+            || &self.capture != capture
+            || !self
+                .frames
+                .get(&slot.ordinal)
+                .is_some_and(|entry| entry.handoff.slot == *slot)
+        {
+            return Err(CustodyError::Rejected);
+        }
+        Ok(())
     }
 
     fn check(&self, handoff: &CommittedPreacceptHandoff) -> Result<(), CustodyError> {
         if self.retired || self.capture != handoff.capture {
             return Err(CustodyError::Rejected);
         }
-        if self.frame.as_ref().is_some_and(|existing| {
-            existing.frame != handoff.frame || existing.slot != handoff.slot
+        if self.frames.values().any(|entry| {
+            let existing = &entry.handoff;
+            (existing.slot.ordinal == handoff.slot.ordinal
+                || existing.frame.operation_id == handoff.frame.operation_id)
+                && (existing.frame != handoff.frame || existing.slot != handoff.slot)
         }) {
             return Err(CustodyError::Conflict);
         }
@@ -137,10 +181,26 @@ impl CandidateSmMemory {
         handoff: &CommittedPreacceptHandoff,
     ) -> Result<CandidateHydration, CustodyError> {
         self.check(handoff)?;
-        if self.frame.is_some() {
+        if self.frames.contains_key(&handoff.slot.ordinal) {
             return Ok(CandidateHydration::AlreadyHydrated);
         }
-        self.frame = Some(handoff.clone());
+        let bytes = encode_payload(&handoff.frame)?.len();
+        if self.frames.len() >= 1024
+            || self
+                .bytes
+                .checked_add(bytes)
+                .is_none_or(|n| n > 16 * 1024 * 1024)
+        {
+            return Err(CustodyError::Capacity);
+        }
+        self.frames.insert(
+            handoff.slot.ordinal,
+            MemoryEntry {
+                handoff: handoff.clone(),
+                bytes,
+            },
+        );
+        self.bytes += bytes;
         Ok(CandidateHydration::Inserted)
     }
 }
@@ -150,6 +210,7 @@ impl CandidateSmMemory {
 struct ProvisionalHydration<'a> {
     receiver: &'a mut CandidateSmMemory,
     outcome: CandidateHydration,
+    ordinal: i64,
     confirmed: bool,
 }
 
@@ -162,6 +223,7 @@ impl<'a> ProvisionalHydration<'a> {
         Ok(Self {
             receiver,
             outcome,
+            ordinal: handoff.slot.ordinal,
             confirmed: false,
         })
     }
@@ -175,7 +237,9 @@ impl<'a> ProvisionalHydration<'a> {
 impl Drop for ProvisionalHydration<'_> {
     fn drop(&mut self) {
         if !self.confirmed && self.outcome == CandidateHydration::Inserted {
-            self.receiver.frame = None;
+            if let Some(entry) = self.receiver.frames.remove(&self.ordinal) {
+                self.receiver.bytes -= entry.bytes;
+            }
         }
     }
 }

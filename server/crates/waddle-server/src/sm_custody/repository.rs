@@ -13,8 +13,8 @@ use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
 use super::types::db;
 use super::{
     CommittedAdmission, CommittedSlot, CustodyCapture, CustodyError, CustodyInventoryPage,
-    CustodyLimits, CustodyOperation, CustodyRecoveryAuthority, CustodyResolution, CustodyTerminal,
-    PreparedDirectFrame, SealedSession, SessionGeneration,
+    CustodyLimits, CustodyOperation, CustodyRecoveryAuthority, CustodyReplayPage,
+    CustodyResolution, CustodyTerminal, PreparedDirectFrame, SealedSession, SessionGeneration,
 };
 use crate::db::physical_attestation::PhysicalAttestationConfig;
 use crate::ingress_uow::{
@@ -293,18 +293,23 @@ impl SmCustodyRepository {
     ) -> Result<CustodyInventoryPage, CustodyError> {
         self.verify_seal(sealed)?;
         let mut tx = self.recovery_guard(authority, true).await?;
-        let rows = sqlx::query(&format!("{} WHERE o.gate_id = $1 AND ($2::uuid IS NULL OR o.operation_id > $2) ORDER BY o.operation_id LIMIT 2", operation_select(&self.schema)))
-            .bind(self.capture.gate_id).bind(after).fetch_all(pg(&mut tx)?).await.map_err(db)?;
+        let cursor: Option<(bool, i64)> = if let Some(id) = after {
+            Some(sqlx::query_as(&format!("SELECT s.ordinal IS NULL, coalesce(s.ordinal,0) FROM {}.sm_custody_operations o LEFT JOIN {}.sm_custody_slots s ON s.operation_id = o.operation_id WHERE o.gate_id = $1 AND o.operation_id = $2", self.schema, self.schema))
+                .bind(self.capture.gate_id).bind(id).fetch_optional(pg(&mut tx)?).await.map_err(db)?.ok_or(CustodyError::Rejected)?)
+        } else {
+            None
+        };
+        let rows = sqlx::query(&format!("{} WHERE o.gate_id = $1 AND ($2::boolean IS NULL OR (s.ordinal IS NULL, coalesce(s.ordinal,0), o.operation_id) > ($2,$3,$4)) ORDER BY (s.ordinal IS NULL), s.ordinal, o.operation_id LIMIT 17", operation_select(&self.schema)))
+            .bind(self.capture.gate_id).bind(cursor.map(|v| v.0)).bind(cursor.map(|v| v.1)).bind(after)
+            .fetch_all(pg(&mut tx)?).await.map_err(db)?;
         let operations = rows
             .into_iter()
             .map(decode_operation)
             .collect::<Result<Vec<_>, _>>()?;
-        // One operation per captured session today; explicit lookahead keeps
-        // paging complete even if that bound changes in a later tranche.
         let mut operations = operations;
-        let more = operations.len() > 1;
+        let more = operations.len() > 16;
         if more {
-            operations.truncate(1);
+            operations.truncate(16);
         }
         let next = if more {
             operations.last().map(|item| item.frame.operation_id)
@@ -313,6 +318,42 @@ impl SmCustodyRepository {
         };
         commit(tx).await?;
         Ok(CustodyInventoryPage { operations, next })
+    }
+
+    /// Bounded read-only inventory of pending slots with committed source
+    /// handoff. Gaps stay visible through their original ordinals; no new
+    /// attempt or send authority exists.
+    pub async fn replay_inventory(
+        &self,
+        sealed: &SealedSession,
+        authority: &CustodyRecoveryAuthority,
+        after: Option<u64>,
+    ) -> Result<CustodyReplayPage, CustodyError> {
+        self.verify_seal(sealed)?;
+        let after = after
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| CustodyError::Rejected)?
+            .unwrap_or(0);
+        let mut tx = self.recovery_guard(authority, true).await?;
+        let rows = sqlx::query(&format!("{} WHERE o.gate_id = $1 AND s.ordinal > $2 AND t.operation_id IS NULL AND EXISTS (SELECT 1 FROM {}.sm_custody_handoffs h WHERE h.operation_id = o.operation_id) ORDER BY s.ordinal LIMIT 17", operation_select(&self.schema), self.schema))
+            .bind(self.capture.gate_id).bind(after).fetch_all(pg(&mut tx)?).await.map_err(db)?;
+        let mut operations = rows
+            .into_iter()
+            .map(decode_operation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let more = operations.len() > 16;
+        operations.truncate(16);
+        let next = if more {
+            operations
+                .last()
+                .and_then(|item| item.slot.as_ref())
+                .map(CommittedSlot::ordinal)
+        } else {
+            None
+        };
+        commit(tx).await?;
+        Ok(CustodyReplayPage { operations, next })
     }
 
     pub async fn reconcile(

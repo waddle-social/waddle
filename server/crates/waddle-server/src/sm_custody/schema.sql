@@ -1,6 +1,9 @@
 -- Dark candidate only. Immutable journals remain bounded and are not reclaimed.
-CREATE TABLE __SCHEMA__.sm_custody_quota (id INTEGER PRIMARY KEY CHECK (id = 1));
-INSERT INTO __SCHEMA__.sm_custody_quota VALUES (1);
+CREATE TABLE __SCHEMA__.sm_custody_quota (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    revision BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO __SCHEMA__.sm_custody_quota (id) VALUES (1);
 CREATE TABLE __SCHEMA__.sm_custody_gates (
     gate_id UUID PRIMARY KEY,
     token UUID NOT NULL,
@@ -20,7 +23,7 @@ CREATE TABLE __SCHEMA__.sm_custody_gates (
 );
 CREATE TABLE __SCHEMA__.sm_custody_operations (
     operation_id UUID PRIMARY KEY,
-    gate_id UUID NOT NULL UNIQUE REFERENCES __SCHEMA__.sm_custody_gates (gate_id),
+    gate_id UUID NOT NULL REFERENCES __SCHEMA__.sm_custody_gates (gate_id),
     message_key UUID NOT NULL,
     receipt_kind INTEGER NOT NULL,
     semantic_identity_hash BYTEA NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
@@ -28,13 +31,15 @@ CREATE TABLE __SCHEMA__.sm_custody_operations (
     attempt_token UUID NOT NULL UNIQUE,
     payload TEXT NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 262144),
     received_at TIMESTAMPTZ NOT NULL,
-    UNIQUE (message_key, receipt_kind, semantic_identity_hash, resource)
+    UNIQUE (message_key, receipt_kind, semantic_identity_hash, resource),
+    UNIQUE (operation_id, gate_id)
 );
 CREATE TABLE __SCHEMA__.sm_custody_slots (
-    operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
+    operation_id UUID PRIMARY KEY,
     gate_id UUID NOT NULL REFERENCES __SCHEMA__.sm_custody_gates (gate_id),
     ordinal BIGINT NOT NULL CHECK (ordinal > 0),
-    UNIQUE (gate_id, ordinal)
+    UNIQUE (gate_id, ordinal),
+    FOREIGN KEY (operation_id, gate_id) REFERENCES __SCHEMA__.sm_custody_operations (operation_id, gate_id)
 );
 CREATE TABLE __SCHEMA__.sm_custody_terminals (
     operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
@@ -84,12 +89,26 @@ FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 -- This triggers even for a raw delayed candidate INSERT: gate -> canonical.
 CREATE FUNCTION __SCHEMA__.sm_custody_admission_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
-DECLARE closed BOOLEAN;
+DECLARE closed BOOLEAN; retained_rows BIGINT; retained_bytes BIGINT;
 BEGIN
     SELECT sealed INTO closed FROM __SCHEMA__.sm_custody_gates WHERE gate_id = NEW.gate_id FOR UPDATE;
     IF closed IS DISTINCT FROM FALSE THEN RAISE EXCEPTION 'SM custody gate is closed'; END IF;
-    PERFORM 1 FROM __SCHEMA__.ingress_messages WHERE message_key = NEW.message_key FOR UPDATE;
+    -- Produce a new parent tuple even when the retention field is already
+    -- NULL. A stale REPEATABLE READ deleter must abort instead of evaluating
+    -- the deletion guard against a snapshot that predates this admission.
+    UPDATE __SCHEMA__.ingress_messages SET retention_eligible_at = NULL
+      WHERE message_key = NEW.message_key;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody canonical source is absent'; END IF;
+    -- Updating, rather than merely locking, forces a stale REPEATABLE READ
+    -- writer to abort after a concurrent admission commits. At READ COMMITTED
+    -- the following count sees the latest committed journal under this lock.
+    UPDATE __SCHEMA__.sm_custody_quota SET revision = revision + 1 WHERE id = 1;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody quota row is absent'; END IF;
+    SELECT count(*), coalesce(sum(octet_length(payload)), 0) INTO retained_rows, retained_bytes
+      FROM __SCHEMA__.sm_custody_operations;
+    IF retained_rows >= 1024 OR retained_bytes + octet_length(NEW.payload) > 16777216 THEN
+        RAISE EXCEPTION 'SM custody retained quota exceeded';
+    END IF;
     RETURN NEW;
 END $$;
 CREATE TRIGGER sm_custody_admission_guard BEFORE INSERT ON __SCHEMA__.sm_custody_operations
@@ -109,6 +128,31 @@ BEGIN
 END $$;
 CREATE TRIGGER sm_custody_slot_guard BEFORE INSERT ON __SCHEMA__.sm_custody_slots
 FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_slot_guard();
+-- A transfer is an exact copy, so its immutable byte total cannot exceed the
+-- already bounded admission journal. Serialize raw writers at the same gate.
+CREATE FUNCTION __SCHEMA__.sm_custody_transfer_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    PERFORM 1 FROM __SCHEMA__.sm_custody_gates g JOIN __SCHEMA__.sm_custody_operations o
+      ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id FOR UPDATE OF g;
+    IF NOT EXISTS (SELECT 1 FROM __SCHEMA__.sm_custody_operations o
+        WHERE o.operation_id = NEW.operation_id AND
+          (o.resource, o.payload, o.received_at) = (NEW.resource, NEW.payload, NEW.received_at)) THEN
+        RAISE EXCEPTION 'SM custody transfer differs from admission';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_transfer_guard BEFORE INSERT ON __SCHEMA__.sm_custody_transfers
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_transfer_guard();
+CREATE FUNCTION __SCHEMA__.sm_custody_terminal_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    PERFORM 1 FROM __SCHEMA__.sm_custody_gates g JOIN __SCHEMA__.sm_custody_operations o
+      ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id FOR UPDATE OF g;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_terminal_guard BEFORE INSERT ON __SCHEMA__.sm_custody_terminals
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_terminal_guard();
 CREATE FUNCTION __SCHEMA__.sm_custody_parent_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
