@@ -15,6 +15,8 @@ pub struct FrontierModel {
     exposed: u64,
     appended: u64,
     ingress: u64,
+    transport_next: Option<u64>,
+    in_flight_attempt: Option<u64>,
     uncertain_writes: BTreeSet<u64>,
     capacity: u32,
 }
@@ -36,13 +38,14 @@ pub enum AppendError {
 pub enum AttemptError {
     NotRetained,
     OutOfOrder,
+    WriteInFlight,
     UncertainWritePending,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttemptOutcome {
     NewlyExposed,
-    Retry,
+    Replay,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +77,7 @@ pub enum FrameWriteResult {
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameWriteError {
     NotExposed,
+    NoMatchingAttempt,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -92,8 +96,11 @@ impl FrontierModel {
         Self::from_ordinals(0, 0, 0, capacity)
     }
 
-    /// Model a supplied contiguous history; this constructor does not validate
-    /// that the history, retained rows, fence, or owner exist outside the model.
+    /// Model a supplied contiguous history on an already-live transport. Its
+    /// next emission cursor starts after `exposed`; callers must cross the
+    /// explicit resume boundary before replaying older unacknowledged rows.
+    /// This constructor does not validate that the history, retained rows,
+    /// fence, or owner exist outside the model.
     pub fn from_ordinals(
         peer_acked: u64,
         exposed: u64,
@@ -124,6 +131,8 @@ impl FrontierModel {
             exposed,
             appended,
             ingress,
+            transport_next: exposed.checked_add(1),
+            in_flight_attempt: None,
             uncertain_writes: BTreeSet::new(),
             capacity,
         })
@@ -153,6 +162,14 @@ impl FrontierModel {
         self.uncertain_writes.iter().copied()
     }
 
+    pub fn transport_next(&self) -> Option<u64> {
+        self.transport_next
+    }
+
+    pub fn in_flight_attempt(&self) -> Option<u64> {
+        self.in_flight_attempt
+    }
+
     /// Retain the next replay ordinal without asserting any exposure.
     pub fn append(&mut self) -> Result<u64, AppendError> {
         let next = self
@@ -166,27 +183,39 @@ impl FrontierModel {
         Ok(next)
     }
 
-    /// Caller assumes a current authority and known committed fence, and calls
-    /// immediately before one write attempt. Previously exposed retained rows
-    /// may be retried; new exposure must advance by exactly one ordinal.
+    /// Caller assumes a current authority and known committed fence. At most
+    /// one attempt is in flight, and it must be the exact next ordinal on this
+    /// transport. Previously exposed rows can be attempted only after an
+    /// explicit new-transport resume boundary; same-transport retries are not
+    /// allowed.
     pub fn record_assumed_committed_attempt(
         &mut self,
         ordinal: u64,
     ) -> Result<AttemptOutcome, AttemptError> {
+        if self.in_flight_attempt.is_some() {
+            return Err(AttemptError::WriteInFlight);
+        }
         if !self.uncertain_writes.is_empty() {
             return Err(AttemptError::UncertainWritePending);
         }
         if ordinal <= self.peer_acked || ordinal > self.appended {
             return Err(AttemptError::NotRetained);
         }
-        if ordinal <= self.exposed {
-            return Ok(AttemptOutcome::Retry);
-        }
-        if ordinal - self.exposed != 1 {
+        if self.transport_next != Some(ordinal) {
             return Err(AttemptError::OutOfOrder);
         }
-        self.exposed = ordinal;
-        Ok(AttemptOutcome::NewlyExposed)
+        let outcome = if ordinal <= self.exposed {
+            AttemptOutcome::Replay
+        } else if ordinal - self.exposed == 1 {
+            AttemptOutcome::NewlyExposed
+        } else {
+            return Err(AttemptError::OutOfOrder);
+        };
+        if outcome == AttemptOutcome::NewlyExposed {
+            self.exposed = ordinal;
+        }
+        self.in_flight_attempt = Some(ordinal);
+        Ok(outcome)
     }
 
     /// Classify relative to the acknowledged floor in the wrapping half-space.
@@ -200,14 +229,20 @@ impl FrontierModel {
         ordinal: u64,
         result: FrameWriteResult,
     ) -> Result<(), FrameWriteError> {
+        if self.in_flight_attempt != Some(ordinal) {
+            return Err(FrameWriteError::NoMatchingAttempt);
+        }
         if ordinal <= self.peer_acked || ordinal > self.exposed {
             return Err(FrameWriteError::NotExposed);
         }
+        self.in_flight_attempt = None;
         match result {
             // An accepted retry cannot disambiguate whether an earlier
             // uncertain attempt reached the peer. ACK or resume reconciliation
             // is required before subsequent exposure is safe.
-            FrameWriteResult::Accepted => {}
+            FrameWriteResult::Accepted => {
+                self.transport_next = ordinal.checked_add(1);
+            }
             FrameWriteResult::Unknown => {
                 self.uncertain_writes.insert(ordinal);
             }
@@ -230,6 +265,8 @@ impl FrontierModel {
             });
         }
         self.uncertain_writes.clear();
+        self.in_flight_attempt = None;
+        self.transport_next = self.peer_acked.checked_add(1);
         Ok(())
     }
 
@@ -271,6 +308,23 @@ impl FrontierModel {
         self.peer_acked += u64::from(distance);
         self.uncertain_writes
             .retain(|ordinal| *ordinal > self.peer_acked);
+        if self
+            .in_flight_attempt
+            .is_some_and(|ordinal| ordinal <= self.peer_acked)
+        {
+            self.in_flight_attempt = None;
+        }
+        let next_after_ack = self.peer_acked.checked_add(1);
+        if let Some(next_after_ack) = next_after_ack {
+            if self
+                .transport_next
+                .is_none_or(|transport_next| transport_next < next_after_ack)
+            {
+                self.transport_next = Some(next_after_ack);
+            }
+        } else {
+            self.transport_next = None;
+        }
         Ok(AckOutcome::Advanced {
             through: self.peer_acked,
         })
@@ -326,9 +380,18 @@ mod tests {
             Ok(AttemptOutcome::NewlyExposed)
         );
         assert_eq!(
-            model.record_assumed_committed_attempt(1),
-            Ok(AttemptOutcome::Retry)
+            model.record_assumed_committed_attempt(2),
+            Err(AttemptError::WriteInFlight)
         );
+        model
+            .record_frame_write_result(1, FrameWriteResult::Accepted)
+            .unwrap();
+        let before = model.clone();
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Err(AttemptError::OutOfOrder)
+        );
+        assert_eq!(model, before);
         assert_eq!(
             model.acknowledge(1, AckKind::Live),
             Ok(AckOutcome::Advanced { through: 1 })
@@ -361,10 +424,16 @@ mod tests {
             model.record_assumed_committed_attempt(u64::from(u32::MAX)),
             Ok(AttemptOutcome::NewlyExposed)
         );
+        model
+            .record_frame_write_result(u64::from(u32::MAX), FrameWriteResult::Accepted)
+            .unwrap();
         assert_eq!(
             model.record_assumed_committed_attempt(u64::from(u32::MAX) + 1),
             Ok(AttemptOutcome::NewlyExposed)
         );
+        model
+            .record_frame_write_result(u64::from(u32::MAX) + 1, FrameWriteResult::Accepted)
+            .unwrap();
         assert_eq!(
             model.acknowledge(u32::MAX, AckKind::Live),
             Ok(AckOutcome::Advanced {
@@ -537,16 +606,31 @@ mod tests {
         }
         assert_eq!(
             model.record_assumed_committed_attempt(101),
-            Ok(AttemptOutcome::Retry)
+            Err(AttemptError::OutOfOrder),
+            "an already-exposed row is not resent on the same transport"
         );
+        model.reconcile_uncertain_after_resume(100).unwrap();
+        assert_eq!(
+            model.record_assumed_committed_attempt(101),
+            Ok(AttemptOutcome::Replay)
+        );
+        model
+            .record_frame_write_result(101, FrameWriteResult::Accepted)
+            .unwrap();
         assert_eq!(
             model.record_assumed_committed_attempt(102),
             Ok(AttemptOutcome::NewlyExposed)
         );
+        model
+            .record_frame_write_result(102, FrameWriteResult::Accepted)
+            .unwrap();
         assert_eq!(
             model.record_assumed_committed_attempt(103),
             Ok(AttemptOutcome::NewlyExposed)
         );
+        model
+            .record_frame_write_result(103, FrameWriteResult::Accepted)
+            .unwrap();
         assert_eq!(model.replay().collect::<Vec<_>>(), vec![101, 102, 103]);
     }
 
@@ -563,25 +647,40 @@ mod tests {
         );
         assert_eq!(model.exposed(), 1);
         assert_eq!(
-            model.record_frame_write_result(1, FrameWriteResult::Unknown),
-            Ok(())
+            model.record_assumed_committed_attempt(2),
+            Err(AttemptError::WriteInFlight),
+            "ordinal 2 cannot be in flight before ordinal 1 has a result"
         );
-        assert_eq!(model.uncertain_writes().collect::<Vec<_>>(), vec![1]);
-        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2]);
-
+        assert_eq!(model.exposed(), 1);
         assert_eq!(
             model.record_assumed_committed_attempt(1),
-            Err(AttemptError::UncertainWritePending)
+            Err(AttemptError::WriteInFlight)
         );
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(
-            model.record_frame_write_result(1, FrameWriteResult::Accepted),
-            Ok(())
+            model.acknowledge(2, AckKind::Live),
+            Err(AckError::HandledTooHigh {
+                h: 2,
+                send_count: 1
+            })
         );
-        assert!(model.has_uncertain_writes());
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2]);
+
+        model
+            .record_frame_write_result(1, FrameWriteResult::Unknown)
+            .unwrap();
+        assert_eq!(model.uncertain_writes().collect::<Vec<_>>(), vec![1]);
         assert_eq!(
             model.record_assumed_committed_attempt(2),
             Err(AttemptError::UncertainWritePending)
         );
+        let before = model.clone();
+        assert_eq!(
+            model.record_frame_write_result(1, FrameWriteResult::Accepted),
+            Err(super::FrameWriteError::NoMatchingAttempt)
+        );
+        assert_eq!(model, before);
+        assert!(model.has_uncertain_writes());
         assert_eq!(model.exposed(), 1);
 
         assert_eq!(
@@ -633,41 +732,34 @@ mod tests {
         assert_eq!(model.peer_acked(), 1);
         assert_eq!(model.replay().collect::<Vec<_>>(), vec![2]);
 
-        let mut duplicate_attempt = FrontierModel::new(4).unwrap();
-        duplicate_attempt.append().unwrap();
-        duplicate_attempt.append().unwrap();
-        duplicate_attempt
-            .record_assumed_committed_attempt(1)
+        let mut accepted_first = FrontierModel::new(4).unwrap();
+        accepted_first.append().unwrap();
+        accepted_first.append().unwrap();
+        accepted_first.record_assumed_committed_attempt(1).unwrap();
+        accepted_first
+            .record_frame_write_result(1, FrameWriteResult::Accepted)
             .unwrap();
-        duplicate_attempt
-            .record_frame_write_result(1, FrameWriteResult::Unknown)
-            .unwrap();
-        // Even an Accepted completion for a same-stream retry does not prove
-        // whether the first attempt was counted by the peer.
+        let before = accepted_first.clone();
         assert_eq!(
-            duplicate_attempt.record_frame_write_result(1, FrameWriteResult::Accepted),
-            Ok(())
+            accepted_first.record_assumed_committed_attempt(1),
+            Err(AttemptError::OutOfOrder),
+            "an accepted row cannot be resent on the same transport"
         );
-        assert!(duplicate_attempt.has_uncertain_writes());
+        assert_eq!(accepted_first, before);
         assert_eq!(
-            duplicate_attempt.record_assumed_committed_attempt(2),
-            Err(AttemptError::UncertainWritePending)
-        );
-        let before = duplicate_attempt.clone();
-        assert_eq!(
-            duplicate_attempt.acknowledge(2, AckKind::Live),
+            accepted_first.acknowledge(2, AckKind::Live),
             Err(AckError::HandledTooHigh {
                 h: 2,
                 send_count: 1
             })
         );
-        assert_eq!(duplicate_attempt, before);
-        assert_eq!(duplicate_attempt.replay().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(accepted_first.replay().collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
     fn resume_boundary_reconciles_unknown_writes_only_at_exact_ack_floor() {
         let mut model = FrontierModel::new(4).unwrap();
+        model.append().unwrap();
         model.append().unwrap();
         model
             .record_assumed_committed_attempt(1)
@@ -691,7 +783,45 @@ mod tests {
         assert!(model.has_uncertain_writes());
         model.reconcile_uncertain_after_resume(0).unwrap();
         assert!(!model.has_uncertain_writes());
-        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            model.record_assumed_committed_attempt(2),
+            Err(AttemptError::OutOfOrder),
+            "the new transport cannot skip the first replay row"
+        );
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Ok(AttemptOutcome::Replay)
+        );
+        model
+            .record_frame_write_result(1, FrameWriteResult::Accepted)
+            .unwrap();
+        assert_eq!(
+            model.record_assumed_committed_attempt(2),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+
+        let mut late_result = FrontierModel::new(2).unwrap();
+        late_result.append().unwrap();
+        late_result.append().unwrap();
+        late_result.record_assumed_committed_attempt(1).unwrap();
+        assert_eq!(
+            late_result.acknowledge(1, AckKind::Live),
+            Ok(AckOutcome::Advanced { through: 1 })
+        );
+        assert_eq!(late_result.in_flight_attempt(), None);
+        let before = late_result.clone();
+        assert_eq!(
+            late_result.record_frame_write_result(1, FrameWriteResult::Unknown),
+            Err(super::FrameWriteError::NoMatchingAttempt),
+            "a late Unknown after the ACK cannot re-freeze the resolved row"
+        );
+        assert_eq!(late_result, before);
+        assert!(!late_result.has_uncertain_writes());
+        assert_eq!(
+            late_result.record_assumed_committed_attempt(2),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
     }
 
     #[test]
@@ -736,9 +866,21 @@ mod tests {
                         Err(AppendError::OrdinalExhausted) => unreachable!(),
                     },
                     2 => {
-                        let ordinal = model.exposed + 1;
-                        if model.record_assumed_committed_attempt(ordinal).is_err() {
-                            prop_assert_eq!(&model, &before);
+                        if let Some(ordinal) = model.in_flight_attempt {
+                            prop_assert_eq!(
+                                model.record_frame_write_result(ordinal, FrameWriteResult::Accepted),
+                                Ok(()),
+                            );
+                        } else if let Some(ordinal) = model.transport_next {
+                            if ordinal <= model.appended {
+                                prop_assert!(model.record_assumed_committed_attempt(ordinal).is_ok());
+                            } else {
+                                prop_assert_eq!(
+                                    model.record_assumed_committed_attempt(ordinal),
+                                    Err(AttemptError::NotRetained),
+                                );
+                                prop_assert_eq!(&model, &before);
+                            }
                         }
                     }
                     3 => {
@@ -779,7 +921,12 @@ mod tests {
                     }
                     _ => {
                         let ordinal = model.appended + 1;
-                        prop_assert_eq!(model.record_assumed_committed_attempt(ordinal), Err(AttemptError::NotRetained));
+                        let expected = if model.in_flight_attempt.is_some() {
+                            AttemptError::WriteInFlight
+                        } else {
+                            AttemptError::NotRetained
+                        };
+                        prop_assert_eq!(model.record_assumed_committed_attempt(ordinal), Err(expected));
                         prop_assert_eq!(&model, &before);
                     }
                 }
@@ -789,6 +936,10 @@ mod tests {
                 prop_assert!(model.peer_acked <= model.exposed && model.exposed <= model.appended);
                 prop_assert!(model.appended - model.peer_acked <= u64::from(model.capacity));
                 prop_assert!(model.appended - model.peer_acked < u64::from(HALF_SPACE));
+                prop_assert!(model.uncertain_writes.len() <= 1);
+                if let Some(in_flight) = model.in_flight_attempt {
+                    prop_assert_eq!(model.transport_next, Some(in_flight));
+                }
                 prop_assert_eq!(model.replay().collect::<Vec<_>>(), retained.iter().copied().collect::<Vec<_>>());
             }
         }

@@ -158,6 +158,15 @@ enum CommitStatus {
     Committed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnableCommitStatus {
+    NotStarted,
+    InFlight,
+    Unknown,
+    Committed,
+    NotCommitted,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnableCommitReceipt {
     pub operation: OperationId,
@@ -323,6 +332,7 @@ pub struct SmLifecycleModel {
     resources: ResourceContinuity,
     state: LifecycleStatus,
     enable_operation: OperationId,
+    enable_commit: EnableCommitStatus,
     enabled_effect_ready: bool,
     transfer: Option<TransferState>,
     pending_ingress: VecDeque<u64>,
@@ -344,6 +354,7 @@ impl SmLifecycleModel {
             resources: config.resources,
             state: LifecycleStatus::EnablingLive,
             enable_operation: config.operation,
+            enable_commit: EnableCommitStatus::NotStarted,
             enabled_effect_ready: false,
             transfer: None,
             pending_ingress: VecDeque::new(),
@@ -416,10 +427,36 @@ impl SmLifecycleModel {
         }
     }
 
-    pub fn record_enable_commit_unknown(&mut self) -> Result<(), ModelError> {
+    /// Record that the exact enable transaction has started before a caller
+    /// can lose its commit result or terminalize the session.
+    pub fn begin_enable_commit(&mut self, expected: &LifecycleFence) -> Result<(), ModelError> {
         if self.state != LifecycleStatus::EnablingLive {
             return Err(ModelError::WrongState);
         }
+        if *expected != self.fence() {
+            return Err(ModelError::StaleFence);
+        }
+        if self.enable_commit != EnableCommitStatus::NotStarted {
+            return Err(ModelError::CommitNotConfirmed);
+        }
+        self.enable_commit = EnableCommitStatus::InFlight;
+        Ok(())
+    }
+
+    pub fn record_enable_commit_unknown(&mut self) -> Result<(), ModelError> {
+        if !matches!(
+            self.state,
+            LifecycleStatus::EnablingLive | LifecycleStatus::Terminal
+        ) {
+            return Err(ModelError::WrongState);
+        }
+        if !matches!(
+            self.enable_commit,
+            EnableCommitStatus::InFlight | EnableCommitStatus::Unknown
+        ) {
+            return Err(ModelError::CommitNotConfirmed);
+        }
+        self.enable_commit = EnableCommitStatus::Unknown;
         self.repair
             .insert(RepairResponsibility::EnableCommitUnknown(
                 self.enable_operation,
@@ -436,6 +473,12 @@ impl SmLifecycleModel {
         if *receipt != self.expected_enable_commit_receipt() {
             return Err(ModelError::ReceiptMismatch);
         }
+        if !matches!(
+            self.enable_commit,
+            EnableCommitStatus::InFlight | EnableCommitStatus::Unknown
+        ) {
+            return Err(ModelError::CommitNotConfirmed);
+        }
         let mut frontier = self.frontier.clone();
         for ordinal in &self.pending_ingress {
             frontier
@@ -448,6 +491,7 @@ impl SmLifecycleModel {
             .remove(&RepairResponsibility::EnableCommitUnknown(
                 self.enable_operation,
             ));
+        self.enable_commit = EnableCommitStatus::Committed;
         self.enabled_effect_ready = true;
         self.state = LifecycleStatus::Live;
         Ok(())
@@ -472,6 +516,10 @@ impl SmLifecycleModel {
             return Err(ModelError::RepairNotPending);
         }
         tombstone.enable_commit_resolution = Some(receipt.resolution);
+        self.enable_commit = match receipt.resolution {
+            EnableCommitResolution::Committed => EnableCommitStatus::Committed,
+            EnableCommitResolution::NotCommitted => EnableCommitStatus::NotCommitted,
+        };
         self.repair.remove(&responsibility);
         Ok(())
     }
@@ -821,6 +869,17 @@ impl SmLifecycleModel {
         });
         self.repair
             .insert(RepairResponsibility::TombstoneCustodyPending(id));
+        if self.state == LifecycleStatus::EnablingLive
+            && matches!(
+                self.enable_commit,
+                EnableCommitStatus::InFlight | EnableCommitStatus::Unknown
+            )
+        {
+            self.repair
+                .insert(RepairResponsibility::EnableCommitUnknown(
+                    self.enable_operation,
+                ));
+        }
         self.state = LifecycleStatus::Terminal;
         self.enabled_effect_ready = false;
         Ok(())
@@ -918,6 +977,9 @@ mod tests {
     }
 
     fn make_live(model: &mut SmLifecycleModel) {
+        model
+            .begin_enable_commit(&model.fence())
+            .expect("begin enable commit");
         let receipt = model.expected_enable_commit_receipt();
         model.commit_enable(&receipt).expect("enable commit");
     }
@@ -981,6 +1043,9 @@ mod tests {
         );
         assert_eq!(model.frontier().ingress(), 0);
 
+        model
+            .begin_enable_commit(&model.fence())
+            .expect("begin enable transaction");
         let receipt = model.expected_enable_commit_receipt();
         model
             .commit_enable(&receipt)
@@ -1154,6 +1219,21 @@ mod tests {
             model.receive_input(&binding, 1),
             Ok(InputDisposition::Buffered)
         );
+        let mut stale_fence = model.fence();
+        stale_fence.claim = ClaimId::new(999);
+        let before = model.clone();
+        assert_eq!(
+            model.begin_enable_commit(&stale_fence),
+            Err(ModelError::StaleFence)
+        );
+        assert_eq!(model, before);
+        model.begin_enable_commit(&model.fence()).unwrap();
+        let before = model.clone();
+        assert_eq!(
+            model.begin_enable_commit(&model.fence()),
+            Err(ModelError::CommitNotConfirmed)
+        );
+        assert_eq!(model, before);
         model
             .record_enable_commit_unknown()
             .expect("uncertain result retained");
@@ -1207,6 +1287,7 @@ mod tests {
         let mut terminal = enabling_model(7);
         let terminal_binding = terminal.fence().binding;
         terminal.receive_input(&terminal_binding, 1).unwrap();
+        terminal.begin_enable_commit(&terminal.fence()).unwrap();
         terminal.record_enable_commit_unknown().unwrap();
         let terminal_fence = terminal.fence();
         let terminal_id = TombstoneId::new(702);
@@ -1231,6 +1312,34 @@ mod tests {
         assert!(!terminal
             .repair_responsibilities()
             .any(|item| matches!(item, RepairResponsibility::EnableCommitUnknown(_))));
+
+        let mut late = enabling_model(7);
+        let late_binding = late.fence().binding;
+        late.receive_input(&late_binding, 1).unwrap();
+        late.begin_enable_commit(&late.fence()).unwrap();
+        let late_fence = late.fence();
+        late.terminalize(
+            &late_fence,
+            TombstoneId::new(703),
+            TerminalReason::EnableRejected,
+        )
+        .unwrap();
+        assert!(late
+            .repair_responsibilities()
+            .any(|item| item == RepairResponsibility::EnableCommitUnknown(OperationId::new(404))));
+        late.record_enable_commit_unknown()
+            .expect("late unknown result remains repairable");
+        let late_resolution =
+            late.expected_terminal_enable_resolution(EnableCommitResolution::Committed);
+        late.reconcile_terminal_enable_commit(&late_resolution)
+            .expect("late committed result settles without revival");
+        assert_eq!(late.state(), LifecycleStatus::Terminal);
+        assert!(!late.enabled_effect_ready());
+        assert_eq!(late.frontier().ingress(), 0);
+        assert_eq!(
+            late.tombstone().unwrap().enable_commit_resolution,
+            Some(EnableCommitResolution::Committed)
+        );
     }
 
     #[test]
@@ -1457,9 +1566,12 @@ mod tests {
                 crate::stream_management::frontier_model::AttemptError::UncertainWritePending
             ))
         );
-        model
-            .record_frame_write_result(&fence, 1, FrameWriteResult::Accepted)
-            .unwrap();
+        assert_eq!(
+            model.record_frame_write_result(&fence, 1, FrameWriteResult::Accepted),
+            Err(ModelError::FrameWrite(
+                crate::stream_management::frontier_model::FrameWriteError::NoMatchingAttempt
+            ))
+        );
         assert!(model.frontier().has_uncertain_writes());
         assert_eq!(model.replay_ordinals(), Some(vec![1, 2]));
 
@@ -1475,7 +1587,7 @@ mod tests {
         let resumed_fence = model.fence();
         assert_eq!(
             model.record_write_attempt(&resumed_fence, 1),
-            Ok(AttemptOutcome::Retry)
+            Ok(AttemptOutcome::Replay)
         );
         model
             .record_frame_write_result(&resumed_fence, 1, FrameWriteResult::Accepted)
