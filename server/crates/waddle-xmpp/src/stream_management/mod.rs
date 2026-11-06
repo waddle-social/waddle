@@ -24,9 +24,11 @@
 //! - `SmSessionRegistry` - Server-wide registry for detached resumable sessions
 //! - `UnackedQueue` - Queue of unacknowledged outbound stanzas
 
-#[cfg(test)]
-mod frontier_model;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod frontier_model;
 pub mod ingress_append;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod lifecycle_model;
 pub mod persistence;
 mod replay;
 mod resume_checkpoint;
