@@ -117,6 +117,7 @@ pub(super) async fn verify_roles_and_tables(
           AND c.relkind='r' AND c.relpersistence='p' AND c.relowner=n.nspowner
           AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition
           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid)
           AND pg_catalog.has_table_privilege(a.oid,c.oid,'SELECT')
           AND NOT pg_catalog.has_table_privilege(a.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES,MAINTAIN')
           AND NOT pg_catalog.has_table_privilege(a.oid,c.oid,'SELECT WITH GRANT OPTION')

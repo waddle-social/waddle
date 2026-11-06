@@ -199,6 +199,8 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         ("pending default",format!("ALTER TABLE {s}.pending_delivery ALTER COLUMN claim_offered SET DEFAULT 9"),format!("ALTER TABLE {s}.pending_delivery ALTER COLUMN claim_offered SET DEFAULT 0")),
         ("internal trigger",format!("ALTER TABLE {s}.ingress_origin_aliases DISABLE TRIGGER ALL"),format!("ALTER TABLE {s}.ingress_origin_aliases ENABLE TRIGGER ALL; ALTER TABLE {s}.ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_dml; ALTER TABLE {s}.ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_truncate; ALTER TABLE {s}.ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_definer_api_guard_dml")),
         ("column type",format!("ALTER TABLE {s}.pending_delivery ALTER COLUMN claim_offered TYPE bigint"),format!("ALTER TABLE {s}.pending_delivery ALTER COLUMN claim_offered TYPE integer")),
+        ("sessions inheritance child",format!("CREATE TABLE {s}.session_child () INHERITS ({s}.sessions)"),format!("DROP TABLE {s}.session_child")),
+        ("pending inheritance child",format!("CREATE TABLE {s}.pending_child () INHERITS ({s}.pending_delivery)"),format!("DROP TABLE {s}.pending_child")),
         ("API dependency UPDATE",format!("GRANT UPDATE ON {s}.sessions TO {api}"),format!("REVOKE UPDATE ON {s}.sessions FROM {api}; GRANT UPDATE(id) ON {s}.sessions TO {api}")),
         ("row security",format!("ALTER TABLE {t} ENABLE ROW LEVEL SECURITY"),format!("ALTER TABLE {t} DISABLE ROW LEVEL SECURITY")),
         ("dormant policy",format!("CREATE POLICY hostile ON {t} USING (true)"),format!("DROP POLICY hostile ON {t}")),

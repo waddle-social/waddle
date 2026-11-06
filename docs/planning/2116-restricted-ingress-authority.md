@@ -82,8 +82,10 @@ execution grants. All non-internal ingress triggers are checked independently.
 The structural manifest covers the thirteen guarded tables, epoch and guard
 manifest tables, `sessions`, and the canonical owner-prepared `pending_delivery`
 table. It pins columns/defaults, checks, unique/foreign-key constraints,
-indexes and internal/non-internal trigger definitions. Physical catalog OIDs
-and planner statistics are excluded from the portable structural comparison;
+indexes, live parent/child inheritance edges, and internal/non-internal trigger
+definitions. Dependencies must neither inherit nor have children, including
+children outside the ingress inventory or foreign-table children. Physical
+catalog OIDs and planner statistics are excluded from the portable structural comparison;
 the attested schema identity and supplied epoch OID are checked separately.
 The manifest producer executes the actual ordered migration SQL and canonical
 pending owner DDL inside one rollback-only disposable transaction. The PG17

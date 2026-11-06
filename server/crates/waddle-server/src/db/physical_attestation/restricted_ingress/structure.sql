@@ -7,6 +7,8 @@ FROM (
     'properties',pg_catalog.jsonb_build_object('access_method',am.amname,
       'replica_identity',c.relreplident,'options',c.reloptions,'tablespace',c.reltablespace,
       'of_type',c.reloftype,'has_rules',c.relhasrules),
+    -- relhassubclass is a sticky planner hint; pin live edges in either direction.
+    'inheritance_edges',(SELECT count(*) FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid),
     'columns',COALESCE((SELECT pg_catalog.jsonb_agg(
       pg_catalog.jsonb_build_object('properties',pg_catalog.to_jsonb(a)-ARRAY['attrelid','attstattarget','attcacheoff','attacl'],
         'default',pg_catalog.pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)

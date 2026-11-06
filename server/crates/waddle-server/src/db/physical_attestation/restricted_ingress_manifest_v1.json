@@ -8,7 +8,7 @@
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
     "pending_schema": "a1cec890f4af46c75fff94630cdd75ef2d8349abff28bf8fec1e268ecb87527c",
     "pending_recovery": "8fe312795d4b592ccdc1ac9465f140257666b94d65e762b010c4fb5025dcee3a",
-    "structure_query": "7de903ca4e7608f624454b0e8ff283c9ea9fbb1bc1554fe6a3bdbb05b0af4140"
+    "structure_query": "ab4c36964b3acb035443e47b5895ef534409f47c5dc7e25f42418369396736ce"
   },
   "functions": [
     {
@@ -5407,7 +5407,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_carbon_receipts",
@@ -5781,7 +5782,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_deliveries",
@@ -6193,7 +6195,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_delivery_receipts",
@@ -6624,7 +6627,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_effect_descendants",
@@ -7125,7 +7129,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_effect_intents",
@@ -8003,7 +8008,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_effect_receipts",
@@ -8459,7 +8465,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_epoch_guard_manifest",
@@ -8617,7 +8624,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_messages",
@@ -9936,7 +9944,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_origin_aliases",
@@ -10580,7 +10589,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_owner_rejections",
@@ -11127,7 +11137,8 @@
           "foreign_table": "ingress_messages",
           "foreign_schema": "__SCHEMA_NAME__"
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_protocol_epoch",
@@ -11458,7 +11469,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_send_attempts",
@@ -12056,7 +12068,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_sm_refs",
@@ -12660,7 +12673,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "ingress_sm_streams",
@@ -13248,7 +13262,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "pending_delivery",
@@ -14067,7 +14082,8 @@
           "foreign_table": null,
           "foreign_schema": null
         }
-      ]
+      ],
+      "inheritance_edges": 0
     },
     {
       "name": "sessions",
@@ -14645,7 +14661,8 @@
           "foreign_table": "users",
           "foreign_schema": "__SCHEMA_NAME__"
         }
-      ]
+      ],
+      "inheritance_edges": 0
     }
   ]
 }
