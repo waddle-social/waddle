@@ -16,6 +16,9 @@ use super::{
     prepare_candidate_application_fixture, test_url, url_with_schema, Fixture, CATALOG_GRANT_LOCK,
 };
 
+#[path = "restricted_transaction_probe.rs"]
+mod transaction_probe;
+
 const CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/ingress_definer_api_candidate.sql");
 
@@ -100,6 +103,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         .expect("exact restricted profile");
     assert_eq!(observed.manifest_version, 1);
     assert_eq!(observed.epoch_relation_oid, epoch_oid);
+    transaction_probe::exercise(&fixture, &config, &api_role, epoch_oid).await;
     assert!(
         pool.inspect_restricted_ingress_profile(&api_role, epoch_oid + 1)
             .await

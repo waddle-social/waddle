@@ -27,6 +27,8 @@ pub use installer::{
 };
 mod restricted_ingress;
 pub use restricted_ingress::{RestrictedIngressProfileError, RestrictedIngressProfileObservation};
+#[cfg(feature = "test-support")]
+pub use restricted_ingress::{RestrictedTransactionProbe, RestrictedTransactionProbeObservation};
 mod typed_authority;
 #[cfg(feature = "test-support")]
 pub(crate) use typed_authority::prelock_epoch_relation;
