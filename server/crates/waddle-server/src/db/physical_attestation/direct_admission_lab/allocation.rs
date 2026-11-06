@@ -879,7 +879,9 @@ impl LabTx<'_, '_> {
         id: uuid::Uuid,
     ) -> Result<Option<DirectAdmission>, FixtureAllocationError> {
         Ok(match self {
-            Self::Postgres(tx, schema) => lookup_postgres(tx, schema, id).await?,
+            Self::Postgres(tx, schema) => {
+                lookup_postgres(tx, schema, id, super::PostgresLabTables::Direct).await?
+            }
             Self::Sqlite(tx) => lookup_sqlite(tx, id).await?,
         })
     }

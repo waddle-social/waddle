@@ -39,6 +39,11 @@ pub use typed_authority::{
     PinOutcome, PinRecovery, PinState, PinTerminalDisposition, ALLOCATION_LAB_SQLITE_DDL,
     DIRECT_LAB_SQLITE_DDL, PIN_LAB_SQLITE_DDL,
 };
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub use typed_authority::{
+    custody_lab_postgres_ddl, CustodyBinding, CustodyDisposition, CustodyLab, CustodyLabError,
+    CustodyLabIdentity, CustodyRetention, SealedCustodyGate,
+};
 pub use typed_authority::{DarkIngressAuthority, DarkIngressAuthorityError, TransactionBounds};
 #[cfg(feature = "test-support")]
 pub use typed_authority::{RetentionLab, RetentionLabBatch};

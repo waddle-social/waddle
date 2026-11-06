@@ -1,6 +1,15 @@
 //! Closed, unwired experiment. `FixtureConnection` is synthetic and cannot
 //! authorize a real connection or enqueue. No runtime writer calls this lab.
 
+#[cfg(feature = "clustering")]
+#[path = "direct_admission_lab/custody.rs"]
+mod custody;
+#[cfg(feature = "clustering")]
+pub use custody::{
+    custody_lab_postgres_ddl, CustodyBinding, CustodyDisposition, CustodyLab, CustodyLabError,
+    CustodyLabIdentity, CustodyRetention, SealedCustodyGate,
+};
+
 #[path = "direct_admission_lab/allocation.rs"]
 mod allocation;
 pub use allocation::{
@@ -12,7 +21,7 @@ pub use allocation::{
 use crate::ingress_uow::{start_fresh_postgres, start_fresh_sqlite, SendLease};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{PgConnection, Row};
 use thiserror::Error;
 use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::ownership::NodeIdentity;
@@ -275,6 +284,7 @@ impl DirectAdmissionLab {
                     lease,
                     &payload,
                     self.limits,
+                    PostgresLabTables::Direct,
                 )
                 .await?;
                 prepared.commit().await?;
@@ -327,6 +337,7 @@ impl DirectAdmissionLab {
                     &mut prepared.transaction,
                     schema,
                     admission.pin.admission_id,
+                    PostgresLabTables::Direct,
                 )
                 .await?;
                 let record = check_record(record, admission)?;
@@ -495,13 +506,39 @@ fn decode(stored: Stored) -> Result<DirectAdmission, DirectAdmissionLabError> {
     })
 }
 
+#[derive(Clone, Copy)]
+enum PostgresLabTables {
+    Direct,
+    #[cfg(feature = "clustering")]
+    Custody,
+}
+
+impl PostgresLabTables {
+    fn admission(self) -> &'static str {
+        match self {
+            Self::Direct => "direct_admission_lab",
+            #[cfg(feature = "clustering")]
+            Self::Custody => "custody_lab_admission",
+        }
+    }
+
+    fn quota(self) -> &'static str {
+        match self {
+            Self::Direct => "direct_admission_lab_quota",
+            #[cfg(feature = "clustering")]
+            Self::Custody => "custody_lab_quota",
+        }
+    }
+}
+
 async fn lookup_postgres(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     schema: &str,
     id: uuid::Uuid,
+    tables: PostgresLabTables,
 ) -> Result<Option<DirectAdmission>, DirectAdmissionLabError> {
-    let row = sqlx::query(&format!("SELECT admission_id::text, message_key::text, receipt_kind::bigint, semantic_identity_hash, resource, attempt_token::text, node_id, node_incarnation, connection_generation::text, sm_session_id, payload, received_at FROM {}.direct_admission_lab WHERE admission_id = $1", quote_identifier(schema)))
-        .bind(id).fetch_optional(&mut **tx).await.map_err(super::super::postgres_error)?;
+    let row = sqlx::query(&format!("SELECT admission_id::text, message_key::text, receipt_kind::bigint, semantic_identity_hash, resource, attempt_token::text, node_id, node_incarnation, connection_generation::text, sm_session_id, payload, received_at FROM {}.{} WHERE admission_id = $1", quote_identifier(schema), tables.admission()))
+        .bind(id).fetch_optional(&mut *tx).await.map_err(super::super::postgres_error)?;
     row.map(|r| {
         let bad = |_| DarkIngressAuthorityError::Database;
         decode(Stored {
@@ -523,19 +560,22 @@ async fn lookup_postgres(
 }
 
 async fn start_postgres(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     schema: &str,
     admission: &DirectAdmission,
     lease: &SendLease,
     payload: &str,
     limits: DirectAdmissionLimits,
+    tables: PostgresLabTables,
 ) -> Result<DirectAdmissionOutcome, DirectAdmissionLabError> {
     let q = quote_identifier(schema);
     let pin = &admission.pin;
+    let admission_table = tables.admission();
+    let quota_table = tables.quota();
     let canonical = sqlx::query(&format!("SELECT envelope_version::bigint, envelope, created_at FROM {q}.ingress_messages WHERE message_key = $1 FOR UPDATE"))
-        .bind(pin.key.message_key.to_storage()).fetch_optional(&mut **tx).await.map_err(super::super::postgres_error)?.ok_or(DirectAdmissionLabError::Rejected)?;
+        .bind(pin.key.message_key.to_storage()).fetch_optional(&mut *tx).await.map_err(super::super::postgres_error)?.ok_or(DirectAdmissionLabError::Rejected)?;
     let intent = sqlx::query(&format!("SELECT kind, payload_version::bigint, payload FROM {q}.ingress_effect_intents WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3"))
-        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).fetch_optional(&mut **tx).await.map_err(super::super::postgres_error)?.ok_or(DirectAdmissionLabError::Rejected)?;
+        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).fetch_optional(&mut *tx).await.map_err(super::super::postgres_error)?.ok_or(DirectAdmissionLabError::Rejected)?;
     let bad = |_| DarkIngressAuthorityError::Database;
     let version: Option<i64> = canonical.try_get(0).map_err(bad)?;
     let envelope: Option<Vec<u8>> = canonical.try_get(1).map_err(bad)?;
@@ -551,34 +591,34 @@ async fn start_postgres(
         received_at,
     )?;
     let attempt = sqlx::query(&format!("SELECT 1 FROM {q}.ingress_send_attempts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4 FOR UPDATE"))
-        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_optional(&mut **tx).await.map_err(super::super::postgres_error)?;
+        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_optional(&mut *tx).await.map_err(super::super::postgres_error)?;
     attempt.ok_or(DirectAdmissionLabError::Rejected)?;
     sqlx::query(&format!(
-        "SELECT id FROM {q}.direct_admission_lab_quota WHERE id = 1 FOR UPDATE"
+        "SELECT id FROM {q}.{quota_table} WHERE id = 1 FOR UPDATE"
     ))
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(super::super::postgres_error)?
     .ok_or(DarkIngressAuthorityError::Database)?;
-    if let Some(existing) = lookup_postgres(tx, schema, pin.admission_id).await? {
+    if let Some(existing) = lookup_postgres(tx, schema, pin.admission_id, tables).await? {
         return if identical_admission(&existing, admission) {
             Ok(DirectAdmissionOutcome::Recovered)
         } else {
             Err(DirectAdmissionLabError::Conflict)
         };
     }
-    let conflict: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.direct_admission_lab WHERE attempt_token = $1 OR (message_key = $2 AND receipt_kind = $3 AND semantic_identity_hash = $4 AND resource = $5))"))
-        .bind(admission.attempt_token).bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_one(&mut **tx).await.map_err(super::super::postgres_error)?;
+    let conflict: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.{admission_table} WHERE attempt_token = $1 OR (message_key = $2 AND receipt_kind = $3 AND semantic_identity_hash = $4 AND resource = $5))"))
+        .bind(admission.attempt_token).bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_one(&mut *tx).await.map_err(super::super::postgres_error)?;
     if conflict {
         return Err(DirectAdmissionLabError::Conflict);
     }
     let blocked: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.ingress_effect_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3) OR EXISTS (SELECT 1 FROM {q}.ingress_delivery_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND resource = $4) OR EXISTS (SELECT 1 FROM {q}.ingress_carbon_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4) OR EXISTS (SELECT 1 FROM {q}.sm_ingress_appends WHERE message_key = $1::text AND receipt_kind = $2 AND semantic_identity_hash = $3 AND resource = $4)"))
-        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_one(&mut **tx).await.map_err(super::super::postgres_error)?;
+        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_one(&mut *tx).await.map_err(super::super::postgres_error)?;
     if blocked {
         return Err(DirectAdmissionLabError::Rejected);
     }
-    let (rows, bytes): (i64, i64) = sqlx::query_as(&format!("SELECT COUNT(*), COALESCE(SUM(octet_length(payload)), 0)::bigint FROM {q}.direct_admission_lab"))
-        .fetch_one(&mut **tx).await.map_err(super::super::postgres_error)?;
+    let (rows, bytes): (i64, i64) = sqlx::query_as(&format!("SELECT COUNT(*), COALESCE(SUM(octet_length(payload)), 0)::bigint FROM {q}.{admission_table}"))
+        .fetch_one(&mut *tx).await.map_err(super::super::postgres_error)?;
     capacity(rows, bytes, payload.len(), limits)?;
     if !start_fresh_postgres(tx, &format!("{q}.ingress_send_attempts"), lease)
         .await
@@ -586,8 +626,8 @@ async fn start_postgres(
     {
         return Err(DirectAdmissionLabError::Rejected);
     }
-    sqlx::query(&format!("INSERT INTO {q}.direct_admission_lab (admission_id, message_key, receipt_kind, semantic_identity_hash, resource, attempt_token, node_id, node_incarnation, connection_generation, sm_session_id, payload, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"))
-        .bind(pin.admission_id).bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).bind(admission.attempt_token).bind(&admission.owner.node_id).bind(&admission.owner.node_epoch).bind(admission.connection.generation).bind(admission.connection.sm_session.as_str()).bind(payload).bind(pin.received_at.to_rfc3339()).execute(&mut **tx).await.map_err(super::super::postgres_error)?;
+    sqlx::query(&format!("INSERT INTO {q}.{admission_table} (admission_id, message_key, receipt_kind, semantic_identity_hash, resource, attempt_token, node_id, node_incarnation, connection_generation, sm_session_id, payload, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"))
+        .bind(pin.admission_id).bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).bind(admission.attempt_token).bind(&admission.owner.node_id).bind(&admission.owner.node_epoch).bind(admission.connection.generation).bind(admission.connection.sm_session.as_str()).bind(payload).bind(pin.received_at.to_rfc3339()).execute(&mut *tx).await.map_err(super::super::postgres_error)?;
     Ok(DirectAdmissionOutcome::Recorded)
 }
 

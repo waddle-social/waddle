@@ -37,6 +37,11 @@ pub use admission_pin_lab::{
     PinOutcome, PinRecovery, PinState, PinTerminalDisposition, ALLOCATION_LAB_SQLITE_DDL,
     DIRECT_LAB_SQLITE_DDL, PIN_LAB_SQLITE_DDL,
 };
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub use admission_pin_lab::{
+    custody_lab_postgres_ddl, CustodyBinding, CustodyDisposition, CustodyLab, CustodyLabError,
+    CustodyLabIdentity, CustodyRetention, SealedCustodyGate,
+};
 
 /// Bounds on checkout and the first PostgreSQL relation-lock wait.
 #[derive(Debug, Clone, Copy)]

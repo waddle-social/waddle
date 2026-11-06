@@ -1306,3 +1306,7 @@ async fn postgres_committed_lost_reply_requires_fresh_authoritative_lookup() {
 
 #[path = "allocation.rs"]
 mod allocation_tests;
+
+#[cfg(feature = "clustering")]
+#[path = "custody.rs"]
+mod custody_tests;

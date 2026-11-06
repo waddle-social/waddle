@@ -16,6 +16,11 @@ pub use direct::{
     FixtureAllocationWitness, FixtureConnection, FixtureFrame, FixtureStream,
     ALLOCATION_LAB_SQLITE_DDL, DIRECT_LAB_SQLITE_DDL,
 };
+#[cfg(feature = "clustering")]
+pub use direct::{
+    custody_lab_postgres_ddl, CustodyBinding, CustodyDisposition, CustodyLab, CustodyLabError,
+    CustodyLabIdentity, CustodyRetention, SealedCustodyGate,
+};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;
