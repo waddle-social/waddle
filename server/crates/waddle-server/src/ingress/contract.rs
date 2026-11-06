@@ -4,6 +4,7 @@ use super::commit;
 use super::execute;
 use super::frame_receipt_retry;
 use super::gc;
+use super::receipt_custody;
 use super::CancellationToken;
 use super::DatabaseDriver;
 use super::DeliveryExecutionContext;
@@ -39,6 +40,8 @@ pub enum IngressStartupError {
     AttestedIngressPoolRequired,
     #[error("an owner PostgreSQL ingress lane is required for this constructor")]
     OwnerSharedIngressPoolRequired,
+    #[error("receipt continuation fatal fence was already bound")]
+    ReceiptFenceAlreadyBound,
     #[error(transparent)]
     UnitOfWork(#[from] IngressUowError),
 }
@@ -71,10 +74,13 @@ pub struct IngressAuthority {
     pub(in crate::ingress) force_stop: CancellationToken,
     pub(in crate::ingress) gc_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(in crate::ingress) admission: Arc<RwLock<bool>>,
+    pub(in crate::ingress) executing: RwLock<bool>,
+    pub(in crate::ingress) clustered: bool,
     pub(in crate::ingress) streams: StdMutex<HashMap<SmSessionId, Weak<RwLock<()>>>>,
     pub(in crate::ingress) retirement_cursor: Mutex<Option<SmSessionId>>,
     pub(in crate::ingress) frame_receipt_retries:
         StdMutex<frame_receipt_retry::FrameReceiptRetries>,
+    pub(in crate::ingress) receipt_custody: receipt_custody::ReceiptCustody,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     pub(in crate::ingress) stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -83,6 +89,37 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    pub(crate) fn bind_receipt_fatal_fence(
+        &self,
+        fatal_fence: CancellationToken,
+    ) -> Result<(), IngressStartupError> {
+        if self.receipt_custody.bind_fatal_fence(fatal_fence) {
+            Ok(())
+        } else {
+            Err(IngressStartupError::ReceiptFenceAlreadyBound)
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn receipt_custody_test_probe(
+        &self,
+        message: waddle_xmpp::ingress::MessageKey,
+        lose_ack: bool,
+    ) -> Arc<super::ReceiptCustodyProbe> {
+        self.receipt_custody.test_probe(message, lose_ack)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn receipt_custody_test_capacity(&self, batches: usize, receipts: usize) {
+        self.receipt_custody.test_capacity(batches, receipts);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn receipt_custody_shares_ingress_lane(&self, database: &Database) -> bool {
+        self.database.shares_ingress_lane(database)
+            && self.receipt_custody.shares_ingress_lane(database)
+    }
+
     pub(crate) fn bind_room_observers(
         &self,
         actors: Arc<crate::room_observation::RoomObservationActors>,
@@ -253,6 +290,10 @@ impl IngressAuthority {
         lineage: LineageConfig,
         #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
     ) -> Result<Self, IngressStartupError> {
+        #[cfg(feature = "clustering")]
+        let clustered = node_identity.is_some();
+        #[cfg(not(feature = "clustering"))]
+        let clustered = false;
         // A canonical node identity is present exactly when clustering is
         // enabled: claim fences are then asserted inside every transaction.
         // Single-node deployments (SQLite, or PostgreSQL without clustering)
@@ -289,6 +330,12 @@ impl IngressAuthority {
         let gc = gc::RetentionGcCoordinator::new(database.clone(), uow.clone(), recovery.clone());
         let cancellation = CancellationToken::new();
         let force_stop = CancellationToken::new();
+        let admission = Arc::new(RwLock::new(true));
+        let receipt_custody = receipt_custody::ReceiptCustody::new(
+            database.clone(),
+            Arc::clone(&admission),
+            force_stop.clone(),
+        );
         let gc_task = tokio::spawn(gc::run_retention_gc_coordinator(
             gc.clone(),
             cancellation.clone(),
@@ -304,7 +351,10 @@ impl IngressAuthority {
             cancellation,
             force_stop,
             gc_task: Mutex::new(Some(gc_task)),
-            admission: Arc::new(RwLock::new(true)),
+            admission,
+            executing: RwLock::new(true),
+            clustered,
+            receipt_custody,
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -328,6 +378,13 @@ impl IngressAuthority {
         let uow = IngressUnitOfWork::open(database.clone(), lineage)
             .expect("open test ingress unit of work");
         let recovery = RecoveryBinding::default();
+        let admission = Arc::new(RwLock::new(true));
+        let force_stop = CancellationToken::new();
+        let receipt_custody = receipt_custody::ReceiptCustody::new(
+            database.clone(),
+            Arc::clone(&admission),
+            force_stop.clone(),
+        );
         Self {
             observers: std::sync::OnceLock::new(),
             gc: gc::RetentionGcCoordinator::new(database.clone(), uow.clone(), recovery.clone()),
@@ -336,9 +393,12 @@ impl IngressAuthority {
             uow,
             config: IngressConfig::default(),
             cancellation: CancellationToken::new(),
-            force_stop: CancellationToken::new(),
+            force_stop,
             gc_task: Mutex::new(None),
-            admission: Arc::new(RwLock::new(true)),
+            admission,
+            executing: RwLock::new(true),
+            clustered: false,
+            receipt_custody,
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -604,19 +664,46 @@ impl IngressAuthority {
         sink: &ImmediateSink,
         deps: &Deps<'_>,
     ) -> ExecutionReport {
+        // This separate gate lets graceful drain wait for existing executors
+        // to transfer their proofs before it closes the receipt queue. A new
+        // or recursive execution fails immediately if drain is queued.
+        let Ok(executing) = self.executing.try_read() else {
+            return ExecutionReport::new(deps.delivery_execution_context.into());
+        };
+        if !*executing || self.cancellation.is_cancelled() {
+            return ExecutionReport::new(deps.delivery_execution_context.into());
+        }
         let admission = self.admission.read().await;
         if self.cancellation.is_cancelled() || !*admission {
             return ExecutionReport::new(deps.delivery_execution_context.into());
         }
         let mut execution_deps = deps.clone();
         execution_deps.ingress_delivery_stop = Some(self.force_stop.clone());
-        execute::execute_effects(
+        // A missing lifecycle fence, a clustered node, or an attested pool
+        // keeps the existing path. The continuation requires the bound fatal
+        // fence and an acknowledged insert on the ordinary standalone pool.
+        if self.clustered
+            || !self.receipt_custody.has_fatal_fence()
+            || self.database.attested_pg_writer_capability().is_some()
+        {
+            return execute::execute_effects(
+                &self.uow,
+                &self.database,
+                decision,
+                sink,
+                &execution_deps,
+                Duration::from_secs(5),
+            )
+            .await;
+        }
+        execute::execute_admitted_effects(
             &self.uow,
             &self.database,
             decision,
             sink,
             &execution_deps,
             Duration::from_secs(5),
+            &self.receipt_custody,
         )
         .await
     }
@@ -691,6 +778,9 @@ impl IngressAuthority {
     pub async fn drain_and_join(&self, budget: Duration) -> bool {
         self.cancellation.cancel();
         let drained = tokio::time::timeout(budget, async {
+            *self.executing.write().await = false;
+            self.receipt_custody.close();
+            let receipts_drained = self.receipt_custody.join().await;
             let receipt_task = self
                 .frame_receipt_retries
                 .lock()
@@ -713,7 +803,7 @@ impl IngressAuthority {
                 }
             }
             task.take();
-            true
+            receipts_drained
         })
         .await;
         if let Ok(result) = drained {

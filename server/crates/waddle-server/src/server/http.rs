@@ -874,16 +874,16 @@ async fn open_ingress_authority(
     } else {
         None
     };
-    Ok(Arc::new(
-        create_ingress_authority(
-            &config.ingress,
-            &state.db_pool,
-            &state.lineage_config,
-            #[cfg(feature = "clustering")]
-            node_identity,
-        )
-        .await?,
-    ))
+    let authority = create_ingress_authority(
+        &config.ingress,
+        &state.db_pool,
+        &state.lineage_config,
+        #[cfg(feature = "clustering")]
+        node_identity,
+    )
+    .await?;
+    authority.bind_receipt_fatal_fence(state.node_lifecycle.fatal_fence_token())?;
+    Ok(Arc::new(authority))
 }
 
 async fn create_ingress_authority(

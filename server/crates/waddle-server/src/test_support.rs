@@ -183,6 +183,39 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Pause each receipt continuation attempt for a canonical message.
+#[cfg(feature = "test-support")]
+pub fn receipt_custody_probe(
+    authority: &IngressAuthority,
+    message: waddle_xmpp::ingress::MessageKey,
+    lose_ack: bool,
+) -> Arc<crate::ingress::ReceiptCustodyProbe> {
+    authority.receipt_custody_test_probe(message, lose_ack)
+}
+
+/// Bind the same node fatal-fence token that production startup supplies.
+#[cfg(feature = "test-support")]
+pub fn bind_receipt_custody_fatal_fence(authority: &IngressAuthority, state: &WebSocketState) {
+    authority
+        .bind_receipt_fatal_fence(state.deps.app_state.node_lifecycle.fatal_fence_token())
+        .expect("bind test receipt fatal fence");
+}
+
+/// Override the bounded receipt continuation capacity in a test fixture.
+#[cfg(feature = "test-support")]
+pub fn receipt_custody_capacity(authority: &IngressAuthority, batches: usize, receipts: usize) {
+    authority.receipt_custody_test_capacity(batches, receipts);
+}
+
+/// Whether both the authority and its receipt worker carry this reserved lane.
+#[cfg(feature = "test-support")]
+pub fn receipt_custody_shares_ingress_lane(
+    authority: &IngressAuthority,
+    database: &Database,
+) -> bool {
+    authority.receipt_custody_shares_ingress_lane(database)
+}
+
 /// Build a test-only WebSocket fixture that advertises and dispatches the
 /// dark SASL2 OAuthBearer path. This fixture does not assert TLS termination
 /// or prove that a request arrived without early data.

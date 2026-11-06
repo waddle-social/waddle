@@ -302,6 +302,7 @@ mod custody_tests;
 mod implementation;
 use implementation::classify_outcome;
 use implementation::completed_receipts;
+pub(in crate::ingress) use implementation::execute_admitted_effects;
 pub use implementation::execute_effects;
 #[cfg(test)]
 use implementation::is_invite_delivery_dependent;
@@ -315,5 +316,6 @@ pub use implementation::ExecutionPersistenceFailure;
 pub use implementation::ExecutionReport;
 pub use implementation::ExternalOutcome;
 pub use implementation::FrameObligation;
+pub(super) use implementation::ProvenReceiptBatch;
 #[cfg(feature = "clustering")]
 pub use implementation::RelayFrameReceiptCompletion;
