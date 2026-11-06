@@ -1174,9 +1174,6 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
         format!("GRANT USAGE, CREATE ON SCHEMA guarded TO {api_owner}"),
         format!("GRANT SELECT ON guarded.ingress_protocol_epoch TO {api_owner}"),
         format!("GRANT UPDATE (id) ON guarded.ingress_protocol_epoch TO {api_owner}"),
-        format!("GRANT SELECT, INSERT, DELETE ON guarded.ingress_messages TO {api_owner}"),
-        format!("GRANT UPDATE (message_key) ON guarded.ingress_messages TO {api_owner}"),
-        format!("GRANT SELECT, INSERT ON guarded.ingress_origin_aliases TO {api_owner}"),
         format!("GRANT SELECT ON guarded.sessions TO {api_owner}"),
         format!("GRANT UPDATE (id) ON guarded.sessions TO {api_owner}"),
     ] {
@@ -1184,6 +1181,14 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
             .execute(&mut transition_admin)
             .await
             .expect("grant API owner its bounded privileges");
+    }
+    for table in TABLES {
+        sqlx::query(&format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.{table} TO {api_owner}"
+        ))
+        .execute(&mut transition_admin)
+        .await
+        .expect("grant dedicated API owner guarded-table DML");
     }
     sqlx::raw_sql(&candidate_sql)
         .execute(&mut transition_admin)
@@ -1337,6 +1342,68 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     let mut expected_execute_grantees = vec![api_owner.clone(), fixture.runtime.clone()];
     expected_execute_grantees.sort();
     assert_eq!(function_execute_grantees, expected_execute_grantees);
+    let callable_api_functions: Vec<(String, String, String, bool, bool, bool, bool)> =
+        sqlx::query_as(
+            r#"
+        SELECT p.proname::text, pg_catalog.pg_get_userbyid(p.proowner)::text,
+               p.provolatile::text, p.prosecdef,
+               COALESCE('search_path=pg_catalog, pg_temp' = ANY(p.proconfig), false),
+               pg_catalog.has_function_privilege($1, p.oid, 'EXECUTE'),
+               EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.aclexplode(
+                       COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
+                   ) acl
+                   WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+               )
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'guarded'
+          AND p.proname LIKE 'waddle_ingress_%'
+          AND p.proname NOT IN (
+              'waddle_ingress_epoch_guard', 'waddle_ingress_truncate_guard',
+              'waddle_ingress_protocol_epoch_guard',
+              'waddle_ingress_epoch_guard_manifest_append_only',
+              'waddle_ingress_owner_rejection_delete_guard',
+              'waddle_ingress_owner_rejection_immutable',
+              'waddle_ingress_owner_rejection_insert_guard',
+              'waddle_ingress_source_binding_guard',
+              'waddle_ingress_source_insert_guard',
+              'waddle_ingress_definer_prepare', 'waddle_ingress_definer_epoch_guard',
+              'waddle_ingress_refresh_retention'
+          )
+        ORDER BY p.proname
+        "#,
+        )
+        .bind(&fixture.runtime)
+        .fetch_all(&mut owner)
+        .await
+        .expect("inspect full candidate API function catalog");
+    assert!(
+        callable_api_functions.len() >= 35,
+        "candidate API catalog unexpectedly small: {} functions",
+        callable_api_functions.len()
+    );
+    for (
+        name,
+        owner_role,
+        volatility,
+        security_definer,
+        safe_path,
+        runtime_execute,
+        public_execute,
+    ) in callable_api_functions
+    {
+        assert_eq!(owner_role, api_owner, "{name} must have the API owner");
+        assert_eq!(
+            volatility, "v",
+            "{name} must be VOLATILE for epoch preparation"
+        );
+        assert!(security_definer, "{name} must be SECURITY DEFINER");
+        assert!(safe_path, "{name} must pin the safe search_path");
+        assert!(runtime_execute, "runtime must execute {name}");
+        assert!(!public_execute, "PUBLIC must not execute {name}");
+    }
     let can_set_owner: bool = sqlx::query_scalar("SELECT pg_catalog.pg_has_role($1, $2, 'MEMBER')")
         .bind(&fixture.runtime)
         .bind(&api_owner)
@@ -1537,6 +1604,176 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
             .await
             .expect("rollback invalid ancestry page request");
     }
+    let bounded_page_calls = [
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_effect_intents('{legacy_key}'::uuid, NULL::numeric, $1::integer)"
+        ),
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_effect_receipts('{legacy_key}'::uuid, NULL::integer, NULL::bytea, $1::integer)"
+        ),
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_carbon_receipts('{legacy_key}'::uuid, 7, decode(repeat('00', 32), 'hex'), NULL::text, $1::integer)"
+        ),
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_pending_send_attempts('{legacy_key}'::uuid, 7, decode(repeat('00', 32), 'hex'), NULL::text, $1::integer)"
+        ),
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_delivery_receipts('{legacy_key}'::uuid, 7, decode(repeat('00', 32), 'hex'), NULL::text, $1::integer)"
+        ),
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_all_delivery_receipts('{legacy_key}'::uuid, 7, decode(repeat('00', 32), 'hex'), NULL::text, $1::integer)"
+        ),
+        format!(
+            "SELECT * FROM guarded.waddle_ingress_list_archive_positions('{legacy_key}'::uuid, 1, decode(repeat('00', 32), 'hex'), NULL::text, NULL::bigint, $1::integer)"
+        ),
+    ];
+    for sql in bounded_page_calls {
+        for page_size in [None, Some(0), Some(257)] {
+            begin(&mut runtime).await;
+            writer_lock(&mut runtime).await;
+            proof(&mut runtime, 0).await;
+            let error = sqlx::query(&sql)
+                .bind(page_size)
+                .fetch_all(&mut runtime)
+                .await
+                .expect_err("malformed or oversized API page must be rejected");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("22023"),
+                "{sql}, page size {page_size:?}: {error}"
+            );
+            sqlx::query("ROLLBACK")
+                .execute(&mut runtime)
+                .await
+                .expect("rollback invalid API page request");
+        }
+    }
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let inserted_intents: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM generate_series(1, 257) AS series(ordinal) \
+         WHERE guarded.waddle_ingress_insert_effect_intent( \
+             $1, ordinal::numeric, ordinal::integer, \
+             decode(lpad(to_hex(ordinal), 64, '0'), 'hex'), decode('00', 'hex'))",
+    )
+    .bind(legacy_key)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("seed more effect intents than one bounded page");
+    assert_eq!(inserted_intents, 257);
+    let first_page: Vec<String> = sqlx::query_scalar(
+        "SELECT effect_ordinal FROM guarded.waddle_ingress_list_effect_intents( \
+             $1, NULL::numeric, 256)",
+    )
+    .bind(legacy_key)
+    .fetch_all(&mut runtime)
+    .await
+    .expect("read first bounded intent page");
+    assert_eq!(first_page.len(), 256);
+    assert_eq!(first_page.first().map(String::as_str), Some("1"));
+    assert_eq!(first_page.last().map(String::as_str), Some("256"));
+    let second_page: Vec<String> = sqlx::query_scalar(
+        "SELECT effect_ordinal FROM guarded.waddle_ingress_list_effect_intents( \
+             $1, 256::numeric, 256)",
+    )
+    .bind(legacy_key)
+    .fetch_all(&mut runtime)
+    .await
+    .expect("read second bounded intent page");
+    assert_eq!(second_page, vec!["257"]);
+    let exhausted: Vec<String> = sqlx::query_scalar(
+        "SELECT effect_ordinal FROM guarded.waddle_ingress_list_effect_intents( \
+             $1, 257::numeric, 256)",
+    )
+    .bind(legacy_key)
+    .fetch_all(&mut runtime)
+    .await
+    .expect("read exhausted bounded intent page");
+    assert!(exhausted.is_empty());
+    let mut archive_hash = vec![0_u8; 32];
+    archive_hash[31] = 1;
+    let inserted_archive: bool = sqlx::query_scalar(
+        "SELECT guarded.waddle_ingress_insert_archive_dispatch( \
+             'archive@example.test', 1, $1, 1, $2, 'resource@example.test', '')",
+    )
+    .bind(legacy_key)
+    .bind(&archive_hash)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("insert archive dispatch through fixed API");
+    assert!(inserted_archive);
+    let stored_archive_position: Option<i64> = sqlx::query_scalar(
+        "SELECT guarded.waddle_ingress_archive_dispatch_position( \
+             'archive@example.test', $1, 1, $2, 'resource@example.test', '')",
+    )
+    .bind(legacy_key)
+    .bind(&archive_hash)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("read archive dispatch through fixed API");
+    assert_eq!(stored_archive_position, Some(1));
+    let archive_positions: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT archive_jid, archive_seq FROM guarded.waddle_ingress_list_archive_positions( \
+             $1, 1, $2, NULL::text, NULL::bigint, 256)",
+    )
+    .bind(legacy_key)
+    .bind(&archive_hash)
+    .fetch_all(&mut runtime)
+    .await
+    .expect("read bounded archive position page");
+    assert_eq!(archive_positions, vec![("archive@example.test".into(), 1)]);
+    let source_key = uuid::Uuid::new_v4();
+    let child_key = uuid::Uuid::new_v4();
+    let bound_source_inserted: bool = sqlx::query_scalar(
+        "SELECT guarded.waddle_ingress_insert_message( \
+             $1, 1, decode(repeat('11', 32), 'hex'), NULL::smallint, NULL::bytea, \
+             $2, $3, 1::numeric, 1::numeric, NULL::uuid, NULL::numeric)",
+    )
+    .bind(source_key)
+    .bind(&sender)
+    .bind(context_a)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("insert bound source through fixed API");
+    assert!(bound_source_inserted);
+    let child_inserted: bool = sqlx::query_scalar(
+        "SELECT guarded.waddle_ingress_insert_message( \
+             $1, 1, decode(repeat('22', 32), 'hex'), NULL::smallint, NULL::bytea, \
+             NULL::text, NULL::uuid, NULL::numeric, NULL::numeric, NULL::uuid, NULL::numeric)",
+    )
+    .bind(child_key)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("insert child through fixed API");
+    assert!(child_inserted);
+    let initialized: bool =
+        sqlx::query_scalar("SELECT guarded.waddle_ingress_initialize_owner_decision($1)")
+            .bind(source_key)
+            .fetch_one(&mut runtime)
+            .await
+            .expect("initialize owner decision through fixed API");
+    assert!(initialized);
+    let rejected: bool =
+        sqlx::query_scalar("SELECT guarded.waddle_ingress_record_owner_rejection($1, $2)")
+            .bind(source_key)
+            .bind(child_key)
+            .fetch_one(&mut runtime)
+            .await
+            .expect("record owner rejection through fixed API");
+    assert!(rejected);
+    let stored_child: Option<String> =
+        sqlx::query_scalar("SELECT guarded.waddle_ingress_owner_rejection_child($1)")
+            .bind(source_key)
+            .fetch_one(&mut runtime)
+            .await
+            .expect("read owner rejection through fixed API");
+    let expected_child = child_key.to_string();
+    assert_eq!(stored_child.as_deref(), Some(expected_child.as_str()));
+    commit(&mut runtime).await;
     begin(&mut runtime).await;
     writer_lock(&mut runtime).await;
     proof(&mut runtime, 0).await;
@@ -1874,8 +2111,8 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .expect("check rolled-back rows");
     assert_eq!(rolled_rows, 0);
 
-    // Two simultaneous first writers converge on one alias; the loser removes
-    // its unreferenced message candidate after PostgreSQL resolves uniqueness.
+    // Two simultaneous first writers converge on one alias; the losing
+    // candidate is rolled back inside the fixed API's exception block.
     let race_origin = format!("race-{suffix}");
     let race_hash = alias_hash(&sender, "target@example.test", 1, &race_origin);
     let winner_key = uuid::Uuid::new_v4();
@@ -1930,7 +2167,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     });
     wait_blocked(&mut wait_observer, loser_pid, winner_pid).await;
     commit(&mut winner).await;
-    let (loser, (loser_result, loser_outcome, _, _)) =
+    let (mut loser, (loser_result, loser_outcome, _, _)) =
         loser_task.await.expect("join concurrent alias loser");
     assert_eq!(loser_result, Some(winner_key));
     assert_eq!(loser_outcome, "existing");
@@ -1945,6 +2182,146 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .await
     .expect("check concurrency winner rows");
     assert_eq!(race_counts, (1, 1));
+
+    // If the blocked first writer rolls back, the waiting writer becomes the
+    // canonical winner without leaving the abandoned candidate behind.
+    let aborted_origin = format!("aborted-winner-{suffix}");
+    let aborted_hash = alias_hash(&sender, "target@example.test", 1, &aborted_origin);
+    let aborted_key = uuid::Uuid::new_v4();
+    let retry_key = uuid::Uuid::new_v4();
+    let aborted_sender = sender.clone();
+    let aborted_origin_task = aborted_origin.clone();
+    begin(&mut winner).await;
+    writer_lock(&mut winner).await;
+    proof(&mut winner, 0).await;
+    let (aborted_result, aborted_outcome, _, _) = resolve_origin(
+        &mut winner,
+        OriginRequest {
+            message_key: aborted_key,
+            hash: aborted_hash,
+            sender: &sender,
+            target_jid: "target@example.test",
+            origin_id: &aborted_origin,
+            digest,
+            source_context: Some(context_a),
+            source_sm_ingress_id: None,
+        },
+    )
+    .await;
+    assert_eq!(aborted_result, Some(aborted_key));
+    assert_eq!(aborted_outcome, "inserted");
+    begin(&mut loser).await;
+    writer_lock(&mut loser).await;
+    proof(&mut loser, 0).await;
+    let loser_pid = pid(&mut loser).await;
+    let winner_pid = pid(&mut winner).await;
+    let retry_task = tokio::spawn(async move {
+        let result = resolve_origin(
+            &mut loser,
+            OriginRequest {
+                message_key: retry_key,
+                hash: aborted_hash,
+                sender: &aborted_sender,
+                target_jid: "target@example.test",
+                origin_id: &aborted_origin_task,
+                digest,
+                source_context: Some(context_a),
+                source_sm_ingress_id: None,
+            },
+        )
+        .await;
+        commit(&mut loser).await;
+        (loser, result)
+    });
+    wait_blocked(&mut wait_observer, loser_pid, winner_pid).await;
+    sqlx::query("ROLLBACK")
+        .execute(&mut winner)
+        .await
+        .expect("abort first alias writer");
+    let (loser, (retry_result, retry_outcome, _, _)) =
+        retry_task.await.expect("join waiting alias writer");
+    assert_eq!(retry_result, Some(retry_key));
+    assert_eq!(retry_outcome, "inserted");
+    let aborted_counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM guarded.ingress_messages WHERE message_key IN ($1, $2)), \
+                (SELECT count(*) FROM guarded.ingress_origin_aliases WHERE alias_key_hash = $3)",
+    )
+    .bind(aborted_key)
+    .bind(retry_key)
+    .bind(aborted_hash.to_vec())
+    .fetch_one(&mut observer)
+    .await
+    .expect("check aborted winner left no row");
+    assert_eq!(aborted_counts, (1, 1));
+
+    // The alias-race handler must not consume a different unique violation
+    // raised while inserting the tentative message.
+    sqlx::query(
+        "CREATE UNIQUE INDEX fixture_unique_digest ON guarded.ingress_messages (digest) \
+         WHERE digest = decode(repeat('7f', 32), 'hex')",
+    )
+    .execute(&mut owner)
+    .await
+    .expect("install unrelated unique index in disposable schema");
+    let unique_digest = vec![0x7f_u8; 32];
+    let first_unique_key = uuid::Uuid::new_v4();
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let first_unique_insert: bool = sqlx::query_scalar(
+        "SELECT guarded.waddle_ingress_insert_message( \
+             $1, 1, $2, NULL::smallint, NULL::bytea, \
+             NULL::text, NULL::uuid, NULL::numeric, NULL::numeric, NULL::uuid, NULL::numeric)",
+    )
+    .bind(first_unique_key)
+    .bind(&unique_digest)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("seed one unique digest through fixed API");
+    assert!(first_unique_insert);
+    commit(&mut runtime).await;
+    let duplicate_unique_key = uuid::Uuid::new_v4();
+    let duplicate_unique_origin = format!("different-unique-{suffix}");
+    let duplicate_unique_hash =
+        alias_hash(&sender, "target@example.test", 1, &duplicate_unique_origin);
+    begin(&mut runtime).await;
+    writer_lock(&mut runtime).await;
+    proof(&mut runtime, 0).await;
+    let unrelated_unique = sqlx::query(
+        "SELECT canonical_message_key FROM guarded.waddle_ingress_resolve_origin( \
+             $1, 1, $2, $3, $4, 1, 'target@example.test', $5, \
+             NULL::text, NULL::uuid, NULL::numeric, NULL::numeric, NULL::uuid, NULL::numeric)",
+    )
+    .bind(duplicate_unique_key)
+    .bind(&unique_digest)
+    .bind(duplicate_unique_hash.to_vec())
+    .bind(&sender)
+    .bind(&duplicate_unique_origin)
+    .fetch_one(&mut runtime)
+    .await
+    .expect_err("unrelated unique violation must propagate");
+    let unrelated_database_error = unrelated_unique
+        .as_database_error()
+        .expect("PostgreSQL reports unrelated unique violation");
+    assert_eq!(unrelated_database_error.code().as_deref(), Some("23505"));
+    assert_eq!(
+        unrelated_database_error.constraint(),
+        Some("fixture_unique_digest")
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback unrelated unique violation");
+    let duplicate_unique_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM guarded.ingress_messages WHERE message_key = $1) + \
+                (SELECT count(*) FROM guarded.ingress_origin_aliases WHERE alias_key_hash = $2)",
+    )
+    .bind(duplicate_unique_key)
+    .bind(duplicate_unique_hash.to_vec())
+    .fetch_one(&mut observer)
+    .await
+    .expect("check unrelated violation left no rows");
+    assert_eq!(duplicate_unique_rows, 0);
 
     // Ordinary runtime lacks DML, even after a forged proof and an actual
     // epoch lock. With temporary DML, the invoker trigger independently
