@@ -32,17 +32,68 @@ pub struct UserActor {
     /// Per-resource show/status/priority snapshot for presence-probe replies.
     pub(in crate::registry::user_actor) presence_states: HashMap<FullJid, PresenceState>,
     pub(in crate::registry::user_actor) pending_subscriptions: Vec<Stanza>,
+    /// Test-only, bounded child-mutation journal. It stores copied IDs and
+    /// dispositions only; it never retains serving state or affects replies.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(in crate::registry::user_actor) transition_observations:
+        Vec<super::test_support::ResourceMutationObservation>,
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(in crate::registry::user_actor) transition_observation_overflow: usize,
+    /// Fixture label only; never read by production authority paths.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(in crate::registry::user_actor) synthetic_claim_identity:
+        crate::ownership::UserClaimIdentity,
 }
 
 impl UserActor {
     /// Create a new `UserActor` for the given bare JID.
     pub fn new(bare_jid: BareJid) -> Self {
+        #[cfg(any(test, feature = "test-utils"))]
+        let synthetic_claim_identity = crate::ownership::UserClaimIdentity::fresh(
+            bare_jid.clone(),
+            crate::ownership::NodeLeaseIdentity::local_process(),
+            crate::ownership::ClaimEpoch(0),
+        );
         Self {
             bare_jid,
             connections: HashMap::new(),
             presence_states: HashMap::new(),
             pending_subscriptions: Vec::new(),
+            #[cfg(any(test, feature = "test-utils"))]
+            transition_observations: Vec::with_capacity(
+                super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY,
+            ),
+            #[cfg(any(test, feature = "test-utils"))]
+            transition_observation_overflow: 0,
+            #[cfg(any(test, feature = "test-utils"))]
+            synthetic_claim_identity,
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(in crate::registry::user_actor) fn observe_resource_mutation(
+        &mut self,
+        observation: impl FnOnce() -> super::test_support::ResourceMutationObservation,
+    ) {
+        if self.transition_observations.len()
+            < super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY
+        {
+            self.transition_observations.push(observation());
+        } else {
+            self.transition_observation_overflow =
+                self.transition_observation_overflow.saturating_add(1);
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn bounded_binding_for_observation(
+        &self,
+        binding_ref: Option<&crate::ownership::BindingRef>,
+    ) -> Option<crate::ownership::BoundedBindingObservation> {
+        super::test_support::snapshot_if_capacity(self.transition_observations.len(), || {
+            binding_ref.map(crate::ownership::BindingRef::bounded_observation)
+        })
+        .flatten()
     }
 
     /// The bare JID this actor manages.
@@ -52,11 +103,35 @@ impl UserActor {
 
     /// Remove all state associated with a resource.
     pub(in crate::registry::user_actor) fn remove_resource(&mut self, jid: &FullJid) {
+        self.remove_resource_with_owner(jid, None);
+    }
+
+    fn remove_resource_with_owner(
+        &mut self,
+        jid: &FullJid,
+        owner: Option<LocalConnectionBindingId>,
+    ) {
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let _ = owner;
+        #[cfg(any(test, feature = "test-utils"))]
+        let previous = self.connections.get(jid).map(ConnectionEntry::binding_id);
         if let Some(entry) = self.connections.get(jid) {
             entry.seal_actor_binding_if_any();
         }
         self.connections.remove(jid);
         self.presence_states.remove(jid);
+        #[cfg(any(test, feature = "test-utils"))]
+        self.observe_resource_mutation(|| {
+            super::test_support::ResourceMutationObservation::Remove {
+                previous,
+                owner,
+                disposition: if previous.is_some() {
+                    super::test_support::ResourceMutationDisposition::Removed
+                } else {
+                    super::test_support::ResourceMutationDisposition::AlreadyAbsent
+                },
+            }
+        });
     }
 
     /// Ownership-gated removal, mirroring the DashMap
@@ -78,7 +153,22 @@ impl UserActor {
             (None, _) => false,
         };
         if should_remove {
-            self.remove_resource(jid);
+            self.remove_resource_with_owner(jid, owner.copied());
+        } else {
+            #[cfg(any(test, feature = "test-utils"))]
+            let previous = self.connections.get(jid).map(ConnectionEntry::binding_id);
+            #[cfg(any(test, feature = "test-utils"))]
+            self.observe_resource_mutation(|| {
+                super::test_support::ResourceMutationObservation::Remove {
+                    previous,
+                    owner: owner.copied(),
+                    disposition: if previous.is_some() {
+                        super::test_support::ResourceMutationDisposition::Retained
+                    } else {
+                        super::test_support::ResourceMutationDisposition::AlreadyAbsent
+                    },
+                }
+            });
         }
         should_remove
     }
@@ -110,10 +200,32 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering connection");
+        #[cfg(any(test, feature = "test-utils"))]
+        let previous = self
+            .connections
+            .get(&msg.jid)
+            .map(ConnectionEntry::binding_id);
+        #[cfg(any(test, feature = "test-utils"))]
+        let candidate = msg.entry.binding_id();
+        #[cfg(any(test, feature = "test-utils"))]
+        let candidate_binding = self.bounded_binding_for_observation(msg.entry.binding_ref());
         if let Some(entry) = self.connections.get(&msg.jid) {
             entry.seal_actor_binding_if_any();
         }
         self.connections.insert(msg.jid, msg.entry);
+        #[cfg(any(test, feature = "test-utils"))]
+        self.observe_resource_mutation(|| {
+            super::test_support::ResourceMutationObservation::Register {
+                previous,
+                candidate,
+                candidate_binding,
+                disposition: if previous.is_some() {
+                    super::test_support::ResourceMutationDisposition::Replaced
+                } else {
+                    super::test_support::ResourceMutationDisposition::Inserted
+                },
+            }
+        });
     }
 }
 
@@ -137,6 +249,23 @@ impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if msg.entry.binding_id() != msg.owner {
+            #[cfg(any(test, feature = "test-utils"))]
+            let candidate_binding = self.bounded_binding_for_observation(msg.entry.binding_ref());
+            #[cfg(any(test, feature = "test-utils"))]
+            let previous = self
+                .connections
+                .get(&msg.jid)
+                .map(ConnectionEntry::binding_id);
+            #[cfg(any(test, feature = "test-utils"))]
+            self.observe_resource_mutation(|| {
+                super::test_support::ResourceMutationObservation::RegisterIfOwnerOrAbsent {
+                    previous,
+                    candidate: msg.entry.binding_id(),
+                    candidate_binding,
+                    owner: msg.owner,
+                    disposition: super::test_support::ResourceMutationDisposition::Rejected,
+                }
+            });
             return false;
         }
         if self
@@ -144,13 +273,53 @@ impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
             .get(&msg.jid)
             .is_some_and(|entry| entry.binding_id() != msg.owner)
         {
+            #[cfg(any(test, feature = "test-utils"))]
+            let candidate_binding = self.bounded_binding_for_observation(msg.entry.binding_ref());
+            #[cfg(any(test, feature = "test-utils"))]
+            let previous = self
+                .connections
+                .get(&msg.jid)
+                .map(ConnectionEntry::binding_id);
+            #[cfg(any(test, feature = "test-utils"))]
+            self.observe_resource_mutation(|| {
+                super::test_support::ResourceMutationObservation::RegisterIfOwnerOrAbsent {
+                    previous,
+                    candidate: msg.entry.binding_id(),
+                    candidate_binding,
+                    owner: msg.owner,
+                    disposition: super::test_support::ResourceMutationDisposition::Rejected,
+                }
+            });
             return false;
         }
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering owner-gated connection");
         if let Some(entry) = self.connections.get(&msg.jid) {
             entry.seal_actor_binding_if_any();
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        let previous = self
+            .connections
+            .get(&msg.jid)
+            .map(ConnectionEntry::binding_id);
+        #[cfg(any(test, feature = "test-utils"))]
+        let candidate = msg.entry.binding_id();
+        #[cfg(any(test, feature = "test-utils"))]
+        let candidate_binding = self.bounded_binding_for_observation(msg.entry.binding_ref());
         self.connections.insert(msg.jid, msg.entry);
+        #[cfg(any(test, feature = "test-utils"))]
+        self.observe_resource_mutation(|| {
+            super::test_support::ResourceMutationObservation::RegisterIfOwnerOrAbsent {
+                previous,
+                candidate,
+                candidate_binding,
+                owner: msg.owner,
+                disposition: if previous.is_some() {
+                    super::test_support::ResourceMutationDisposition::Replaced
+                } else {
+                    super::test_support::ResourceMutationDisposition::Inserted
+                },
+            }
+        });
         true
     }
 }
@@ -194,6 +363,12 @@ impl kameo::message::Message<RegisterProvisionalConnectionIfExpected> for UserAc
         msg: RegisterProvisionalConnectionIfExpected,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let previous = self
+            .connections
+            .get(&msg.jid)
+            .map(ConnectionEntry::binding_id);
+        let candidate = msg.candidate.binding_id();
+        let candidate_binding = self.bounded_binding_for_observation(msg.candidate.binding_ref());
         if msg.jid.to_bare() != self.bare_jid
             || msg.candidate.jid() != &msg.jid
             || !msg.candidate.is_provisional()
@@ -204,6 +379,15 @@ impl kameo::message::Message<RegisterProvisionalConnectionIfExpected> for UserAc
                 .map(ConnectionEntry::binding_id)
                 != msg.expected
         {
+            self.observe_resource_mutation(|| {
+                super::test_support::ResourceMutationObservation::ProvisionalMirror {
+                    previous,
+                    candidate,
+                    candidate_binding,
+                    expected: msg.expected,
+                    disposition: super::test_support::ResourceMutationDisposition::Rejected,
+                }
+            });
             return false;
         }
         if let Some(previous) = self.connections.get(&msg.jid) {
@@ -211,6 +395,19 @@ impl kameo::message::Message<RegisterProvisionalConnectionIfExpected> for UserAc
         }
         self.connections
             .insert(msg.jid, msg.candidate.entry_for_publication());
+        self.observe_resource_mutation(|| {
+            super::test_support::ResourceMutationObservation::ProvisionalMirror {
+                previous,
+                candidate,
+                candidate_binding,
+                expected: msg.expected,
+                disposition: if previous.is_some() {
+                    super::test_support::ResourceMutationDisposition::Replaced
+                } else {
+                    super::test_support::ResourceMutationDisposition::Inserted
+                },
+            }
+        });
         true
     }
 }
@@ -670,6 +867,12 @@ impl kameo::message::Message<ConflictCloseAllResources> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let count = self.connections.len();
+        #[cfg(any(test, feature = "test-utils"))]
+        self.observe_resource_mutation(|| {
+            super::test_support::ResourceMutationObservation::ConflictClose {
+                resource_count: count,
+            }
+        });
         self.connections.clear();
         self.presence_states.clear();
         count

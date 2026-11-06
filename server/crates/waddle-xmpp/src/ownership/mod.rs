@@ -52,6 +52,8 @@ mod user_claim_identity;
 pub use connection_identity::{
     BindingAttemptId, BindingRef, ConnectionRef, NodeLeaseIdentity, PhysicalTransportGeneration,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use connection_identity::{BoundedBindingObservation, BINDING_OBSERVATION_FIELD_BYTE_CAP};
 pub use in_process::InProcessClaimStore;
 pub use observe::{observed_claim_store, ObservedClaimStore};
 pub use resume::{verify_resume_identity, ResumeIdentityProof};

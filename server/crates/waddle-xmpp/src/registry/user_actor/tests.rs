@@ -1,6 +1,10 @@
 use super::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
 };
+use super::test_support::{
+    ModelComparison, ResourceMutationDisposition, ResourceMutationObservation,
+    TakeResourceMutationObservations,
+};
 use super::{
     health_check_or_wedge_kill, BareJid, ClearPresenceState, ConfirmProvisionalConnection,
     ConflictCloseAllResources, Context, DrainPendingSubscriptions, FullJid, GetAvailableResources,
@@ -226,6 +230,375 @@ async fn test_register_and_resource_count() {
 
     let count: usize = actor.ask(ResourceCount).await.expect("count");
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_records_child_decisions_as_inconclusive() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    let (first, _first_rx) = entry();
+    let stale_owner = first.binding_id();
+    actor
+        .ask(RegisterConnection {
+            jid: jid.clone(),
+            entry: first,
+        })
+        .await
+        .expect("first child registration");
+
+    let (replacement, _replacement_rx) = entry();
+    let replacement_owner = replacement.binding_id();
+    actor
+        .ask(RegisterConnection {
+            jid: jid.clone(),
+            entry: replacement,
+        })
+        .await
+        .expect("replacement child registration");
+    actor
+        .ask(UnregisterConnection {
+            jid,
+            owner: Some(stale_owner),
+        })
+        .await
+        .expect("stale unregister");
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    assert_eq!(batch.overflow_count, 0);
+    assert_eq!(batch.observations.len(), 3);
+    assert_eq!(
+        batch.model_comparison,
+        ModelComparison::InconclusiveMissingExternalReceipts
+    );
+    assert_eq!(batch.unsupported_direct_replacement_count, 1);
+    let claim_identity = batch.synthetic_claim_identity.clone();
+    let next_batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("empty observation batch");
+    assert_eq!(next_batch.synthetic_claim_identity, claim_identity);
+    assert!(next_batch.observations.is_empty());
+
+    assert!(matches!(
+        &batch.observations[0],
+        ResourceMutationObservation::Register {
+            previous: None,
+            disposition: ResourceMutationDisposition::Inserted,
+            candidate_binding: Some(_),
+            ..
+        }
+    ));
+    let ResourceMutationObservation::Register {
+        candidate_binding: Some(binding_identity),
+        ..
+    } = &batch.observations[0]
+    else {
+        unreachable!("the first local registration carries bounded identity evidence");
+    };
+    assert!(binding_identity.local_process_incarnation.is_some());
+    assert!(matches!(
+        &batch.observations[1],
+        ResourceMutationObservation::Register {
+            previous: Some(previous),
+            candidate,
+            disposition: ResourceMutationDisposition::Replaced,
+            candidate_binding: Some(_),
+        } if *previous == stale_owner && *candidate == replacement_owner
+    ));
+    assert!(matches!(
+        &batch.observations[2],
+        ResourceMutationObservation::Remove {
+            previous: Some(previous),
+            owner: Some(owner),
+            disposition: ResourceMutationDisposition::Retained,
+        } if *previous == replacement_owner && *owner == stale_owner
+    ));
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_bounds_its_journal() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    for _ in 0..(super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY + 3) {
+        let (entry, _rx) = entry();
+        actor
+            .ask(RegisterConnection {
+                jid: jid.clone(),
+                entry,
+            })
+            .await
+            .expect("registration remains successful when observation journal fills");
+    }
+    let jid = full("alice", "overflow");
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::from_node_identity(
+            &crate::ownership::NodeIdentity::new("n".repeat(4096), "e".repeat(4096)),
+        ),
+    );
+    let binding = crate::ownership::BindingRef::fresh(connection.clone());
+    let (endpoint, _receiver, _custody) =
+        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
+    let oversized_entry =
+        ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
+            .expect("binding matches connection")
+            .entry_for_publication();
+    actor
+        .ask(RegisterConnection {
+            jid,
+            entry: oversized_entry,
+        })
+        .await
+        .expect("oversized observation does not affect registration");
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    assert_eq!(
+        batch.observations.len(),
+        super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY
+    );
+    assert_eq!(batch.overflow_count, 4);
+    assert_eq!(
+        batch.model_comparison,
+        ModelComparison::InconclusiveMissingExternalReceipts
+    );
+    let count: usize = actor.ask(ResourceCount).await.expect("actor still serves");
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_bounds_binding_identity_and_skips_snapshots_when_full() {
+    use super::test_support::{snapshot_if_capacity, BINDING_OBSERVATION_FIELD_BYTE_CAP};
+    use std::cell::Cell;
+
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    let node_id = format!("{}🦆", "n".repeat(BINDING_OBSERVATION_FIELD_BYTE_CAP - 1));
+    let node_epoch = "e".repeat(BINDING_OBSERVATION_FIELD_BYTE_CAP + 20);
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::from_node_identity(
+            &crate::ownership::NodeIdentity::new(node_id, node_epoch),
+        ),
+    );
+    let binding = crate::ownership::BindingRef::fresh(connection.clone());
+    let (endpoint, _receiver, _custody) =
+        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
+    let entry = ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
+        .expect("binding matches connection")
+        .entry_for_publication();
+    actor
+        .ask(RegisterConnection { jid, entry })
+        .await
+        .expect("registration");
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    let ResourceMutationObservation::Register {
+        candidate_binding: Some(identity),
+        ..
+    } = &batch.observations[0]
+    else {
+        panic!("local binding identity evidence should be present");
+    };
+    assert_eq!(
+        identity.node_id_prefix.as_ref().map(String::len),
+        Some(BINDING_OBSERVATION_FIELD_BYTE_CAP - 1),
+        "UTF-8 truncation must stop before a partial codepoint"
+    );
+    assert_eq!(
+        identity.node_epoch_prefix.as_ref().map(String::len),
+        Some(BINDING_OBSERVATION_FIELD_BYTE_CAP)
+    );
+    assert!(identity.node_identity_truncated);
+    assert_eq!(
+        batch.model_comparison,
+        ModelComparison::InconclusiveMissingExternalReceipts
+    );
+
+    let factory_called = Cell::new(false);
+    let snapshot = snapshot_if_capacity(
+        super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY,
+        || {
+            factory_called.set(true);
+            String::from("must not allocate after saturation")
+        },
+    );
+    assert!(snapshot.is_none());
+    assert!(
+        !factory_called.get(),
+        "saturated journals must skip snapshot creation"
+    );
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_reports_remote_entries_as_unmodeled() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "remote");
+    let (endpoint, _receiver) = SocketOutboundEndpoint::channel(1);
+    let remote = ConnectionEntry::remote_hosted(endpoint);
+    actor
+        .ask(RegisterConnection { jid, entry: remote })
+        .await
+        .expect("remote mirror registration");
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    assert!(matches!(
+        &batch.observations[0],
+        ResourceMutationObservation::Register {
+            candidate_binding: None,
+            disposition: ResourceMutationDisposition::Inserted,
+            ..
+        }
+    ));
+    assert_eq!(
+        batch.model_comparison,
+        ModelComparison::InconclusiveMissingExternalReceipts
+    );
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_records_provisional_mirror_refusal() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    let wrong_jid = full("alice", "tablet");
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    );
+    let binding = crate::ownership::BindingRef::fresh(connection.clone());
+    let (endpoint, _receiver, _custody) =
+        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
+    let candidate = ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid)
+        .expect("candidate matches connection");
+
+    let accepted = actor
+        .ask(RegisterProvisionalConnectionIfExpected {
+            jid: wrong_jid,
+            candidate,
+            expected: None,
+        })
+        .await
+        .expect("provisional mirror refusal");
+    assert!(!accepted);
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    assert!(matches!(
+        &batch.observations[0],
+        ResourceMutationObservation::ProvisionalMirror {
+            previous: None,
+            candidate_binding: Some(_),
+            disposition: ResourceMutationDisposition::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(
+        batch.model_comparison,
+        ModelComparison::InconclusiveMissingExternalReceipts
+    );
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_records_absent_and_unconditional_removal() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    actor
+        .ask(UnregisterConnection {
+            jid: jid.clone(),
+            owner: Some(crate::registry::LocalConnectionBindingId::fresh()),
+        })
+        .await
+        .expect("absent owner-gated unregister");
+    let (entry, _rx) = entry();
+    actor
+        .ask(RegisterConnection {
+            jid: jid.clone(),
+            entry,
+        })
+        .await
+        .expect("register");
+    actor
+        .ask(UnregisterConnection { jid, owner: None })
+        .await
+        .expect("unconditional unregister");
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    assert!(matches!(
+        &batch.observations[0],
+        ResourceMutationObservation::Remove {
+            previous: None,
+            owner: Some(_),
+            disposition: ResourceMutationDisposition::AlreadyAbsent,
+        }
+    ));
+    assert!(matches!(
+        &batch.observations[2],
+        ResourceMutationObservation::Remove {
+            previous: Some(_),
+            owner: None,
+            disposition: ResourceMutationDisposition::Removed,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_sees_child_commit_after_caller_timeout() {
+    use super::test_support::GateMailbox;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{oneshot, Notify};
+
+    let actor = spawn_actor("alice").await;
+    let entered = Arc::new(Notify::new());
+    let (release_tx, release_rx) = oneshot::channel();
+    actor
+        .tell(GateMailbox {
+            entered: Arc::clone(&entered),
+            release_rx,
+        })
+        .await
+        .expect("gate enqueues");
+    entered.notified().await;
+
+    let (entry, _rx) = entry();
+    let jid = full("alice", "phone");
+    let result = tokio::time::timeout(
+        Duration::from_millis(10),
+        actor.ask(RegisterConnection { jid, entry }),
+    )
+    .await;
+    assert!(result.is_err(), "caller times out behind the blocked child");
+    release_tx.send(()).expect("release child");
+
+    let count: usize = actor.ask(ResourceCount).await.expect("later child query");
+    assert_eq!(
+        count, 1,
+        "queued child mutation commits after caller timeout"
+    );
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    assert!(matches!(
+        &batch.observations[0],
+        ResourceMutationObservation::Register {
+            disposition: ResourceMutationDisposition::Inserted,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -1126,6 +1499,18 @@ async fn delivery_closed_channel_evicts_and_replacement_delivers() {
         .await
         .expect("closed send");
     assert_eq!(outcome, BroadcastOutcome::DroppedClosed);
+    let observed = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("closed-channel observation");
+    assert!(matches!(
+        observed.observations.last(),
+        Some(ResourceMutationObservation::Remove {
+            previous: Some(_),
+            disposition: ResourceMutationDisposition::Removed,
+            ..
+        })
+    ));
 
     // Entry was evicted.
     let connected: bool = actor
@@ -1261,6 +1646,14 @@ async fn conflict_close_all_resources_clears_every_registered_resource() {
 
     let count: usize = actor.ask(ResourceCount).await.expect("count");
     assert_eq!(count, 0);
+    let observed = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("conflict-close observation");
+    assert!(matches!(
+        observed.observations.last(),
+        Some(ResourceMutationObservation::ConflictClose { resource_count: 2 })
+    ));
 }
 
 #[tokio::test]
