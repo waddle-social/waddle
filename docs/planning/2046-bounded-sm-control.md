@@ -8,7 +8,7 @@ Keep the existing serving selector and wire behavior unchanged. This slice prove
 
 ## Design and verification
 
-1. Define a private capability carrying the fixed output bound and make the driver consume it before dispatch. Keep output accounting on the completed result as a secondary assertion.
+1. Define a private capability carrying the fixed output bound and make the driver consume it before dispatch. The retained result is `Option<SmAck>`, so it cannot contain a response batch or multiple frames; tests check the canonical serializer's payload size at decimal-width boundaries.
 2. Preserve the sole actor state owner, the acknowledgement ordering, and XEP-0198 handled count semantics. Do not turn a reservation into a claim of delivery or durable custody.
 3. Test exact boundary and one-byte over-bound behavior, unsupported operation rejection before effects, cancellation, control queue saturation, and acknowledgement order. Consult the official XEP-0198 source for wire behavior.
 4. Run focused server tests, formatting, and scoped strict Clippy. Obtain independent read-only review of the final diff and evidence before marking the draft ready.
@@ -16,3 +16,7 @@ Keep the existing serving selector and wire behavior unchanged. This slice prove
 ## Later gates
 
 Variable-output producers need proven bounds or chunked retained continuations, with ordered writer or replay-owner handoff and preserved credits. Real control progress needs safe continuation boundaries and a bounded recovery path for stalled effectful handlers. Production activation also needs the remaining #2046 custody, authority, and qualification gates.
+
+The 128-byte reservation covers at most one acknowledgement produced by `SmAck::to_xml`; it does not include a later transport close or other socket buffers. No acknowledgement after a checkpoint failure means the connection state has been put into closing; loss of authority is retained as an unknown completion. A future adapter must handle those terminal cases and their output custody separately. The request currently uses the driver's ordinary data queue, while the independent control queue contains only a barrier: this slice does not provide independently serviced SM control during a stalled handler.
+
+The generic inbound and recipient core methods remain compiled for future work, but the bounded driver cannot call them until their producers have a proven bound or retained continuation. Their narrowly scoped dead-code expectations identify that gate in test-support builds.

@@ -4,9 +4,10 @@
 //! existing state without exposing it and serializes stop with operations that
 //! hold the lifecycle gate. The actor fixture exercises this same core.
 
+use super::connection_actor_driver_task::ReservedSmRequest;
 use super::frame::{
-    handle_classified_xmpp_frame_with_admission, ordered_relay_origin_from_sm,
-    ClassifiedInboundFrame, ResponseBatch,
+    handle_classified_sm_request_with_admission, handle_classified_xmpp_frame_with_admission,
+    ordered_relay_origin_from_sm, ClassifiedInboundFrame, ResponseBatch,
 };
 use super::interpret_loop::build_interpret_deps;
 use super::replay::{drive_interpret_loop, DriveOutcome};
@@ -63,12 +64,28 @@ pub(super) enum ConnectionActorDriverCompletion<T> {
 pub(super) enum ConnectionActorDriverError {
     #[error("connection actor is stopping")]
     Stopped,
+    #[cfg_attr(
+        all(feature = "test-support", not(test)),
+        expect(
+            dead_code,
+            reason = "the generic recipient seam awaits a bounded producer"
+        )
+    )]
     #[error("connection state machine is not initialized")]
     StateMachineUnavailable,
+    #[cfg_attr(
+        all(feature = "test-support", not(test)),
+        expect(
+            dead_code,
+            reason = "the generic recipient seam awaits a bounded producer"
+        )
+    )]
     #[error("recipient interpretation requires a peer stanza")]
     NotPeerStanza,
     #[error("connection admission authority was revoked")]
     AuthorityRevoked,
+    #[error("SM request lacks its output reservation")]
+    OutputReservationMissing,
 }
 
 impl ConnectionActorCore {
@@ -91,6 +108,10 @@ impl ConnectionActorCore {
     /// Delegate one XMPP frame to the same typed protocol/frame handler used
     /// by the legacy WebSocket loop. The actor keeps sole mutable ownership of
     /// `WsConnState`; the returned batch is still only local output work.
+    #[cfg_attr(
+        all(feature = "test-support", not(test)),
+        expect(dead_code, reason = "generic inbound work awaits bounded producers")
+    )]
     pub(super) async fn process_inbound_frame(
         &mut self,
         input: ClassifiedInboundFrame,
@@ -114,10 +135,38 @@ impl ConnectionActorCore {
         .await
     }
 
+    /// Run the bounded SM request while retaining sole ownership of state.
+    pub(super) async fn process_sm_request(
+        &mut self,
+        _request: ReservedSmRequest<'_>,
+        state: &WebSocketState,
+        permit: &NodeAdmissionPermit,
+        shutdown: &CancellationToken,
+    ) -> Result<
+        ConnectionActorDriverCompletion<Option<waddle_xmpp::stream_management::SmAck>>,
+        ConnectionActorDriverError,
+    > {
+        let lifecycle = Arc::clone(&self.lifecycle);
+        run_with_driver_completion(lifecycle, permit, shutdown, || async {
+            handle_classified_sm_request_with_admission(state, &mut self.state, permit, shutdown)
+                .await
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) fn advance_handled_for_test(&mut self) {
+        self.state.sm_state.increment_inbound();
+    }
+
     /// Run one retained peer envelope through the existing state-machine
     /// recipient pass. Borrowing the envelope leaves its exact custody record
     /// intact; the caller still owns writing, SM acceptance, and terminal
     /// settlement for the returned driver outcome.
+    #[cfg_attr(
+        all(feature = "test-support", not(test)),
+        expect(dead_code, reason = "generic recipient work awaits a bounded producer")
+    )]
     pub(super) async fn interpret_peer_stanza(
         &mut self,
         state: &WebSocketState,

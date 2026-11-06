@@ -7,13 +7,12 @@
 use super::connection_actor_core::{
     ConnectionActorCore, ConnectionActorDriverCompletion, ConnectionActorDriverError,
 };
-use super::frame::{ClassifiedInboundFrame, ResponseBatch};
-use super::replay::DriveOutcome;
+use super::frame::{ClassifiedInboundFrame, ClassifiedSmRequest};
 use super::{OutboundStanza, WebSocketState};
 use crate::clustering::NodeAdmissionPermit;
 use crate::server::routes::websocket::supervised_io::StopReason;
-use jid::BareJid;
 use std::collections::HashMap;
+#[cfg(any(test, feature = "test-support"))]
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,17 +26,23 @@ use waddle_xmpp::ownership::ConnectionRef;
 const MAX_PENDING_OPERATIONS: usize = 256;
 const DEFAULT_CONTROL_CAPACITY: usize = 8;
 const DEFAULT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+// SmAck::to_xml builds one empty <a/> in SM_NS with one decimal u32 `h`
+// attribute. Its only variable text is at most ten ASCII digits; 128 bytes
+// covers the fixed XML envelope and namespace as well. The serializer contract
+// is exercised below against zero, each decimal-width boundary, and u32::MAX.
+const MAX_SM_ACK_OUTPUT_BYTES: usize = 128;
+#[cfg(any(test, feature = "test-support"))]
 const DEFAULT_RESULT_RESERVATION_BYTES: usize = 64 * 1024;
 
-/// Bounded admission for one dark actor task. The byte value is admission
-/// accounting: input bytes plus a result reservation. Handler outputs are
-/// measured only after effects return; an overrun is retained and seals
-/// admission, so this is not a hard memory bound or an activation guarantee.
+/// Bounded admission for one dark actor task. The supported SM request reserves
+/// its maximum serialized output payload before effects. Input accounting and
+/// test fixtures are not heap bounds; this does not authorize activation.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ConnectionActorDriverTaskLimits {
     data_capacity: usize,
     control_capacity: usize,
     byte_capacity: usize,
+    #[cfg(any(test, feature = "test-support"))]
     result_reservation_bytes: usize,
 }
 
@@ -47,6 +52,7 @@ impl Default for ConnectionActorDriverTaskLimits {
             data_capacity: MAX_PENDING_OPERATIONS,
             control_capacity: DEFAULT_CONTROL_CAPACITY,
             byte_capacity: DEFAULT_BYTE_CAPACITY,
+            #[cfg(any(test, feature = "test-support"))]
             result_reservation_bytes: DEFAULT_RESULT_RESERVATION_BYTES,
         }
     }
@@ -74,8 +80,11 @@ impl ConnectionActorDriverTaskLimits {
             || self.control_capacity == 0
             || self.byte_capacity == 0
             || self.byte_capacity > u32::MAX as usize
-            || self.result_reservation_bytes > self.byte_capacity
         {
+            return Err(ConnectionActorDriverTaskAdmissionError::InvalidLimits);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if self.result_reservation_bytes > self.byte_capacity {
             return Err(ConnectionActorDriverTaskAdmissionError::InvalidLimits);
         }
         Ok(self)
@@ -91,10 +100,12 @@ pub(super) struct ConnectionActorDriverTaskResult {
 
 #[derive(Debug)]
 pub(super) enum ConnectionActorDriverTaskResultValue {
-    InboundFrame(
-        Result<ConnectionActorDriverCompletion<ResponseBatch>, ConnectionActorDriverError>,
+    SmRequest(
+        Result<
+            ConnectionActorDriverCompletion<Option<waddle_xmpp::stream_management::SmAck>>,
+            ConnectionActorDriverError,
+        >,
     ),
-    PeerStanza(Result<ConnectionActorDriverCompletion<DriveOutcome>, ConnectionActorDriverError>),
     #[cfg(any(test, feature = "test-support"))]
     Paused(&'static str),
     #[cfg(any(test, feature = "test-support"))]
@@ -198,18 +209,51 @@ struct DriverAdmissionReservation {
     _count: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
     input_bytes: usize,
-    result_reservation_bytes: usize,
+    output_bound: DriverOutputBound,
+}
+
+/// Can only be constructed by the driver from the admitted request and its
+/// matching byte reservation. The core requires it before running effects.
+pub(super) struct ReservedSmRequest<'a> {
+    _input: &'a ClassifiedSmRequest,
+    _reservation: &'a DriverAdmissionReservation,
+}
+
+impl DriverAdmissionReservation {
+    fn sm_request<'a>(&'a self, input: &'a ClassifiedSmRequest) -> Option<ReservedSmRequest<'a>> {
+        matches!(self.output_bound, DriverOutputBound::SmAck).then_some(ReservedSmRequest {
+            _input: input,
+            _reservation: self,
+        })
+    }
+}
+
+/// This capability is selected from the classified operation before it can
+/// enter the ledger or run effects. A request can only return one `SmAck`.
+#[derive(Debug, Clone, Copy)]
+enum DriverOutputBound {
+    SmAck,
+    #[cfg(any(test, feature = "test-support"))]
+    Fixture(usize),
+}
+
+impl DriverOutputBound {
+    fn bytes(self) -> usize {
+        match self {
+            Self::SmAck => MAX_SM_ACK_OUTPUT_BYTES,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Fixture(bytes) => bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum ConnectionActorDriverTaskInput {
-    InboundFrame {
-        input: ClassifiedInboundFrame,
-        domain: BareJid,
+    SmRequest {
+        input: ClassifiedSmRequest,
         #[cfg(test)]
         before_start: Option<(Arc<Notify>, Arc<Notify>)>,
     },
-    PeerStanza(Box<OutboundStanza>),
     #[cfg(any(test, feature = "test-support"))]
     Paused {
         entered: Arc<Notify>,
@@ -225,11 +269,11 @@ pub(super) enum ConnectionActorDriverTaskInput {
     #[cfg(any(test, feature = "test-support"))]
     Panic,
     #[cfg(any(test, feature = "test-support"))]
-    Immediate {
-        input_bytes: usize,
-    },
+    Immediate { input_bytes: usize },
     #[cfg(any(test, feature = "test-support"))]
     ImmediateResult(&'static str),
+    #[cfg(test)]
+    AdvanceHandled,
 }
 
 type DriverInput = ConnectionActorDriverTaskInput;
@@ -245,13 +289,7 @@ enum DriverControl {
 impl ConnectionActorDriverTaskInput {
     fn input_bytes(&self) -> usize {
         match self {
-            Self::InboundFrame { input, domain, .. } => input
-                .wire_bytes()
-                .max(accounted_debug_bytes(input))
-                .saturating_add(domain.as_str().len()),
-            // Count a typed representation only. XML serialization belongs
-            // to the eventual socket adapter, not actor admission.
-            Self::PeerStanza(stanza) => accounted_debug_bytes(stanza),
+            Self::SmRequest { input, .. } => input.wire_bytes(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Paused { .. } => 0,
             #[cfg(any(test, feature = "test-support"))]
@@ -262,18 +300,44 @@ impl ConnectionActorDriverTaskInput {
             Self::Immediate { input_bytes } => *input_bytes,
             #[cfg(any(test, feature = "test-support"))]
             Self::ImmediateResult(result) => result.len(),
+            #[cfg(test)]
+            Self::AdvanceHandled => 0,
+        }
+    }
+
+    fn output_bound(&self, limits: ConnectionActorDriverTaskLimits) -> DriverOutputBound {
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = limits;
+        match self {
+            Self::SmRequest { .. } => DriverOutputBound::SmAck,
+            #[cfg(any(test, feature = "test-support"))]
+            _ => DriverOutputBound::Fixture(limits.result_reservation_bytes),
         }
     }
 }
 
 impl ConnectionActorDriverTaskResult {
+    // SM accounting uses the proven maximum, not an estimate of Debug output.
+    // The shape of the typed result permits zero or one acknowledgement only.
     fn accounted_bytes(&self) -> usize {
-        accounted_debug_bytes(&self.value)
+        match &self.value {
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(_))
+                | ConnectionActorDriverCompletion::CompletionUnknown {
+                    retained: Some(_), ..
+                },
+            )) => MAX_SM_ACK_OUTPUT_BYTES,
+            ConnectionActorDriverTaskResultValue::SmRequest(_) => 0,
+            #[cfg(any(test, feature = "test-support"))]
+            _ => accounted_debug_bytes(&self.value),
+        }
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct CountingFormatter(usize);
 
+#[cfg(any(test, feature = "test-support"))]
 impl std::fmt::Write for CountingFormatter {
     fn write_str(&mut self, value: &str) -> std::fmt::Result {
         self.0 = self.0.saturating_add(value.len());
@@ -281,6 +345,7 @@ impl std::fmt::Write for CountingFormatter {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn accounted_debug_bytes(value: &impl std::fmt::Debug) -> usize {
     let mut formatter = CountingFormatter(0);
     let _ = std::write!(&mut formatter, "{value:?}");
@@ -395,34 +460,31 @@ impl ConnectionActorDriverTask {
         &self.shared.connection_ref
     }
 
-    /// Admit one frame operation without an await boundary. The operation ID
-    /// and source input become shared custody before the worker can run it.
+    /// Admit only a classified SM request. The caller keeps its original input
+    /// when this bounded lane rejects another kind of frame.
     pub(super) fn submit_inbound_frame(
         &self,
-        input: ClassifiedInboundFrame,
-        domain: BareJid,
+        input: &ClassifiedInboundFrame,
     ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
         if input.wire_bytes() > waddle_xmpp::protocol::frame::MAX_FRAME_SIZE {
             return Err(ConnectionActorDriverTaskAdmissionError::Overloaded);
         }
-        self.submit(ConnectionActorDriverTaskInput::InboundFrame {
+        let input = input
+            .sm_request()
+            .ok_or(ConnectionActorDriverTaskAdmissionError::UnsupportedOperation)?;
+        self.submit(ConnectionActorDriverTaskInput::SmRequest {
             input,
-            domain,
             #[cfg(test)]
             before_start: None,
         })
     }
 
-    /// Admit one recipient-pass operation while preserving the original typed
-    /// envelope in the ledger.
+    /// Peer interpretation has no proven bound on this lane yet.
     pub(super) fn submit_peer_stanza(
         &self,
-        stanza: OutboundStanza,
+        _stanza: &OutboundStanza,
     ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
-        if stanza.kind != super::DeliveryKind::PeerStanza {
-            return Err(ConnectionActorDriverTaskAdmissionError::WrongOperationKind);
-        }
-        self.submit(ConnectionActorDriverTaskInput::PeerStanza(Box::new(stanza)))
+        Err(ConnectionActorDriverTaskAdmissionError::UnsupportedOperation)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -465,8 +527,9 @@ impl ConnectionActorDriverTask {
         input: ConnectionActorDriverTaskInput,
     ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
         let input_bytes = input.input_bytes();
+        let output_bound = input.output_bound(self.shared.limits);
         let charged_bytes = input_bytes
-            .checked_add(self.shared.limits.result_reservation_bytes)
+            .checked_add(output_bound.bytes())
             .filter(|bytes| *bytes <= self.shared.limits.byte_capacity)
             .ok_or(ConnectionActorDriverTaskAdmissionError::Overloaded)?;
         let count = self
@@ -487,7 +550,7 @@ impl ConnectionActorDriverTask {
             _count: count,
             _bytes: bytes,
             input_bytes,
-            result_reservation_bytes: self.shared.limits.result_reservation_bytes,
+            output_bound,
         });
         let result = self.shared.permit.with_current(|| {
             let mut ledger = self.shared.lock_state();
@@ -630,8 +693,8 @@ pub(super) enum ConnectionActorDriverTaskAdmissionError {
     Stopped,
     #[error("connection driver operation capacity is full")]
     Overloaded,
-    #[error("peer recipient pass accepts only peer stanzas")]
-    WrongOperationKind,
+    #[error("operation has no proven output bound on this lane")]
+    UnsupportedOperation,
     #[error("connection driver operation IDs are exhausted")]
     OperationIdExhausted,
     #[error("connection driver task limits are invalid")]
@@ -672,6 +735,8 @@ pub enum ConnectionActorDriverTestAdmissionError {
     Stopped,
     #[error("connection driver capacity is full")]
     Overloaded,
+    #[error("operation has no proven output bound on this lane")]
+    UnsupportedOperation,
 }
 
 #[cfg(feature = "test-support")]
@@ -725,6 +790,18 @@ impl ConnectionActorDriverTestTicket {
             .operation
             .runs
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn sm_acknowledged_count(&self) -> Option<u32> {
+        let ConnectionActorDriverTaskSnapshot::Completed(result) = self.ticket.snapshot() else {
+            return None;
+        };
+        match &result.value {
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack)),
+            )) => Some(ack.h),
+            _ => None,
+        }
     }
 
     pub fn retains_input(&self) -> bool {
@@ -790,6 +867,29 @@ impl ConnectionActorDriverTestHandle {
         self.task.connection_ref()
     }
 
+    /// Submit the canonical request through the same classifier as transport.
+    pub fn submit_sm_request(
+        &self,
+    ) -> Result<ConnectionActorDriverTestTicket, ConnectionActorDriverTestAdmissionError> {
+        let frame = waddle_xmpp::stream_management::SmRequest::to_xml();
+        self.task
+            .submit_inbound_frame(&ClassifiedInboundFrame::classify(&frame))
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+            .map_err(map_test_admission_error)
+    }
+
+    /// Exercise rejection without giving up the caller's typed stanza.
+    pub fn submit_peer_stanza(
+        &self,
+        stanza: &waddle_xmpp::Stanza,
+    ) -> Result<ConnectionActorDriverTestTicket, ConnectionActorDriverTestAdmissionError> {
+        let peer = OutboundStanza::peer_stanza(stanza.clone());
+        self.task
+            .submit_peer_stanza(&peer)
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+            .map_err(map_test_admission_error)
+    }
+
     pub fn submit_paused(
         &self,
         gate: &ConnectionActorDriverTestGate,
@@ -849,8 +949,10 @@ fn map_test_admission_error(
         ConnectionActorDriverTaskAdmissionError::Overloaded => {
             ConnectionActorDriverTestAdmissionError::Overloaded
         }
+        ConnectionActorDriverTaskAdmissionError::UnsupportedOperation => {
+            ConnectionActorDriverTestAdmissionError::UnsupportedOperation
+        }
         ConnectionActorDriverTaskAdmissionError::Stopped
-        | ConnectionActorDriverTaskAdmissionError::WrongOperationKind
         | ConnectionActorDriverTaskAdmissionError::OperationIdExhausted
         | ConnectionActorDriverTaskAdmissionError::InvalidLimits => {
             ConnectionActorDriverTestAdmissionError::Stopped
@@ -1297,7 +1399,7 @@ async fn run_driver(worker: DriverWorker) {
             release.notified().await;
         }
         #[cfg(test)]
-        if let DriverInput::InboundFrame {
+        if let DriverInput::SmRequest {
             before_start: Some((dequeued, release)),
             ..
         } = &command.operation.input
@@ -1321,22 +1423,16 @@ async fn run_driver(worker: DriverWorker) {
         let mut active =
             ActiveOperationGuard::new(Arc::clone(&command.operation), Arc::clone(&shared));
         let result = match &command.operation.input {
-            DriverInput::InboundFrame { input, domain, .. } => {
-                ConnectionActorDriverTaskResultValue::InboundFrame(
-                    core.process_inbound_frame(
-                        input.clone(),
-                        domain,
-                        websocket.as_ref(),
-                        &permit,
-                        &shutdown,
-                    )
-                    .await,
-                )
+            DriverInput::SmRequest { input, .. } => {
+                let request = command.operation._reservation.sm_request(input);
+                ConnectionActorDriverTaskResultValue::SmRequest(match request {
+                    Some(request) => {
+                        core.process_sm_request(request, websocket.as_ref(), &permit, &shutdown)
+                            .await
+                    }
+                    None => Err(ConnectionActorDriverError::OutputReservationMissing),
+                })
             }
-            DriverInput::PeerStanza(stanza) => ConnectionActorDriverTaskResultValue::PeerStanza(
-                core.interpret_peer_stanza(websocket.as_ref(), stanza, &permit, &shutdown)
-                    .await,
-            ),
             #[cfg(any(test, feature = "test-support"))]
             DriverInput::Paused {
                 entered,
@@ -1359,6 +1455,11 @@ async fn run_driver(worker: DriverWorker) {
             #[cfg(any(test, feature = "test-support"))]
             DriverInput::ImmediateResult(result) => {
                 ConnectionActorDriverTaskResultValue::ImmediateResult(result)
+            }
+            #[cfg(test)]
+            DriverInput::AdvanceHandled => {
+                core.advance_handled_for_test();
+                ConnectionActorDriverTaskResultValue::Immediate
             }
         };
         let mut result = Some(result);
@@ -1397,7 +1498,7 @@ impl ActiveOperationGuard {
             _reservation: Arc::clone(&self.operation._reservation),
         });
         let exceeds_reservation =
-            result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
+            result.accounted_bytes() > self.operation._reservation.output_bound.bytes();
         self.shared
             .publish_completion(&self.operation, result, exceeds_reservation, false);
         self.complete = true;
@@ -1409,7 +1510,7 @@ impl ActiveOperationGuard {
             _reservation: Arc::clone(&self.operation._reservation),
         });
         let exceeds_reservation =
-            result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
+            result.accounted_bytes() > self.operation._reservation.output_bound.bytes();
         self.shared.request_stop(StopReason::LeaseLost);
         self.shared
             .publish_completion(&self.operation, result, exceeds_reservation, true);
@@ -1473,10 +1574,17 @@ mod tests {
     async fn test_task_with_limits(
         limits: ConnectionActorDriverTaskLimits,
     ) -> ConnectionActorDriverTask {
+        test_task_with_state(limits, super::super::state::WsConnState::new()).await
+    }
+
+    async fn test_task_with_state(
+        limits: ConnectionActorDriverTaskLimits,
+        state: super::super::state::WsConnState,
+    ) -> ConnectionActorDriverTask {
         let websocket = create_test_websocket_state().await;
         let permit = NodeLifecycle::new().admit().expect("serving permit");
         ConnectionActorDriverTask::spawn_with_limits(
-            super::super::state::WsConnState::new(),
+            state,
             websocket,
             permit,
             CancellationToken::new(),
@@ -1486,11 +1594,10 @@ mod tests {
     }
 
     fn submit_typed_sm(task: &ConnectionActorDriverTask) -> ConnectionActorDriverTicket {
-        task.submit_inbound_frame(
-            ClassifiedInboundFrame::classify("<enable xmlns='urn:xmpp:sm:3'/>"),
-            "example.com".parse().expect("domain"),
-        )
-        .expect("typed SM accepted")
+        task.submit_inbound_frame(&ClassifiedInboundFrame::classify(
+            "<r xmlns='urn:xmpp:sm:3'/>",
+        ))
+        .expect("typed SM request accepted")
     }
 
     #[tokio::test]
@@ -1511,22 +1618,18 @@ mod tests {
         let ConnectionActorDriverTaskSnapshot::Completed(result) = snapshot else {
             panic!("typed result retained")
         };
-        let ConnectionActorDriverTaskResultValue::InboundFrame(Ok(
-            ConnectionActorDriverCompletion::CurrentAtCompletion(batch),
+        let ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+            ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack)),
         )) = &result.value
         else {
             panic!("inbound handler completed")
         };
-        assert_eq!(batch.frames.len(), 1);
-        assert!(batch.frames[0]
-            .clone()
-            .into_serialized_xml()
-            .contains("unexpected-request"));
+        assert_eq!(ack.h, 0);
         assert_eq!(retained.run_count(), 1);
-        let DriverInput::InboundFrame { input, .. } = retained.input_snapshot() else {
+        let DriverInput::SmRequest { input, .. } = retained.input_snapshot() else {
             panic!("typed source retained")
         };
-        assert_eq!(input.wire_bytes(), "<enable xmlns='urn:xmpp:sm:3'/>".len());
+        assert_eq!(input.wire_bytes(), "<r xmlns='urn:xmpp:sm:3'/>".len());
         retained.acknowledge().expect("settled");
         task.request_stop(StopReason::Requested);
         task.wait_joined().await;
@@ -1563,7 +1666,7 @@ mod tests {
             assert_eq!(queued.run_count(), 0);
             assert!(matches!(
                 queued.input_snapshot(),
-                DriverInput::InboundFrame { .. }
+                DriverInput::SmRequest { .. }
             ));
             assert!(queued.retains_input());
             active.acknowledge().expect("predecessor settled");
@@ -1578,9 +1681,10 @@ mod tests {
             let dequeued = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let ticket = task
-                .submit(DriverInput::InboundFrame {
-                    input: ClassifiedInboundFrame::classify("<enable xmlns='urn:xmpp:sm:3'/>"),
-                    domain: "example.com".parse().expect("domain"),
+                .submit(DriverInput::SmRequest {
+                    input: ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>")
+                        .sm_request()
+                        .expect("typed request"),
                     before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
                 })
                 .expect("typed SM accepted");
@@ -1606,7 +1710,7 @@ mod tests {
             assert!(ticket.retains_input());
             assert!(matches!(
                 ticket.input_snapshot(),
-                DriverInput::InboundFrame { .. }
+                DriverInput::SmRequest { .. }
             ));
             ticket.acknowledge().expect("typed source settled");
         }
@@ -1619,7 +1723,7 @@ mod tests {
             &" ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1),
         );
         assert!(matches!(
-            task.submit_inbound_frame(input, "example.com".parse().expect("domain")),
+            task.submit_inbound_frame(&input),
             Err(ConnectionActorDriverTaskAdmissionError::Overloaded)
         ));
         assert!(task.shared.lock_state().operations.is_empty());
@@ -1628,17 +1732,275 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_input_size_is_preserved_in_bounded_admission() {
+    async fn sm_request_reserves_the_full_output_bound_before_dispatch() {
+        let input = ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>");
+        let exact = input.wire_bytes() + MAX_SM_ACK_OUTPUT_BYTES;
+        for capacity in [exact - 1, exact] {
+            let task = test_task_with_limits(ConnectionActorDriverTaskLimits::with_bounds(
+                1, 1, capacity, 0,
+            ))
+            .await;
+            let submission = task.submit_inbound_frame(&input);
+            if capacity < exact {
+                assert!(matches!(
+                    submission,
+                    Err(ConnectionActorDriverTaskAdmissionError::Overloaded)
+                ));
+                let ledger = task.shared.lock_state();
+                assert!(ledger.operations.is_empty());
+                assert_eq!(
+                    ledger.next_id, 1,
+                    "rejection precedes operation and effects"
+                );
+            } else {
+                let ticket = submission.expect("exact reservation fits");
+                let ConnectionActorDriverTaskSnapshot::Completed(result) = ticket.wait().await
+                else {
+                    panic!("request completes");
+                };
+                assert!(matches!(
+                    result.value,
+                    ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                        ConnectionActorDriverCompletion::CurrentAtCompletion(Some(_))
+                    ))
+                ));
+                assert_eq!(task.shared.byte_permits.available_permits(), 0);
+                ticket.acknowledge().expect("settled");
+                assert_eq!(task.shared.byte_permits.available_permits(), 0);
+                drop(result);
+                assert_eq!(task.shared.byte_permits.available_permits(), exact);
+            }
+            task.request_stop(StopReason::Requested);
+            task.wait_joined().await;
+        }
+    }
+
+    #[test]
+    fn every_decimal_width_of_sm_ack_fits_the_reserved_wire_bound() {
+        let mut counts = vec![0, u32::MAX];
+        for width in 1..=9 {
+            let boundary = 10_u32.pow(width);
+            counts.extend([boundary - 1, boundary]);
+        }
+        for count in counts {
+            let xml = waddle_xmpp::stream_management::SmAck::new(count).to_xml();
+            assert!(xml.len() <= MAX_SM_ACK_OUTPUT_BYTES, "h={count}: {xml}");
+            let parsed = waddle_xmpp::stream_management::SmAck::parse(&xml).expect("typed ack");
+            assert_eq!(parsed.h, count);
+        }
+    }
+
+    #[tokio::test]
+    async fn other_inbound_and_peer_work_is_rejected_before_operation_or_effects() {
+        let task = test_task().await;
+        for xml in [
+            "<enable xmlns='urn:xmpp:sm:3'/>",
+            "<a xmlns='urn:xmpp:sm:3' h='0'/>",
+            "<resume xmlns='urn:xmpp:sm:3' previd='s' h='0'/>",
+            "<presence xmlns='jabber:client'/>",
+            "<iq xmlns='jabber:client' type='get' id='1'><ping xmlns='urn:xmpp:ping'/></iq>",
+            "<invalid",
+        ] {
+            let input = ClassifiedInboundFrame::classify(xml);
+            assert!(matches!(
+                task.submit_inbound_frame(&input),
+                Err(ConnectionActorDriverTaskAdmissionError::UnsupportedOperation)
+            ));
+            assert_eq!(input.wire_bytes(), xml.len(), "caller retains input");
+        }
+        let stanza = waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None));
+        let peer = OutboundStanza::peer_stanza(stanza);
+        assert!(matches!(
+            task.submit_peer_stanza(&peer),
+            Err(ConnectionActorDriverTaskAdmissionError::UnsupportedOperation)
+        ));
+        assert_eq!(peer.kind, super::super::DeliveryKind::PeerStanza);
+        {
+            let ledger = task.shared.lock_state();
+            assert!(ledger.operations.is_empty());
+            assert_eq!(ledger.next_id, 1);
+        }
+        let ticket = submit_typed_sm(&task);
+        assert_eq!(ticket.id(), 1);
+        let ConnectionActorDriverTaskSnapshot::Completed(result) = ticket.wait().await else {
+            panic!("request completes");
+        };
+        assert!(matches!(
+            result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack))
+            )) if ack.h == 0
+        ));
+        ticket.acknowledge().expect("settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn sm_requests_observe_the_handled_prefix_in_actor_order() {
+        let task = test_task().await;
+        let first = submit_typed_sm(&task);
+        let handled = task
+            .submit(DriverInput::AdvanceHandled)
+            .expect("handled fixture");
+        let second = submit_typed_sm(&task);
+        assert!(first.id() < handled.id() && handled.id() < second.id());
+        let ConnectionActorDriverTaskSnapshot::Completed(second_result) = second.wait().await
+        else {
+            panic!("second request completes");
+        };
+        let ConnectionActorDriverTaskSnapshot::Completed(first_result) = first.snapshot() else {
+            panic!("first request completed before second");
+        };
+        assert!(matches!(
+            first_result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack))
+            )) if ack.h == 0
+        ));
+        assert!(matches!(
+            second_result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack))
+            )) if ack.h == 1
+        ));
+        first.acknowledge().expect("first settled");
+        handled.acknowledge().expect("handled fixture settled");
+        second.acknowledge().expect("second settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn sm_request_does_not_acknowledge_past_a_handled_prefix_hole() {
+        let mut state = super::super::state::WsConnState::new();
+        state.sm_state.enable("nonresumable".into(), false, None);
+        let _first = state.sm_inbound_completion.reserve(&state.sm_state);
+        let second = state.sm_inbound_completion.reserve(&state.sm_state);
+        state
+            .sm_inbound_completion
+            .complete(second, &mut state.sm_state);
+        let task = test_task_with_state(ConnectionActorDriverTaskLimits::default(), state).await;
+        let ticket = submit_typed_sm(&task);
+        let ConnectionActorDriverTaskSnapshot::Completed(result) = ticket.wait().await else {
+            panic!("request completes");
+        };
+        assert!(matches!(
+            result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(Some(ack))
+            )) if ack.h == 0
+        ));
+        ticket.acknowledge().expect("settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_returns_no_ack_on_the_bounded_path() {
+        let mut state = super::super::state::WsConnState::new();
+        state
+            .sm_state
+            .enable("missing-ingress-stream".into(), true, Some(300));
+        state.phase = waddle_xmpp::protocol::ConnectionPhase::ready(
+            "alice@example.com/web".parse().expect("jid"),
+            false,
+        );
+        let sequence = state.sm_inbound_completion.reserve(&state.sm_state);
+        state.sm_inbound_completion.mark_committed(sequence, 0);
+        state
+            .sm_inbound_completion
+            .complete(sequence, &mut state.sm_state);
+        let task = test_task_with_state(ConnectionActorDriverTaskLimits::default(), state).await;
+        let ticket = submit_typed_sm(&task);
+        let ConnectionActorDriverTaskSnapshot::Completed(result) = ticket.wait().await else {
+            panic!("request completes");
+        };
+        assert!(matches!(
+            result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(None)
+            ))
+        ));
+        ticket.acknowledge().expect("settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_sm_waiter_recovers_the_same_request_and_result() {
+        let task = test_task().await;
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let ticket = task
+            .submit(DriverInput::SmRequest {
+                input: ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>")
+                    .sm_request()
+                    .expect("typed request"),
+                before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+            })
+            .expect("request admitted");
+        dequeued.notified().await;
+        let id = ticket.id();
+        let connection = task.connection_ref().clone();
+        let waiter_ticket = ticket.clone();
+        let waiter = tokio::spawn(async move { waiter_ticket.wait().await });
+        waiter.abort();
+        let _ = waiter.await;
+        drop(ticket);
+        let recovered = task
+            .lookup(&connection, id)
+            .expect("same operation retained");
+        assert!(matches!(
+            recovered.snapshot(),
+            ConnectionActorDriverTaskSnapshot::Accepted
+        ));
+        release.notify_one();
+        assert!(matches!(
+            recovered.wait().await,
+            ConnectionActorDriverTaskSnapshot::Completed(_)
+        ));
+        assert_eq!(recovered.run_count(), 1);
+        recovered.acknowledge().expect("settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn full_sm_data_lane_keeps_barrier_admission_separate() {
+        let input = ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>");
+        let capacity = input.wire_bytes() + MAX_SM_ACK_OUTPUT_BYTES;
         let task = test_task_with_limits(ConnectionActorDriverTaskLimits::with_bounds(
-            4, 1, 4096, 1024,
+            1, 1, capacity, 0,
         ))
         .await;
-        let input = ClassifiedInboundFrame::classify(&" ".repeat(4096));
-        assert_eq!(input.wire_bytes(), 4096);
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let ticket = task
+            .submit(DriverInput::SmRequest {
+                input: input.sm_request().expect("typed request"),
+                before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+            })
+            .expect("request admitted");
+        dequeued.notified().await;
         assert!(matches!(
-            task.submit_inbound_frame(input, "example.com".parse().expect("domain")),
+            task.submit_inbound_frame(&input),
             Err(ConnectionActorDriverTaskAdmissionError::Overloaded)
         ));
+        let mut barrier = task
+            .try_control_barrier()
+            .expect("control capacity is independent");
+        assert!(matches!(
+            barrier.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        release.notify_one();
+        barrier.await.expect("barrier serviced after request");
+        assert!(matches!(
+            ticket.wait().await,
+            ConnectionActorDriverTaskSnapshot::Completed(_)
+        ));
+        ticket.acknowledge().expect("settled");
         task.request_stop(StopReason::Requested);
         task.wait_joined().await;
     }

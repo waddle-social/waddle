@@ -289,6 +289,7 @@ pub(super) use implementation::defer_superseded_sm_claim;
 pub(super) use implementation::flush_ingress_checkpoint;
 #[cfg(test)]
 use implementation::handle_sm_enable;
+pub(super) use implementation::handle_sm_request;
 pub(super) use implementation::handle_sm_stanza;
 pub(super) use implementation::is_countable_stanza;
 #[cfg(test)]
