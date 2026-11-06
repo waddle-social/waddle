@@ -156,15 +156,25 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
     )
     .await;
     rejected(pool, &wrong_claim, Rejection::Claim).await;
-    let stale_epoch = Source::new(claim("owner", "epoch-2", 7), first.binding.clone());
-    let stale_claim = request(
-        pool,
-        &jid,
-        &stale_epoch,
-        Action::Publish(SyntheticReceipt::new(&stale_epoch, 1)),
-    )
-    .await;
-    rejected(pool, &stale_claim, Rejection::Claim).await;
+    for (field, replacement) in [
+        ("/claim_epoch", serde_json::json!(8)),
+        ("/owner/Clustered/node_id", serde_json::json!("other-owner")),
+        ("/owner/Clustered/node_epoch", serde_json::json!("epoch-2")),
+    ] {
+        let mut encoded = serde_json::to_value(&first_claim).unwrap();
+        *encoded.pointer_mut(field).expect("claim identity field") = replacement;
+        let changed: UserClaimIdentity = serde_json::from_value(encoded).unwrap();
+        assert_eq!(changed.actor_incarnation(), first_claim.actor_incarnation());
+        let stale = Source::new(changed, first.binding.clone());
+        let stale_claim = request(
+            pool,
+            &jid,
+            &stale,
+            Action::Publish(SyntheticReceipt::new(&stale, 1)),
+        )
+        .await;
+        rejected(pool, &stale_claim, Rejection::Claim).await;
+    }
     let mut wrong_connection = first.clone();
     wrong_connection.connection = source(&first_claim).connection;
     let inconsistent = request(
@@ -243,6 +253,18 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
     )
     .await;
     assert!(db::current(pool, &jid, &first, 1).await.unwrap());
+    let mut other_slot = historic_activation.clone();
+    other_slot.full_jid = "alice@example.test/other-device".parse().unwrap();
+    assert_eq!(
+        db::lookup(pool, &other_slot).await.unwrap(),
+        Lookup::PayloadConflict
+    );
+    assert_eq!(
+        db::execute(pool, &other_slot, Pause::None).await.unwrap(),
+        Execution::PayloadConflict
+    );
+    other_slot.id = uuid::Uuid::new_v4();
+    rejected(pool, &other_slot, Rejection::UnsupportedSlot).await;
 
     let replace = AccountResourceMutation::ReplaceClaim {
         claim_identity: first_claim.clone(),
@@ -587,7 +609,7 @@ fn spawn_child(
         .unwrap()
 }
 
-async fn wait_for_signal(path: &Path) {
+async fn wait_for_signal(path: &Path) -> i32 {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !path.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -595,6 +617,32 @@ async fn wait_for_signal(path: &Path) {
     })
     .await
     .expect("child reached its transaction barrier");
+    std::fs::read_to_string(path)
+        .expect("read backend PID")
+        .parse()
+        .expect("valid backend PID")
+}
+
+async fn wait_for_blocked_backend(pool: &PgPool, contender: i32, holder: i32) {
+    assert_ne!(contender, holder, "separate PostgreSQL backends");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND $2 = ANY(pg_catalog.pg_blocking_pids(pid)))",
+            )
+            .bind(contender)
+            .bind(holder)
+            .fetch_one(pool)
+            .await
+            .expect("inspect PostgreSQL lock wait");
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("contender is blocked by the exact child backend");
 }
 
 #[tokio::test]
@@ -611,7 +659,7 @@ async fn multiprocess_cancellation_lost_reply_and_generation_fenced_recovery() {
 
     let prepare = request(&fixture.pool, &jid, &source, Action::Prepare).await;
     let mut child = spawn_child(&fixture, &prepare, "before", &ready, &release);
-    wait_for_signal(&ready).await;
+    let holder_pid = wait_for_signal(&ready).await;
     assert_eq!(
         db::lookup(&fixture.pool, &prepare).await.unwrap(),
         Lookup::Indeterminate,
@@ -619,14 +667,15 @@ async fn multiprocess_cancellation_lost_reply_and_generation_fenced_recovery() {
     );
     let pool = fixture.pool.clone();
     let retry = prepare.clone();
-    let mut pending =
-        tokio::spawn(async move { db::execute(&pool, &retry, Pause::None).await.unwrap() });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut pending)
+    let contender_ready = signals.path().join("before-contender");
+    let contender_signal = contender_ready.clone();
+    let pending = tokio::spawn(async move {
+        db::execute(&pool, &retry, Pause::ReportBackend(contender_signal))
             .await
-            .is_err(),
-        "retry waits for the child transaction's claim/slot locks"
-    );
+            .unwrap()
+    });
+    let contender_pid = wait_for_signal(&contender_ready).await;
+    wait_for_blocked_backend(&fixture.pool, contender_pid, holder_pid).await;
     child.kill().await.unwrap();
     let _ = child.wait().await.unwrap();
     assert_eq!(
@@ -701,7 +750,7 @@ async fn multiprocess_cancellation_lost_reply_and_generation_fenced_recovery() {
     let ready_race = signals.path().join("race");
     let register = unknown;
     let mut child = spawn_child(&fixture, &register, "release", &ready_race, &release);
-    wait_for_signal(&ready_race).await;
+    let holder_pid = wait_for_signal(&ready_race).await;
     let competitor = request(
         &fixture.pool,
         &jid,
@@ -710,13 +759,15 @@ async fn multiprocess_cancellation_lost_reply_and_generation_fenced_recovery() {
     )
     .await;
     let pool = fixture.pool.clone();
-    let mut pending =
-        tokio::spawn(async move { db::execute(&pool, &competitor, Pause::None).await.unwrap() });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut pending)
+    let contender_ready = signals.path().join("race-contender");
+    let contender_signal = contender_ready.clone();
+    let pending = tokio::spawn(async move {
+        db::execute(&pool, &competitor, Pause::ReportBackend(contender_signal))
             .await
-            .is_err()
-    );
+            .unwrap()
+    });
+    let contender_pid = wait_for_signal(&contender_ready).await;
+    wait_for_blocked_backend(&fixture.pool, contender_pid, holder_pid).await;
     std::fs::write(&release, b"commit").unwrap();
     assert!(child.wait().await.unwrap().success());
     assert_eq!(

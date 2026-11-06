@@ -118,6 +118,7 @@ impl Request {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Rejection {
+    UnsupportedSlot,
     Claim,
     InconsistentSource,
     RevisionOrGeneration,
@@ -446,7 +447,7 @@ impl Fixture {
             .bind(claim_json)
             .execute(pool)
             .await?;
-        sqlx::query("INSERT INTO lab_slot VALUES ($1, $2, 0, 0, 'vacant', NULL, NULL, NULL)")
+        sqlx::query("INSERT INTO lab_slot (full_jid, bare_jid, revision, generation, state) VALUES ($1, $2, 0, 0, 'vacant')")
             .bind(full_jid.to_string())
             .bind(claim.bare_jid().to_string())
             .execute(pool)
@@ -565,6 +566,8 @@ pub async fn lookup(pool: &PgPool, request: &Request) -> Result<Lookup> {
 #[derive(Debug, Clone)]
 pub enum Pause {
     None,
+    /// Publish the contender's PostgreSQL backend PID before attempting locks.
+    ReportBackend(PathBuf),
     /// Signal after the journal and state writes but before COMMIT, then wait
     /// for the test parent to terminate this process.
     BeforeCommit(PathBuf),
@@ -577,14 +580,25 @@ pub enum Pause {
     AfterCommit(PathBuf),
 }
 
-async fn signal_and_wait(path: PathBuf) -> Result<()> {
-    std::fs::write(path, b"ready").context("signal fixture parent")?;
+fn signal_backend(path: &std::path::Path, backend_pid: i32) -> Result<()> {
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, backend_pid.to_string()).context("write fixture backend PID")?;
+    std::fs::rename(temporary, path).context("signal fixture parent")?;
+    Ok(())
+}
+
+async fn signal_and_wait(path: PathBuf, backend_pid: i32) -> Result<()> {
+    signal_backend(&path, backend_pid)?;
     tokio::time::sleep(Duration::from_secs(60)).await;
     bail!("fixture parent did not terminate paused child")
 }
 
-async fn signal_and_wait_for_release(ready: PathBuf, release: PathBuf) -> Result<()> {
-    std::fs::write(ready, b"ready").context("signal fixture parent")?;
+async fn signal_and_wait_for_release(
+    ready: PathBuf,
+    release: PathBuf,
+    backend_pid: i32,
+) -> Result<()> {
+    signal_backend(&ready, backend_pid)?;
     tokio::time::timeout(Duration::from_secs(20), async {
         while !release.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -600,13 +614,32 @@ async fn signal_and_wait_for_release(ready: PathBuf, release: PathBuf) -> Result
 /// missing journal entry after a lost COMMIT reply is not a rejection result.
 pub async fn execute(pool: &PgPool, request: &Request, pause: Pause) -> Result<Execution> {
     let mut tx = pool.begin().await?;
+    let backend_pid = if matches!(&pause, Pause::None) {
+        None
+    } else {
+        Some(
+            sqlx::query_scalar::<_, i32>("SELECT pg_catalog.pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await?,
+        )
+    };
+    if let Pause::ReportBackend(path) = &pause {
+        signal_backend(path, backend_pid.context("missing fixture backend PID")?)?;
+    }
+    // This laboratory has one immutable enrolled slot. Resolve its key before
+    // locking so a conflicting replay with a different requested JID still
+    // reaches the same operation journal under the same claim/slot locks.
+    let enrolled_jid: String = sqlx::query_scalar("SELECT full_jid FROM lab_slot WHERE singleton")
+        .fetch_one(&mut *tx)
+        .await?;
+    let enrolled: FullJid = enrolled_jid.parse()?;
     let row = sqlx::query("SELECT identity FROM lab_claim WHERE bare_jid = $1 FOR UPDATE")
-        .bind(request.full_jid.to_bare().to_string())
+        .bind(enrolled.to_bare().to_string())
         .fetch_one(&mut *tx)
         .await?;
     let mut claim: UserClaimIdentity = serde_json::from_value(row.try_get("identity")?)?;
     let row = sqlx::query("SELECT * FROM lab_slot WHERE full_jid = $1 FOR UPDATE")
-        .bind(request.full_jid.to_string())
+        .bind(&enrolled_jid)
         .fetch_one(&mut *tx)
         .await?;
     let mut state = Slot::from_row(&row)?;
@@ -629,23 +662,24 @@ pub async fn execute(pool: &PgPool, request: &Request, pause: Pause) -> Result<E
     }
 
     let source = &request.source;
-    let rejection =
-        if source.claim != claim || source.claim.bare_jid() != &request.full_jid.to_bare() {
-            Some(Rejection::Claim)
-        } else if source.binding.connection_ref() != &source.connection {
-            Some(Rejection::InconsistentSource)
-        } else if request.revision != state.revision || request.generation != state.generation {
-            Some(Rejection::RevisionOrGeneration)
-        } else if state.revision == i64::MAX {
-            Some(Rejection::Exhausted)
-        } else if !matches!(&request.action, Action::Prepare)
-            && (state.connection.as_ref() != Some(&source.connection)
-                || state.binding.as_ref() != Some(&source.binding))
-        {
-            Some(Rejection::Binding)
-        } else {
-            None
-        };
+    let rejection = if request.full_jid != enrolled {
+        Some(Rejection::UnsupportedSlot)
+    } else if source.claim != claim || source.claim.bare_jid() != &request.full_jid.to_bare() {
+        Some(Rejection::Claim)
+    } else if source.binding.connection_ref() != &source.connection {
+        Some(Rejection::InconsistentSource)
+    } else if request.revision != state.revision || request.generation != state.generation {
+        Some(Rejection::RevisionOrGeneration)
+    } else if state.revision == i64::MAX {
+        Some(Rejection::Exhausted)
+    } else if !matches!(&request.action, Action::Prepare)
+        && (state.connection.as_ref() != Some(&source.connection)
+            || state.binding.as_ref() != Some(&source.binding))
+    {
+        Some(Rejection::Binding)
+    } else {
+        None
+    };
 
     let rejection = if rejection.is_some() {
         rejection
@@ -801,14 +835,23 @@ pub async fn execute(pool: &PgPool, request: &Request, pause: Pause) -> Result<E
         .execute(&mut *tx)
         .await?;
     if let Pause::BeforeCommit(path) = &pause {
-        signal_and_wait(path.clone()).await?;
+        signal_and_wait(
+            path.clone(),
+            backend_pid.context("missing fixture backend PID")?,
+        )
+        .await?;
     }
     if let Pause::BeforeCommitUntilRelease { ready, release } = &pause {
-        signal_and_wait_for_release(ready.clone(), release.clone()).await?;
+        signal_and_wait_for_release(
+            ready.clone(),
+            release.clone(),
+            backend_pid.context("missing fixture backend PID")?,
+        )
+        .await?;
     }
     tx.commit().await?;
     if let Pause::AfterCommit(path) = pause {
-        signal_and_wait(path).await?;
+        signal_and_wait(path, backend_pid.context("missing fixture backend PID")?).await?;
     }
     Ok(Execution::Applied(outcome))
 }

@@ -13,7 +13,9 @@ marker to exercise cleanup and refusal respectively.
 Every request carries the complete typed `UserClaimIdentity`, `ConnectionRef`,
 and `BindingRef`. In one transaction the fixture locks the claim before the
 slot, checks the exact identities and version, applies a restricted transition,
-and records its complete request and terminal outcome. The database's retained
+and records its complete request and terminal outcome. The schema enforces a
+single enrolled slot; new requests for a different slot are rejected, while a
+conflicting replay reaches the same journal first. The database's retained
 unique binding and `(full_jid, generation)` keys fence reuse. A retry uses the
 same operation ID and payload; a mismatch is a conflict. A missing journal row
 after an unknown result is indeterminate, including while the original commit
@@ -25,7 +27,8 @@ The first test compares a restricted prepare, publish, register, claim-move,
 adopt, retire, and fresh-bind history against the in-process #2210 transition
 model. The second starts independent test processes, kills one after it has
 written but before COMMIT, deliberately withholds a reply after a real COMMIT,
-and holds another transaction while a competitor waits. It also recovers a
+and holds another transaction while PostgreSQL reports the competitor blocked
+by that exact child backend. It also recovers a
 lost predecessor retirement result after a same-JID successor is active.
 
 The publication, registration, directed-presence, presentation, and custody

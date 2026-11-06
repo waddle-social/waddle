@@ -10,6 +10,7 @@ CREATE TABLE lab_claim_history (
 );
 CREATE TABLE lab_slot (
     full_jid TEXT PRIMARY KEY,
+    singleton BOOLEAN NOT NULL DEFAULT TRUE UNIQUE CHECK (singleton),
     bare_jid TEXT NOT NULL REFERENCES lab_claim(bare_jid),
     revision BIGINT NOT NULL CHECK (revision >= 0),
     generation BIGINT NOT NULL CHECK (generation >= 0),
