@@ -35,11 +35,13 @@ pub(crate) use migrations::verify_relation_guard_candidate_in_transaction;
 pub(crate) use migrations::verify_room_observation_migration_v1023_in_transaction;
 pub(crate) use migrations::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
 pub use migrations::{
-    bootstrap_dark_postgres_mam_owner, grant_dark_owner_rejection_runtime_access,
-    inspect_dark_owner_rejection_runtime_access, inspect_dark_postgres_epoch_acl,
-    migration_checksum, run_dark_postgres_owner, DarkEpochAclStage, DarkMamOwnerError,
+    acquire_dark_shared_migration_ledger_v1023, bootstrap_dark_postgres_mam_owner,
+    grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
+    inspect_dark_postgres_epoch_acl, migration_checksum, run_dark_postgres_owner,
+    DarkEpochAclStage, DarkLedgerPreflightError, DarkMamOwnerError, DarkMigrationLedgerPins,
     DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError, MigrationNamespace,
-    MigrationRunner, OwnerRejectionGrantError, OwnerRejectionGrantState, WADDLE_NAMESPACE_START,
+    MigrationRunner, OwnerRejectionGrantError, OwnerRejectionGrantState, SharedMigrationLedger,
+    WADDLE_NAMESPACE_START,
 };
 #[cfg(feature = "test-support")]
 pub use migrations::{

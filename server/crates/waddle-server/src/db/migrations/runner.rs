@@ -331,9 +331,66 @@ impl MigrationRunner {
         let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
-        self.validate_ledger(&applied_rows, driver, false)?;
+        self.verify_applied_through_rows(&applied_rows, driver, required_version)
+    }
+
+    /// Read only the already-pinned, locked PostgreSQL heap. The caller must
+    /// establish its catalog shape and safe search path before calling this.
+    pub(super) async fn verify_applied_through_locked_postgres(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        ledger_table: &str,
+        required_version: i64,
+    ) -> Result<(), DatabaseError> {
+        // No ORDER BY: an ordering operator need not be resolved to validate
+        // the checksum and version-prefix invariants.
+        let sql = format!("SELECT version, description, checksum FROM ONLY {ledger_table}");
+        let rows: Vec<(i64, String, Option<String>)> =
+            sqlx::query_as(&sql).fetch_all(connection).await?;
+        let applied_rows = rows
+            .into_iter()
+            .map(|(version, description, checksum)| LedgerRow {
+                version,
+                description,
+                checksum,
+            })
+            .collect::<Vec<_>>();
+        self.verify_applied_through_rows(
+            &applied_rows,
+            DatabaseDriver::Postgres,
+            required_version,
+        )?;
+
+        // The bootstrap sentinel query is deliberately unavailable here. A
+        // committed single-catalog prefix must instead contain both owned
+        // namespaces through the requested version.
+        for migration in self
+            .migrations
+            .iter()
+            .filter(|m| m.version <= required_version)
+        {
+            if !applied_rows
+                .iter()
+                .any(|row| row.version == migration.version)
+            {
+                return Err(MigrationLedgerError::PendingMigration {
+                    version: migration.version,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_applied_through_rows(
+        &self,
+        applied_rows: &[LedgerRow],
+        driver: DatabaseDriver,
+        required_version: i64,
+    ) -> Result<(), DatabaseError> {
+        self.validate_ledger(applied_rows, driver, false)?;
         let mut seen = HashSet::new();
-        for row in &applied_rows {
+        for row in applied_rows {
             if self.owns_version(row.version) && !seen.insert(row.version) {
                 return Err(MigrationLedgerError::DuplicateVersion {
                     version: row.version,

@@ -21,6 +21,7 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_substrate::supported_protocol_epoch;
 
 mod epoch_acl;
+mod ledger_preflight;
 mod mam;
 mod owner_rejection_grants;
 #[cfg(feature = "test-support")]
@@ -31,6 +32,10 @@ mod transition_lab;
 const _: &str = include_str!("owner/ingress_definer_api_candidate.sql");
 
 pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
+pub use ledger_preflight::{
+    acquire_dark_shared_migration_ledger_v1023, DarkLedgerPreflightError, DarkMigrationLedgerPins,
+    SharedMigrationLedger,
+};
 pub use mam::{bootstrap_dark_postgres_mam_owner, DarkMamOwnerError};
 pub use owner_rejection_grants::{
     grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
