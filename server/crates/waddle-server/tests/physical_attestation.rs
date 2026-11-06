@@ -6635,3 +6635,7 @@ mod call_teardown_attach;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/restricted_ingress.rs"]
 mod restricted_ingress_tests;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/observer_quarantine.rs"]
+mod observer_quarantine;
