@@ -1,7 +1,7 @@
 # Single-node P2.1 serving cutover
 
-Status: **plan; no serving selector**. This follows the dark V1030 receipt
-journal and SM recovery work in #2237. The first target is a PostgreSQL 17
+Status: **integrated implementation plan; no serving selector**. This follows
+the dark pinned catalog proof in #2242. The first target is a PostgreSQL 17
 server built with clustering support but configured for one runtime node. The
 current `UnconvertedStores` refusal remains until every gate below passes.
 
@@ -18,8 +18,10 @@ before-acquire attestor hooks run**, under the trusted mutation policy.
 
 V1030 makes an old binary reject the ledger. The cutover therefore fences old
 login and reconnection, drains and verifies old backends on the authoritative
-primary before changing roles, and proves the journal empty and trusted while
-the owner holds the transition barrier. An uncertain owner COMMIT retains its
+primary before changing roles, verifies prepared transactions are disabled and
+none remain (or positively reconciles and fences each relevant prepared
+transaction), and proves the journal empty and trusted while the owner holds
+the transition barrier. An uncertain owner COMMIT retains its
 durable operation identity and original-backend/primary fence until positive
 reconciliation or a proven terminal outcome; an absent marker or dropped socket
 alone is not rollback proof. No rollback plan assumes an old binary can restart
@@ -54,17 +56,25 @@ against V1030.
    noncallable the legacy schema-owner helper before selecting R. Replace
    runtime-wide V1030 journal SELECT with a pinned exact-key definer lookup;
    bound journal admission and retention without losing unknown-COMMIT proof.
+   This lookup narrows enumeration; possession of another operation UUID by R
+   is not a per-user authorization boundary.
+   Resolve V1009's invoker `FOR SHARE` epoch lock in the selected API-owner
+   execution context; do not grant epoch `UPDATE (id)` to R or treat the dark
+   relation-guard candidate as the selected role profile.
 3. **Typed transaction and operation identities.** A non-cloneable authority
    binds the exact pool, checked profile, source occurrence, attempt and
    immutable result. It exposes fixed operations, no raw transaction, SQL
    callback, or pool escape. The 13 epoch-guarded tables and every locking
    read or writer in ordinary ingress, pooled receipts, alias/GC/recovery,
-   notification/Push descendants, and room/MUC children must use it. Originless
-   submissions receive a stable identity and durable pre-attempt custody before
-   the first cancellable await, plus independent post-crash discovery. A missing
-   readback is never rollback proof; no external effect is retried from receipt
-   evidence alone. Non-receipt transitions need their own durable result and
-   reconciliation protocol.
+   notification/Push descendants, and room/MUC children must use it. Mint a
+   stable source occurrence synchronously and transfer immutable input to
+   supervised ownership before the first cancellable await. Do not acknowledge
+   upstream acceptance until custody is durably recorded or positively
+   reconciled; a crash before custody needs retry of the same occurrence.
+   Originless non-resumable input without that retry identity fails closed.
+   A missing readback is never rollback proof; no external effect is retried
+   from receipt evidence alone. Non-receipt transitions need their own durable
+   result and reconciliation protocol.
 4. **SM source and recipient interlock.** Define a fenced, durable single-node
    claim/session authority and restart recovery; the clustering-disabled
    `InProcessClaimStore` cannot satisfy the candidate's database claim check.
@@ -96,7 +106,7 @@ against V1030.
 5. **Whole startup graph.** Attach every enabled store to the attested main
    pool without owner DDL or child URLs. Provide explicit safe single-node MAM
    and durable SM claim paths when clustering is compiled but disabled at runtime. Keep listeners
-   and workers unready until role-backed attachment, recovery and old-backend
+   unbound and effectful workers stopped until role-backed attachment, recovery and old-backend
    cutoff pass. The first selected slice excludes clustered serving and
    arbitrary-node resume.
 
