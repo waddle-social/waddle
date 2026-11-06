@@ -49,6 +49,62 @@ be compiled and tested without wiring them into the pool hooks or listeners.
    until positive reconciliation. No rollback assumes an old binary can
    restart against V1030.
 
+## Role and handoff map for the later serving transition
+
+These are distinct PostgreSQL principals, not names inferred from the runtime
+connection. The operator must hand the pre-transition identity bundle to the
+fencing and attestor verifier independently of the database being checked:
+system identifier, database and schema names/OIDs, deployment and lineage
+UUIDs, database-owner and S/R/T/I role OIDs, trusted-schema OID, `_lineage`
+heap and primary-index OIDs, and the installed attestor function OID and
+operation ID. The trusted provisioner then captures `_migrations` heap and
+primary-index OIDs and, after V1030 and API promotion, A, epoch, journal table,
+record-function and lookup-function OIDs on the same fenced primary. It hands
+that second bundle independently to R before the complete profile check; R
+must not derive expected pins from its own connection. H, monitor and every
+enabled store need a versioned extension to this bundle. The dark tests
+provision subsets of this graph; they do not provision it for startup.
+
+| Principal | Intended authority | Required boundary before selection |
+| --- | --- | --- |
+| S, schema owner | NOLOGIN owner of the target schema and owner-prepared relations | Migrator alone may `SET ROLE` to S; R, A, H, T, I and M have no S membership. |
+| R, runtime | LOGIN for the attested main pool | No ownership, role inheritance, schema/TEMP creation, guarded direct DML or whole-journal read. Exact owner-granted SELECT on `_lineage`, `_migrations`, epoch and guard manifest; target/trusted-schema USAGE and attestor EXECUTE; checked store grants and exact ingress-definer EXECUTE. |
+| A, ingress API owner | NOLOGIN owner of the fixed receipt and lookup functions | SELECT/INSERT/UPDATE/DELETE on the guarded graph; epoch SELECT and UPDATE(id); sessions and pending-delivery SELECT plus sessions UPDATE(id); journal SELECT/INSERT. R receives lookup and record EXECUTE, with no journal table or column grant. |
+| H, PubSub helper owner | NOLOGIN owner of one fixed lock helper | Only the exact table lock rights required by that helper; remove the legacy S-owned callable helper before R selection. |
+| T, attestor definer | NOLOGIN owner of the fixed physical attestor | Trusted-schema ownership, bounded lineage read and control-function EXECUTE; no application-store write authority. |
+| I, attestor installer | Separate LOGIN and the sole SET-only member of T | May install or inspect the attestor under the reviewed lineage/install lock protocol; cannot assume S or A. No INHERIT/ADMIN option, other direct or transitive T members, or incoming I/R memberships. |
+| M, monitor | PostgreSQL `pg_monitor` role in the current ingress profile | Its permitted SELECT grants must be included in the complete role/ACL matrix; R must not inherit monitor authority. |
+| Migrator | Separate LOGIN with SET-only S membership | Runs owner DDL under lineage, ledger and epoch mutation protocol; cannot assume T or use the R pool. |
+
+The current dark attestor checks its own S/R/T/I subset and the receipt
+profile checks S/R/A. Other owner-prepared stores verify separate fragments.
+No single selected verifier currently joins those fragments with H, M and the
+migrator, every enabled store ACL, and the provider's role memberships. The
+serving package must pin that complete versioned matrix, provision the missing
+grants, and check it after each relevant lock wait before granting a transaction
+capability. The role administrator and privileged DDL process must honor the
+same trusted mutation or independently proven quiescence boundary.
+
+The handoff order is: attest the authoritative primary against the
+pre-transition pins; fence old login and reconnection; drain and verify old
+backends; hold the owner transition barrier; apply V1030 if absent without
+changing its registered bytes or checksum, then verify its committed ledger,
+empty owner-only journal and exact catalog. In one owner transition, promote
+V1030's existing schema-owned SECURITY INVOKER record function to A and
+SECURITY DEFINER, create the separately versioned lookup function, and apply
+the exact grants atomically. That transfer needs a trusted role administrator
+with authority to change the owner, and a temporary A CREATE-on-schema grant
+for PostgreSQL's owner-change rule; function creation runs as A. Revoke the
+temporary CREATE grant in the same transaction and verify no temporary role
+membership or CREATE privilege remains before R selection. Capture and hand
+off the resulting OIDs through
+the trusted provisioner, then refresh the full role and catalog profile on R
+before enabling the selected pool and listeners. An uncertain transition
+COMMIT retains its provisioning operation identity and the original
+primary/backend fence until positive reconciliation; a new R connection
+cannot certify that historical result. The old binary rejects the V1030
+ledger, so rollback is a new forward repair protocol.
+
 ## Acceptance for this dark group
 
 - PostgreSQL 17 positive and hostile tests exercise the exact opt-in path,
