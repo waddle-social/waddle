@@ -111,6 +111,30 @@ pub async fn attest_dark_catalog_pinned(
     pins: DarkPhysicalAttestationPins,
     restore_search_path: &str,
 ) -> Result<(), DarkPhysicalAttestationError> {
+    attest_dark_catalog_pinned_connection(tx, config, pins, restore_search_path).await
+}
+
+/// The database adapter owns the transaction lifetime and its lease. Keep
+/// this entry private to the pinned diagnostic; a raw connection alone could
+/// be in autocommit and would lose every transaction-scoped barrier.
+pub(super) async fn attest_dark_catalog_pinned_db_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    restore_search_path: &str,
+) -> Result<(), DarkPhysicalAttestationError> {
+    let connection = tx
+        .postgres_connection()
+        .ok_or(DarkPhysicalAttestationError::TransactionBoundary)?;
+    attest_dark_catalog_pinned_connection(connection, config, pins, restore_search_path).await
+}
+
+async fn attest_dark_catalog_pinned_connection(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    restore_search_path: &str,
+) -> Result<(), DarkPhysicalAttestationError> {
     if !pins.valid() {
         return Err(DarkPhysicalAttestationError::InvalidPins);
     }
@@ -121,7 +145,6 @@ pub async fn attest_dark_catalog_pinned(
     if database_name.is_empty() || database_name.len() > 63 || database_name.contains('\0') {
         return Err(DarkPhysicalAttestationError::InvalidDatabaseName);
     }
-    let connection = &mut **tx;
     // SET is not resolved through a caller-controlled search path. Do not read
     // the inherited setting: even a server-side prefix may materialize it.
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")

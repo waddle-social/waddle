@@ -1,4 +1,4 @@
-//! Dark, transaction-bound entry proof for the committed V1023 ledger prefix.
+//! Dark, transaction-bound entry proofs for committed migration ledger prefixes.
 //!
 //! This checks only the migration ledger. It is not a physical attestation,
 //! serving authorization, role-graph audit, or proof of operational fencing.
@@ -128,6 +128,29 @@ pub async fn acquire_dark_shared_migration_ledger_v1030_write<'a, 'connection>(
     restore_search_path: &str,
 ) -> Result<SharedMigrationLedger<'a, 'connection>, DarkLedgerPreflightError> {
     acquire_dark_shared_migration_ledger(tx, schema, pins, restore_search_path, 1030, false, true)
+        .await
+}
+
+/// Acquire a shared-ledger proof for the complete registered V1030 prefix in
+/// a caller-owned READ COMMITTED READ ONLY transaction.
+///
+/// Call this before dependent reads or application locks. It applies bounded
+/// local lock and statement timeouts without loosening tighter values, then
+/// acquires the shared lineage advisory lock, shared migration advisory lock,
+/// and ledger relation lock in that order before reading the ledger. The caller
+/// must keep privileged DDL, role membership, ACL changes, and owner writes
+/// quiescent throughout dependent work, and must not acquire the exclusive
+/// migration advisory lock while holding this proof. On any error the caller
+/// must roll back immediately; on cancellation it must roll back when control
+/// resumes. The proof does not attest the connection, apply migrations, or
+/// authorize serving.
+pub async fn acquire_dark_shared_migration_ledger_v1030_read<'a, 'connection>(
+    tx: &'a mut Transaction<'connection>,
+    schema: &str,
+    pins: DarkMigrationLedgerPins,
+    restore_search_path: &str,
+) -> Result<SharedMigrationLedger<'a, 'connection>, DarkLedgerPreflightError> {
+    acquire_dark_shared_migration_ledger(tx, schema, pins, restore_search_path, 1030, true, true)
         .await
 }
 

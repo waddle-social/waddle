@@ -4,10 +4,10 @@ Issue: #2046, #2116. This is a staged, dark authority change. Runtime startup re
 
 ## Plan
 
-1. Add an exact-transaction pinned entry on the caller-owned PostgreSQL transaction. Use the independently provisioned `PinnedRuntimeAuthority`; never derive pins from the checked connection or treat the pool checkout hook as authority for later statements. Preserve the legacy path for existing callers while pinned startup remains closed.
-2. Establish one bounded `READ COMMITTED` transaction and its access mode before dependent reads. Prove physical lineage and catalog identity, then the complete registered V1030 migration ledger under shared lineage and ledger barriers, then the pinned epoch relation and row, before acquiring any application store lock. Keep all barriers on that same transaction through dependent work.
-3. Convert the first suitable read-only diagnostic callers to the shared entry. Keep the entire remaining caller inventory explicit and unconverted paths fail closed for pinned mode. Do not expose a raw pinned pool or bypass through a direct attestor call.
-4. Add PostgreSQL 17 positive and negative tests for actual ordering, pin drift, read-only/write mode, cancellation/rollback, and first caller behavior. Run formatting, focused integration suites, scoped strict Clippy, and independent diff review. Track environmental or unchanged baseline diagnostics separately.
+1. Add a fixed, pool-backed pinned entry that owns its PostgreSQL transaction through acknowledged rollback. Use the independently provisioned `PinnedRuntimeAuthority`; never derive pins from the checked connection or treat the pool checkout hook as authority for later statements. Preserve the legacy path for existing callers while pinned startup remains closed.
+2. Establish one bounded `READ COMMITTED READ ONLY` transaction before dependent reads. Prove physical lineage and catalog identity, then the complete registered V1030 migration ledger under shared lineage and ledger barriers, then prelock and recheck the pinned epoch heap. Keep all barriers on that same transaction through the fixed diagnostic and acknowledged rollback. This slice does not prove epoch row validity or a serving transition fence.
+3. Keep the diagnostic fixed and dark. PubSub attachment returns a reusable database handle; proving its initial transaction would not authorize its later operations. The existing 24 transaction callers and direct attestor entries stay unconverted and must fail closed for pinned mode. Do not expose a raw pinned pool or weaken the version 2 startup refusal.
+4. Add PostgreSQL 17 positive and negative tests for actual ordering, pin drift, access mode, cancellation/rollback, and relation replacement after a lock wait. Run formatting, focused integration suites, scoped strict Clippy, and independent diff review. Track environmental or unchanged baseline diagnostics separately.
 
 ## Gate
 
