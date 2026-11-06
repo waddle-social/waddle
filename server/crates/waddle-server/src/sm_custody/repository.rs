@@ -154,20 +154,34 @@ impl SmCustodyRepository {
         let row = sqlx::query(&format!("SELECT token, resource, session_id, generation, endpoint, node_id, node_incarnation, claim_epoch, sealed FROM {q}.sm_custody_gates WHERE gate_id = $1 FOR UPDATE"))
             .bind(self.capture.gate_id).fetch_optional(pg(&mut tx)?).await.map_err(db)?
             .ok_or(CustodyError::Rejected)?;
-        if row.try_get::<Uuid, _>(0).map_err(db)? != self.capture.token
-            || row.try_get::<String, _>(1).map_err(db)? != self.capture.resource.to_string()
-            || row.try_get::<String, _>(2).map_err(db)? != self.capture.session.as_str()
-            || row.try_get::<i64, _>(3).map_err(db)? != self.capture.generation.get() as i64
-            || row.try_get::<String, _>(4).map_err(db)? != self.endpoint()?
-            || row.try_get::<String, _>(5).map_err(db)? != self.capture.owner.node_id
-            || row.try_get::<String, _>(6).map_err(db)? != self.capture.owner.node_epoch
-            || row.try_get::<i64, _>(7).map_err(db)? != self.capture.claim.0
-            || (!allow_sealed && row.try_get::<bool, _>(8).map_err(db)?)
-        {
+        self.assert_stored_capture(&row)?;
+        if !allow_sealed && row.try_get::<bool, _>("sealed").map_err(db)? {
             return Err(CustodyError::Rejected);
         }
         self.fresh_principal(&mut tx).await?;
         Ok(tx)
+    }
+
+    // Caller already holds this exact gate row. Comparing the stored capture
+    // binds the session whose current claim was asserted to the gate being
+    // accessed. Endpoint equality includes the old principal's immutable
+    // identity, but deliberately does not require that principal to be live.
+    fn assert_stored_capture(&self, row: &PgRow) -> Result<(), CustodyError> {
+        if row.try_get::<Uuid, _>("token").map_err(db)? != self.capture.token
+            || row.try_get::<String, _>("resource").map_err(db)?
+                != self.capture.resource.to_string()
+            || row.try_get::<String, _>("session_id").map_err(db)? != self.capture.session.as_str()
+            || row.try_get::<i64, _>("generation").map_err(db)?
+                != self.capture.generation.get() as i64
+            || row.try_get::<String, _>("endpoint").map_err(db)? != self.endpoint()?
+            || row.try_get::<String, _>("node_id").map_err(db)? != self.capture.owner.node_id
+            || row.try_get::<String, _>("node_incarnation").map_err(db)?
+                != self.capture.owner.node_epoch
+            || row.try_get::<i64, _>("claim_epoch").map_err(db)? != self.capture.claim.0
+        {
+            return Err(CustodyError::Rejected);
+        }
+        Ok(())
     }
 
     // Recheck database-clock expiry after blocking gate/canonical waits. The
@@ -233,17 +247,14 @@ impl SmCustodyRepository {
         )
         .await?;
         let q = &self.schema;
-        let row = sqlx::query(&format!(
-            "SELECT token, sealed FROM {q}.sm_custody_gates WHERE gate_id = $1 FOR UPDATE"
-        ))
+        let row = sqlx::query(&format!("SELECT token, resource, session_id, generation, endpoint, node_id, node_incarnation, claim_epoch, sealed FROM {q}.sm_custody_gates WHERE gate_id = $1 FOR UPDATE"))
         .bind(self.capture.gate_id)
         .fetch_optional(pg(&mut tx)?)
         .await
         .map_err(db)?
         .ok_or(CustodyError::Rejected)?;
-        if row.try_get::<Uuid, _>(0).map_err(db)? != self.capture.token
-            || (sealed && !row.try_get::<bool, _>(1).map_err(db)?)
-        {
+        self.assert_stored_capture(&row)?;
+        if sealed && !row.try_get::<bool, _>("sealed").map_err(db)? {
             return Err(CustodyError::Rejected);
         }
         Ok(tx)

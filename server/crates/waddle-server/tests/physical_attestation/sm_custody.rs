@@ -394,6 +394,119 @@ async fn postgres_sm_custody_seal_proves_absence_and_rejects_generation_replacem
 }
 
 #[tokio::test]
+async fn postgres_sm_custody_recovery_cannot_substitute_another_sessions_claim() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let c = Candidate::new().await;
+    let repo_a = c.repository();
+    let admission_a = repo_a.admit(&c.frame, &c.lease).await.expect("A admission");
+    let owner_b = NodeIdentity::new("node-b", "incarnation-b");
+    let session_b = SmSessionId::new("independent-session-b");
+    let claim_b = ClaimEpoch(142);
+    sqlx::query(&format!("INSERT INTO {}.clustering_claims (entity,entity_type,node_id,node_epoch,claim_epoch) VALUES ($1,$2,$3,$4,$5)", c.fixture.target))
+        .bind(format!("{}:{}", EntityType::SmSession.as_db_str(), session_b.as_str()))
+        .bind(EntityType::SmSession.as_db_str()).bind(&owner_b.node_id).bind(&owner_b.node_epoch)
+        .bind(claim_b.0).execute(&c.fixture.admin).await.expect("distinct B claim");
+    let uow_b = uow(
+        &c.fixture.runtime_options,
+        &c.config,
+        c.fixture.lineage.deployment_uuid.0,
+        &owner_b,
+    )
+    .await;
+    let capture_b = CustodyCapture {
+        gate_id: Uuid::new_v4(),
+        token: Uuid::new_v4(),
+        resource: "bob@example.test/phone".parse().expect("B resource"),
+        binding: BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            &owner_b,
+        ))),
+        session: session_b.clone(),
+        generation: SessionGeneration::new(9).expect("B generation"),
+        principal: c.capture.principal.clone(),
+        owner: owner_b.clone(),
+        claim: claim_b,
+    };
+    let repo_b = SmCustodyRepository::new(
+        uow_b.clone(),
+        &c.config,
+        capture_b,
+        CustodyLimits::new(16, 65536).expect("limits"),
+    )
+    .expect("B repository");
+    repo_b.install_captured_session().await.expect("B gate");
+    let authority_b = CustodyRecoveryAuthority {
+        owner: owner_b,
+        claim: claim_b,
+    };
+    // Match A's gate and token while selecting B's current claim. Constructor
+    // equality checks alone cannot establish the stored session/gate relation.
+    let mut forged_capture = c.capture.clone();
+    forged_capture.session = session_b;
+    let forged = SmCustodyRepository::new(
+        uow_b,
+        &c.config,
+        forged_capture,
+        CustodyLimits::new(16, 65536).expect("limits"),
+    )
+    .expect("syntactically valid forged capture");
+    assert!(matches!(
+        forged.seal_for_recovery(&authority_b).await,
+        Err(CustodyError::Rejected)
+    ));
+    let a_sealed: bool = sqlx::query_scalar(&format!(
+        "SELECT sealed FROM {}.sm_custody_gates WHERE gate_id = $1",
+        c.fixture.target
+    ))
+    .bind(c.capture.gate_id)
+    .fetch_one(&c.fixture.admin)
+    .await
+    .expect("A gate unchanged");
+    assert!(!a_sealed, "B authority must not seal A");
+    // Recovery must compare the immutable principal identity without requiring
+    // the old principal to remain valid in the sessions relation.
+    sqlx::query(&format!("DELETE FROM {}.sessions", c.fixture.target))
+        .execute(&c.fixture.admin)
+        .await
+        .expect("retire old principal");
+    let sealed_a = repo_a
+        .seal_for_recovery(&c.authority())
+        .await
+        .expect("A can still seal its own gate");
+    assert!(matches!(
+        forged.inventory(&sealed_a, &authority_b, None).await,
+        Err(CustodyError::Rejected)
+    ));
+    assert!(matches!(
+        forged
+            .reconcile(&sealed_a, &authority_b, c.frame.operation_id)
+            .await,
+        Err(CustodyError::Rejected)
+    ));
+    assert!(matches!(
+        forged
+            .transfer_recovered(&sealed_a, &authority_b, &admission_a)
+            .await,
+        Err(CustodyError::Rejected)
+    ));
+    let untouched: (i64, i64) = sqlx::query_as(&format!("SELECT (SELECT count(*) FROM {}.sm_custody_terminals), (SELECT count(*) FROM {}.sm_custody_transfers)", c.fixture.target, c.fixture.target))
+        .fetch_one(&c.fixture.admin).await.expect("A custody remains pending");
+    assert_eq!(untouched, (0, 0));
+    let inventory_a = repo_a
+        .inventory(&sealed_a, &c.authority(), None)
+        .await
+        .expect("A inventory remains reachable");
+    assert_eq!(inventory_a.operations[0].frame(), &c.frame);
+    repo_a
+        .transfer_recovered(&sealed_a, &c.authority(), &admission_a)
+        .await
+        .expect("A can transfer retained custody");
+    drop(forged);
+    drop(repo_b);
+    drop(repo_a);
+    c.fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_sm_custody_seal_fences_delayed_admission_and_successor_reads_inventory() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let c = Candidate::new().await;

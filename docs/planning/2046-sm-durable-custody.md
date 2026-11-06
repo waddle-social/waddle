@@ -42,6 +42,9 @@ A fresh UOW rediscovers stored gate token, old principal, endpoint and generatio
 using exact SM session/resource and the successor's current claim. Sealed inventory
 and full-payload transfer need no live old principal or old claim. Enumeration
 requires no original in-memory capture, frame, lease or operation ID.
+Every recovery operation compares the entire immutable stored capture under the
+gate lock, binding the asserted current session claim to that exact gate. An
+unrelated session's valid claim cannot seal, inspect, reconcile or transfer it.
 
 Journals/transfers remain immutable after canonical collection. They are not
 reclaimed here. Total journal count and payload bytes have hard limits (at most
@@ -83,6 +86,8 @@ payload/time, wrapping `h`, bounded admission, unsupported tombstone rejection,
 pending-delete protection, fresh retention, raw late candidate insertion after
 collection, and successor discovery/transfer after old-principal deletion and
 claim turnover.
+An independent two-claim regression also checks that a forged session/gate
+combination leaves the target unsealed and its pending custody unchanged.
 
 ## Deferred production gates
 
