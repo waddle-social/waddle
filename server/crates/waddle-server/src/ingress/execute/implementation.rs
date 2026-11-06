@@ -41,6 +41,7 @@ use super::{
     SettledOutcome,
 };
 use super::{EffectReceiptKey, IngressDecision};
+use crate::ingress::receipt_custody::ReceiptCustody;
 
 pub(in crate::ingress) fn supplies_dependency(
     effect: &ExternalEffect,
@@ -71,6 +72,21 @@ pub enum ExecutionPersistenceFailure {
     RelayConfirmationDeclined,
     #[error("post-commit persistence budget exhausted")]
     BudgetExhausted,
+    #[error("proven receipt continuation is unavailable")]
+    ReceiptCustodyUnavailable,
+}
+
+/// Constructed only after the live executor has calculated the complete set
+/// of concrete, all-sibling receipt proofs for an effect.
+pub(in crate::ingress) struct ProvenReceiptBatch {
+    message: MessageKey,
+    receipts: Vec<EffectReceiptKey>,
+}
+
+impl ProvenReceiptBatch {
+    pub(in crate::ingress) fn into_parts(self) -> (MessageKey, Vec<EffectReceiptKey>) {
+        (self.message, self.receipts)
+    }
 }
 
 /// Owner receipts carried to the origin's actual response write boundary.
@@ -399,6 +415,33 @@ pub async fn execute_effects(
     deps: &Deps<'_>,
     budget: Duration,
 ) -> ExecutionReport {
+    execute_effects_inner(uow, db, decision, sink, deps, budget, None).await
+}
+
+/// Only an authority-admitted live execution can transfer receipt proofs to
+/// the authority's continuation worker. Recovery and nested executors use the
+/// ordinary entry point and retain their existing ownership boundaries.
+pub(in crate::ingress) async fn execute_admitted_effects(
+    uow: &IngressUnitOfWork,
+    db: &Database,
+    decision: &IngressDecision,
+    sink: &ImmediateSink,
+    deps: &Deps<'_>,
+    budget: Duration,
+    custody: &ReceiptCustody,
+) -> ExecutionReport {
+    execute_effects_inner(uow, db, decision, sink, deps, budget, Some(custody)).await
+}
+
+async fn execute_effects_inner(
+    uow: &IngressUnitOfWork,
+    db: &Database,
+    decision: &IngressDecision,
+    sink: &ImmediateSink,
+    deps: &Deps<'_>,
+    budget: Duration,
+    custody: Option<&ReceiptCustody>,
+) -> ExecutionReport {
     let mut scoped_deps = deps.clone();
     scoped_deps.ingress_delivery_uow = Some(uow.clone());
     if scoped_deps.ingress_delivery_stop.is_none() {
@@ -418,6 +461,7 @@ pub async fn execute_effects(
     report.message_key = decision.message_key;
     let deadline = tokio::time::Instant::now() + budget;
     let mut recorded = Vec::new();
+    let mut receipt_unresolved = false;
     let mut proven = vec![Vec::new(); decision.external.len()];
     let mut completed = vec![None; decision.external.len()];
     let mut recheck = vec![false; decision.external.len()];
@@ -658,11 +702,20 @@ pub async fn execute_effects(
                                 }
                             }
                         }
+                        #[cfg(feature = "test-support")]
+                        if let (Some(custody), Some(message)) = (custody, decision.message_key) {
+                            custody.before_effect(message).await;
+                        }
                         let result = sink.execute_with_applied(execution, &effect_deps, &decision.applied_durable).await;
-                        if let Some(message) = decision.message_key {
-                            if let Err(error) = carbon_progress::persist(uow, message, effect, &result).await {
-                                tracing::warn!(%error, "remote carbon progress persistence failed; leaving obligation pending");
-                                return EffectOutcome::Unavailable;
+                        // Only remote carbon fanout has post-sink progress to
+                        // persist. Other outcomes reach proof bookkeeping in
+                        // this same poll, without another cancellable await.
+                        if matches!(effect, ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. })) {
+                            if let Some(message) = decision.message_key {
+                                if let Err(error) = carbon_progress::persist(uow, message, effect, &result).await {
+                                    tracing::warn!(%error, "remote carbon progress persistence failed; leaving obligation pending");
+                                    return EffectOutcome::Unavailable;
+                                }
                             }
                         }
                         result
@@ -788,7 +841,63 @@ pub async fn execute_effects(
         let Some(message_key) = decision.message_key else {
             continue;
         };
+        let mut eligible = Vec::new();
         for key in completed_receipts(decision, &report.outcomes, &proven, index) {
+            if !recorded.contains(&key) && !eligible.contains(&key) {
+                eligible.push(key);
+            }
+        }
+        if let Some(custody) = custody.filter(|_| {
+            !eligible.is_empty()
+                && !matches!(
+                    effect,
+                    ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. })
+                )
+        }) {
+            // No await separates the concrete proof and retention of the
+            // entire eligible set. Rejection leaves every receipt uncertain
+            // and prevents terminalization; dependency scheduling continues
+            // from the effect's existing completion proof.
+            #[cfg(test)]
+            let injected_failure = eligible
+                .iter()
+                .any(|key| test_hooks::take_receipt_failure(message_key, key));
+            #[cfg(not(test))]
+            let injected_failure = false;
+            let retained = if injected_failure {
+                Err(())
+            } else {
+                custody.retain_proven(ProvenReceiptBatch {
+                    message: message_key,
+                    receipts: eligible.clone(),
+                })
+            };
+            let failure = match retained {
+                Ok(completion) => match tokio::time::timeout_at(deadline, completion).await {
+                    Ok(Ok(())) => {
+                        recorded.extend(eligible);
+                        continue;
+                    }
+                    Ok(Err(_)) => ExecutionPersistenceFailure::ReceiptCustodyUnavailable,
+                    Err(_) => ExecutionPersistenceFailure::BudgetExhausted,
+                },
+                Err(()) => ExecutionPersistenceFailure::ReceiptCustodyUnavailable,
+            };
+            meter_unresolved(effect, report.phase);
+            report.outcomes[index].1 = ExternalOutcome::Uncertain;
+            for key in eligible {
+                let failure = match failure {
+                    ExecutionPersistenceFailure::BudgetExhausted => {
+                        ExecutionPersistenceFailure::BudgetExhausted
+                    }
+                    _ => ExecutionPersistenceFailure::ReceiptCustodyUnavailable,
+                };
+                report.receipt_failures.push((key, failure));
+            }
+            receipt_unresolved = true;
+            continue;
+        }
+        for key in eligible {
             if recorded.contains(&key) {
                 continue;
             }
@@ -849,6 +958,9 @@ pub async fn execute_effects(
         }
     }
     if !report.frame_obligations.is_empty() {
+        return report;
+    }
+    if receipt_unresolved {
         return report;
     }
     if let Some(key) = decision.message_key {

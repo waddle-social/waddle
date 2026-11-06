@@ -32,6 +32,9 @@ mod invitation_authority;
 pub(crate) mod live_delivery;
 pub mod nested;
 pub mod principal;
+mod receipt_custody;
+#[cfg(feature = "test-support")]
+pub use receipt_custody::ReceiptCustodyProbe;
 pub(crate) mod room_manifest_replay;
 pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;
