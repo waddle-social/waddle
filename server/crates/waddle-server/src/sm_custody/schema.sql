@@ -128,6 +128,40 @@ BEGIN
 END $$;
 CREATE TRIGGER sm_custody_slot_guard BEFORE INSERT ON __SCHEMA__.sm_custody_slots
 FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_slot_guard();
+-- A raw marker must identify this operation's completed source attempt, not
+-- a completed attempt from another resource, owner, or lease generation. The
+-- completed tuple's 32-bit xmin must match the current XID's low bits. This is
+-- only a structural hint: raw DML can no-op UPDATE it, and wrap can reuse
+-- those bits. The disposable role is not a restricted writer boundary.
+CREATE FUNCTION __SCHEMA__.sm_custody_handoff_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE source_key UUID; closed BOOLEAN;
+BEGIN
+    SELECT o.message_key, g.sealed INTO source_key, closed FROM __SCHEMA__.sm_custody_operations o
+      JOIN __SCHEMA__.sm_custody_gates g ON g.gate_id = o.gate_id
+      JOIN __SCHEMA__.sm_custody_slots s ON (s.operation_id, s.gate_id) = (o.operation_id, o.gate_id)
+      WHERE o.operation_id = NEW.operation_id FOR UPDATE OF g;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody handoff has no exact slot'; END IF;
+    IF closed OR EXISTS (SELECT 1 FROM __SCHEMA__.sm_custody_terminals t
+        WHERE t.operation_id = NEW.operation_id) THEN
+        RAISE EXCEPTION 'SM custody handoff gate is closed';
+    END IF;
+    PERFORM 1 FROM __SCHEMA__.ingress_messages WHERE message_key = source_key FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody handoff source is absent'; END IF;
+    PERFORM 1 FROM __SCHEMA__.ingress_send_attempts a
+      JOIN __SCHEMA__.sm_custody_operations o ON a.message_key = o.message_key
+        AND a.kind = o.receipt_kind AND a.semantic_identity_hash = o.semantic_identity_hash
+        AND a.recipient = o.resource AND a.lease_token = o.attempt_token::text
+      JOIN __SCHEMA__.sm_custody_gates g ON g.gate_id = o.gate_id
+        AND a.node_id = g.node_id AND a.node_incarnation = g.node_incarnation
+      WHERE o.operation_id = NEW.operation_id AND a.state = 2
+        AND a.xmin = ((pg_catalog.pg_current_xact_id()::text::numeric % 4294967296)::text)::xid
+      FOR UPDATE OF a;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody handoff attempt differs'; END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_handoff_guard BEFORE INSERT ON __SCHEMA__.sm_custody_handoffs
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_handoff_guard();
 -- A transfer is an exact copy, so its immutable byte total cannot exceed the
 -- already bounded admission journal. Serialize raw writers at the same gate.
 CREATE FUNCTION __SCHEMA__.sm_custody_transfer_guard() RETURNS trigger
@@ -136,9 +170,11 @@ BEGIN
     PERFORM 1 FROM __SCHEMA__.sm_custody_gates g JOIN __SCHEMA__.sm_custody_operations o
       ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id FOR UPDATE OF g;
     IF NOT EXISTS (SELECT 1 FROM __SCHEMA__.sm_custody_operations o
+        JOIN __SCHEMA__.sm_custody_slots s ON (s.operation_id, s.gate_id) = (o.operation_id, o.gate_id)
+        JOIN __SCHEMA__.sm_custody_handoffs h ON h.operation_id = s.operation_id
         WHERE o.operation_id = NEW.operation_id AND
           (o.resource, o.payload, o.received_at) = (NEW.resource, NEW.payload, NEW.received_at)) THEN
-        RAISE EXCEPTION 'SM custody transfer differs from admission';
+        RAISE EXCEPTION 'SM custody transfer differs from source-marked admission';
     END IF;
     RETURN NEW;
 END $$;
@@ -149,6 +185,14 @@ LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
     PERFORM 1 FROM __SCHEMA__.sm_custody_gates g JOIN __SCHEMA__.sm_custody_operations o
       ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id FOR UPDATE OF g;
+    IF NEW.disposition = 2 AND NOT EXISTS (
+        SELECT 1 FROM __SCHEMA__.sm_custody_transfers x
+        JOIN __SCHEMA__.sm_custody_handoffs h ON h.operation_id = x.operation_id
+        JOIN __SCHEMA__.sm_custody_slots s ON s.operation_id = h.operation_id
+        JOIN __SCHEMA__.sm_custody_operations o ON (o.operation_id, o.gate_id) = (s.operation_id, s.gate_id)
+        WHERE x.operation_id = NEW.operation_id
+          AND (x.resource, x.payload, x.received_at) = (o.resource, o.payload, o.received_at)
+    ) THEN RAISE EXCEPTION 'SM custody transfer terminal has no marked copy'; END IF;
     RETURN NEW;
 END $$;
 CREATE TRIGGER sm_custody_terminal_guard BEFORE INSERT ON __SCHEMA__.sm_custody_terminals

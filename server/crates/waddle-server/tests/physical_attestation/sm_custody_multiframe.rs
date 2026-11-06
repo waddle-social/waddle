@@ -265,6 +265,9 @@ async fn postgres_multiframe_retained_quota_counts_utf8_bytes_and_identity() {
         exact.admit(&third.0, &third.1).await,
         Err(CustodyError::Capacity)
     ));
+    repo.resume_preaccept(first.0.operation_id)
+        .await
+        .expect("source marker");
     repo.transfer(&admission)
         .await
         .expect("terminal still retained");
