@@ -6631,3 +6631,7 @@ mod mam_read;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/call_teardown_attach.rs"]
 mod call_teardown_attach;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/restricted_ingress.rs"]
+mod restricted_ingress_tests;
