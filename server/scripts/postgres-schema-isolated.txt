@@ -37,5 +37,6 @@ crates/waddle-server/src/server/routes/websocket/muc_invites/tests.rs  # muc_inv
 crates/waddle-server/src/sm_promotion/tests.rs  # quota_bounce_<uuid>
 
 # Integration binaries.
+crates/waddle-xmpp/tests/account_claim_binding_lab.rs  # synthetic waddle_claim_lab_<uuid> schema
 crates/waddle-server/tests/db_lineage_multiprocess.rs  # SchemaFixture: one UUID schema per test
 crates/waddle-server/tests/xep0313_mam_integration.rs  # waddle_test_xep0313_uow_<uuid>
