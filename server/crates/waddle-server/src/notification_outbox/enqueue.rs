@@ -6,6 +6,7 @@ use super::{
 };
 use crate::db::DatabaseDriver;
 use crate::db::Transaction;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_uow::EffectDescendantRepository;
 use crate::ingress_uow::IngressUowError;
 
@@ -152,6 +153,17 @@ impl NotificationOutboxStore {
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         expected: &NotificationCandidate,
     ) -> Result<bool, IngressUowError> {
+        Self::attach_existing_candidate_lineage_with_api(tx, None, message_key, effect, expected)
+            .await
+    }
+
+    pub(crate) async fn attach_existing_candidate_lineage_with_api(
+        tx: &mut Transaction<'_>,
+        api: Option<&DefinerApiCandidateContext<'_>>,
+        message_key: waddle_xmpp::ingress::MessageKey,
+        effect: &waddle_xmpp::ingress::IngressEffectKey,
+        expected: &NotificationCandidate,
+    ) -> Result<bool, IngressUowError> {
         let query = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL FOR UPDATE NOWAIT"
         } else {
@@ -198,8 +210,9 @@ impl NotificationOutboxStore {
             let Some(id) = delivery else { return Ok(false) };
             // Outboxed alone never discharges legacy unknown fanout. A live
             // candidate bridge, or absent lineage, retains the original route.
+            let pending = pending_descendant_sql(api);
             let mut rows = tx.query(
-                "SELECT EXISTS(SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL), EXISTS(SELECT 1 FROM notification_outbox_lineage WHERE candidate_delivery_id = ?)",
+                &format!("SELECT {pending}, EXISTS(SELECT 1 FROM notification_outbox_lineage WHERE candidate_delivery_id = ?)"),
                 crate::db_params![id.to_string(), id.to_string()],
             ).await?;
             let proof = rows
@@ -210,7 +223,7 @@ impl NotificationOutboxStore {
                 return Ok(false);
             }
         }
-        Self::attach_candidate_lineage_in_transaction(tx, message_key, effect, expected).await?;
+        Self::attach_candidate_lineage_with_api(tx, api, message_key, effect, expected).await?;
         Ok(true)
     }
 
@@ -223,16 +236,32 @@ impl NotificationOutboxStore {
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
     ) -> Result<(), IngressUowError> {
-        EffectDescendantRepository::lock_raw(tx, message_key).await?;
+        Self::attach_candidate_lineage_with_api(tx, None, message_key, effect, candidate).await
+    }
+
+    pub(crate) async fn attach_candidate_lineage_with_api(
+        tx: &mut Transaction<'_>,
+        api: Option<&DefinerApiCandidateContext<'_>>,
+        message_key: waddle_xmpp::ingress::MessageKey,
+        effect: &waddle_xmpp::ingress::IngressEffectKey,
+        candidate: &NotificationCandidate,
+    ) -> Result<(), IngressUowError> {
+        if let Some(api) = api {
+            EffectDescendantRepository::lock_message_with_candidate_api(tx, api, message_key)
+                .await?;
+        } else {
+            EffectDescendantRepository::lock_raw(tx, message_key).await?;
+        }
         if !Self::lock_unquarantined_candidate(tx, candidate).await? {
             return Err(IngressUowError::EffectIntentConflict);
         }
         let Some(id) = Self::candidate_delivery_id_in_transaction(tx, candidate).await? else {
             return Err(IngressUowError::EffectIntentConflict);
         };
+        let pending = pending_descendant_sql(api);
         let mut rows = tx
             .query(
-                "SELECT outboxed_at_ms, EXISTS(SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL), suppressed_reason, EXISTS(SELECT 1 FROM notification_outbox_lineage WHERE candidate_delivery_id = ?) FROM notification_candidates WHERE delivery_id = ?",
+                &format!("SELECT outboxed_at_ms, {pending}, suppressed_reason, EXISTS(SELECT 1 FROM notification_outbox_lineage WHERE candidate_delivery_id = ?) FROM notification_candidates WHERE delivery_id = ?"),
                 crate::db_params![id.to_string(), id.to_string(), id.to_string()],
             )
             .await?;
@@ -248,7 +277,18 @@ impl NotificationOutboxStore {
         }
         let established_history = suppression.is_some() || row.get::<bool>(3)?;
         drop(rows);
-        EffectDescendantRepository::attach_raw(tx, message_key, effect, id).await?;
+        if let Some(api) = api {
+            EffectDescendantRepository::attach_effect_with_candidate_api(
+                tx,
+                api,
+                message_key,
+                effect,
+                id,
+            )
+            .await?;
+        } else {
+            EffectDescendantRepository::attach_raw(tx, message_key, effect, id).await?;
+        }
         if !outboxed {
             return Ok(());
         }
@@ -268,12 +308,26 @@ impl NotificationOutboxStore {
             );
         }
         for job in jobs {
-            EffectDescendantRepository::copy_raw(tx, id, job).await?;
+            if let Some(api) = api {
+                EffectDescendantRepository::copy_with_candidate_api(tx, api, id, job).await?;
+            } else {
+                EffectDescendantRepository::copy_raw(tx, id, job).await?;
+            }
         }
         // Existing unresolved bridges are durable unknown fanout, including
         // legacy history. Copying known children cannot discharge that proof.
         if !pending_bridge && established_history {
-            EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
+            if let Some(api) = api {
+                EffectDescendantRepository::settle_with_candidate_api(
+                    tx,
+                    api,
+                    id,
+                    chrono::Utc::now(),
+                )
+                .await?;
+            } else {
+                EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
+            }
         }
         Ok(())
     }
@@ -333,5 +387,16 @@ impl NotificationOutboxStore {
             return Ok(0);
         };
         Ok(row.get::<i64>(0)?)
+    }
+}
+
+fn pending_descendant_sql(api: Option<&DefinerApiCandidateContext<'_>>) -> String {
+    if let Some(api) = api {
+        format!(
+            "{}(?::text, TRUE)",
+            api.qualified_function("waddle_ingress_descendant_exists")
+        )
+    } else {
+        "EXISTS(SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL)".to_owned()
     }
 }

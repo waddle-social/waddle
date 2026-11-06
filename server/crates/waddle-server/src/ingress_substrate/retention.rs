@@ -17,6 +17,18 @@ pub(crate) async fn invalidate_retention_in_prepared_transaction(
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let api = super::DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let function = api.qualified_function("waddle_ingress_invalidate_retention");
+        let _ = candidate_boolean(
+            tx,
+            &format!("SELECT {function}(?::uuid)"),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
+        return Ok(());
+    }
     let sql = super::substrate::prepared_ingress_sql(
         tx.driver(),
         prepared,
@@ -97,6 +109,18 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
     let Some(prepared) = prepared else {
         return refresh_retention(tx, message_key, now).await;
     };
+    if prepared.uses_definer_api_candidate() {
+        let api = super::DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let function = api.qualified_function("waddle_ingress_refresh_retention");
+        let _ = candidate_boolean(
+            tx,
+            &format!("SELECT {function}(?::uuid)"),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
+        return Ok(());
+    }
     use super::substrate::{prepared_ingress_relation, PreparedIngressRelation};
     let relation = |name| prepared_ingress_relation(Some(prepared), name);
     let pending = relation(PreparedIngressRelation::PendingDelivery);
@@ -151,6 +175,27 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
     .await
     .map_err(discard_database_error)?;
     Ok(())
+}
+
+async fn candidate_boolean(
+    tx: &mut Transaction<'_>,
+    query: &str,
+    params: impl crate::db::IntoParams,
+) -> Result<bool, IngressSubstrateError> {
+    let mut rows = tx
+        .query(query, params)
+        .await
+        .map_err(discard_database_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+    let result: bool = row.get(0).map_err(discard_database_error)?;
+    if rows.next().await.map_err(discard_database_error)?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult);
+    }
+    Ok(result)
 }
 
 pub(crate) async fn refresh_retention_with_db_clock(

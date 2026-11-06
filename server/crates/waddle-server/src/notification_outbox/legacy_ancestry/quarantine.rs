@@ -5,6 +5,7 @@ use super::{
     Transaction, Uuid,
 };
 use crate::db::Row;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 
 pub(super) fn is_candidate_data_error(error: &NotificationOutboxError) -> bool {
     matches!(
@@ -26,9 +27,37 @@ pub(super) async fn lock_scanned_parent(
     tx: &mut Transaction<'_>,
     recorded: &Recorded,
 ) -> Result<bool, IngressUowError> {
-    match EffectDescendantRepository::lock_raw(tx, recorded.message).await {
+    lock_scanned_parent_with_api(tx, None, recorded).await
+}
+
+pub(super) async fn lock_scanned_parent_with_api(
+    tx: &mut Transaction<'_>,
+    api: Option<&DefinerApiCandidateContext<'_>>,
+    recorded: &Recorded,
+) -> Result<bool, IngressUowError> {
+    let lock = if let Some(api) = api {
+        EffectDescendantRepository::lock_message_with_candidate_api(tx, api, recorded.message).await
+    } else {
+        EffectDescendantRepository::lock_raw(tx, recorded.message).await
+    };
+    match lock {
         Ok(()) => Ok(true),
         Err(IngressUowError::EffectIntentMessageMissing) => {
+            if let Some(api) = api {
+                let effect = recorded.intent.semantic_key();
+                return if EffectDescendantRepository::intent_exists_with_candidate_api(
+                    tx,
+                    api,
+                    recorded.message,
+                    &effect,
+                )
+                .await?
+                {
+                    Err(IngressUowError::EffectIntentMessageMissing)
+                } else {
+                    Ok(false)
+                };
+            }
             let query = if tx.driver() == DatabaseDriver::Postgres {
                 "SELECT 1 FROM ingress_effect_intents WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?"
             } else {

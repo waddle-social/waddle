@@ -73,9 +73,39 @@ impl EffectIntentRepository {
         let hash = Sha256::digest(key.storage_identity().as_bytes());
         let (kind, payload) = intent.with_encoded_v1(|kind, payload| (kind, payload.to_vec()))?;
         let (tx, prepared) = tx.prepared_parts();
-        let sql = prepared_ingress_sql(tx.driver(), prepared, PreparedIngressRelation::Effects,
-            ("UPDATE ", " SET payload = ? WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1"),
-            "UPDATE ingress_effect_intents SET payload = ? WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1");
+        if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::bytea)",
+                api.qualified_function("waddle_ingress_update_effect_payload"),
+            );
+            if !super::candidate_boolean(
+                tx,
+                &query,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    i64::from(kind),
+                    hash.to_vec(),
+                    payload
+                ],
+            )
+            .await?
+            {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+            return Ok(());
+        }
+        let sql = prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            PreparedIngressRelation::Effects,
+            (
+                "UPDATE ",
+                " SET payload = ? WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1",
+            ),
+            "UPDATE ingress_effect_intents SET payload = ? WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1",
+        );
         let changed = tx
             .execute(
                 &sql,

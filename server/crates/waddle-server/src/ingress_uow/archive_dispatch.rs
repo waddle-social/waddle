@@ -6,6 +6,7 @@
 use crate::db::Database;
 use crate::db::Row;
 use crate::db::Rows;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_substrate::IngressSubstrateError;
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ingress::MessageKey;
@@ -118,19 +119,40 @@ impl ArchiveDispatchRepository {
         } else {
             "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?, ?, ?, '', ?) ON CONFLICT DO NOTHING"
         };
-        tx.transaction_mut()
-            .execute(
-                insert,
+        let (transaction, prepared) = tx.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_insert_archive_dispatch");
+            super::candidate_boolean(
+                transaction,
+                &format!(
+                    "SELECT {function}(?::text, ?::bigint, ?::uuid, ?::integer, ?::bytea, ?::text, ?::text)"
+                ),
                 crate::db_params![
                     recipient.to_string(),
                     ordinal.to_storage(),
                     key.to_storage().to_string(),
                     receipt.kind.to_storage(),
                     receipt.semantic_identity_hash.to_vec(),
+                    "",
                     physical_id.as_str(),
                 ],
             )
             .await?;
+        } else {
+            transaction
+                .execute(
+                    insert,
+                    crate::db_params![
+                        recipient.to_string(),
+                        ordinal.to_storage(),
+                        key.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec(),
+                        physical_id.as_str(),
+                    ],
+                )
+                .await?;
+        }
         Ok(true)
     }
 
@@ -140,11 +162,57 @@ impl ArchiveDispatchRepository {
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>, IngressUowError> {
         let (transaction, prepared) = tx.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_list_archive_positions");
+            let mut positions = Vec::new();
+            let (mut after_archive, mut after_sequence) = (None::<String>, None::<i64>);
+            loop {
+                let mut rows = transaction
+                    .query(
+                        &format!(
+                            "SELECT archive_jid, archive_seq FROM {function}(?::uuid, ?::integer, ?::bytea, ?::text, ?::bigint, 256)"
+                        ),
+                        crate::db_params![
+                            key.to_storage().to_string(),
+                            receipt.kind.to_storage(),
+                            receipt.semantic_identity_hash.to_vec(),
+                            after_archive.clone(),
+                            after_sequence,
+                        ],
+                    )
+                    .await?;
+                let mut count = 0usize;
+                while let Some(row) = rows.next().await? {
+                    let archive: String = row.get(0)?;
+                    let sequence: i64 = row.get(1)?;
+                    let archive: BareJid = archive
+                        .parse()
+                        .map_err(|_| IngressUowError::InvalidStoredDeliveryResource)?;
+                    let ordinal = ArchiveOrdinal::from_storage(sequence)
+                        .map_err(|_| IngressUowError::EffectIntentConflict)?;
+                    after_archive = Some(archive.to_string());
+                    after_sequence = Some(ordinal.to_storage());
+                    positions.push(waddle_xmpp::stream_management::ArchiveDispatchPosition {
+                        archive,
+                        ordinal,
+                    });
+                    count += 1;
+                }
+                drop(rows);
+                if count < 256 {
+                    break;
+                }
+            }
+            return Ok(positions);
+        }
         let query = crate::ingress_substrate::prepared_ingress_sql(
             transaction.driver(),
             prepared,
             crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
-            ("SELECT DISTINCT archive_jid, archive_seq FROM ", " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq"),
+            (
+                "SELECT DISTINCT archive_jid, archive_seq FROM ",
+                " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq",
+            ),
             positions_query(DatabaseDriver::Sqlite),
         );
         let rows = transaction
@@ -189,14 +257,82 @@ impl ArchiveDispatchRepository {
     ) -> Result<(), IngressUowError> {
         validate_registration(tx, key, archive, ordinal, obligations).await?;
         let (transaction, prepared) = tx.prepared_parts();
-        let insert = crate::ingress_substrate::prepared_ingress_sql(transaction.driver(), prepared,
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let insert_function = api.qualified_function("waddle_ingress_insert_archive_dispatch");
+            let position_function =
+                api.qualified_function("waddle_ingress_archive_dispatch_position");
+            for obligation in obligations {
+                let resource = match &obligation.target {
+                    DispatchTarget::Resource(resource) => resource.to_string(),
+                    DispatchTarget::ArchiveWide | DispatchTarget::Pending(_) => String::new(),
+                };
+                let pending = match &obligation.target {
+                    DispatchTarget::Pending(id) => id.as_str(),
+                    _ => "",
+                };
+                let receipt = &obligation.receipt;
+                super::candidate_boolean(
+                    transaction,
+                    &format!(
+                        "SELECT {insert_function}(?::text, ?::bigint, ?::uuid, ?::integer, ?::bytea, ?::text, ?::text)"
+                    ),
+                    crate::db_params![
+                        archive.to_string(),
+                        ordinal.to_storage(),
+                        key.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec(),
+                        resource.clone(),
+                        pending,
+                    ],
+                )
+                .await?;
+                let mut rows = transaction
+                    .query(
+                        &format!(
+                            "SELECT {position_function}(?::text, ?::uuid, ?::integer, ?::bytea, ?::text, ?::text)"
+                        ),
+                        crate::db_params![
+                            archive.to_string(),
+                            key.to_storage().to_string(),
+                            receipt.kind.to_storage(),
+                            receipt.semantic_identity_hash.to_vec(),
+                            resource,
+                            pending,
+                        ],
+                    )
+                    .await?;
+                let row = rows
+                    .next()
+                    .await?
+                    .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+                let stored: Option<i64> = row.get(0)?;
+                if rows.next().await?.is_some() || stored != Some(ordinal.to_storage()) {
+                    return Err(IngressUowError::EffectIntentConflict);
+                }
+            }
+            return Ok(());
+        }
+        let insert = crate::ingress_substrate::prepared_ingress_sql(
+            transaction.driver(),
+            prepared,
             crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
-            ("INSERT INTO ", " (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"),
-            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING");
-        let select = crate::ingress_substrate::prepared_ingress_sql(transaction.driver(), prepared,
+            (
+                "INSERT INTO ",
+                " (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            ),
+            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        );
+        let select = crate::ingress_substrate::prepared_ingress_sql(
+            transaction.driver(),
+            prepared,
             crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
-            ("SELECT archive_seq FROM ", " WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?"),
-            "SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?");
+            (
+                "SELECT archive_seq FROM ",
+                " WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?",
+            ),
+            "SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?",
+        );
         for obligation in obligations {
             // Empty is a storage-only wildcard; protocol boundaries remain typed.
             let resource = match &obligation.target {
@@ -280,19 +416,65 @@ impl ArchiveDispatchRepository {
         stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
     ) -> Result<DispatchReadiness, IngressUowError> {
         let recipient = resource.to_bare();
-        let mut rows = tx.transaction_mut().query(
-            "SELECT DISTINCT archive_jid, archive_seq, resource FROM ingress_archive_dispatch WHERE archive_jid = ? AND pending_row_id = ?",
-            crate::db_params![recipient.to_string(), row_id.as_str()],
-        ).await?;
-        let mut positions = Vec::new();
-        while let Some(row) = rows.next().await? {
-            positions.push(decode_position(&row)?);
-        }
-        drop(rows);
+        let (transaction, prepared) = tx.prepared_parts();
+        let mut positions = if let Some(api) =
+            prepared.and_then(DefinerApiCandidateContext::from_prepared)
+        {
+            let function = api.qualified_function("waddle_ingress_list_pending_archive_positions");
+            let mut positions = Vec::new();
+            let (mut after_sequence, mut after_resource) = (None::<i64>, None::<String>);
+            loop {
+                let mut rows = transaction
+                    .query(
+                        &format!(
+                            "SELECT archive_jid, archive_seq, resource FROM {function}(?::text, ?::text, ?::bigint, ?::text, 256)"
+                        ),
+                        crate::db_params![
+                            recipient.to_string(),
+                            row_id.as_str(),
+                            after_sequence,
+                            after_resource.clone(),
+                        ],
+                    )
+                    .await?;
+                let mut count = 0usize;
+                while let Some(row) = rows.next().await? {
+                    let position = decode_position(&row)?;
+                    after_sequence = Some(position.ordinal.to_storage());
+                    after_resource = Some(
+                        position
+                            .resource
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    );
+                    positions.push(position);
+                    count += 1;
+                }
+                drop(rows);
+                if count < 256 {
+                    break;
+                }
+            }
+            positions
+        } else {
+            let mut rows = transaction.query(
+                "SELECT DISTINCT archive_jid, archive_seq, resource FROM ingress_archive_dispatch WHERE archive_jid = ? AND pending_row_id = ?",
+                crate::db_params![recipient.to_string(), row_id.as_str()],
+            ).await?;
+            let mut positions = Vec::new();
+            while let Some(row) = rows.next().await? {
+                positions.push(decode_position(&row)?);
+            }
+            drop(rows);
+            positions
+        };
         if positions.is_empty() && pending_store_exists(tx).await? {
             // SM detach promotion is an independent pending producer; recover
             // its position directly from its typed archive pointer.
-            let sql = format!("SELECT p.archive_stanza_by, {PENDING_ORDINAL}, '' FROM pending_delivery p WHERE p.row_id = ? AND p.recipient_jid = ? AND p.payload_kind = 'archived' AND {PENDING_ORDINAL} IS NOT NULL");
+            let sql = format!(
+                "SELECT p.archive_stanza_by, {PENDING_ORDINAL}, '' FROM pending_delivery p WHERE p.row_id = ? AND p.recipient_jid = ? AND p.payload_kind = 'archived' AND {PENDING_ORDINAL} IS NOT NULL"
+            );
             let mut rows = tx
                 .transaction_mut()
                 .query(
@@ -316,8 +498,12 @@ impl ArchiveDispatchRepository {
 
 fn positions_query(driver: DatabaseDriver) -> &'static str {
     match driver {
-        DatabaseDriver::Postgres => "SELECT DISTINCT archive_jid, archive_seq FROM ingress_archive_dispatch WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq",
-        DatabaseDriver::Sqlite => "SELECT DISTINCT archive_jid, archive_seq FROM ingress_archive_dispatch WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq",
+        DatabaseDriver::Postgres => {
+            "SELECT DISTINCT archive_jid, archive_seq FROM ingress_archive_dispatch WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq"
+        }
+        DatabaseDriver::Sqlite => {
+            "SELECT DISTINCT archive_jid, archive_seq FROM ingress_archive_dispatch WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq"
+        }
     }
 }
 
@@ -350,10 +536,95 @@ async fn validate_registration(
     obligations: &[ArchiveDispatchObligation],
 ) -> Result<(), IngressUowError> {
     let (transaction, prepared) = tx.prepared_parts();
-    let query = crate::ingress_substrate::prepared_ingress_sql(transaction.driver(), prepared,
+    if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+        let function = api.qualified_function("waddle_ingress_list_archive_registration");
+        for (index, obligation) in obligations.iter().enumerate() {
+            if obligations[..index]
+                .iter()
+                .any(|prior| prior.receipt == obligation.receipt)
+            {
+                continue;
+            }
+            let expected = obligations
+                .iter()
+                .filter(|other| other.receipt == obligation.receipt)
+                .map(|other| &other.target)
+                .collect::<Vec<_>>();
+            let receipt = &obligation.receipt;
+            let supplemental_pending = receipt.kind.to_storage()
+                == waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag()
+                && expected
+                    .iter()
+                    .all(|target| matches!(target, DispatchTarget::Resource(_)));
+            let mut stored = Vec::new();
+            let (mut after_resource, mut after_pending) = (None::<String>, None::<String>);
+            loop {
+                let mut rows = transaction
+                    .query(
+                        &format!(
+                            "SELECT archive_seq, resource, pending_row_id FROM {function}(?::text, ?::uuid, ?::integer, ?::bytea, ?::text, ?::text, 256)"
+                        ),
+                        crate::db_params![
+                            archive.to_string(),
+                            key.to_storage().to_string(),
+                            receipt.kind.to_storage(),
+                            receipt.semantic_identity_hash.to_vec(),
+                            after_resource.clone(),
+                            after_pending.clone(),
+                        ],
+                    )
+                    .await?;
+                let mut count = 0usize;
+                while let Some(row) = rows.next().await? {
+                    let position: i64 = row.get(0)?;
+                    let resource: String = row.get(1)?;
+                    let pending: String = row.get(2)?;
+                    if position != ordinal.to_storage() {
+                        return Err(IngressUowError::EffectIntentConflict);
+                    }
+                    after_resource = Some(resource.clone());
+                    after_pending = Some(pending.clone());
+                    if !pending.is_empty() {
+                        if supplemental_pending {
+                            count += 1;
+                            continue;
+                        }
+                        stored.push(DispatchTarget::Pending(PendingRowId::new(pending)));
+                    } else if resource.is_empty() {
+                        stored.push(DispatchTarget::ArchiveWide);
+                    } else {
+                        stored.push(DispatchTarget::Resource(
+                            resource
+                                .parse()
+                                .map_err(|_| IngressUowError::InvalidStoredDeliveryResource)?,
+                        ));
+                    }
+                    count += 1;
+                }
+                drop(rows);
+                if count < 256 {
+                    break;
+                }
+            }
+            if !stored.is_empty()
+                && (stored.iter().any(|target| !expected.contains(&target))
+                    || expected.iter().any(|target| !stored.contains(target)))
+            {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+        }
+        return Ok(());
+    }
+    let query = crate::ingress_substrate::prepared_ingress_sql(
+        transaction.driver(),
+        prepared,
         crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
-        ("SELECT archive_seq, resource, pending_row_id FROM ", " WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?"),
-        "SELECT archive_seq, resource, pending_row_id FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ?");
+        (
+            "SELECT archive_seq, resource, pending_row_id FROM ",
+            " WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?",
+        ),
+        "SELECT archive_seq, resource, pending_row_id FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ?",
+    );
     for (index, obligation) in obligations.iter().enumerate() {
         if obligations[..index]
             .iter()
@@ -480,6 +751,52 @@ async fn predecessors(
     resource: Option<&FullJid>,
     stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
 ) -> Result<DispatchReadiness, IngressUowError> {
+    let (transaction, prepared) = tx.prepared_parts();
+    if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+        let function = api.qualified_function("waddle_ingress_list_receipt_archive_positions");
+        let target = resource.map(ToString::to_string).unwrap_or_default();
+        let (mut after_archive, mut after_sequence, mut after_resource) =
+            (None::<String>, None::<i64>, None::<String>);
+        let mut positions = Vec::new();
+        loop {
+            let mut rows = transaction
+                .query(
+                    &format!(
+                        "SELECT archive_jid, archive_seq, resource FROM {function}(?::uuid, ?::integer, ?::bytea, ?::text, ?::text, ?::bigint, ?::text, 256)"
+                    ),
+                    crate::db_params![
+                        key.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec(),
+                        target.clone(),
+                        after_archive.clone(),
+                        after_sequence,
+                        after_resource.clone(),
+                    ],
+                )
+                .await?;
+            let mut count = 0usize;
+            while let Some(row) = rows.next().await? {
+                let position = decode_position(&row)?;
+                after_archive = Some(position.archive.to_string());
+                after_sequence = Some(position.ordinal.to_storage());
+                after_resource = Some(
+                    position
+                        .resource
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                );
+                positions.push(position);
+                count += 1;
+            }
+            drop(rows);
+            if count < 256 {
+                break;
+            }
+        }
+        return positions_ready(tx, positions, stream).await;
+    }
     let query = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
         "SELECT DISTINCT archive_jid, archive_seq, resource FROM ingress_archive_dispatch WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND (? = '' OR resource = '' OR resource = ?)"
     } else {
@@ -543,34 +860,98 @@ async fn recorded_predecessors(
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
-    let mut rows = tx
-        .transaction_mut()
-        .query(
-            PREDECESSORS,
-            crate::db_params![
-                position.archive.to_string(),
-                position.ordinal.to_storage(),
-                target.clone(),
-                target
-            ],
-        )
-        .await?;
     let mut candidates = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let stored: String = row.get(0)?;
-        let pending: String = row.get(2)?;
-        let receipted: i64 = row.get(3)?;
-        candidates.push((
-            decode_message(&stored)?,
-            if pending.is_empty() {
-                None
-            } else {
-                Some(PendingRowId::new(pending))
-            },
-            receipted != 0,
-        ));
+    let (transaction, prepared) = tx.prepared_parts();
+    if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+        let function = api.qualified_function("waddle_ingress_list_archive_predecessors");
+        let (
+            mut after_sequence,
+            mut after_message,
+            mut after_kind,
+            mut after_hash,
+            mut after_resource,
+            mut after_pending,
+        ) = (
+            None::<i64>,
+            None::<String>,
+            None::<i32>,
+            None::<Vec<u8>>,
+            None::<String>,
+            None::<String>,
+        );
+        loop {
+            let mut rows = transaction
+                .query(
+                    &format!(
+                        "SELECT message_key, pending_row_id, receipted, archive_seq, kind, semantic_identity_hash, resource FROM {function}(?::text, ?::bigint, ?::text, ?::bigint, ?::uuid, ?::integer, ?::bytea, ?::text, ?::text, 256)"
+                    ),
+                    crate::db_params![
+                        position.archive.to_string(),
+                        position.ordinal.to_storage(),
+                        target.clone(),
+                        after_sequence,
+                        after_message.clone(),
+                        after_kind,
+                        after_hash.clone(),
+                        after_resource.clone(),
+                        after_pending.clone(),
+                    ],
+                )
+                .await?;
+            let mut count = 0usize;
+            while let Some(row) = rows.next().await? {
+                let stored: String = row.get(0)?;
+                let pending: String = row.get(1)?;
+                let receipted: bool = row.get(2)?;
+                after_sequence = Some(row.get(3)?);
+                after_message = Some(stored.clone());
+                after_kind = Some(row.get(4)?);
+                after_hash = Some(row.get(5)?);
+                after_resource = Some(row.get(6)?);
+                after_pending = Some(pending.clone());
+                candidates.push((
+                    decode_message(&stored)?,
+                    if pending.is_empty() {
+                        None
+                    } else {
+                        Some(PendingRowId::new(pending))
+                    },
+                    receipted,
+                ));
+                count += 1;
+            }
+            drop(rows);
+            if count < 256 {
+                break;
+            }
+        }
+    } else {
+        let mut rows = transaction
+            .query(
+                PREDECESSORS,
+                crate::db_params![
+                    position.archive.to_string(),
+                    position.ordinal.to_storage(),
+                    target.clone(),
+                    target
+                ],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let stored: String = row.get(0)?;
+            let pending: String = row.get(2)?;
+            let receipted: i64 = row.get(3)?;
+            candidates.push((
+                decode_message(&stored)?,
+                if pending.is_empty() {
+                    None
+                } else {
+                    Some(PendingRowId::new(pending))
+                },
+                receipted != 0,
+            ));
+        }
     }
-    drop(rows);
     let mut blockers = Vec::new();
     for (key, pending, receipted) in candidates {
         if let Some(pending) = pending.filter(|_| receipted) {
@@ -617,7 +998,9 @@ async fn pending_predecessor(
         .as_ref()
         .map(|target| target.to_bare().to_string())
         .unwrap_or_default();
-    let query = format!("SELECT p.row_id FROM pending_delivery p WHERE p.payload_kind = 'archived' AND p.archive_stanza_by = ? AND (? = '' OR p.recipient_jid = ?) AND {PENDING_ORDINAL} < ? AND NOT (COALESCE(p.flushed_in_session = NULLIF(?, ''), FALSE) AND p.outbound_sequence IS NOT NULL) LIMIT 1");
+    let query = format!(
+        "SELECT p.row_id FROM pending_delivery p WHERE p.payload_kind = 'archived' AND p.archive_stanza_by = ? AND (? = '' OR p.recipient_jid = ?) AND {PENDING_ORDINAL} < ? AND NOT (COALESCE(p.flushed_in_session = NULLIF(?, ''), FALSE) AND p.outbound_sequence IS NOT NULL) LIMIT 1"
+    );
     let mut rows = tx
         .transaction_mut()
         .query(
@@ -640,6 +1023,21 @@ async fn resource_completed(
     receipt: &EffectReceiptKey,
     resource: &FullJid,
 ) -> Result<bool, IngressUowError> {
+    let (transaction, prepared) = tx.prepared_parts();
+    if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+        let function = api.qualified_function("waddle_ingress_resource_receipt_exists");
+        return super::candidate_boolean(
+            transaction,
+            &format!("SELECT {function}(?::uuid, ?::integer, ?::bytea, ?::text)"),
+            crate::db_params![
+                key.to_storage().to_string(),
+                receipt.kind.to_storage(),
+                receipt.semantic_identity_hash.to_vec(),
+                resource.to_string(),
+            ],
+        )
+        .await;
+    }
     let query = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
         "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND resource = ? UNION ALL SELECT recipient FROM ingress_carbon_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND recipient = ? LIMIT 1"
     } else {

@@ -8,12 +8,15 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
+#[cfg(feature = "test-support")]
+use super::RelationGuardCapability;
 use super::{IngressUowError, IngressUowTransaction};
 #[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
-use crate::db::{Database, DatabaseDriver, Transaction};
+use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
 #[cfg(feature = "test-support")]
 use crate::ingress_substrate::prepare_attested_receipt_transaction;
+use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_substrate::{
     acquire_epoch_lock_first, prepared_ingress_relation, prepared_ingress_sql,
     supported_protocol_epoch, PreparedAttestedReceiptWriter, PreparedIngressRelation,
@@ -66,6 +69,35 @@ pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
         return Err(IngressUowError::EpochUnsupported { live, supported });
     }
     Ok(tx)
+}
+
+/// Begin a raw writer prepared for the dark SECURITY DEFINER API experiment.
+/// The returned writer and prepared identity refer to this exact caller-owned
+/// transaction; callers must retain both through commit/rollback.
+#[cfg(feature = "test-support")]
+pub(crate) async fn begin_raw_ingress_writer_with_definer_api_candidate<'a>(
+    db: &'a Database,
+    capability: &AttestedPostgresWriterCapability,
+    relation_guard: &RelationGuardCapability,
+) -> Result<(Transaction<'a>, PreparedAttestedReceiptWriter), IngressUowError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(IngressUowError::PostgresRequired);
+    }
+    db.verify_attested_pg_writer_capability(capability)
+        .map_err(DatabaseError::from)?;
+    relation_guard.verify_for_database(db, capability)?;
+    let mut tx = db.begin_immediate().await?;
+    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        .await?;
+    bound_raw_transaction(&mut tx).await?;
+    let mut prepared = relation_guard.prepare_transaction(&mut tx).await?;
+    let live = prepared.protocol_epoch();
+    let supported = supported_protocol_epoch();
+    if live > supported {
+        return Err(IngressUowError::EpochUnsupported { live, supported });
+    }
+    prepared.enable_definer_api_candidate_for_test();
+    Ok((tx, prepared))
 }
 
 async fn begin_raw_ingress_writer_inner<'a>(
@@ -157,6 +189,249 @@ impl EffectDescendantRepository {
             }
             _ => Self::settle_all_raw(tx, descendant, now).await,
         }
+    }
+
+    /// Fixed API variants for raw callers that retain the same prepared
+    /// relation-guard transaction. These never begin or commit transactions.
+    pub(crate) async fn lock_message_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        message_key: MessageKey,
+    ) -> Result<(), IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid)",
+            api.qualified_function("waddle_ingress_lock_message_nowait"),
+        );
+        let mut rows = tx
+            .query(
+                &query,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(canonical_nowait_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(canonical_nowait_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let locked: bool = row.get(0).map_err(canonical_nowait_error)?;
+        if rows.next().await.map_err(canonical_nowait_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult.into());
+        }
+        if !locked {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn lock_all_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid)",
+            api.qualified_function("waddle_ingress_lock_descendant_ancestors_nowait"),
+        );
+        let mut rows = tx
+            .query(&query, crate::db_params![descendant.to_string()])
+            .await
+            .map_err(canonical_nowait_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(canonical_nowait_error)?
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let locked: bool = row.get(0).map_err(canonical_nowait_error)?;
+        if rows.next().await.map_err(canonical_nowait_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult.into());
+        }
+        if !locked {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn attach_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        message_key: MessageKey,
+        kind: i32,
+        semantic_identity_hash: &[u8],
+        descendant: Uuid,
+    ) -> Result<bool, IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::uuid)",
+            api.qualified_function("waddle_ingress_attach_descendant"),
+        );
+        candidate_boolean(
+            tx,
+            &query,
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                kind,
+                semantic_identity_hash.to_vec(),
+                descendant.to_string()
+            ],
+        )
+        .await
+    }
+
+    pub(crate) async fn copy_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        source: Uuid,
+        target: Uuid,
+    ) -> Result<(), IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid, ?::uuid)",
+            api.qualified_function("waddle_ingress_copy_descendant"),
+        );
+        let copied = candidate_boolean(
+            tx,
+            &query,
+            crate::db_params![source.to_string(), target.to_string()],
+        )
+        .await?;
+        if copied {
+            Ok(())
+        } else {
+            Err(IngressSubstrateError::InvalidDefinerApiResult.into())
+        }
+    }
+
+    pub(crate) async fn settle_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        descendant: Uuid,
+        _now: DateTime<Utc>,
+    ) -> Result<(), IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid)",
+            api.qualified_function("waddle_ingress_settle_descendant"),
+        );
+        let settled =
+            candidate_boolean(tx, &query, crate::db_params![descendant.to_string()]).await?;
+        if settled {
+            Ok(())
+        } else {
+            Err(IngressSubstrateError::InvalidDefinerApiResult.into())
+        }
+    }
+
+    pub(crate) async fn bind_effect_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+    ) -> Result<EffectDeliveryBinding, IngressUowError> {
+        Self::lock_message_with_candidate_api(tx, api, message_key).await?;
+        ensure_intent_with_candidate_api(tx, api, message_key, effect).await?;
+        if matches!(
+            effect,
+            IngressEffectKey::CallSignal(..)
+                | IngressEffectKey::Pin(..)
+                | IngressEffectKey::DmPinMutation(..)
+                | IngressEffectKey::DmCallThreadState(..)
+        ) {
+            return Ok(EffectDeliveryBinding::AwaitingDurableOwner);
+        }
+        let key = DeliveryKey::effect(message_key, effect);
+        let outcome = crate::ingress_substrate::record_delivery_in_prepared_transaction(
+            tx,
+            Some(api.prepared()),
+            key,
+            message_key,
+        )
+        .await?;
+        if outcome == MessageWriteOutcome::MessageVanished {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        Ok(EffectDeliveryBinding::Bound(key))
+    }
+
+    pub(crate) async fn attach_effect_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        if Self::bind_effect_with_candidate_api(tx, api, message_key, effect).await?
+            == EffectDeliveryBinding::AwaitingDurableOwner
+        {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        Self::attach_with_candidate_api(
+            tx,
+            api,
+            message_key,
+            effect.storage_kind(),
+            &identity_hash(effect),
+            descendant,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn descendant_exists_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        descendant_key: &str,
+        pending_only: bool,
+    ) -> Result<bool, IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::text, ?::boolean)",
+            api.qualified_function("waddle_ingress_descendant_exists"),
+        );
+        candidate_boolean(tx, &query, crate::db_params![descendant_key, pending_only]).await
+    }
+
+    pub(crate) async fn intent_exists_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+    ) -> Result<bool, IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid, ?::integer, ?::bytea)",
+            api.qualified_function("waddle_ingress_intent_exists"),
+        );
+        candidate_boolean(
+            tx,
+            &query,
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                effect.storage_kind(),
+                identity_hash(effect).to_vec()
+            ],
+        )
+        .await
+    }
+
+    pub(crate) async fn descendant_settled_with_candidate_api(
+        tx: &mut Transaction<'_>,
+        api: &DefinerApiCandidateContext<'_>,
+        message_key: MessageKey,
+        kind: i32,
+        semantic_identity_hash: &[u8],
+        descendant_key: &str,
+    ) -> Result<bool, IngressUowError> {
+        let query = format!(
+            "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+            api.qualified_function("waddle_ingress_descendant_settled"),
+        );
+        candidate_boolean(
+            tx,
+            &query,
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                kind,
+                semantic_identity_hash.to_vec(),
+                descendant_key
+            ],
+        )
+        .await
     }
 
     /// New parents acquired after pre-existing work must never wait: abort the
@@ -358,6 +633,12 @@ async fn lock_nowait_prepared(
     prepared: &PreparedAttestedReceiptWriter,
     message_key: MessageKey,
 ) -> Result<(), IngressUowError> {
+    if prepared.uses_definer_api_candidate() {
+        let api = DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        return EffectDescendantRepository::lock_message_with_candidate_api(tx, &api, message_key)
+            .await;
+    }
     let query = prepared_ingress_sql(
         tx.driver(),
         Some(prepared),
@@ -386,6 +667,11 @@ async fn lock_all_nowait_prepared(
     prepared: &PreparedAttestedReceiptWriter,
     descendant: Uuid,
 ) -> Result<(), IngressUowError> {
+    if prepared.uses_definer_api_candidate() {
+        let api = DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        return EffectDescendantRepository::lock_all_with_candidate_api(tx, &api, descendant).await;
+    }
     for key in ancestor_keys_in_prepared(tx, Some(prepared), descendant).await? {
         lock_nowait_prepared(tx, prepared, key).await?;
     }
@@ -398,6 +684,11 @@ async fn copy_prepared(
     source: Uuid,
     target: Uuid,
 ) -> Result<(), IngressUowError> {
+    if prepared.uses_definer_api_candidate() {
+        let api = DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        return EffectDescendantRepository::copy_with_candidate_api(tx, &api, source, target).await;
+    }
     lock_all_nowait_prepared(tx, prepared, source).await?;
     let keys = ancestor_keys_in_prepared(tx, Some(prepared), source).await?;
     let relation =
@@ -429,6 +720,12 @@ async fn settle_all_prepared(
     descendant: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), IngressUowError> {
+    if prepared.uses_definer_api_candidate() {
+        let api = DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        return EffectDescendantRepository::settle_with_candidate_api(tx, &api, descendant, now)
+            .await;
+    }
     lock_all_nowait_prepared(tx, prepared, descendant).await?;
     let keys = ancestor_keys_in_prepared(tx, Some(prepared), descendant).await?;
     let query = prepared_ingress_sql(
@@ -501,6 +798,20 @@ async fn attach_prepared(
     {
         return Err(IngressUowError::EffectIntentConflict);
     }
+    if prepared.uses_definer_api_candidate() {
+        let api = DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        let _inserted = EffectDescendantRepository::attach_with_candidate_api(
+            tx,
+            &api,
+            message_key,
+            effect.storage_kind(),
+            &identity_hash(effect),
+            descendant,
+        )
+        .await?;
+        return Ok(());
+    }
     let query = prepared_ingress_sql(
         tx.driver(),
         Some(prepared),
@@ -544,6 +855,11 @@ async fn ensure_intent_in_prepared(
     message_key: MessageKey,
     effect: &IngressEffectKey,
 ) -> Result<(), IngressUowError> {
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let api = DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+        return ensure_intent_with_candidate_api(tx, &api, message_key, effect).await;
+    }
     let query = crate::ingress_substrate::prepared_ingress_sql(tx.driver(), prepared,
         crate::ingress_substrate::PreparedIngressRelation::Effects,
         ("SELECT 1 FROM ", " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?"),
@@ -648,6 +964,38 @@ fn sql<'a>(tx: &Transaction<'_>, postgres: &'a str, sqlite: &'a str) -> &'a str 
     match tx.driver() {
         DatabaseDriver::Postgres => postgres,
         DatabaseDriver::Sqlite => sqlite,
+    }
+}
+
+async fn candidate_boolean(
+    tx: &mut Transaction<'_>,
+    query: &str,
+    params: impl IntoParams,
+) -> Result<bool, IngressUowError> {
+    let mut rows = tx.query(query, params).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+    let result: bool = row.get(0)?;
+    if rows.next().await?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult.into());
+    }
+    Ok(result)
+}
+
+async fn ensure_intent_with_candidate_api(
+    tx: &mut Transaction<'_>,
+    api: &DefinerApiCandidateContext<'_>,
+    message_key: MessageKey,
+    effect: &IngressEffectKey,
+) -> Result<(), IngressUowError> {
+    if EffectDescendantRepository::intent_exists_with_candidate_api(tx, api, message_key, effect)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(IngressUowError::EffectIntentConflict)
     }
 }
 

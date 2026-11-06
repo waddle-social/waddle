@@ -18,6 +18,8 @@ mod durable_more;
 mod effect_descendants;
 #[cfg(feature = "test-support")]
 pub(crate) use effect_descendants::begin_raw_ingress_writer_with_capability;
+#[cfg(feature = "test-support")]
+pub(crate) use effect_descendants::begin_raw_ingress_writer_with_definer_api_candidate;
 pub(crate) use effect_descendants::canonical_nowait_error;
 pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transaction};
 mod error;
@@ -78,6 +80,27 @@ pub(crate) use repositories::{
 };
 pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
+
+pub(crate) async fn candidate_boolean(
+    transaction: &mut Transaction<'_>,
+    query: &str,
+    params: impl crate::db::IntoParams,
+) -> Result<bool, IngressUowError> {
+    let mut rows = transaction.query(query, params).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+    let result: bool = row.get(0)?;
+    if rows.next().await?.is_some() {
+        return Err(
+            crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+        );
+    }
+    Ok(result)
+}
+
+pub(super) const DEFINER_API_PAGE_SIZE: i64 = 256;
 
 use std::time::Duration;
 
@@ -579,6 +602,29 @@ impl<'a> IngressUowTransaction<'a> {
         self.prepared_receipt_writer
             .as_ref()
             .map(PreparedAttestedReceiptWriter::schema)
+    }
+
+    pub(crate) fn uses_definer_api_candidate(&self) -> bool {
+        self.prepared_receipt_writer
+            .as_ref()
+            .is_some_and(PreparedAttestedReceiptWriter::uses_definer_api_candidate)
+    }
+
+    /// Select the unregistered function-owner API only in its disposable
+    /// candidate fixture. This flag belongs to this already-prepared UOW and
+    /// cannot create a second connection or transaction.
+    #[cfg(feature = "test-support")]
+    pub fn enable_definer_api_candidate_for_test(&mut self) -> Result<(), IngressUowError> {
+        if self.transaction.driver() != DatabaseDriver::Postgres {
+            return Err(IngressUowError::PostgresRequired);
+        }
+        let prepared = self
+            .prepared_receipt_writer
+            .as_mut()
+            .filter(|prepared| prepared.uses_relation_guard())
+            .ok_or(IngressUowError::AttestedPoolRequired)?;
+        prepared.enable_definer_api_candidate_for_test();
+        Ok(())
     }
 
     /// Test-only source-alias fixture access; not a runtime repository API.

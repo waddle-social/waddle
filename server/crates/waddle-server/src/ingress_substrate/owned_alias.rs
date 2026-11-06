@@ -89,6 +89,19 @@ pub(crate) async fn resolve_prepared_origin_in_scope(
     if tx.driver() != DatabaseDriver::Postgres {
         return Err(IngressSubstrateError::SchemaIdentityMismatch);
     }
+    if prepared.uses_definer_api_candidate() {
+        return super::substrate::resolve_alias_via_definer_api(
+            tx,
+            prepared,
+            sender,
+            target,
+            origin,
+            digest,
+            None,
+            MessageKey::new,
+        )
+        .await;
+    }
     let alias = AliasStorageKey::new(sender, target, origin);
     if let Some(key) = probe_alias(tx, prepared, &alias).await? {
         #[cfg(test)]
