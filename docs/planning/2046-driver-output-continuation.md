@@ -47,3 +47,15 @@ P3.3 durable session/frontier authority, guarantee control progress during a
 stalled effect/socket, or activate a serving endpoint. Those remain #2046
 gates. If the fixture cannot attach to the actual reserved `WebSocketInput`
 and `WebSocketOutput`, label it a scheduler model rather than transport proof.
+
+## Phase 1 implementation boundary
+
+The current phase implements only the test-support scheduler model: typed lazy
+frame production, pre-effect count and worst-case byte reservation, an exact
+connection owner claim, a bounded handled-sequence window, and separate
+prepared/admitted/attempted/uncertain/flushed milestones. Its tests exercise
+that model without a socket. They do not prove async effect cancellation
+custody, direct-frame or control ordering through a physical writer, actual
+`WebSocketInput`/`WebSocketOutput` integration, receipt retention across
+caller cancellation, or joined cleanup. Those transport guarantees remain
+required before calling P3.1 complete.

@@ -53,13 +53,14 @@ pub mod connection_actor {
         ConnectionActorBindingAttempt, ConnectionActorController, ConnectionActorError,
         ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorSequence,
         ConnectionActorSnapshot, ConnectionActorStartBarrier, ConnectionActorStartError,
-        ConnectionActorStartHooks, ConnectionWireFrame, CountableEffectDisposition,
-        CountableInboundEffect, CountableStanzaEffect, InstallBinding, OutputAdmissionPause,
-        PanicConnectionActor, PauseConnectionActor, PrebindAuthAttempt, PrebindAuthOutcome,
-        PrebindAuthToken, PrebindInput, PrebindPhase, PrebindSaslInput, PrebindSnapshot,
-        PrebindValidationAttempt, PrepareBinding, RequestAcknowledgement, ReserveHandledInbound,
-        RetireBinding, SeedInboundCounterForTest, SnapshotConnection, SnapshotPrebind,
-        StopConnectionActor,
+        ConnectionActorStartHooks, ConnectionWireFrame, ContinuationArbiter, ContinuationError,
+        ContinuationLimits, ContinuationOwnerClaim, ContinuationPhase, ContinuationTicket,
+        CountableEffectDisposition, CountableInboundEffect, CountableStanzaEffect, InstallBinding,
+        OutputAdmissionPause, OutputContinuation, PanicConnectionActor, PauseConnectionActor,
+        PrebindAuthAttempt, PrebindAuthOutcome, PrebindAuthToken, PrebindInput, PrebindPhase,
+        PrebindSaslInput, PrebindSnapshot, PrebindValidationAttempt, PrepareBinding,
+        RequestAcknowledgement, ReserveHandledInbound, RetireBinding, SeedInboundCounterForTest,
+        SnapshotConnection, SnapshotPrebind, StopConnectionActor,
     };
 }
 
