@@ -20,6 +20,7 @@ use super::{
 };
 
 mod catalog;
+mod catalog_preflight;
 mod manifest;
 mod receipt_authority;
 mod receipt_catalog;
@@ -81,7 +82,7 @@ impl AttestedPgPool {
             let mut connection = self.acquire().await?;
             let config = &self.writer_capability.config;
             let mut tx = connection.begin().await?;
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
                 .execute(&mut *tx)
                 .await?;
             sqlx::query("SET LOCAL statement_timeout = '5s'")
@@ -134,7 +135,8 @@ async fn inspect_profile_with_receipt_journal(
     let row = sqlx::query(
         "SELECT pg_catalog.current_setting('server_version_num')::integer, \
          pg_catalog.current_setting('search_path'), session_user::text, current_user::text, \
-         pg_catalog.current_setting('session_replication_role')",
+         pg_catalog.current_setting('session_replication_role'), \
+         pg_catalog.current_setting('transaction_isolation')",
     )
     .fetch_one(&mut *connection)
     .await?;
@@ -146,6 +148,7 @@ async fn inspect_profile_with_receipt_journal(
         || row.try_get::<String, _>(2)? != runtime
         || row.try_get::<String, _>(3)? != runtime
         || row.try_get::<String, _>(4)? != "origin"
+        || row.try_get::<String, _>(5)? != "read committed"
     {
         return Err(RestrictedIngressProfileError::Mismatch(
             "runtime session/search path",
@@ -155,22 +158,50 @@ async fn inspect_profile_with_receipt_journal(
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;
-    let (runtime_oid, api_oid) = catalog::verify_roles_and_tables(
+    let manifest = manifest::load()?;
+    let before = catalog::verify_roles_and_tables(
         connection, schema, schema_oid, runtime, api_owner, epoch_oid,
     )
     .await?;
-    if receipt_journal {
-        manifest::verify_with_receipt_journal(connection, schema, runtime, api_owner, true).await?;
-    } else {
-        manifest::verify(connection, schema, runtime, api_owner).await?;
+    catalog_preflight::verify(connection, schema, &manifest).await?;
+    // A name-only LOCK on a view or inheritance parent can reach objects the
+    // runtime should never touch. First establish this is the expected heap;
+    // then, after any wait, use a fresh RC snapshot to recheck all identities
+    // and catalog safety before reading the manifest or deparsing expressions.
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.ingress_epoch_guard_manifest IN ACCESS SHARE MODE",
+        quote_identifier(schema),
+    ))
+    .execute(&mut *connection)
+    .await?;
+    let after = catalog::verify_roles_and_tables(
+        connection, schema, schema_oid, runtime, api_owner, epoch_oid,
+    )
+    .await?;
+    if before != after {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "post-lock catalog identities",
+        ));
     }
+    catalog_preflight::verify(connection, schema, &manifest).await?;
+    manifest::verify_functions_and_triggers(
+        connection,
+        schema,
+        runtime,
+        api_owner,
+        receipt_journal,
+        &manifest,
+    )
+    .await?;
+    catalog::verify_manifest_rows(connection, schema).await?;
+    manifest::verify_structure(connection, schema, &manifest).await?;
     restore_application_path(connection, schema, runtime).await?;
     Ok(RestrictedIngressProfileObservation {
         manifest_version: MANIFEST_VERSION,
         schema_oid,
         epoch_relation_oid: epoch_oid,
-        runtime_role_oid: runtime_oid,
-        api_owner_oid: api_oid,
+        runtime_role_oid: after.runtime_oid,
+        api_owner_oid: after.api_oid,
     })
 }
 

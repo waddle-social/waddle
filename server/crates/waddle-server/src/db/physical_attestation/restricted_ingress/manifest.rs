@@ -23,13 +23,34 @@ const STRUCTURE_SQL: &str = include_str!("structure.sql");
 const MANIFEST: &str = include_str!("../restricted_ingress_manifest_v2.json");
 
 #[derive(Deserialize)]
-struct Manifest {
+pub(super) struct Manifest {
     version: u32,
     postgres_major: u32,
     source_sha256: BTreeMap<String, String>,
     functions: Vec<Function>,
     triggers: Vec<Value>,
     structure: Value,
+}
+
+impl Manifest {
+    pub(super) fn structure_for_schema(&self, schema: &str) -> Value {
+        fn replace(value: &Value, schema: &str) -> Value {
+            match value {
+                Value::String(value) => Value::String(value.replace("__SCHEMA_NAME__", schema)),
+                Value::Array(values) => {
+                    Value::Array(values.iter().map(|value| replace(value, schema)).collect())
+                }
+                Value::Object(values) => Value::Object(
+                    values
+                        .iter()
+                        .map(|(key, value)| (key.clone(), replace(value, schema)))
+                        .collect(),
+                ),
+                _ => value.clone(),
+            }
+        }
+        replace(&self.structure, schema)
+    }
 }
 
 #[derive(Deserialize)]
@@ -63,24 +84,7 @@ fn render(body: &str, schema: &str, runtime: &str, api: &str) -> String {
         .replace("__RUNTIME_ROLE_LITERAL__", runtime)
 }
 
-pub(super) async fn verify(
-    connection: &mut PgConnection,
-    schema: &str,
-    runtime: &str,
-    api: &str,
-) -> Result<()> {
-    verify_with_receipt_journal(connection, schema, runtime, api, false).await
-}
-
-/// Preserve strict v2 for existing callers. The journal profile must separately
-/// verify the extra function's pinned OID, body, owner and ACL before use.
-pub(super) async fn verify_with_receipt_journal(
-    connection: &mut PgConnection,
-    schema: &str,
-    runtime: &str,
-    api: &str,
-    receipt_journal: bool,
-) -> Result<()> {
+pub(super) fn load() -> Result<Manifest> {
     let manifest: Manifest = serde_json::from_str(MANIFEST)
         .map_err(|_| RestrictedIngressProfileError::Mismatch("manifest encoding"))?;
     if manifest.version != super::MANIFEST_VERSION
@@ -96,6 +100,19 @@ pub(super) async fn verify_with_receipt_journal(
             ));
         }
     }
+    Ok(manifest)
+}
+
+/// Check functions and triggers before any application relation is read.
+/// The journal profile separately pins its extra function before using it.
+pub(super) async fn verify_functions_and_triggers(
+    connection: &mut PgConnection,
+    schema: &str,
+    runtime: &str,
+    api: &str,
+    receipt_journal: bool,
+    manifest: &Manifest,
+) -> Result<()> {
     let function_sql = r#"
         SELECT p.proname::text AS name,
           (pg_catalog.to_jsonb(p) - ARRAY['oid','pronamespace','proowner','prolang','prosrc','proacl']) AS properties,
@@ -220,13 +237,21 @@ pub(super) async fn verify_with_receipt_journal(
     "#).bind(schema).fetch_one(&mut *connection).await?;
     let actual_count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND pg_catalog.starts_with(c.relname,'ingress_') AND NOT t.tgisinternal")
         .bind(schema).fetch_one(&mut *connection).await?;
-    if triggers != Value::Array(manifest.triggers)
+    if triggers != Value::Array(manifest.triggers.clone())
         || triggers.as_array().map(Vec::len) != usize::try_from(actual_count).ok()
     {
         return Err(RestrictedIngressProfileError::Mismatch(
             "trigger inventory/properties",
         ));
     }
+    Ok(())
+}
+
+pub(super) async fn verify_structure(
+    connection: &mut PgConnection,
+    schema: &str,
+    manifest: &Manifest,
+) -> Result<()> {
     let mut tables: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
     tables.extend([
         "ingress_protocol_epoch",
@@ -239,13 +264,7 @@ pub(super) async fn verify_with_receipt_journal(
         .bind(&tables)
         .fetch_one(&mut *connection)
         .await?;
-    let expected_structure: Value = serde_json::from_str(
-        &manifest
-            .structure
-            .to_string()
-            .replace("__SCHEMA_NAME__", schema),
-    )
-    .map_err(|_| RestrictedIngressProfileError::Mismatch("structural manifest encoding"))?;
+    let expected_structure = manifest.structure_for_schema(schema);
     if structure != expected_structure {
         return Err(RestrictedIngressProfileError::Mismatch(
             "table structural manifest",
