@@ -47,6 +47,8 @@ struct Candidate {
     lease: SendLease,
 }
 
+#[path = "sm_custody_marker_transfer.rs"]
+mod marker_transfer;
 #[path = "sm_custody_multiframe.rs"]
 mod multiframe;
 #[path = "preaccept_handoff.rs"]
@@ -438,6 +440,10 @@ async fn postgres_sm_custody_recovery_cannot_substitute_another_sessions_claim()
     let c = Candidate::new().await;
     let repo_a = c.repository();
     let admission_a = repo_a.admit(&c.frame, &c.lease).await.expect("A admission");
+    repo_a
+        .resume_preaccept(c.frame.operation_id)
+        .await
+        .expect("A source marker");
     let owner_b = NodeIdentity::new("node-b", "incarnation-b");
     let session_b = SmSessionId::new("independent-session-b");
     let claim_b = ClaimEpoch(142);
@@ -612,16 +618,23 @@ async fn postgres_sm_custody_seal_fences_delayed_admission_and_successor_reads_i
             .expect("exact committed ID"),
         CustodyResolution::Committed(_)
     ));
-    successor
-        .transfer_recovered(
-            &sealed,
-            &authority,
-            &page.operations[0]
-                .admission(&sealed)
-                .expect("exact sealed capability"),
-        )
-        .await
-        .expect("successor owns full-payload recovery without old principal");
+    assert!(matches!(
+        successor
+            .transfer_recovered(
+                &sealed,
+                &authority,
+                &page.operations[0]
+                    .admission(&sealed)
+                    .expect("exact sealed capability"),
+            )
+            .await,
+        Err(CustodyError::Rejected)
+    ));
+    assert_eq!(
+        page.operations[0].terminal(),
+        None,
+        "unmarked payload remains retained"
+    );
     drop(successor);
     drop(repo);
     c.fixture.cleanup().await;
@@ -862,15 +875,22 @@ async fn delayed_commit_schedule(committed: bool) {
             .is_err(),
         "sealed original cannot re-enter"
     );
-    repo.transfer_recovered(
-        &seal,
-        &c.authority(),
-        &page.operations[0]
-            .admission(&seal)
-            .expect("exact gate capability"),
-    )
-    .await
-    .expect("retained payload has a recovery sink");
+    assert!(matches!(
+        repo.transfer_recovered(
+            &seal,
+            &c.authority(),
+            &page.operations[0]
+                .admission(&seal)
+                .expect("exact gate capability"),
+        )
+        .await,
+        Err(CustodyError::Rejected)
+    ));
+    assert_eq!(
+        page.operations[0].terminal(),
+        None,
+        "unmarked payload stays inventoried"
+    );
     drop(blocker);
     drop(repo);
     c.fixture.cleanup().await;
@@ -908,6 +928,9 @@ async fn postgres_sm_custody_transfer_wrap_and_capacity_are_closed() {
         let admission = repo.admit(&c.frame, &c.lease).await.expect("admit");
         let slot = repo.bind(&admission).await.expect("wrap slot");
         assert_eq!((slot.ordinal(), slot.h()), (4294967296, 0));
+        repo.resume_preaccept(c.frame.operation_id)
+            .await
+            .expect("source marker");
         c.settle_executor().await;
         assert!(
             sqlx::query(&format!(

@@ -86,8 +86,9 @@ impl SmCustodyRepository {
         commit(tx).await
     }
 
-    /// Full payload/time/resource transfer commits atomically with terminal
-    /// custody. This candidate sink is not the selected pending_delivery store.
+    /// A source-marked slot's full payload/time/resource transfer commits
+    /// atomically with terminal custody. This candidate sink is not the
+    /// selected pending_delivery store.
     pub async fn transfer(&self, admission: &CommittedAdmission) -> Result<(), CustodyError> {
         self.finish_transfer(admission, None).await
     }
@@ -118,6 +119,20 @@ impl SmCustodyRepository {
         };
         let saved = self.operation(&mut tx, admission.operation).await?;
         let q = &self.schema;
+        if saved.terminal == Some(CustodyTerminal::Ack) {
+            return Err(CustodyError::Conflict);
+        }
+        // An admitted payload, or even a bound slot, does not prove the exact
+        // source attempt handed ownership to this candidate. In particular,
+        // never seal the gate on a refusal: the source may still finish its
+        // handoff, and a successor must be able to inventory the payload.
+        if saved.slot.is_none()
+            || !self
+                .has_source_handoff(&mut tx, admission.operation)
+                .await?
+        {
+            return Err(CustodyError::Rejected);
+        }
         // The first transfer seals the entire generation, even when later
         // transfers have not yet committed. Recovery can inventory the rest.
         sqlx::query(&format!(

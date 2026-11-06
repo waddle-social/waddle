@@ -13,7 +13,9 @@ use waddle_server::sm_custody::{
 use waddle_xmpp::ownership::{BindingRef, ClaimEpoch, NodeIdentity};
 
 use super::super::super::super::wait_for_blocked_application;
-use super::{child_input, child_repository, uow, Candidate, CATALOG_GRANT_LOCK};
+use super::{
+    child_input, child_repository, pg_seed_transaction, uow, Candidate, CATALOG_GRANT_LOCK,
+};
 
 async fn named_repo(c: &Candidate, name: &str) -> SmCustodyRepository {
     let named = uow(
@@ -333,6 +335,46 @@ async fn postgres_preaccept_rejects_already_started_source_and_missing_marker() 
         repo.resume_preaccept(c.frame.operation_id).await.is_err(),
         "Completed row is not a handoff marker"
     );
+    assert_eq!(snapshot(&c).await, (2, 1, 1, 0));
+    assert!(repo.transfer(&admission).await.is_err());
+    assert!(
+        sqlx::query(&format!(
+            "INSERT INTO {}.sm_custody_handoffs (operation_id) VALUES ($1)",
+            c.fixture.target
+        ))
+        .bind(c.frame.operation_id)
+        .execute(&c.fixture.admin)
+        .await
+        .is_err(),
+        "an earlier generic completion cannot mint a source marker"
+    );
+    let state: (bool, i64) = sqlx::query_as(&format!("SELECT sealed, (SELECT count(*) FROM {0}.sm_custody_terminals) FROM {0}.sm_custody_gates WHERE gate_id = $1", c.fixture.target))
+        .bind(c.capture.gate_id).fetch_one(&c.fixture.admin).await.expect("gate and terminal");
+    assert_eq!(state, (false, 0));
+    // The candidate runtime role still has raw DML. Demonstrate its limit in a
+    // rolled-back transaction rather than treating xmin as an authority proof.
+    let mut raw = pg_seed_transaction(&c.fixture).await;
+    sqlx::query(&format!("SET LOCAL ROLE {}", c.fixture.runtime))
+        .execute(&mut *raw)
+        .await
+        .expect("use candidate runtime role");
+    sqlx::query(&format!(
+        "UPDATE {}.ingress_send_attempts SET state=state WHERE message_key=$1",
+        c.fixture.target
+    ))
+    .bind(c.frame.key.message_key.to_storage())
+    .execute(&mut *raw)
+    .await
+    .expect("raw no-op write");
+    sqlx::query(&format!(
+        "INSERT INTO {}.sm_custody_handoffs (operation_id) VALUES ($1)",
+        c.fixture.target
+    ))
+    .bind(c.frame.operation_id)
+    .execute(&mut *raw)
+    .await
+    .expect("raw role can forge marker");
+    raw.rollback().await.expect("discard forged marker");
     assert_eq!(snapshot(&c).await, (2, 1, 1, 0));
     drop(repo);
     c.fixture.cleanup().await;

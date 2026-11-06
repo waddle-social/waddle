@@ -379,7 +379,7 @@ impl SmCustodyRepository {
         Ok(())
     }
 
-    async fn has_source_handoff(
+    pub(super) async fn has_source_handoff(
         &self,
         tx: &mut IngressUowTransaction<'_>,
         operation: Uuid,
