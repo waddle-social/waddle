@@ -349,35 +349,6 @@ fn element_headers_structurally_equal(
         && nodes.len() == other_nodes.len()
 }
 
-/// Drop an owned XML tree without invoking Element's recursive derived Drop.
-/// Frames contain owned child iterators, so the auxiliary stack grows with
-/// nesting depth rather than with the number of siblings.
-fn discard_element_tree(mut root: Element) {
-    let mut pending = vec![root.take_nodes().into_iter()];
-    drop(root);
-
-    while let Some(frame) = pending.last_mut() {
-        match frame.next() {
-            Some(Node::Element(mut child)) => {
-                pending.push(child.take_nodes().into_iter());
-                drop(child);
-            }
-            Some(Node::Text(text)) => drop(text),
-            None => {
-                pending.pop();
-            }
-        }
-    }
-}
-
-fn discard_unretained_operation(mut operation: AccountResourceOperation) {
-    if let AccountResourceMutation::UpdateSnapshot { snapshot, .. } = &mut operation.mutation {
-        for payload in snapshot.presence_payloads.drain(..) {
-            discard_element_tree(payload);
-        }
-    }
-}
-
 /// Monotonic revision of this single full-JID resource slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccountResourceRevision(u64);
@@ -1085,18 +1056,15 @@ impl AccountResourceSlot {
             if matches_payload {
                 return Ok(AccountResourceExecution::Replayed(outcome));
             }
-            discard_unretained_operation(operation);
             return Err(AccountResourceExecuteError::OperationIdConflict);
         }
 
         if self.journal.len() == ACCOUNT_RESOURCE_OPERATION_CAPACITY {
-            discard_unretained_operation(operation);
             return Err(AccountResourceExecuteError::JournalFull);
         }
 
         if let AccountResourceMutation::UpdateSnapshot { snapshot, .. } = &operation.mutation {
             if !snapshot.within_bounds() {
-                discard_unretained_operation(operation);
                 return Err(AccountResourceExecuteError::SnapshotTooLarge);
             }
         }
@@ -2630,6 +2598,55 @@ mod tests {
             escaped_overflow,
             false,
         );
+    }
+
+    #[test]
+    fn over_limit_wide_payload_rejects_and_drops_without_copying_siblings() {
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let binding_ref = binding(local_connection());
+        bind_active(&mut slot, &claim_identity, &binding_ref);
+        let before_revision = slot.revision();
+
+        let mut wide_payload = Element::bare("payload", "urn:example");
+        for _ in 0..100_000 {
+            wide_payload.append_text_node(String::new());
+        }
+        let rejected = operation(AccountResourceMutation::UpdateSnapshot {
+            claim_identity,
+            expected_revision: before_revision,
+            binding_ref,
+            snapshot: snapshot(
+                true,
+                None,
+                None,
+                0,
+                vec![wide_payload],
+                false,
+                false,
+                false,
+                None,
+            ),
+        });
+
+        let (result, revision) = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                // The operation is consumed and its wide payload is dropped
+                // on this thread when the over-limit update returns. Element's
+                // iterative Drop owns the original child Vec through an
+                // iterator; it does not collect a second sibling-sized Vec.
+                let result = slot.execute(rejected);
+                let revision = slot.revision();
+                drop(slot);
+                (result, revision)
+            })
+            .expect("spawn small-stack wide-payload test thread")
+            .join()
+            .expect("wide rejected payload drop must not recurse or copy siblings");
+
+        assert_eq!(result, Err(AccountResourceExecuteError::SnapshotTooLarge));
+        assert_eq!(revision, before_revision);
     }
 
     #[test]
