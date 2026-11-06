@@ -67,8 +67,16 @@ impl DarkPhysicalAttestationPins {
 pub enum DarkPhysicalAttestationError {
     #[error("pre-attestor proof requires independently supplied nonzero object pins")]
     InvalidPins,
+    #[error("pre-attestor restore path must be at most 1024 bytes and contain no NUL")]
+    InvalidRestorePath,
+    #[error("pre-attestor database name must contain 1 to 63 bytes and no NUL")]
+    InvalidDatabaseName,
     #[error("pre-attestor proof requires PostgreSQL 17 and a bounded READ COMMITTED transaction")]
     TransactionBoundary,
+    #[error("pre-attestor early catalog identity or metadata guard failed")]
+    EarlyCatalogDrift,
+    #[error("pre-attestor catalog expression tree exceeds the size bound")]
+    OversizedCatalogExpression,
     #[error("pre-attestor catalog, ownership, ACL, or object identity drifted")]
     CatalogDrift,
     #[error(transparent)]
@@ -85,7 +93,10 @@ pub enum DarkPhysicalAttestationError {
 /// 10s, 10s and 20s respectively. The runtime login must have exact SELECT
 /// access to `_lineage` to acquire its ACCESS SHARE lock. The caller must take
 /// no later-order lock before this function and must roll back on error or
-/// cancellation. A separate network/overall deadline remains necessary.
+/// cancellation. A separate network/overall deadline remains necessary. The
+/// caller supplies the desired post-proof `search_path`, which is limited to
+/// 1024 bytes and must contain no NUL. This function does not inspect or infer
+/// the inherited path; the caller owns the desired post-proof session state.
 ///
 /// Catalogs and built-in PostgreSQL objects are trusted. Privileged DDL, role
 /// and ACL changes, function replacement, and lineage writes must be quiescent
@@ -98,21 +109,27 @@ pub async fn attest_dark_catalog_pinned(
     tx: &mut Transaction<'_, Postgres>,
     config: &PhysicalAttestationConfig,
     pins: DarkPhysicalAttestationPins,
+    restore_search_path: &str,
 ) -> Result<(), DarkPhysicalAttestationError> {
     if !pins.valid() {
         return Err(DarkPhysicalAttestationError::InvalidPins);
     }
+    if restore_search_path.len() > 1024 || restore_search_path.contains('\0') {
+        return Err(DarkPhysicalAttestationError::InvalidRestorePath);
+    }
+    let database_name = &config.postgres().database.name.0;
+    if database_name.is_empty() || database_name.len() > 63 || database_name.contains('\0') {
+        return Err(DarkPhysicalAttestationError::InvalidDatabaseName);
+    }
     let connection = &mut **tx;
-    // SHOW and SET are not resolved through a caller-controlled search path.
-    let previous_path: String = sqlx::query_scalar("SHOW search_path")
-        .fetch_one(&mut *connection)
-        .await?;
+    // SET is not resolved through a caller-controlled search path. Do not read
+    // the inherited setting: even a server-side prefix may materialize it.
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;
     let result = verify_and_attest(connection, config, pins).await;
     let restored = sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
-        .bind(previous_path)
+        .bind(restore_search_path)
         .execute(&mut *connection)
         .await;
     result?;
@@ -230,7 +247,7 @@ async fn verify_catalog(
         .await?
         .unwrap_or(false);
     if !bounded {
-        return Err(DarkPhysicalAttestationError::CatalogDrift);
+        return Err(DarkPhysicalAttestationError::EarlyCatalogDrift);
     }
     // This installer check is catalog-only and is repeated after the lock.
     match verify_prerequisites(connection, config).await {
@@ -271,7 +288,7 @@ async fn verify_catalog(
         .fetch_one(&mut *connection)
         .await?;
     if !bounded_expressions {
-        return Err(DarkPhysicalAttestationError::CatalogDrift);
+        return Err(DarkPhysicalAttestationError::OversizedCatalogExpression);
     }
     // Do not deparse until the preceding catalog checks have proved that the
     // trees are bounded and their dependencies have no non-system objects.

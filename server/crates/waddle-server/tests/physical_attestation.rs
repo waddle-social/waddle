@@ -1461,7 +1461,7 @@ async fn dark_attestor_attempt(
         .execute(&mut *tx)
         .await
         .expect("bound statements");
-    let result = attest_dark_catalog_pinned(&mut tx, config, pins).await;
+    let result = attest_dark_catalog_pinned(&mut tx, config, pins, &fixture.target).await;
     tx.rollback().await.expect("roll back proof transaction");
     result
 }
@@ -1524,7 +1524,7 @@ async fn dark_attestor_accepts_exact_pins_and_rejects_unbounded_or_stale_inputs(
     wrong.attestor_function_oid ^= 1;
     assert!(matches!(
         dark_attestor_attempt(&fixture, &config, wrong).await,
-        Err(DarkPhysicalAttestationError::CatalogDrift)
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
     ));
     sqlx::query(&format!(
         "REVOKE SELECT ON {}._lineage FROM {}",
@@ -1556,7 +1556,7 @@ async fn dark_attestor_accepts_exact_pins_and_rejects_unbounded_or_stale_inputs(
         .await
         .expect("bound statement");
     assert!(matches!(
-        attest_dark_catalog_pinned(&mut tx, &config, pins).await,
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target).await,
         Err(DarkPhysicalAttestationError::TransactionBoundary)
     ));
     tx.rollback().await.expect("roll back RR transaction");
@@ -1575,7 +1575,7 @@ async fn dark_attestor_accepts_exact_pins_and_rejects_unbounded_or_stale_inputs(
         .await
         .expect("remove lock bound");
     assert!(matches!(
-        attest_dark_catalog_pinned(&mut tx, &config, pins).await,
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target).await,
         Err(DarkPhysicalAttestationError::TransactionBoundary)
     ));
     tx.rollback()
@@ -1600,7 +1600,7 @@ async fn dark_attestor_accepts_exact_pins_and_rejects_unbounded_or_stale_inputs(
         .await
         .expect("remove transaction lifetime bound");
     assert!(matches!(
-        attest_dark_catalog_pinned(&mut tx, &config, pins).await,
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target).await,
         Err(DarkPhysicalAttestationError::TransactionBoundary)
     ));
     tx.rollback().await.expect("roll back unbounded lifetime");
@@ -1712,7 +1712,7 @@ async fn dark_attestor_rejects_oversized_catalog_trees_before_deparsing() {
     assert!(stored_size < 4096, "the oversized tree is compressed");
     assert!(matches!(
         dark_attestor_attempt(&fixture, &config, pins).await,
-        Err(DarkPhysicalAttestationError::CatalogDrift)
+        Err(DarkPhysicalAttestationError::OversizedCatalogExpression)
     ));
     sqlx::query(&format!(
         "ALTER TABLE {}._lineage DROP CONSTRAINT _lineage_id_check",
@@ -1749,7 +1749,7 @@ async fn dark_attestor_rejects_oversized_catalog_trees_before_deparsing() {
     assert!(stored_size < 4096, "the oversized tree is compressed");
     assert!(matches!(
         dark_attestor_attempt(&fixture, &config, pins).await,
-        Err(DarkPhysicalAttestationError::CatalogDrift)
+        Err(DarkPhysicalAttestationError::OversizedCatalogExpression)
     ));
     fixture.cleanup().await;
 }
@@ -1783,8 +1783,84 @@ async fn dark_attestor_rejects_compressed_function_configuration() {
     assert!(rendered_size > 4096);
     assert!(matches!(
         dark_attestor_attempt(&fixture, &config, pins).await,
-        Err(DarkPhysicalAttestationError::CatalogDrift)
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
     ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn dark_attestor_never_reads_an_oversized_inherited_search_path() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime connection");
+    let inherited = "untrusted".repeat(32_768);
+    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+        .bind(&inherited)
+        .execute(&mut runtime)
+        .await
+        .expect("install oversized inherited path");
+    let mut tx = runtime.begin().await.expect("begin proof");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read committed");
+    bound_dark_transaction(&mut tx).await;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await
+        .expect("lock bound");
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .expect("statement bound");
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, &"x".repeat(1025)).await,
+        Err(DarkPhysicalAttestationError::InvalidRestorePath)
+    ));
+    assert!(matches!(
+        attest_dark_catalog_pinned(&mut tx, &config, pins, "invalid\0path").await,
+        Err(DarkPhysicalAttestationError::InvalidRestorePath)
+    ));
+    for name in [String::new(), "x".repeat(64), "invalid\0name".to_owned()] {
+        let mut wrong = fixture.lineage.clone();
+        wrong
+            .postgres_identity
+            .as_mut()
+            .expect("PostgreSQL identity")
+            .database
+            .name = PgDatabaseName(name);
+        let wrong = fixture.with_lineage(wrong);
+        assert!(matches!(
+            attest_dark_catalog_pinned(&mut tx, &wrong, pins, &fixture.target).await,
+            Err(DarkPhysicalAttestationError::InvalidDatabaseName)
+        ));
+    }
+    // This deliberate test query verifies that rejected restore inputs did not
+    // alter the inherited setting. The proof itself never queries that value.
+    let before_size: i32 = sqlx::query_scalar(
+        "SELECT pg_catalog.octet_length(pg_catalog.current_setting('search_path'))",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("measure inherited path in test");
+    assert_eq!(
+        usize::try_from(before_size).expect("positive length"),
+        inherited.len()
+    );
+    attest_dark_catalog_pinned(&mut tx, &config, pins, &fixture.target)
+        .await
+        .expect("proof replaces the inherited path without reading it");
+    let restored: String = sqlx::query_scalar("SHOW search_path")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read caller-selected path");
+    assert_eq!(restored, fixture.target);
+    tx.rollback().await.expect("roll back proof");
+    drop(runtime);
     fixture.cleanup().await;
 }
 
@@ -1854,7 +1930,7 @@ END $body$"#,
         .fetch_one(&mut *tx)
         .await
         .expect("capture caller path");
-    attest_dark_catalog_pinned(&mut tx, &config, pins)
+    attest_dark_catalog_pinned(&mut tx, &config, pins, &before)
         .await
         .expect("proof ignores hostile operator");
     let after: String = sqlx::query_scalar("SHOW search_path")
@@ -1919,7 +1995,7 @@ async fn dark_attestor_rejects_view_and_custom_cast_before_either_runs() {
     }
     assert!(matches!(
         dark_attestor_attempt(&fixture, &config, pins).await,
-        Err(DarkPhysicalAttestationError::CatalogDrift)
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
     ));
     assert!(!attestor_probe_was_called(&fixture).await);
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
@@ -2000,6 +2076,7 @@ async fn dark_attestor_rechecks_pinned_heap_after_replacement_during_lock_wait()
         .fetch_one(&mut runtime)
         .await
         .expect("runtime PID");
+    let restore_path = fixture.target.clone();
     let task = tokio::spawn(async move {
         let mut tx = runtime.begin().await.expect("begin proof");
         sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
@@ -2015,7 +2092,7 @@ async fn dark_attestor_rechecks_pinned_heap_after_replacement_during_lock_wait()
             .execute(&mut *tx)
             .await
             .expect("statement bound");
-        let result = attest_dark_catalog_pinned(&mut tx, &config, pins).await;
+        let result = attest_dark_catalog_pinned(&mut tx, &config, pins, &restore_path).await;
         tx.rollback().await.expect("rollback proof");
         result
     });
@@ -2069,7 +2146,7 @@ async fn dark_attestor_rechecks_pinned_heap_after_replacement_during_lock_wait()
     holder.commit().await.expect("publish replacement");
     assert!(matches!(
         task.await.expect("join attestation"),
-        Err(DarkPhysicalAttestationError::CatalogDrift)
+        Err(DarkPhysicalAttestationError::EarlyCatalogDrift)
     ));
     fixture.cleanup().await;
 }
