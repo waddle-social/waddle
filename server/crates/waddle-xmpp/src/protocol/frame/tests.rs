@@ -170,6 +170,48 @@ fn parses_sasl_response_frame() {
 }
 
 #[test]
+fn parses_sasl2_authenticate_and_response_frames() {
+    use waddle_xmpp_core::xep0388::Sasl2Mechanism;
+
+    let auth = r#"<authenticate xmlns="urn:xmpp:sasl:2" mechanism="OAUTHBEARER"><initial-response>biwsAQ==</initial-response></authenticate>"#;
+    match parse_frame(auth).expect("valid SASL2 authenticate") {
+        InboundFrame::Sasl2Authenticate(request) => {
+            assert_eq!(request.mechanism, Sasl2Mechanism::OAuthBearer);
+            assert_eq!(
+                request
+                    .initial_response
+                    .expect("initial response")
+                    .as_bytes(),
+                b"n,,\x01"
+            );
+        }
+        other => panic!("expected SASL2 authenticate, got {other:?}"),
+    }
+
+    let response = r#"<s:response xmlns:s="urn:xmpp:sasl:2">Yw==</s:response>"#;
+    match parse_frame(response).expect("valid SASL2 response") {
+        InboundFrame::Sasl2Response(response) => {
+            assert_eq!(response.data.as_bytes(), b"c");
+        }
+        other => panic!("expected SASL2 response, got {other:?}"),
+    }
+
+    assert!(matches!(
+        parse_frame(r#"<abort xmlns="urn:xmpp:sasl:2"/>"#),
+        Ok(InboundFrame::Sasl2Abort)
+    ));
+    assert!(matches!(
+        parse_frame(r#"<abort xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>"#),
+        Err(ParseError::UnknownRoot(root)) if root == "abort"
+    ));
+
+    let wrong_namespace = r#"<authenticate xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="OAUTHBEARER">eA==</authenticate>"#;
+    assert!(parse_frame(wrong_namespace).is_err());
+    let malformed_payload = r#"<authenticate xmlns="urn:xmpp:sasl:2" mechanism="OAUTHBEARER"><initial-response>!</initial-response></authenticate>"#;
+    assert!(parse_frame(malformed_payload).is_err());
+}
+
+#[test]
 fn rejects_sasl_response_with_child_payload() {
     let xml = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1i<foo/>aXdz</response>"#;
     assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));

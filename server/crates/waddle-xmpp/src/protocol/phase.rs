@@ -19,6 +19,7 @@ pub struct ScramPendingState {
     stored_key: Vec<u8>,
     server_key: Vec<u8>,
     username: String,
+    sasl2: bool,
 }
 
 impl fmt::Debug for ScramPendingState {
@@ -28,6 +29,7 @@ impl fmt::Debug for ScramPendingState {
             .field("stored_key", &"<redacted>")
             .field("server_key", &"<redacted>")
             .field("username", &self.username)
+            .field("sasl2", &self.sasl2)
             .finish()
     }
 }
@@ -47,6 +49,10 @@ pub enum ConnectionPhase {
     /// SCRAM client-first has been accepted and the server has sent a
     /// challenge. The next legal client step is `<response>`.
     ScramPending { auth: ScramPendingState },
+
+    /// SASL2 OAUTHBEARER rejected an invalid token and is awaiting the
+    /// mechanism's required dummy response or an abort before final failure.
+    Sasl2OAuthErrorPending,
 
     /// SASL succeeded and the connection now has an authenticated bare JID,
     /// but resource binding has not yet completed.
@@ -83,6 +89,10 @@ impl ConnectionPhase {
 
     pub fn scram_pending(auth: ScramPendingState) -> Self {
         Self::ScramPending { auth }
+    }
+
+    pub fn sasl2_oauth_error_pending() -> Self {
+        Self::Sasl2OAuthErrorPending
     }
 
     pub fn authenticated(full_jid: &FullJid) -> Self {
@@ -183,6 +193,27 @@ impl ConnectionPhase {
         }
     }
 
+    pub fn scram_pending_is_sasl2(&self) -> bool {
+        match self {
+            Self::ScramPending { auth } => auth.is_sasl2(),
+            _ => false,
+        }
+    }
+
+    pub fn is_sasl2_oauth_error_pending(&self) -> bool {
+        matches!(self, Self::Sasl2OAuthErrorPending)
+    }
+
+    /// Consume the pending OAuth error exchange and return to pre-auth state.
+    pub fn take_sasl2_oauth_error_pending(&mut self) -> bool {
+        if self.is_sasl2_oauth_error_pending() {
+            *self = Self::Unauthenticated;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn take_scram_pending(&mut self) -> Option<ScramPendingState> {
         let previous = std::mem::replace(self, Self::Unauthenticated);
         match previous {
@@ -202,16 +233,40 @@ impl ScramPendingState {
         server_key: Vec<u8>,
         username: impl Into<String>,
     ) -> Self {
+        Self::new_with_profile(scram_server, stored_key, server_key, username, false)
+    }
+
+    pub fn new_sasl2(
+        scram_server: ScramServer,
+        stored_key: Vec<u8>,
+        server_key: Vec<u8>,
+        username: impl Into<String>,
+    ) -> Self {
+        Self::new_with_profile(scram_server, stored_key, server_key, username, true)
+    }
+
+    fn new_with_profile(
+        scram_server: ScramServer,
+        stored_key: Vec<u8>,
+        server_key: Vec<u8>,
+        username: impl Into<String>,
+        sasl2: bool,
+    ) -> Self {
         Self {
             scram_server,
             stored_key,
             server_key,
             username: username.into(),
+            sasl2,
         }
     }
 
     pub fn username(&self) -> &str {
         &self.username
+    }
+
+    pub fn is_sasl2(&self) -> bool {
+        self.sasl2
     }
 
     pub fn process_client_final(
@@ -258,6 +313,30 @@ mod tests {
         assert!(!phase.allows_stream_management_enable());
         assert!(!phase.allows_stream_management_resume());
         assert_eq!(phase.scram_pending_username(), Some("alice"));
+        assert!(!phase.scram_pending_is_sasl2());
+    }
+
+    #[test]
+    fn scram_pending_state_retains_the_negotiated_sasl_profile() {
+        let sasl2 =
+            ScramPendingState::new_sasl2(ScramServer::new(), vec![1, 2, 3], vec![4, 5, 6], "alice");
+        let phase = ConnectionPhase::scram_pending(sasl2);
+        assert!(phase.scram_pending_is_sasl2());
+    }
+
+    #[test]
+    fn sasl2_oauth_error_pending_is_pre_auth_and_consumes_to_unauthenticated() {
+        let mut phase = ConnectionPhase::sasl2_oauth_error_pending();
+        assert!(phase.is_sasl2_oauth_error_pending());
+        assert!(!phase.is_authenticated());
+        assert!(!phase.allows_sasl_auth());
+        assert!(!phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(!phase.allows_stream_management_enable());
+        assert!(!phase.allows_stream_management_resume());
+        assert!(phase.take_sasl2_oauth_error_pending());
+        assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+        assert!(!phase.take_sasl2_oauth_error_pending());
     }
 
     #[test]

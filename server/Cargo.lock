@@ -4044,8 +4044,6 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 [[package]]
 name = "minidom"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "040b4e38f8abd85ddf9ea00646accc716b9d15e283b0aacb16f697ddba432c97"
 dependencies = [
  "rxml 0.13.3",
  "thiserror 2.0.18",
