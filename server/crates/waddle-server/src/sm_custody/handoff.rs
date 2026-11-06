@@ -1,0 +1,352 @@
+//! Unselected pre-start source contract and concrete one-frame memory owner.
+//! No production routing, transport, replay or endpoint publication uses it.
+
+use jid::FullJid;
+use thiserror::Error;
+use uuid::Uuid;
+use waddle_xmpp::pending_delivery::SmSessionId;
+
+use super::repository::{commit, pg};
+use super::types::db;
+use super::{
+    CommittedAdmission, CommittedSlot, CustodyCapture, CustodyError, CustodyOperation,
+    PreparedDirectFrame, SessionGeneration, SmCustodyRepository,
+};
+use crate::ingress_uow::{IngressUowTransaction, SendLease};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffStage {
+    Admission,
+    Slot,
+    SourceCompletion,
+    Hydration,
+}
+
+/// Lookup identity, not proof that an uncertain transaction committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffRecovery {
+    operation: Uuid,
+    session: SmSessionId,
+    resource: FullJid,
+    generation: SessionGeneration,
+}
+
+impl HandoffRecovery {
+    pub fn operation_id(&self) -> Uuid {
+        self.operation
+    }
+    pub fn session(&self) -> &SmSessionId {
+        &self.session
+    }
+    pub fn resource(&self) -> &FullJid {
+        &self.resource
+    }
+    pub fn generation(&self) -> SessionGeneration {
+        self.generation
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("candidate handoff failed; retained custody may require recovery")]
+pub struct HandoffFailure {
+    recovery: HandoffRecovery,
+    stage: HandoffStage,
+    #[source]
+    cause: Box<CustodyError>,
+}
+
+impl HandoffFailure {
+    pub fn recovery(&self) -> &HandoffRecovery {
+        &self.recovery
+    }
+    pub fn stage(&self) -> HandoffStage {
+        self.stage
+    }
+    pub fn cause(&self) -> &CustodyError {
+        &self.cause
+    }
+}
+
+/// Known committed payload, exact slot and source-handoff marker. This never
+/// means transport exposure or client ACK. Fields cannot be caller-constructed.
+#[derive(Debug, Clone)]
+pub struct CommittedPreacceptHandoff {
+    capture: CustodyCapture,
+    frame: PreparedDirectFrame,
+    slot: CommittedSlot,
+}
+
+impl CommittedPreacceptHandoff {
+    pub fn recovery(&self) -> HandoffRecovery {
+        recovery(&self.capture, self.frame.operation_id)
+    }
+    pub fn ordinal(&self) -> u64 {
+        self.slot.ordinal()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateHydration {
+    Inserted,
+    AlreadyHydrated,
+}
+
+/// Concrete owned candidate, never a published endpoint. Exclusive mutable
+/// access spans hydration; no generic async enqueue closure is accepted.
+pub struct CandidateSmMemory {
+    capture: CustodyCapture,
+    retired: bool,
+    frame: Option<CommittedPreacceptHandoff>,
+}
+
+impl CandidateSmMemory {
+    pub fn new(capture: CustodyCapture) -> Self {
+        Self {
+            capture,
+            retired: false,
+            frame: None,
+        }
+    }
+    pub fn retire(&mut self) {
+        self.retired = true;
+    }
+    pub fn queued_count(&self) -> usize {
+        usize::from(self.frame.is_some())
+    }
+    pub fn accepted_ordinal(&self) -> Option<u64> {
+        self.frame.as_ref().map(CommittedPreacceptHandoff::ordinal)
+    }
+    pub fn queued_frame(&self) -> Option<&PreparedDirectFrame> {
+        self.frame.as_ref().map(|handoff| &handoff.frame)
+    }
+
+    fn check(&self, handoff: &CommittedPreacceptHandoff) -> Result<(), CustodyError> {
+        if self.retired || self.capture != handoff.capture {
+            return Err(CustodyError::Rejected);
+        }
+        if self.frame.as_ref().is_some_and(|existing| {
+            existing.frame != handoff.frame || existing.slot != handoff.slot
+        }) {
+            return Err(CustodyError::Conflict);
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        handoff: &CommittedPreacceptHandoff,
+    ) -> Result<CandidateHydration, CustodyError> {
+        self.check(handoff)?;
+        if self.frame.is_some() {
+            return Ok(CandidateHydration::AlreadyHydrated);
+        }
+        self.frame = Some(handoff.clone());
+        Ok(CandidateHydration::Inserted)
+    }
+}
+
+/// A dropped/failed authority transaction must not publish a new memory entry.
+/// Exclusive receiver access prevents observing it before this guard confirms.
+struct ProvisionalHydration<'a> {
+    receiver: &'a mut CandidateSmMemory,
+    outcome: CandidateHydration,
+    confirmed: bool,
+}
+
+impl<'a> ProvisionalHydration<'a> {
+    fn new(
+        receiver: &'a mut CandidateSmMemory,
+        handoff: &CommittedPreacceptHandoff,
+    ) -> Result<Self, CustodyError> {
+        let outcome = receiver.insert(handoff)?;
+        Ok(Self {
+            receiver,
+            outcome,
+            confirmed: false,
+        })
+    }
+
+    fn confirm(mut self) -> CandidateHydration {
+        self.confirmed = true;
+        self.outcome
+    }
+}
+
+impl Drop for ProvisionalHydration<'_> {
+    fn drop(&mut self) {
+        if !self.confirmed && self.outcome == CandidateHydration::Inserted {
+            self.receiver.frame = None;
+        }
+    }
+}
+
+impl SmCustodyRepository {
+    /// Dark alternative BEFORE production start. Earlier auth transactions must
+    /// already be closed. Each custody transaction ends before the next starts.
+    pub async fn preaccept_local_direct(
+        &self,
+        frame: &PreparedDirectFrame,
+        lease: &SendLease,
+    ) -> Result<CommittedPreacceptHandoff, HandoffFailure> {
+        let id = frame.operation_id;
+        let admission = self
+            .admit(frame, lease)
+            .await
+            .map_err(|cause| self.handoff_failure(id, HandoffStage::Admission, cause))?;
+        let slot = self
+            .bind(&admission)
+            .await
+            .map_err(|cause| self.handoff_failure(id, HandoffStage::Slot, cause))?;
+        self.complete_source_handoff(&admission, &slot)
+            .await
+            .map_err(|cause| self.handoff_failure(id, HandoffStage::SourceCompletion, cause))
+    }
+
+    /// Exact-ID retry under the original current capture. Admission/slot proof
+    /// is required; a Completed attempt alone cannot mint a handoff. Successors
+    /// use sealed inventory/transfer, never old-binding memory hydration.
+    pub async fn resume_preaccept(
+        &self,
+        operation: Uuid,
+    ) -> Result<CommittedPreacceptHandoff, HandoffFailure> {
+        let admission = self
+            .committed_admission(operation)
+            .await
+            .map_err(|cause| self.handoff_failure(operation, HandoffStage::Admission, cause))?;
+        let slot = self
+            .bind(&admission)
+            .await
+            .map_err(|cause| self.handoff_failure(operation, HandoffStage::Slot, cause))?;
+        self.complete_source_handoff(&admission, &slot)
+            .await
+            .map_err(|cause| self.handoff_failure(operation, HandoffStage::SourceCompletion, cause))
+    }
+
+    async fn complete_source_handoff(
+        &self,
+        admission: &CommittedAdmission,
+        slot: &CommittedSlot,
+    ) -> Result<CommittedPreacceptHandoff, CustodyError> {
+        self.check_admission(admission)?;
+        let mut tx = self.guarded(false).await?;
+        let saved = self.operation(&mut tx, admission.operation).await?;
+        self.canonical(&mut tx, saved.frame.key.message_key).await?;
+        if saved.terminal.is_some()
+            || saved.slot.as_ref() != Some(slot)
+            || &slot.admission != admission
+        {
+            return Err(CustodyError::Rejected);
+        }
+        if !self
+            .has_source_handoff(&mut tx, admission.operation)
+            .await?
+        {
+            let q = &self.schema;
+            // Bind the transition to the original immutable attempt identity.
+            // It shares the marker's transaction and never completes a successor.
+            let changed = sqlx::query(&format!("UPDATE {q}.ingress_send_attempts SET state = 2 WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4 AND node_id = $5 AND node_incarnation = $6 AND lease_token = $7 AND state = 1"))
+                .bind(saved.frame.key.message_key.to_storage()).bind(saved.frame.key.kind.to_storage())
+                .bind(saved.frame.key.semantic_identity_hash.as_slice()).bind(saved.frame.key.resource.to_string())
+                .bind(&self.capture.owner.node_id).bind(&self.capture.owner.node_epoch).bind(saved.frame.attempt.to_string())
+                .execute(pg(&mut tx)?).await.map_err(db)?.rows_affected();
+            if changed != 1 {
+                return Err(CustodyError::Conflict);
+            }
+            sqlx::query(&format!(
+                "INSERT INTO {q}.sm_custody_handoffs (operation_id) VALUES ($1)"
+            ))
+            .bind(admission.operation)
+            .execute(pg(&mut tx)?)
+            .await
+            .map_err(db)?;
+        }
+        self.fresh_principal(&mut tx).await?;
+        commit(tx).await?;
+        Ok(CommittedPreacceptHandoff {
+            capture: self.capture.clone(),
+            frame: saved.frame,
+            slot: slot.clone(),
+        })
+    }
+
+    pub async fn hydrate_preaccepted(
+        &self,
+        receiver: &mut CandidateSmMemory,
+        handoff: &CommittedPreacceptHandoff,
+    ) -> Result<CandidateHydration, HandoffFailure> {
+        let operation = handoff.frame.operation_id;
+        let hydrate = async {
+            receiver.check(handoff)?;
+            if handoff.capture != self.capture {
+                return Err(CustodyError::Rejected);
+            }
+            let mut tx = self.guarded(false).await?;
+            let saved = self.operation(&mut tx, operation).await?;
+            self.canonical(&mut tx, saved.frame.key.message_key).await?;
+            self.check_handoff(&saved, handoff)?;
+            if !self.has_source_handoff(&mut tx, operation).await? {
+                return Err(CustodyError::Rejected);
+            }
+            self.fresh_principal(&mut tx).await?;
+            // Admission, slot and source marker already committed. This concrete
+            // mutation assigns their ordinal rather than counting it again.
+            let pending = ProvisionalHydration::new(receiver, handoff)?;
+            commit(tx).await?;
+            Ok(pending.confirm())
+        };
+        hydrate
+            .await
+            .map_err(|cause| self.handoff_failure(operation, HandoffStage::Hydration, cause))
+    }
+
+    fn check_handoff(
+        &self,
+        saved: &CustodyOperation,
+        handoff: &CommittedPreacceptHandoff,
+    ) -> Result<(), CustodyError> {
+        if saved.terminal.is_some()
+            || saved.frame != handoff.frame
+            || saved.slot.as_ref() != Some(&handoff.slot)
+        {
+            return Err(CustodyError::Rejected);
+        }
+        Ok(())
+    }
+
+    async fn has_source_handoff(
+        &self,
+        tx: &mut IngressUowTransaction<'_>,
+        operation: Uuid,
+    ) -> Result<bool, CustodyError> {
+        sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {}.sm_custody_handoffs WHERE operation_id = $1)",
+            self.schema
+        ))
+        .bind(operation)
+        .fetch_one(pg(tx)?)
+        .await
+        .map_err(db)
+    }
+
+    fn handoff_failure(
+        &self,
+        operation: Uuid,
+        stage: HandoffStage,
+        cause: CustodyError,
+    ) -> HandoffFailure {
+        HandoffFailure {
+            recovery: recovery(&self.capture, operation),
+            stage,
+            cause: Box::new(cause),
+        }
+    }
+}
+
+fn recovery(capture: &CustodyCapture, operation: Uuid) -> HandoffRecovery {
+    HandoffRecovery {
+        operation,
+        session: capture.session.clone(),
+        resource: capture.resource.clone(),
+        generation: capture.generation,
+    }
+}
