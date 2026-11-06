@@ -84,19 +84,31 @@ independent supervisor/join on that same record. No second per-connection
 index is added. Exact-reference lookup and acknowledgement survive caller and
 task-handle drops; stale references cannot reach the record.
 
-Stop and lease-loss seal admission immediately. A configured shutdown grace
-allows accepted work to finish; at its deadline, abort and join the worker,
-retaining the active input as `CompletionUnknown` and queued inputs as
-`NotStarted`. Keep the cleanup record until both driver and physical-pump
-cleanup have joined and retained work is settled. Attachment and shutdown are
-serialized by the same cleanup-record lifecycle lock. Preserve exact operation
-identity and never replay from caller cancellation.
+Stop and lease-loss seal admission immediately. The attached permit retains
+the exact identity source revision captured by `SocketAdmission`, in addition
+to the serving generation. Admission and completion both revalidate that
+authority; a result observed after source-revision loss is retained as
+`CompletionUnknown(AuthorityRevoked)` even if node lifecycle still says
+`Serving`. The custodian's first-wins stop signal also starts worker grace as
+soon as a pump initiates stop, alongside physical pump retirement. At the
+configured deadline, abort and join the worker, retaining the active input as
+`CompletionUnknown` and queued inputs as `NotStarted`. Keep the cleanup record
+until both driver and physical-pump cleanup have joined and retained work is
+settled. Attachment and shutdown are serialized by the same cleanup-record
+lifecycle lock. Direct ticket acknowledgement runs a weak, exact-reference
+settlement callback after releasing the ledger lock, so it can prune a record
+when the join task's earlier prune check saw unsettled work. The callback owns
+neither the index nor the endpoint record. Preserve exact operation identity
+and never replay from caller cancellation.
 
 The new deterministic tests cover handle-independent lookup/ack, one handler
-execution, stale references, duplicate and late attachment rejection, deadline
-abort classifications, concurrent join callers, and control admission behind
-a stalled handler. Existing owner and pump tests continue to cover bounded
-inventory, lease loss, panic, stalled physical cleanup, and successor fencing.
+execution, stale references, duplicate and late attachment rejection, direct
+ticket acknowledgement after the join task's prune check, source-revision loss
+without node lifecycle demotion, pump-triggered stop while another pump is
+held, deadline abort classifications, concurrent join callers, and control
+admission behind a stalled handler. Existing owner and pump tests continue to
+cover bounded inventory, lease loss, panic, stalled physical cleanup, and
+successor fencing.
 Keep `/ws` selection, endpoint publication, stream-management advancement,
 wire behavior, workflow files, P2 custody, and the remaining XEP-0198/malformed
 frame paths out of this tranche.

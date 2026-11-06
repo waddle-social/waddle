@@ -365,7 +365,13 @@ impl ActorSocketPublicationAuthority {
     }
 
     pub(crate) fn admission_permit(&self) -> NodeAdmissionPermit {
-        self.authority.permit.clone()
+        match &self.authority.source {
+            IdentitySource::Clustered { source, stamp } => self
+                .authority
+                .permit
+                .with_identity(source.clone(), stamp.clone()),
+            IdentitySource::Standalone => self.authority.permit.clone(),
+        }
     }
 
     pub(crate) fn with_current<R>(

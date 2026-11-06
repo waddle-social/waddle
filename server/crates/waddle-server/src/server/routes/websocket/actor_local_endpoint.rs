@@ -28,6 +28,8 @@ use std::collections::HashMap;
 #[cfg(feature = "test-support")]
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+#[cfg(feature = "test-support")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(feature = "test-support")]
@@ -103,6 +105,8 @@ struct CleanupRecord {
     custodies: Mutex<Vec<Arc<ActorOutboundCustody>>>,
     publications: Mutex<PublicationState>,
     lifecycle: Mutex<CleanupLifecycle>,
+    #[cfg(feature = "test-support")]
+    join_cleanup_finished: AtomicBool,
     #[cfg(feature = "test-support")]
     publication_probe: Mutex<Option<Arc<ActorPublicationProbe>>>,
 }
@@ -300,6 +304,7 @@ impl CleanupRecord {
         &self,
         connection: &ConnectionRef,
         driver: ConnectionActorDriverTaskCleanup,
+        settlement_callback: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(), ActorLocalEndpointError> {
         if driver.connection_ref() != connection {
             return Err(ActorLocalEndpointError::DriverConnectionMismatch);
@@ -314,6 +319,7 @@ impl CleanupRecord {
         if lifecycle.driver.is_some() {
             return Err(ActorLocalEndpointError::DriverAlreadyAttached);
         }
+        driver.set_settlement_callback(settlement_callback);
         lifecycle.driver = Some(driver);
         Ok(())
     }
@@ -424,6 +430,8 @@ impl ActorEndpointCleanupIndex {
                 driver: None,
             }),
             #[cfg(feature = "test-support")]
+            join_cleanup_finished: AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
             publication_probe: Mutex::new(None),
         });
         index.records.insert(connection, Arc::clone(&record));
@@ -436,6 +444,16 @@ impl ActorEndpointCleanupIndex {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .records
             .contains_key(connection)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn join_cleanup_finished_for_test(&self, connection: &ConnectionRef) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .records
+            .get(connection)
+            .is_some_and(|record| record.join_cleanup_finished.load(Ordering::Acquire))
     }
 
     /// Resolve a retained driver operation only through the exact physical
@@ -564,23 +582,26 @@ impl ActorEndpointCleanupIndex {
     }
 
     fn prune_if_settled(&self, connection: &ConnectionRef) {
-        let mut index = self
-            .state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if let Some(record) = index.records.get(connection) {
-            let settled = record.is_joined()
-                && !record.has_publications()
-                && record.driver_is_settled()
-                && record
-                    .custodies
-                    .lock()
-                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-                    .iter()
-                    .all(|custody| custody.retained_count() == 0);
-            if settled {
-                index.records.remove(connection);
-            }
+        prune_cleanup_index_state(&self.state, connection);
+    }
+}
+
+fn prune_cleanup_index_state(state: &Mutex<CleanupIndexState>, connection: &ConnectionRef) {
+    let mut index = state
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+    if let Some(record) = index.records.get(connection) {
+        let settled = record.is_joined()
+            && !record.has_publications()
+            && record.driver_is_settled()
+            && record
+                .custodies
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+                .iter()
+                .all(|custody| custody.retained_count() == 0);
+        if settled {
+            index.records.remove(connection);
         }
     }
 }
@@ -639,6 +660,18 @@ impl ActorLocalEndpointOwner {
                 return Err(error);
             }
         };
+        let driver_shutdown_grace = retirement_deadline;
+        let stop_signal = cleanup.custodian.stop_signal();
+        let stop_cleanup = Arc::downgrade(&cleanup);
+        tokio::spawn(async move {
+            stop_signal.cancelled().await;
+            if let Some(cleanup) = stop_cleanup.upgrade() {
+                let reason = stop_signal.reason().unwrap_or(StopReason::PumpExited);
+                if let Some(driver) = cleanup.begin_shutdown(reason) {
+                    driver.shutdown_and_join(driver_shutdown_grace).await;
+                }
+            }
+        });
         let joined_cleanup = Arc::clone(&cleanup);
         let joined_index = index.clone();
         let joined_connection = connection.clone();
@@ -648,7 +681,7 @@ impl ActorLocalEndpointOwner {
             joined_cleanup.stop_publication();
             joined_cleanup.seal_all();
             let driver_joined = if let Some(driver) = driver {
-                driver.shutdown_and_join(retirement_deadline).await;
+                driver.shutdown_and_join(driver_shutdown_grace).await;
                 driver.is_joined()
             } else {
                 true
@@ -658,6 +691,10 @@ impl ActorLocalEndpointOwner {
                 .retire_publications(retirement_deadline)
                 .await;
             joined_index.prune_if_settled(&joined_connection);
+            #[cfg(feature = "test-support")]
+            joined_cleanup
+                .join_cleanup_finished
+                .store(true, Ordering::Release);
         });
         Ok((
             Self {
@@ -695,8 +732,18 @@ impl ActorLocalEndpointOwner {
             shutdown,
         )
         .map_err(|_| ActorLocalEndpointError::DriverTaskUnavailable)?;
-        self.cleanup
-            .attach_driver(self.connection_ref(), task.cleanup_handle())?;
+        let index_state = Arc::downgrade(&self.index.state);
+        let connection = self.connection_ref().clone();
+        let settlement_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(index_state) = index_state.upgrade() {
+                prune_cleanup_index_state(&index_state, &connection);
+            }
+        });
+        self.cleanup.attach_driver(
+            self.connection_ref(),
+            task.cleanup_handle(),
+            settlement_callback,
+        )?;
         task.mark_app_owned();
         Ok(task)
     }

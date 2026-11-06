@@ -106,6 +106,7 @@ pub(super) enum ConnectionActorDriverTaskResultValue {
 pub(super) enum ConnectionActorDriverTaskUnknownReason {
     WorkerAborted,
     WorkerStopped,
+    AuthorityRevoked,
     ResultReservationExceeded,
 }
 
@@ -166,6 +167,7 @@ struct DriverShared {
     byte_permits: Arc<Semaphore>,
     limits: ConnectionActorDriverTaskLimits,
     state: Mutex<DriverLedger>,
+    settlement_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     joined: Mutex<bool>,
     joined_changed: Notify,
 }
@@ -327,6 +329,7 @@ impl ConnectionActorDriverTask {
                 next_id: 1,
                 operations: HashMap::new(),
             }),
+            settlement_callback: Mutex::new(None),
             joined: Mutex::new(false),
             joined_changed: Notify::new(),
         });
@@ -620,6 +623,7 @@ pub(super) enum ConnectionActorDriverTaskControlError {
 pub enum ConnectionActorDriverTestUnknownReason {
     WorkerAborted,
     WorkerStopped,
+    AuthorityRevoked,
     ResultReservationExceeded,
 }
 
@@ -725,6 +729,9 @@ fn map_test_snapshot(
                 }
                 ConnectionActorDriverTaskUnknownReason::WorkerStopped => {
                     ConnectionActorDriverTestUnknownReason::WorkerStopped
+                }
+                ConnectionActorDriverTaskUnknownReason::AuthorityRevoked => {
+                    ConnectionActorDriverTestUnknownReason::AuthorityRevoked
                 }
                 ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded => {
                     ConnectionActorDriverTestUnknownReason::ResultReservationExceeded
@@ -892,6 +899,8 @@ impl ConnectionActorDriverTicket {
             return Err(ConnectionActorDriverTaskAckError::WrongOwner);
         }
         ledger.operations.remove(&self.operation.id);
+        drop(ledger);
+        self.shared.operation_acknowledged();
         Ok(())
     }
 }
@@ -919,6 +928,24 @@ impl DriverShared {
         ledger.accepting = false;
         self.stop.cancel();
         drop(ledger);
+    }
+
+    fn operation_acknowledged(&self) {
+        let callback = self
+            .settlement_callback
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    fn set_settlement_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .settlement_callback
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(callback);
     }
 
     async fn wait_joined(&self) {
@@ -980,6 +1007,10 @@ impl ConnectionActorDriverTaskCleanup {
 
     pub(super) fn request_stop(&self, reason: StopReason) {
         self.inner.shared.request_stop(reason);
+    }
+
+    pub(super) fn set_settlement_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.inner.shared.set_settlement_callback(callback);
     }
 
     pub(super) fn lookup(
@@ -1168,7 +1199,13 @@ async fn run_driver(worker: DriverWorker) {
                 ConnectionActorDriverTaskResultValue::ImmediateResult(result)
             }
         };
-        active.complete(result);
+        let mut result = Some(result);
+        if permit
+            .with_current(|| active.complete(result.take().expect("operation result is present")))
+            .is_err()
+        {
+            active.complete_non_current(result.take().expect("revoked operation result remains"));
+        }
     }
 }
 
@@ -1210,6 +1247,28 @@ impl ActiveOperationGuard {
             self.operation
                 .set_snapshot(ConnectionActorDriverTaskSnapshot::Completed(result));
         }
+        self.complete = true;
+    }
+
+    fn complete_non_current(&mut self, value: ConnectionActorDriverTaskResultValue) {
+        let result = Arc::new(ConnectionActorDriverTaskResult {
+            value,
+            _reservation: Arc::clone(&self.operation._reservation),
+        });
+        let exceeds_reservation =
+            result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
+        if exceeds_reservation {
+            self.shared.request_stop(StopReason::OutboundOverload);
+        }
+        self.operation
+            .set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: if exceeds_reservation {
+                    ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded
+                } else {
+                    ConnectionActorDriverTaskUnknownReason::AuthorityRevoked
+                },
+                result: Some(result),
+            });
         self.complete = true;
     }
 }
@@ -1687,7 +1746,10 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), active.wait())
                 .await
                 .expect("active handler returns under its own custody"),
-            ConnectionActorDriverTaskSnapshot::Completed(_)
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::AuthorityRevoked,
+                result: Some(_),
+            }
         ));
         task.wait_joined().await;
         active.acknowledge().expect("completion explicitly settled");

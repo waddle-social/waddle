@@ -1572,8 +1572,7 @@ impl IoCustodianHandle {
     }
 
     /// Clone the exact physical connection's first-wins stop signal for
-    /// independently owned test-support tasks.
-    #[cfg(feature = "test-support")]
+    /// independently owned cleanup tasks.
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
     }
