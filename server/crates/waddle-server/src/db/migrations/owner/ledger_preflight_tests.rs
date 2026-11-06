@@ -541,7 +541,6 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
-    cleanup_failed_big_acl_witness(&url).await;
     let fixture = Fixture::new(&url).await;
     fixture.seed_v1030().await;
     let mut roles = Vec::new();
@@ -560,10 +559,10 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
         .expect("grow raw ACL");
         roles.push(role);
     }
-    let (raw_size, compression): (i32, Option<String>) = sqlx::query_as(&format!(
+    let (raw_size, compression): (i32, Option<String>) = sqlx::query_as(
         "SELECT pg_catalog.pg_column_size(nspacl), pg_catalog.pg_column_compression(nspacl) \
-         FROM pg_catalog.pg_namespace WHERE nspname=$1"
-    ))
+         FROM pg_catalog.pg_namespace WHERE nspname=$1",
+    )
     .bind(&fixture.schema)
     .fetch_one(&fixture.admin)
     .await
@@ -614,60 +613,6 @@ async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_fir
             .expect("drop test ACL role");
     }
     fixture.close().await;
-}
-
-async fn cleanup_failed_big_acl_witness(url: &str) {
-    let admin = PgPool::connect(url)
-        .await
-        .expect("cleanup admin connection");
-    let schemas: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT n.nspname::text FROM pg_catalog.pg_namespace n \
-         JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname='_migrations' \
-         CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl \
-         JOIN pg_catalog.pg_roles r ON r.oid=acl.grantee \
-         WHERE n.nspname LIKE 'ledger_p21_%' AND r.rolname LIKE 'ledger_big_acl_%'"
-    ).fetch_all(&admin).await.expect("find stale ACL witness schema");
-    for schema in schemas {
-        let suffix = schema
-            .strip_prefix("ledger_p21_")
-            .expect("fixture schema prefix");
-        sqlx::query(&format!(
-            "DROP SCHEMA \"{}\" CASCADE",
-            schema.replace('"', "\"\"")
-        ))
-        .execute(&admin)
-        .await
-        .expect("drop stale ACL witness schema");
-        for role in [format!("ledger_o_{suffix}"), format!("ledger_r_{suffix}")] {
-            sqlx::query(&format!(
-                "DROP ROLE IF EXISTS \"{}\"",
-                role.replace('"', "\"\"")
-            ))
-            .execute(&admin)
-            .await
-            .expect("drop stale fixture role");
-        }
-    }
-    let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT rolname::text FROM pg_catalog.pg_roles WHERE rolname LIKE 'ledger_big_acl_%'",
-    )
-    .fetch_all(&admin)
-    .await
-    .expect("find stale ACL grantee roles");
-    for role in roles {
-        sqlx::query(&format!("DROP OWNED BY \"{}\"", role.replace('"', "\"\"")))
-            .execute(&admin)
-            .await
-            .expect("revoke stale ACL grantee privileges");
-        sqlx::query(&format!(
-            "DROP ROLE IF EXISTS \"{}\"",
-            role.replace('"', "\"\"")
-        ))
-        .execute(&admin)
-        .await
-        .expect("drop stale ACL grantee role");
-    }
-    admin.close().await;
 }
 
 #[tokio::test]
