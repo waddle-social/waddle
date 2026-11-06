@@ -1,6 +1,7 @@
 //! Catalog-first proof for the separately provisioned installer role.
 
-use sqlx::postgres::{types::Oid, PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::types::Oid;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use super::super::super::read_only_timeout::timeout_millis;

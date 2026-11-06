@@ -1,11 +1,21 @@
 # P2.1 pinned pool-hook and installer transition
 
-Status: **plan; no serving selector**. This grouped continuation starts from
+Status: **dark implementation; no serving selector**. This grouped continuation starts from
 main `600d1af0` after #2239. The first target is PostgreSQL 17, built with
 clustering support and configured for one runtime node. The opt-in dark
 attestor and exact-key receipt lookup are present, but the current pool hooks
 and installer pre-reads still use earlier checks. `UnconvertedStores` remains
 fatal before listeners.
+
+The opt-in installer and hook code for the first three stages below is
+production-compiled; independent pin recording and primary fencing remain
+operator obligations. A bounded READ WRITE V1030 ledger entry is also present, but no
+production transaction caller uses it yet. The version 2 startup parser
+accepts an independent pin bundle and then refuses before opening a database
+connection. A pinned checkout pool cannot be converted into the legacy
+`DatabasePool` or used for the legacy ingress-profile inspection. The 24
+`attest_transaction` callers and direct legacy attestor entries in stage 4
+remain a separate migration gate; this checkpoint authorizes no serving work.
 
 ## Architecture gate
 
