@@ -150,7 +150,7 @@ pub fn pinned_attested_pool(
         writer_capability: AttestedPostgresWriterCapability {
             binding: Arc::new(()),
             config,
-            mode: AttestationMode::Pinned(pins),
+            mode: AttestationMode::Pinned(Box::new(pins)),
         },
     })
 }

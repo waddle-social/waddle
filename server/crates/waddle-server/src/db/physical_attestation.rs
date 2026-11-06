@@ -171,7 +171,7 @@ pub(crate) struct AttestedPostgresWriterCapability {
 #[derive(Clone, PartialEq, Eq)]
 enum AttestationMode {
     LegacyDark,
-    Pinned(PinnedRuntimeAuthority),
+    Pinned(Box<PinnedRuntimeAuthority>),
 }
 
 impl AttestedPostgresWriterCapability {
