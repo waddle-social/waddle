@@ -26,6 +26,11 @@ pub use installer::{
     InstallationStatus,
 };
 mod restricted_ingress;
+#[cfg(feature = "test-support")]
+pub use restricted_ingress::{
+    RestrictedEffectReceipt, RestrictedReceiptPilot, RestrictedReceiptReadback,
+    RestrictedReceiptWrite,
+};
 pub use restricted_ingress::{RestrictedIngressProfileError, RestrictedIngressProfileObservation};
 #[cfg(feature = "test-support")]
 pub use restricted_ingress::{RestrictedTransactionProbe, RestrictedTransactionProbeObservation};

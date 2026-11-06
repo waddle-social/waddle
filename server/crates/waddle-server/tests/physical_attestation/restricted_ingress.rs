@@ -16,6 +16,8 @@ use super::{
     prepare_candidate_application_fixture, test_url, url_with_schema, Fixture, CATALOG_GRANT_LOCK,
 };
 
+#[path = "restricted_receipt_transaction.rs"]
+mod receipt_transaction;
 #[path = "restricted_transaction_probe.rs"]
 mod transaction_probe;
 
@@ -242,7 +244,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
     pool.close().await;
     let reconnected = attested_pool(
         fixture.runtime_options.clone(),
-        config,
+        config.clone(),
         1,
         Duration::from_secs(2),
     )
@@ -266,6 +268,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         );
     }
     drop(raw);
+    receipt_transaction::exercise(&fixture, &config, &api_role, epoch_oid).await;
     execute(
         &fixture.admin,
         &format!("DROP OWNED BY {api}; DROP ROLE {api}"),

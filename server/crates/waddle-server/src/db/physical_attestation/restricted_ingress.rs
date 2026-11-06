@@ -22,6 +22,13 @@ use super::{
 mod catalog;
 mod manifest;
 #[cfg(feature = "test-support")]
+mod receipt_transaction;
+#[cfg(feature = "test-support")]
+pub use receipt_transaction::{
+    RestrictedEffectReceipt, RestrictedReceiptPilot, RestrictedReceiptReadback,
+    RestrictedReceiptWrite,
+};
+#[cfg(feature = "test-support")]
 mod transaction_probe;
 #[cfg(feature = "test-support")]
 pub use transaction_probe::{RestrictedTransactionProbe, RestrictedTransactionProbeObservation};
