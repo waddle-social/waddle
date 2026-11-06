@@ -20,10 +20,10 @@ use super::{DetachedSession, InMemorySmSessionRegistry, SmRegistryError};
 pub(super) fn prepare_detached_append(
     previous_sequences: &[u32],
     updated: &DetachedSession,
-    sequence: u32,
+    entry: &super::DetachedUnackedStanza,
     stanza: &Stanza,
-    original_receipt_at: DateTime<Utc>,
 ) -> Result<PersistedDetachedAppend, SmRegistryError> {
+    let sequence = entry.sequence;
     let retained: HashSet<_> = updated
         .unacked_stanzas
         .iter()
@@ -40,11 +40,12 @@ pub(super) fn prepare_detached_append(
     Ok(PersistedDetachedAppend {
         session: super::persistence_codec::detached_to_persisted(updated)?,
         stanza: PersistedUnackedStanza {
-            ingress_receipts: Vec::new(),
+            provenance: entry.provenance.clone(),
+            ingress_receipts: entry.ingress_receipts.clone(),
             stream_id: SmSessionId::new(&updated.stream_id),
             sequence,
             stanza: Box::new(stanza.clone()),
-            original_receipt_at,
+            original_receipt_at: entry.original_receipt_at,
         },
         evicted_sequences,
         ingress_append: None,
@@ -229,29 +230,27 @@ impl InMemorySmSessionRegistry {
             .map(|entry| entry.sequence)
             .collect();
         let mut updated = previous;
-        let sequence = match sequence {
-            Some(sequence) => {
-                if !updated.record_detached_outbound_at(sequence, stanza, original_receipt_at) {
-                    return Ok(true);
-                }
-                sequence
-            }
-            None => {
-                updated.record_detached_outbound(stanza, original_receipt_at);
-                updated.outbound_count
-            }
+        let entry = match sequence {
+            Some(sequence) => match updated.record_detached_outbound_at_with_provenance(
+                sequence,
+                stanza,
+                original_receipt_at,
+                Default::default(),
+            ) {
+                Some(entry) => entry,
+                None => return Ok(true),
+            },
+            None => updated.record_detached_outbound_with_provenance(
+                stanza,
+                original_receipt_at,
+                Default::default(),
+            ),
         };
         // The operation guard covers ownership recovery and storage. Moving it
         // into the storage task keeps cancellation from exposing an unresolved
         // commit to the next writer; the stale mark makes that writer reload.
         let _guard = if let Some(storage) = &self.persistence {
-            let append = prepare_detached_append(
-                &previous_sequences,
-                &updated,
-                sequence,
-                stanza,
-                original_receipt_at,
-            )?;
+            let append = prepare_detached_append(&previous_sequences, &updated, &entry, stanza)?;
             let fence = self.detached_append_fence_locked(&updated).await;
             self.mark_snapshot_stale(&session_id)?;
             let storage = std::sync::Arc::clone(storage);

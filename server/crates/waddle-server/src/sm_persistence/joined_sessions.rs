@@ -8,16 +8,16 @@ pub(super) async fn list_all_sessions_with_unacked(
 ) -> Result<Vec<(PersistedSession, Vec<PersistedUnackedStanza>)>, SmPersistenceError> {
     let mut rows = storage
         .query(
-            "SELECT s.stream_id, s.user_id, s.full_jid, s.occupancy_session, s.inbound_count, \
+            &format!("SELECT s.stream_id, s.user_id, s.full_jid, s.occupancy_session, s.inbound_count, \
                     s.outbound_count, s.last_acked, s.max_resume_secs, \
                     s.detached_at_ms, s.max_resume_duration_ms, \
                     s.carbons_enabled, s.roster_interested, s.blocklist_interested, s.presence_available, \
                     s.presence_show, s.presence_status, s.presence_priority, \
                     s.replay_gap_through, s.presence_payloads, \
-                    u.sequence, u.stanza_xml, u.original_receipt_at_ms, u.ingress_receipts \
+                    u.sequence, u.stanza_xml, u.original_receipt_at_ms, u.ingress_receipts, {provenance} \
              FROM sm_sessions s \
              LEFT JOIN sm_unacked u ON s.stream_id = u.stream_id \
-             ORDER BY s.stream_id ASC, u.sequence ASC",
+             ORDER BY s.stream_id ASC, u.sequence ASC", provenance = super::codec::bounded_provenance_projection(storage.db.driver(), "u.provenance")),
             (),
         )
         .await?;

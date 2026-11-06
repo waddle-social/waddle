@@ -1082,6 +1082,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             last_acked: 0,
             replay_gap_through: None,
             unacked_stanzas: vec![DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: "<message xmlns='jabber:client' type='chat' from='bob@example.com/web' to='alice@example.com/web' id='pre-authority-pending'><body>queued before cutover</body></message>".to_owned(),
@@ -1452,12 +1453,14 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             replay_gap_through: None,
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 9,
                     stanza_xml: "<message xmlns='jabber:client' id='m9'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
                 },
                 DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 10,
                     stanza_xml: "<message xmlns='jabber:client' id='m10'/>".to_string(),

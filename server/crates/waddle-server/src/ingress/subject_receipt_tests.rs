@@ -63,7 +63,7 @@ async fn rejected_subject_receipt(fixture: test_support::IngressFixture) {
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(report.frame_obligations.len(), 1);
     for frame in &report.frame_obligations[0].frames {
-        let waddle_xmpp::Stanza::Message(message) = frame else {
+        let waddle_xmpp::Stanza::Message(message) = &frame.stanza else {
             panic!("subject bounce must be a message");
         };
         let element = minidom::Element::from(message.clone());
@@ -431,8 +431,11 @@ async fn subject_broadcast_after_actor_commit(
             0,
             "frame write has not completed"
         );
-        let [Stanza::Message(reply)] = bounce.frames.as_slice() else {
+        let [frame] = bounce.frames.as_slice() else {
             panic!("one message bounce");
+        };
+        let Stanza::Message(reply) = &frame.stanza else {
+            panic!("message bounce");
         };
         let ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
             mutation:

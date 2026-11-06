@@ -136,7 +136,7 @@ impl DrainAuthority {
 /// the sequence is counted and the client may already have the stanza.
 pub(super) async fn reserve_live_recorded(
     state: &WebSocketState,
-    sm_state: &StreamManagementState,
+    sm_state: &mut StreamManagementState,
     drained_appends: &mut Vec<DrainedAppend>,
 ) {
     let mut authority = DrainAuthority::default();
@@ -146,18 +146,21 @@ pub(super) async fn reserve_live_recorded(
                 sequence,
                 "ingress replay payload unavailable at detach; entry stays unkeyed"
             );
+            sm_state.mark_provenance_unknown(sequence);
             continue;
         };
         let Some(obligation) = authority
             .authorize(state, Some(&payload), Some(obligation))
             .await
         else {
+            sm_state.mark_provenance_unknown(sequence);
             continue;
         };
         if drained_appends
             .iter()
             .any(|drained| drained.0.key() == &obligation.key)
         {
+            sm_state.mark_provenance_unknown(sequence);
             continue;
         }
         match state
@@ -170,8 +173,9 @@ pub(super) async fn reserve_live_recorded(
             Ok(Some(ticket)) => {
                 drained_appends.push(DrainedAppend(ticket.at(sequence, payload, received_at)));
             }
-            Ok(None) => {}
+            Ok(None) => sm_state.mark_provenance_unknown(sequence),
             Err(error) => {
+                sm_state.mark_provenance_unknown(sequence);
                 warn!(%error, "ingress append ledger unreadable at detach; entry stays unkeyed");
             }
         }

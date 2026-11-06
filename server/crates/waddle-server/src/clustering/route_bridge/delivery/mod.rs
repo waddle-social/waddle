@@ -84,7 +84,7 @@ pub(super) fn remote_resource_muc_outcome(
 ) -> OrderedRelayMucProxyOutcome {
     match reply.outcome {
         RemoteResourceRouteOutcome::Delivered | RemoteResourceRouteOutcome::QueuedDetached => {
-            let frames = reply.replies.into_iter().map(|reply| reply.0).collect();
+            let frames = reply.replies.into_iter().map(Into::into).collect();
             match reply.reply_receipt {
                 Some(token) => OrderedRelayMucProxyOutcome::PendingFrames {
                     frames,
@@ -157,10 +157,16 @@ pub(super) fn no_client_reply_outcome_with_commit_state_and_join_repair(
 
 pub(super) fn remote_replies_from_frames(
     frames: Vec<String>,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     frames
         .into_iter()
-        .map(|frame| super::super::codec::decode_stanza(frame.as_str()).map(RemoteStanza))
+        .map(|frame| {
+            super::super::codec::decode_stanza(frame.as_str()).map(|stanza| {
+                crate::clustering::codec::RemoteReplyFrame::from(
+                    waddle_xmpp::stream_management::SmProvenancedStanza::from(stanza),
+                )
+            })
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| {
             tracing::warn!(

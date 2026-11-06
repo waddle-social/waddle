@@ -482,7 +482,7 @@ pub(in crate::clustering::relay) fn is_idempotent_join_presence_envelope(
 // remote-resource replies; companion endpoint versions are v3 and v6 (#1756).
 // v11: carry the recorded ingress append obligation on full-JID message payloads (#1778).
 // v12: frozen processed recipient copies bypass the recipient pipeline (#1770).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v13")]
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v14")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -726,10 +726,10 @@ pub struct RelayRouteRemoteResourceStanzaReply {
     pub reply_receipt: Option<RelayReplyReceiptToken>,
     pub owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     pub outcome: RemoteResourceRouteOutcome,
-    pub replies: Vec<RemoteStanza>,
+    pub replies: Vec<crate::clustering::codec::RemoteReplyFrame>,
 }
 
-// The v8 receive contract is frozen separately in `remote_resource_compat`.
+// The v9 receive contract is frozen separately in `remote_resource_compat`.
 // Domain types above can evolve only with explicit wire adapters.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

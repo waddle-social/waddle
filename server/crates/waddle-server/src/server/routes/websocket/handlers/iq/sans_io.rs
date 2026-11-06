@@ -884,10 +884,16 @@ async fn relay_muji_to_room_owner(
     {
         MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
             OrderedRelayMucProxyOutcome::Delivered(replies) if !replies.is_empty() => {
+                // This legacy XML return type cannot carry per-frame provenance.
+                // Re-entry to the SM queue therefore records it as Unknown.
                 MujiRelayOutcome::Frames(
                     replies
                         .iter()
-                        .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
+                        .map(|reply| {
+                            crate::server::routes::websocket::transport_xml::stanza_to_xml(
+                                &reply.stanza,
+                            )
+                        })
                         .collect(),
                 )
             }

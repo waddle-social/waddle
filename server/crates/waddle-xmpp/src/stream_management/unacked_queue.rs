@@ -16,6 +16,8 @@ use super::sequence::{sequence_gt, sequence_lte};
 /// An unacknowledged stanza waiting for client acknowledgment.
 #[derive(Debug, Clone)]
 pub struct UnackedStanza {
+    /// Origin claims for this exact frame; they do not grant settlement authority.
+    pub provenance: super::SmFrameProvenance,
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
     pub ingress_receipts: Vec<SmIngressFrameReceipt>,
     /// The sequence number of this stanza (outbound count when sent)
@@ -77,6 +79,7 @@ impl UnackedStanza {
         Self {
             sequence,
             stanza_xml,
+            provenance: Default::default(),
             sent_at: Instant::now(),
             ingress_receipts: Vec::new(),
             original_receipt_at,
@@ -134,17 +137,32 @@ impl UnackedQueue {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> UnackedPushResult {
+        self.push_with_provenance(
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+            super::SmFrameProvenance::Unknown,
+        )
+    }
+
+    /// Record provenance with the frame, including when it is immediately evicted.
+    #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
+    pub fn push_with_provenance(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::SmFrameProvenance,
+    ) -> UnackedPushResult {
         let evicted = if self.stanzas.len() >= self.max_size {
             self.stanzas.pop_front()
         } else {
             None
         };
 
-        self.stanzas.push_back(UnackedStanza::with_receipt_at(
-            sequence,
-            stanza_xml,
-            original_receipt_at,
-        ));
+        let mut stanza = UnackedStanza::with_receipt_at(sequence, stanza_xml, original_receipt_at);
+        stanza.provenance = provenance;
+        self.stanzas.push_back(stanza);
 
         match evicted {
             Some(stanza) => UnackedPushResult::Evicted(stanza),
@@ -183,6 +201,7 @@ impl UnackedQueue {
             .iter()
             .filter(|s| sequence_gt(s.sequence, h))
             .map(|s| super::ReplayStanza {
+                provenance: s.provenance.clone(),
                 ingress_receipts: s.ingress_receipts.clone(),
                 stanza_xml: s.stanza_xml.clone(),
                 original_receipt_at: s.original_receipt_at,
@@ -198,6 +217,7 @@ impl UnackedQueue {
         self.stanzas
             .iter()
             .map(|s| super::session_registry::DetachedUnackedStanza {
+                provenance: s.provenance.clone(),
                 ingress_receipts: s.ingress_receipts.clone(),
                 sequence: s.sequence,
                 stanza_xml: s.stanza_xml.clone(),
@@ -217,6 +237,7 @@ impl UnackedQueue {
                     entry.stanza_xml.clone(),
                     entry.original_receipt_at,
                 );
+                stanza.provenance = entry.provenance.clone();
                 stanza.ingress_receipts = entry.ingress_receipts.clone();
                 self.stanzas.push_back(stanza);
             }
@@ -234,6 +255,16 @@ impl UnackedQueue {
             .find(|entry| entry.sequence == sequence)
         {
             entry.ingress_append = Some(Box::new(obligation));
+        }
+    }
+
+    pub(super) fn mark_provenance_unknown(&mut self, sequence: u32) {
+        if let Some(entry) = self
+            .stanzas
+            .iter_mut()
+            .find(|entry| entry.sequence == sequence)
+        {
+            entry.provenance = super::SmFrameProvenance::Unknown;
         }
     }
 
@@ -372,18 +403,21 @@ mod tests {
         let now = Utc::now();
         let stanzas = vec![
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 5,
                 stanza_xml: "<msg5/>".to_string(),
                 original_receipt_at: now,
             },
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 6,
                 stanza_xml: "<msg6/>".to_string(),
                 original_receipt_at: now,
             },
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 7,
                 stanza_xml: "<msg7/>".to_string(),

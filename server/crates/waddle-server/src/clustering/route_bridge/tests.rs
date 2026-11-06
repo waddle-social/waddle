@@ -329,6 +329,7 @@ fn iq_payload() -> OrderedRelayPayload {
 
 fn envelope() -> RemoteStanzaEnvelope {
     RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: NodeId::new(origin_identity().node_id),
         channel: OrderedRelayChannel {
             origin: OrderedRelayOrigin::SmSession(waddle_xmpp::pending_delivery::SmSessionId::new(

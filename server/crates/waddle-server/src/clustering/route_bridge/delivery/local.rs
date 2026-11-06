@@ -4,7 +4,7 @@ use super::{
     relay_payload_target, route_local_bare_jid_with_timeout, validate_claims,
     FullJidDeliveryOutcome, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
     OrderedRelayNackReason, OrderedRelayPayload, RelayFrameCompletion, RelayPayloadTarget,
-    RemoteDeliveryOutcome, RemoteStanza, RemoteStanzaEnvelope, Stanza,
+    RemoteDeliveryOutcome, RemoteStanzaEnvelope, Stanza,
 };
 use crate::ingress::execute::RelayFrameReceiptCompletion;
 use crate::ingress::identity::IngressRelayAdmission;
@@ -17,7 +17,7 @@ impl OrderedRelayDeliveryBridge {
         &self,
         envelope: &RemoteStanzaEnvelope,
         completion: &mut Option<RelayFrameCompletion>,
-    ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+    ) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
         let Some(services) = self.services.get().cloned() else {
             return Err(OrderedRelayNackReason::Unreachable);
         };

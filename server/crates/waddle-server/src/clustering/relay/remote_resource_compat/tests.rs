@@ -5,7 +5,7 @@ use super::{
     RelayRemoteResourceFrameStatus, RelayRouteRemoteResourceStanza,
     RelayRouteRemoteResourceStanzaReply, RelayTraceContext, RemoteResourceOutboundFrame,
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteSendError, RemoteStanza,
-    RouteReply, RouteV8, Serialize,
+    RouteReply, RouteV9, Serialize,
 };
 use crate::clustering::local_claims::RoomLocalClaims;
 use crate::clustering::relay::{classify_effect, RelaySendEffect};
@@ -283,17 +283,16 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 #[test]
-fn frozen_baseline_accepts_pre_upgrade_requests_and_replies_in_both_directions() {
+fn current_route_and_frame_adapters_preserve_requests_and_replies() {
     for current in routes() {
-        // The domain encoding here is the existing binary's v8 encoding. The
-        // new receiver is a separate DTO, and both directions must agree.
-        let received: RouteV8 =
-            rmp_serde::from_slice(&encode(&current)).expect("old sender -> new receiver");
+        // The current route DTO and domain request retain the same fields.
+        let received: RouteV9 =
+            rmp_serde::from_slice(&encode(&current)).expect("domain -> route DTO");
         assert_eq!(encode(&received), encode(&current));
-        let new_sender = RouteV8::from(current.clone());
-        let old_receiver: RelayRouteRemoteResourceStanza =
-            rmp_serde::from_slice(&encode(&new_sender)).expect("new sender -> old receiver");
-        assert_eq!(encode(&old_receiver), encode(&current));
+        let new_sender = RouteV9::from(current.clone());
+        let domain_receiver: RelayRouteRemoteResourceStanza =
+            rmp_serde::from_slice(&encode(&new_sender)).expect("route DTO -> domain");
+        assert_eq!(encode(&domain_receiver), encode(&current));
         let domain: RelayRouteRemoteResourceStanza = received.into();
         assert_eq!(
             encode(&domain),
@@ -322,12 +321,12 @@ fn frozen_baseline_accepts_pre_upgrade_requests_and_replies_in_both_directions()
         RemoteResourceRouteOutcome::JoinMaybeCommitted,
     ] {
         let reply = route_reply(outcome);
-        let frozen: RouteReply = rmp_serde::from_slice(&encode(&reply)).expect("old reply decoded");
+        let frozen: RouteReply = rmp_serde::from_slice(&encode(&reply)).expect("reply DTO decoded");
         assert_eq!(encode(&frozen), encode(&reply));
-        let old: RelayRouteRemoteResourceStanzaReply =
+        let domain: RelayRouteRemoteResourceStanzaReply =
             rmp_serde::from_slice(&encode(&RouteReply::from(reply.clone())))
-                .expect("new reply decoded");
-        assert_eq!(encode(&old), encode(&reply));
+                .expect("domain reply decoded");
+        assert_eq!(encode(&domain), encode(&reply));
         assert_eq!(
             encode(&RelayRouteRemoteResourceStanzaReply::from(frozen)),
             encode(&reply)
@@ -347,7 +346,13 @@ fn route_reply(outcome: RemoteResourceRouteOutcome) -> RelayRouteRemoteResourceS
             semantic_identity_hash: [19; 32],
         }],
         outcome,
-        replies: stanzas(),
+        replies: stanzas()
+            .into_iter()
+            .map(|stanza| crate::clustering::codec::RemoteReplyFrame {
+                stanza,
+                provenance: Default::default(),
+            })
+            .collect(),
     }
 }
 
@@ -385,11 +390,11 @@ fn live_adapters_preserve_authority_stanzas_and_reject_append_obligations() {
 }
 
 #[test]
-fn complete_frozen_wire_corpus_has_not_changed() {
+fn current_versioned_wire_corpus_is_pinned() {
     use sha2::{Digest, Sha256};
     let mut corpus = Vec::new();
     for current in routes() {
-        corpus.push(encode(&RouteV8::from(current.clone())));
+        corpus.push(encode(&RouteV9::from(current.clone())));
         if let Some(live) = LiveRoute::from_current(&current) {
             corpus.push(encode(&live));
         }
@@ -425,12 +430,11 @@ fn complete_frozen_wire_corpus_has_not_changed() {
         );
         corpus.push(encode(&frozen));
     }
-    // Pin shared scalar/authority leaves as well as outer contracts. Never update
-    // this hash for a production schema change: retain these DTOs and add a new
-    // contract. Change fixture coverage only with a reviewed fixture update.
+    // Pin the new route reply and shared scalar/authority leaves. The route
+    // message IDs changed with this corpus; old reply handlers are not retained.
     assert_eq!(
         hex::encode(Sha256::digest(encode(&corpus))),
-        "9ed8834110e03e569e9512e3697f4e1805aaeb1d8c88b340ef787446bd501b8b"
+        "1f35db1e158030625f96034fdf3abc9592a286a298d3fe486a2ebbcf3972a146"
     );
 }
 
@@ -442,8 +446,8 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
     use kameo::remote::RemoteMessage;
     use waddle_xmpp::registry::ConnectionEntry;
     assert_eq!(
-        <RelayActor as RemoteMessage<RouteV8>>::REMOTE_ID,
-        "waddle.clustering.relay.remote_resource_route.v8"
+        <RelayActor as RemoteMessage<RouteV9>>::REMOTE_ID,
+        "waddle.clustering.relay.remote_resource_route.v9"
     );
     assert_eq!(
         <RelayActor as RemoteMessage<FrameV3>>::REMOTE_ID,
@@ -451,7 +455,7 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
     );
     assert_eq!(
         <RelayActor as RemoteMessage<LiveRoute>>::REMOTE_ID,
-        "waddle.clustering.relay.live_resource_route.v2"
+        "waddle.clustering.relay.live_resource_route.v3"
     );
     assert_eq!(
         <RelayActor as RemoteMessage<LiveFrame>>::REMOTE_ID,

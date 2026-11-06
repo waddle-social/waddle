@@ -161,9 +161,22 @@ impl RelayFrameReceiptCompletion {
 /// Frames belonging to one external effect, with its durable receipt obligations.
 #[derive(Debug)]
 pub struct FrameObligation {
-    pub frames: Vec<Stanza>,
+    pub frames: Vec<waddle_xmpp::stream_management::SmProvenancedStanza>,
     pub receipt_keys: Vec<EffectReceiptKey>,
     pub(in crate::ingress) effect_index: usize,
+}
+
+#[cfg(test)]
+impl FrameObligation {
+    pub(crate) fn test_frames(
+        frames: Vec<waddle_xmpp::stream_management::SmProvenancedStanza>,
+    ) -> Self {
+        Self {
+            frames,
+            receipt_keys: Vec::new(),
+            effect_index: 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -723,7 +736,7 @@ pub async fn execute_effects(
                     let result = match result {
                         EffectOutcome::RelayFrames { frames, completion } => {
                             report.retain_relay_frame_completion(completion);
-                            EffectOutcome::Frames(frames)
+                            EffectOutcome::ProvenancedFrames(frames)
                         }
                         result => result,
                     };
@@ -1034,7 +1047,7 @@ pub(in crate::ingress::execute) fn subject_bounce_receipt(
 pub(in crate::ingress::execute) fn classify_outcome(
     effect: &ExternalEffect,
     outcome: EffectOutcome,
-    frames: &mut Vec<Stanza>,
+    frames: &mut Vec<waddle_xmpp::stream_management::SmProvenancedStanza>,
 ) -> ExternalOutcome {
     match outcome {
         EffectOutcome::Settled(settled) => {
@@ -1052,7 +1065,12 @@ pub(in crate::ingress::execute) fn classify_outcome(
         }
         #[cfg(feature = "clustering")]
         EffectOutcome::RelayFrames { .. } => ExternalOutcome::Failed,
-        EffectOutcome::Frames(mut produced) => {
+        EffectOutcome::Frames(produced) => classify_outcome(
+            effect,
+            EffectOutcome::ProvenancedFrames(produced.into_iter().map(Into::into).collect()),
+            frames,
+        ),
+        EffectOutcome::ProvenancedFrames(mut produced) => {
             if matches!(effect, ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })) && !produced.is_empty() {
                 frames.append(&mut produced);
                 return ExternalOutcome::Failed;
@@ -1119,7 +1137,7 @@ pub(in crate::ingress::execute) fn classify_outcome(
             if let ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation {
                 mutation: crate::server::routes::interpret::effects::room::RoomActorMutation::SetSubject { rejection_reply, .. }, ..
             }) = effect {
-                frames.push(Stanza::Message((**rejection_reply).clone()));
+                frames.push(Stanza::Message((**rejection_reply).clone()).into());
                 return ExternalOutcome::Done;
             }
             ExternalOutcome::Failed

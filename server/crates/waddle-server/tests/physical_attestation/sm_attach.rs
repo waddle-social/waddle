@@ -504,6 +504,22 @@ async fn portable_sm_attach_checks_restricted_snapshot_and_schema_drift() {
     drift(
         &fixture,
         &runtime,
+        &format!("ALTER TABLE {s}.sm_unacked RENAME COLUMN provenance TO hidden_provenance"),
+        &format!("ALTER TABLE {s}.sm_unacked RENAME COLUMN hidden_provenance TO provenance"),
+        |e| {
+            matches!(
+                e,
+                SmRuntimeAttachError::InvalidColumn {
+                    table: "sm_unacked",
+                    column: "provenance"
+                }
+            )
+        },
+    )
+    .await;
+    drift(
+        &fixture,
+        &runtime,
         &format!("ALTER TABLE {s}.sm_unacked ALTER COLUMN pair_sequence TYPE integer"),
         &format!("ALTER TABLE {s}.sm_unacked ALTER COLUMN pair_sequence TYPE bigint"),
         |e| {
@@ -698,6 +714,7 @@ async fn portable_sm_attach_accepts_owner_upgrade_and_migration_profiles() {
         format!("ALTER TABLE {s}.sm_sessions ADD COLUMN shadow_ordinal bigint"),
         format!("ALTER TABLE {s}.sm_sessions DROP COLUMN occupancy_session"),
         format!("ALTER TABLE {s}.sm_unacked DROP COLUMN ingress_receipts"),
+        format!("ALTER TABLE {s}.sm_unacked DROP COLUMN provenance"),
         format!("ALTER TABLE {s}.sm_unacked DROP COLUMN pair_sequence"),
     ] {
         admin(&fixture, &sql).await;
@@ -707,7 +724,7 @@ async fn portable_sm_attach_accepts_owner_upgrade_and_migration_profiles() {
         .await
         .expect("real owner upgrade");
     attach(&runtime).await.expect("upgraded owner profile");
-    // Run the real migration catalog through current V1028. Its cutover
+    // Run the real migration catalog through current V1029. Its cutover
     // recreates the SM tables and must have the same attachable profile.
     MigrationRunner::single()
         .run(&owner)

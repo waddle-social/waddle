@@ -269,6 +269,28 @@ pub enum OrderedRelayPayload {
 }
 
 impl OrderedRelayPayload {
+    pub(crate) fn frame_provenance(&self) -> waddle_xmpp::stream_management::SmFrameProvenance {
+        use waddle_xmpp::stream_management::SmFrameProvenance;
+        match self {
+            Self::Message {
+                recipient,
+                ingress_append: Some(obligation),
+                ..
+            }
+            | Self::ProcessedDirectMessage {
+                recipient,
+                ingress_append: Some(obligation),
+                ..
+            } => match recipient.clone().try_into_full() {
+                Ok(resource) => {
+                    SmFrameProvenance::ingress([obligation.clone().into_relayed_for(resource).key])
+                }
+                Err(_) => SmFrameProvenance::Unknown,
+            },
+            _ => SmFrameProvenance::Unknown,
+        }
+    }
+
     fn stanza(&self) -> &waddle_xmpp::Stanza {
         match self {
             OrderedRelayPayload::ProcessedDirectMessage { stanza, .. }
@@ -498,6 +520,9 @@ pub struct RemoteStanzaEnvelope {
     pub sender_claim: OrderedRelayClaim,
     pub target_claim: OrderedRelayClaim,
     pub payload: OrderedRelayPayload,
+    /// Exact per-frame origin claims. This field is signed and is not itself authorization.
+    #[serde(default)]
+    pub provenance: waddle_xmpp::stream_management::SmFrameProvenance,
     /// Optional at the substrate level so ordering tests can construct raw
     /// envelopes, but production delivery rejects unsigned envelopes before
     /// applying any local effect.
@@ -524,6 +549,7 @@ impl RemoteStanzaEnvelope {
             sender_claim: &self.sender_claim,
             target_claim: &self.target_claim,
             payload: &self.payload,
+            provenance: &self.provenance,
         })
     }
 }
@@ -538,6 +564,7 @@ struct RemoteStanzaEnvelopeSigningView<'a> {
     sender_claim: &'a OrderedRelayClaim,
     target_claim: &'a OrderedRelayClaim,
     payload: &'a OrderedRelayPayload,
+    provenance: &'a waddle_xmpp::stream_management::SmFrameProvenance,
 }
 
 /// Internal ACK for an ordered relay envelope. This is not an XEP-0184 receipt
@@ -553,7 +580,7 @@ pub struct OrderedRelayAck {
     /// Typed stanzas the origin node must write back to the originating
     /// client after a proxied server-side operation completes. Empty for
     /// ordinary 1:1 delivery.
-    pub client_replies: Vec<RemoteStanza>,
+    pub client_replies: Vec<super::codec::RemoteReplyFrame>,
 }
 
 /// Which claim in an ordered-relay envelope failed ownership validation.
@@ -672,13 +699,14 @@ struct OrderedRelayRecentAck {
     owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     sequence: OrderedRelaySequence,
     fingerprint: OrderedRelayEnvelopeFingerprint,
-    client_replies: Vec<RemoteStanza>,
+    client_replies: Vec<super::codec::RemoteReplyFrame>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OrderedRelayEnvelopeFingerprint {
     origin_inbound_sequence: OriginInboundSequence,
     payload: OrderedRelayPayloadFingerprint,
+    provenance: waddle_xmpp::stream_management::SmFrameProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +720,7 @@ impl From<&RemoteStanzaEnvelope> for OrderedRelayEnvelopeFingerprint {
         Self {
             origin_inbound_sequence: envelope.origin_inbound_sequence,
             payload: envelope.payload.fingerprint(),
+            provenance: envelope.provenance.clone(),
         }
     }
 }
@@ -849,6 +878,7 @@ impl OrderedRelaySenderState {
             return Err(diversion);
         };
         let envelope = RemoteStanzaEnvelope {
+            provenance: Default::default(),
             asserted_origin_node,
             channel: channel.clone(),
             sequence,
@@ -1075,7 +1105,7 @@ impl OrderedRelayReceiverState {
     pub fn commit_reserved_with_replies(
         &mut self,
         reserved: OrderedRelayReservedEnvelope,
-        client_replies: Vec<RemoteStanza>,
+        client_replies: Vec<super::codec::RemoteReplyFrame>,
     ) -> OrderedRelayReply {
         self.commit_reserved_with_reply_receipt(reserved, client_replies, None, Vec::new())
     }
@@ -1083,7 +1113,7 @@ impl OrderedRelayReceiverState {
     pub(crate) fn commit_reserved_with_reply_receipt(
         &mut self,
         reserved: OrderedRelayReservedEnvelope,
-        client_replies: Vec<RemoteStanza>,
+        client_replies: Vec<super::codec::RemoteReplyFrame>,
         reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
         owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     ) -> OrderedRelayReply {
@@ -1230,7 +1260,7 @@ fn record_ack(
     recent_acked_by_channel: &mut HashMap<OrderedRelayChannel, VecDeque<OrderedRelayRecentAck>>,
     channel: &OrderedRelayChannel,
     envelope: &RemoteStanzaEnvelope,
-    client_replies: &[RemoteStanza],
+    client_replies: &[super::codec::RemoteReplyFrame],
     reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
     owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
 ) {
@@ -1248,7 +1278,8 @@ fn record_ack(
 }
 
 fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
-    envelope.payload.matches_stanza_kind()
+    envelope.provenance == envelope.payload.frame_provenance()
+        && envelope.payload.matches_stanza_kind()
         && envelope.payload.matches_ingress_append_obligation()
         && envelope.payload.matches_muc_proxy_origin()
         && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)

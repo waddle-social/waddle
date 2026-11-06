@@ -30,7 +30,7 @@ async fn terminalization_failure_after_receipts_is_not_unresolved(fixture: Ingre
         ExternalOutcome::AwaitingFrameDelivery,
     ));
     report.frame_obligations.push(FrameObligation {
-        frames: vec![frame],
+        frames: vec![frame.into()],
         receipt_keys: Vec::new(),
         effect_index: 0,
     });

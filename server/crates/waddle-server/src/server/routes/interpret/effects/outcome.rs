@@ -24,9 +24,11 @@ pub enum EffectOutcome {
     /// The arm already committed these receipts with its durable work.
     Settled(SettledOutcome),
     Frames(Vec<Stanza>),
+    /// Frames whose origin association was captured by their producer.
+    ProvenancedFrames(Vec<waddle_xmpp::stream_management::SmProvenancedStanza>),
     #[cfg(feature = "clustering")]
     RelayFrames {
-        frames: Vec<Stanza>,
+        frames: Vec<waddle_xmpp::stream_management::SmProvenancedStanza>,
         completion: RelayFrameReceiptCompletion,
     },
     Archive(Result<StoreOutcome, MamStorageError>),

@@ -2052,23 +2052,39 @@ impl WsConnState {
         self.terminal_sm_recovery = recovery;
     }
 
+    #[cfg(test)]
     pub(super) fn record_terminal_recovery_outbound(&mut self, stanza_xml: String) {
         self.record_terminal_recovery_outbound_with_receipt_at(stanza_xml, chrono::Utc::now());
     }
 
+    #[cfg(test)]
     pub(super) fn record_terminal_recovery_outbound_with_receipt_at(
         &mut self,
         stanza_xml: String,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) {
+        self.record_terminal_recovery_outbound_with_provenance(
+            stanza_xml,
+            original_receipt_at,
+            Default::default(),
+        );
+    }
+
+    pub(super) fn record_terminal_recovery_outbound_with_provenance(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+        provenance: waddle_xmpp::stream_management::SmFrameProvenance,
+    ) {
         if self.terminal_sm_recovery.queue_len() >= TERMINAL_RECOVERY_QUEUE_CAP {
             self.terminal_sm_recovery_dropped = self.terminal_sm_recovery_dropped.saturating_add(1);
             return;
         }
-        let _ = self.terminal_sm_recovery.record_outbound_with_receipt_at(
+        let _ = self.terminal_sm_recovery.record_outbound_with_provenance(
             stanza_xml,
             original_receipt_at,
             waddle_xmpp::telemetry::attributes::SmEvictionPath::ReplayTail,
+            provenance,
         );
     }
 

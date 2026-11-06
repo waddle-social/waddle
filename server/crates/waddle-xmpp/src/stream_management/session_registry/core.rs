@@ -2167,6 +2167,7 @@ impl InMemorySmSessionRegistry {
                 &entry.stanza_xml,
                 entry.original_receipt_at,
                 entry.ingress_receipts.clone(),
+                entry.provenance.clone(),
             )?);
         }
         let accepting_stream = SmSessionId::new(session.stream_id.clone());

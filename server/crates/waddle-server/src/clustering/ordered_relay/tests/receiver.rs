@@ -14,6 +14,7 @@ use std::str::FromStr;
 fn receiver_acks_in_order_and_duplicate_envelopes() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel(),
         sequence: OrderedRelaySequence(1),
@@ -46,6 +47,7 @@ fn receiver_acks_in_order_and_duplicate_envelopes() {
 fn receiver_nacks_recent_duplicate_with_different_payload() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel(),
         sequence: OrderedRelaySequence(1),
@@ -65,6 +67,7 @@ fn receiver_nacks_recent_duplicate_with_different_payload() {
     ));
 
     let tampered = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         payload: message_payload("tampered"),
         ..envelope
     };
@@ -81,6 +84,7 @@ fn receiver_nacks_recent_duplicate_with_different_payload() {
 fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),
@@ -108,6 +112,7 @@ fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
     ));
 
     let replacement_generation = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         payload: OrderedRelayPayload::MucProxy {
             canonical: None,
             principal: None,
@@ -131,6 +136,7 @@ fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
 fn receiver_replays_duplicate_ack_across_asserted_origin_node_changes() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: NodeId::new("old-node".to_string()),
         channel: channel(),
         sequence: OrderedRelaySequence(1),
@@ -150,6 +156,7 @@ fn receiver_replays_duplicate_ack_across_asserted_origin_node_changes() {
     ));
 
     let retry_after_move = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: NodeId::new("new-node".to_string()),
         ..envelope
     };
@@ -166,6 +173,7 @@ fn receiver_replays_duplicate_ack_across_asserted_origin_node_changes() {
 fn receiver_nacks_channel_payload_and_claim_mismatch() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel(),
         sequence: OrderedRelaySequence(1),
@@ -190,6 +198,7 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
     let mut receiver = OrderedRelayReceiverState::default();
     let channel = channel();
     let first = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel.clone(),
         sequence: OrderedRelaySequence(1),
@@ -201,6 +210,7 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
         origin_proof: None,
     };
     let second = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel,
         sequence: OrderedRelaySequence(2),
@@ -242,6 +252,7 @@ fn receiver_nacks_gaps_without_advancing_expected_sequence() {
     let mut receiver = OrderedRelayReceiverState::default();
     let channel = channel();
     let gap = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel.clone(),
         sequence: OrderedRelaySequence(2),
@@ -264,6 +275,7 @@ fn receiver_nacks_gaps_without_advancing_expected_sequence() {
     ));
 
     let first = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel,
         sequence: OrderedRelaySequence(1),
@@ -291,6 +303,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
         let reply = receive(
             &mut receiver,
             RemoteStanzaEnvelope {
+                provenance: Default::default(),
                 asserted_origin_node: origin_node(),
                 channel: channel.clone(),
                 sequence: OrderedRelaySequence(sequence),
@@ -308,6 +321,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
     let too_old_duplicate = receive(
         &mut receiver,
         RemoteStanzaEnvelope {
+            provenance: Default::default(),
             asserted_origin_node: origin_node(),
             channel,
             sequence: OrderedRelaySequence(1),
@@ -334,6 +348,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
 fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel(),
         sequence: OrderedRelaySequence(1),
@@ -363,6 +378,7 @@ async fn receiver_diversion_expires_after_cooldown_without_advancing_expected() 
     let mut receiver = OrderedRelayReceiverState::default();
     let channel = channel();
     let envelope = |sequence: u64, body: &str| RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: channel.clone(),
         sequence: OrderedRelaySequence(sequence),

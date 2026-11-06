@@ -203,7 +203,7 @@ impl NestedIngressOperation {
                     .frame_obligations
                     .iter()
                     .flat_map(|obligation| &obligation.frames)
-                    .find_map(stanza_error)
+                    .find_map(|frame| stanza_error(&frame.stanza))
                     .or_else(|| report.refusal.map(
                         |SettledRefusal::OfflineQuotaExceeded| {
                             crate::server::routes::interpret::offline_delivery::offline_quota_error()
@@ -262,8 +262,8 @@ async fn consume_host_frames(
         .frame_obligations
         .iter()
         .flat_map(|obligation| &obligation.frames)
-        .any(|stanza| {
-            matches!(stanza, Stanza::Message(message)
+        .any(|frame| {
+            matches!(&frame.stanza, Stanza::Message(message)
             if message.type_ == xmpp_parsers::message::MessageType::Groupchat)
         })
     {
@@ -284,7 +284,8 @@ async fn consume_host_frames(
         sender: continuation.host_sender.clone(),
     });
     for obligation in &report.frame_obligations {
-        for stanza in &obligation.frames {
+        for frame in &obligation.frames {
+            let stanza = &frame.stanza;
             let Stanza::Message(message) = stanza else {
                 continue;
             };

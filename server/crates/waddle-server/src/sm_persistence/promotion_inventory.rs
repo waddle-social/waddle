@@ -202,8 +202,8 @@ pub(crate) async fn append(
     if distance == 0 || distance >= (1_u32 << 31) {
         let mut rows = tx
             .query(
-                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts \
-             FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+                &format!("SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, {provenance} \
+             FROM sm_unacked WHERE stream_id = ? AND sequence = ?", provenance = crate::sm_persistence::codec::bounded_provenance_projection(driver, "provenance")),
                 crate::db_params![stanza.stream_id.as_str(), i64::from(stanza.sequence)],
             )
             .await
@@ -216,6 +216,7 @@ pub(crate) async fn append(
             || existing.original_receipt_at.timestamp_millis()
                 != stanza.original_receipt_at.timestamp_millis()
             || existing.ingress_receipts != stanza.ingress_receipts
+            || existing.provenance != stanza.provenance
         {
             return Err(SmPersistenceError::PromotionSequenceConflict {
                 stream_id: stanza.stream_id,
@@ -226,11 +227,11 @@ pub(crate) async fn append(
     }
     let xml = super::codec::serialize_stanza(&stanza.stanza)?;
     let inserted = tx.execute(
-        "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
-         VALUES (?, ?, ?, ?, ?) ON CONFLICT (stream_id, sequence) DO NOTHING",
+        "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (stream_id, sequence) DO NOTHING",
         crate::db_params![stanza.stream_id.as_str(), i64::from(stanza.sequence), xml,
             stanza.original_receipt_at.timestamp_millis(),
-            super::codec::encode_ingress_receipts(&stanza.ingress_receipts)],
+            super::codec::encode_ingress_receipts(&stanza.ingress_receipts), stanza.provenance.encode()],
     ).await.map_err(storage_error)?;
     if inserted != 1 {
         return Err(SmPersistenceError::PromotionSequenceConflict {

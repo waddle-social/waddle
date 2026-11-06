@@ -581,7 +581,10 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
                     .iter()
                     .map(|frame| {
                         let stanza = frame.stanza().expect("owner reply must be a stanza");
-                        crate::clustering::codec::RemoteStanza(stanza.clone())
+                        crate::clustering::codec::RemoteReplyFrame {
+                            stanza: crate::clustering::codec::RemoteStanza(stanza.clone()),
+                            provenance: Default::default(),
+                        }
                     })
                     .collect(),
             };

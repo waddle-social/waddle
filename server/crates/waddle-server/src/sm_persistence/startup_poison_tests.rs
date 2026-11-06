@@ -40,6 +40,7 @@ async fn startup_quarantines_corrupt_sqlite_headers_and_preserves_healthy_neighb
             storage.upsert_session(session(stream)).await.unwrap();
             storage
                 .append_unacked(PersistedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     stream_id: SmSessionId::new(stream),
                     sequence: 1,
@@ -119,6 +120,7 @@ async fn startup_quarantines_partially_corrupt_queues_without_publishing_replay_
                 storage.upsert_session(source).await.unwrap();
                 for sequence in 1..=count {
                     storage.append_unacked(PersistedUnackedStanza {
+                        provenance: Default::default(),
                         ingress_receipts: Vec::new(),
                         stream_id: SmSessionId::new(stream),
                         sequence,

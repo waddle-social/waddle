@@ -12,26 +12,26 @@ use crate::ingress::EffectReceiptKey;
 use crate::ingress::IngressCanonicalRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RouteV8 {
+pub(crate) struct RouteV9 {
     pub(super) source_jid: jid::FullJid,
     registration_id: RemoteResourceRegistrationId,
     socket_generation: RemoteResourceSocketGeneration,
-    target: RouteTargetV8,
+    target: RouteTargetV9,
     #[serde(default)]
     pub(super) trace: RelayTraceContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum RouteTargetV8 {
+enum RouteTargetV9 {
     ProcessedDirectMessage {
         target: jid::FullJid,
         stanza: RemoteStanza,
-        ingress_append: Option<AppendV8>,
+        ingress_append: Option<AppendV9>,
     },
     FullJid {
         target: jid::FullJid,
         stanza: RemoteStanza,
-        ingress_append: Option<AppendV8>,
+        ingress_append: Option<AppendV9>,
     },
     BareJid {
         target: jid::BareJid,
@@ -50,7 +50,7 @@ enum RouteTargetV8 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AppendV8 {
+struct AppendV9 {
     message_key: waddle_xmpp::ingress::MessageKey,
     sender_bare: jid::BareJid,
     receipt: EffectReceiptKey,
@@ -59,7 +59,7 @@ struct AppendV8 {
     dispatch_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
-impl From<IngressAppendObligationRef> for AppendV8 {
+impl From<IngressAppendObligationRef> for AppendV9 {
     fn from(value: IngressAppendObligationRef) -> Self {
         let IngressAppendObligationRef {
             message_key,
@@ -80,9 +80,9 @@ impl From<IngressAppendObligationRef> for AppendV8 {
     }
 }
 
-impl From<AppendV8> for IngressAppendObligationRef {
-    fn from(value: AppendV8) -> Self {
-        let AppendV8 {
+impl From<AppendV9> for IngressAppendObligationRef {
+    fn from(value: AppendV9) -> Self {
+        let AppendV9 {
             message_key,
             sender_bare,
             receipt,
@@ -101,7 +101,7 @@ impl From<AppendV8> for IngressAppendObligationRef {
     }
 }
 
-impl From<RelayRouteRemoteResourceStanza> for RouteV8 {
+impl From<RelayRouteRemoteResourceStanza> for RouteV9 {
     fn from(value: RelayRouteRemoteResourceStanza) -> Self {
         let RelayRouteRemoteResourceStanza {
             source_jid,
@@ -115,7 +115,7 @@ impl From<RelayRouteRemoteResourceStanza> for RouteV8 {
                 target,
                 stanza,
                 ingress_append,
-            } => RouteTargetV8::ProcessedDirectMessage {
+            } => RouteTargetV9::ProcessedDirectMessage {
                 target,
                 stanza,
                 ingress_append: ingress_append.map(Into::into),
@@ -125,13 +125,13 @@ impl From<RelayRouteRemoteResourceStanza> for RouteV8 {
                 stanza,
                 ingress_append,
                 ..
-            } => RouteTargetV8::FullJid {
+            } => RouteTargetV9::FullJid {
                 target,
                 stanza,
                 ingress_append: ingress_append.map(Into::into),
             },
             RemoteResourceRouteTarget::BareJid { target, stanza } => {
-                RouteTargetV8::BareJid { target, stanza }
+                RouteTargetV9::BareJid { target, stanza }
             }
             RemoteResourceRouteTarget::MucProxy {
                 canonical,
@@ -141,7 +141,7 @@ impl From<RelayRouteRemoteResourceStanza> for RouteV8 {
                 kind,
                 origin,
                 stanza,
-            } => RouteTargetV8::MucProxy {
+            } => RouteTargetV9::MucProxy {
                 canonical,
                 principal,
                 stanza_lang,
@@ -161,9 +161,9 @@ impl From<RelayRouteRemoteResourceStanza> for RouteV8 {
     }
 }
 
-impl From<RouteV8> for RelayRouteRemoteResourceStanza {
-    fn from(value: RouteV8) -> Self {
-        let RouteV8 {
+impl From<RouteV9> for RelayRouteRemoteResourceStanza {
+    fn from(value: RouteV9) -> Self {
+        let RouteV9 {
             source_jid,
             registration_id,
             socket_generation,
@@ -171,7 +171,7 @@ impl From<RouteV8> for RelayRouteRemoteResourceStanza {
             trace,
         } = value;
         let target = match target {
-            RouteTargetV8::ProcessedDirectMessage {
+            RouteTargetV9::ProcessedDirectMessage {
                 target,
                 stanza,
                 ingress_append,
@@ -180,7 +180,7 @@ impl From<RouteV8> for RelayRouteRemoteResourceStanza {
                 stanza,
                 ingress_append: ingress_append.map(Into::into),
             },
-            RouteTargetV8::FullJid {
+            RouteTargetV9::FullJid {
                 target,
                 stanza,
                 ingress_append,
@@ -190,10 +190,10 @@ impl From<RouteV8> for RelayRouteRemoteResourceStanza {
                 ingress_append: ingress_append.map(Into::into),
                 received_at: None,
             },
-            RouteTargetV8::BareJid { target, stanza } => {
+            RouteTargetV9::BareJid { target, stanza } => {
                 RemoteResourceRouteTarget::BareJid { target, stanza }
             }
-            RouteTargetV8::MucProxy {
+            RouteTargetV9::MucProxy {
                 canonical,
                 principal,
                 stanza_lang,
@@ -234,7 +234,7 @@ pub(super) struct OutboundFrameV3 {
     registration_id: RemoteResourceRegistrationId,
     stanza: RemoteStanza,
     kind: FrameKind,
-    ingress_append: Option<AppendV8>,
+    ingress_append: Option<AppendV9>,
 }
 
 impl From<RelayDeliverRemoteResourceFrame> for FrameV3 {
@@ -481,7 +481,7 @@ pub(crate) struct RouteReply {
     reply_receipt: Option<RelayReplyReceiptToken>,
     owner_receipts: Vec<OwnerReceipt>,
     outcome: RouteOutcome,
-    replies: Vec<RemoteStanza>,
+    replies: Vec<crate::clustering::codec::RemoteReplyFrame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

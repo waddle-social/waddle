@@ -447,9 +447,12 @@ impl InMemorySmSessionRegistry {
             true,
             stanza,
             original_receipt_at,
-            move |session| {
-                session.record_detached_outbound(stanza, original_receipt_at);
-                session.unacked_stanzas.last().map(|entry| entry.sequence)
+            move |session, provenance| {
+                Some(session.record_detached_outbound_with_provenance(
+                    stanza,
+                    original_receipt_at,
+                    provenance,
+                ))
             },
         )
         .await
@@ -485,10 +488,13 @@ impl InMemorySmSessionRegistry {
             false,
             stanza,
             original_receipt_at,
-            move |session| {
-                session
-                    .record_detached_outbound_at(sequence, stanza, original_receipt_at)
-                    .then_some(sequence)
+            move |session, provenance| {
+                session.record_detached_outbound_at_with_provenance(
+                    sequence,
+                    stanza,
+                    original_receipt_at,
+                    provenance,
+                )
             },
         )
         .await
@@ -544,7 +550,10 @@ impl InMemorySmSessionRegistry {
         new_delivery: bool,
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
-        record: impl FnOnce(&mut super::super::DetachedSession) -> Option<u32>,
+        record: impl FnOnce(
+            &mut super::super::DetachedSession,
+            super::super::SmFrameProvenance,
+        ) -> Option<super::DetachedUnackedStanza>,
     ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::persistence::{KeyedSnapshotOutcome, PersistedIngressAppend};
         use crate::stream_management::SmKeyedAppendOutcome;
@@ -580,16 +589,13 @@ impl InMemorySmSessionRegistry {
             // against the exact session that would receive the append.
             return Ok(SmKeyedAppendOutcome::Suppressed);
         }
-        let Some(sequence) = record(&mut updated) else {
+        let provenance = super::super::SmFrameProvenance::ingress([key.clone()]);
+        let Some(entry) = record(&mut updated, provenance) else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
-        let mut delta = super::append::prepare_detached_append(
-            &previous_sequences,
-            &updated,
-            sequence,
-            stanza,
-            original_receipt_at,
-        )?;
+        let sequence = entry.sequence;
+        let mut delta =
+            super::append::prepare_detached_append(&previous_sequences, &updated, &entry, stanza)?;
         delta.ingress_append = Some(PersistedIngressAppend {
             key,
             accepting_stream: accepting_stream.clone(),

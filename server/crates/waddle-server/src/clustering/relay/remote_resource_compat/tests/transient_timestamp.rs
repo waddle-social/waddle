@@ -5,7 +5,7 @@ use super::{
     RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameReply, RelayRemoteResourceFrameStatus,
     RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelayTraceContext,
     RemoteResourceOutboundFrame, RemoteResourceRouteOutcome, RemoteResourceRouteTarget,
-    RemoteSendError, RemoteStanza, RouteV8,
+    RemoteSendError, RemoteStanza, RouteV9,
 };
 use crate::clustering::local_claims::RoomLocalClaims;
 use crate::clustering::resume_bridge::ResumeStealBridge;
@@ -123,7 +123,7 @@ async fn xep0198_live_frame_wire_and_actual_detach_drain_preserve_original_times
 #[test]
 fn untimestamped_route_and_frame_keep_frozen_baseline_bytes() {
     for message in routes() {
-        let baseline = RouteV8::from(message.clone());
+        let baseline = RouteV9::from(message.clone());
         assert_eq!(encode(&baseline), encode(&message));
         let restored = RelayRouteRemoteResourceStanza::from(baseline);
         if let RemoteResourceRouteTarget::FullJid { received_at, .. } = restored.target {

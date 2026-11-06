@@ -73,6 +73,11 @@ pub(crate) enum ResponseFrame {
     Element(Element),
     /// Typed transport-only stream error emitted by the websocket adapter.
     StreamError(StreamErrorFrame),
+    /// Origin of this exact retained frame, independent of completion receipts.
+    Provenanced {
+        frame: Box<ResponseFrame>,
+        provenance: waddle_xmpp::stream_management::SmFrameProvenance,
+    },
     /// Replay keeps the durable ingress obligation with the retained frame.
     Replay {
         frame: Box<ResponseFrame>,
@@ -86,7 +91,9 @@ impl ResponseFrame {
             Self::Stanza(stanza) => stanza_to_xml(&stanza),
             Self::Element(element) => element_to_xml(element),
             Self::StreamError(error) => error.into_serialized_xml(),
-            Self::Replay { frame, .. } => frame.into_serialized_xml(),
+            Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
+                frame.into_serialized_xml()
+            }
         }
     }
 
@@ -97,7 +104,9 @@ impl ResponseFrame {
                 element.name() == "close" && element.ns() == "urn:ietf:params:xml:ns:xmpp-framing"
             }
             Self::StreamError(_) => false,
-            Self::Replay { frame, .. } => frame.is_websocket_stream_close(),
+            Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
+                frame.is_websocket_stream_close()
+            }
         }
     }
 
@@ -120,7 +129,7 @@ impl ResponseFrame {
     pub(crate) fn stanza(&self) -> Option<&Stanza> {
         match self {
             Self::Stanza(stanza) => Some(stanza),
-            Self::Replay { frame, .. } => frame.stanza(),
+            Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => frame.stanza(),
             Self::Element(_) | Self::StreamError(_) => None,
         }
     }
@@ -132,7 +141,40 @@ impl ResponseFrame {
             Self::Replay {
                 ingress_receipts, ..
             } => ingress_receipts,
+            Self::Provenanced { frame, .. } => frame.ingress_receipts(),
             _ => &[],
+        }
+    }
+
+    pub(crate) fn provenance(&self) -> waddle_xmpp::stream_management::SmFrameProvenance {
+        match self {
+            Self::Provenanced { provenance, .. } => provenance.clone(),
+            Self::Replay { frame, .. } => frame.provenance(),
+            _ => Default::default(),
+        }
+    }
+
+    pub(crate) fn with_provenance(
+        self,
+        provenance: waddle_xmpp::stream_management::SmFrameProvenance,
+    ) -> Self {
+        fn attached(
+            frame: &ResponseFrame,
+        ) -> Option<&waddle_xmpp::stream_management::SmFrameProvenance> {
+            match frame {
+                ResponseFrame::Provenanced { provenance, .. } => Some(provenance),
+                ResponseFrame::Replay { frame, .. } => attached(frame),
+                _ => None,
+            }
+        }
+        // A lost or conflicting association may never be upgraded by a later wrapper.
+        let provenance = match attached(&self) {
+            Some(existing) if *existing != provenance => Default::default(),
+            _ => provenance,
+        };
+        Self::Provenanced {
+            frame: Box::new(self),
+            provenance,
         }
     }
 
@@ -160,6 +202,12 @@ impl ResponseFrame {
 impl From<String> for ResponseFrame {
     fn from(xml: String) -> Self {
         Self::from_serialized_xml(xml)
+    }
+}
+
+impl From<waddle_xmpp::stream_management::SmProvenancedStanza> for ResponseFrame {
+    fn from(frame: waddle_xmpp::stream_management::SmProvenancedStanza) -> Self {
+        Self::from(frame.stanza).with_provenance(frame.provenance)
     }
 }
 
@@ -1896,3 +1944,63 @@ fn reject_resource_message(
 #[cfg(test)]
 #[path = "tests/ingress_frame_limits.rs"]
 mod ingress_frame_limits;
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use waddle_xmpp::ingress::MessageKey;
+    use waddle_xmpp::stream_management::{
+        SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind, SmProvenancedStanza,
+    };
+
+    #[tokio::test]
+    async fn effects_keep_per_frame_associations_before_batch_flattening() {
+        let message = MessageKey::new();
+        let provenance = |hash| {
+            SmFrameProvenance::ingress([SmIngressAppendKey {
+                message_key: message,
+                kind: SmIngressReceiptKind::from_storage(1),
+                semantic_identity_hash: [hash; 32],
+                resource: "a@example.com/phone".parse().expect("resource"),
+            }])
+        };
+        let one = provenance(1);
+        let two = provenance(2);
+        let frame = |id: &str, provenance| {
+            let mut stanza = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+            stanza.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+            SmProvenancedStanza {
+                stanza: Stanza::Message(stanza),
+                provenance,
+            }
+        };
+        let mut report = ExecutionReport::new(
+            crate::server::routes::interpret::DeliveryExecutionContext::Live.into(),
+        );
+        report
+            .frame_obligations
+            .push(crate::ingress::FrameObligation::test_frames(vec![
+                frame("first", one.clone()),
+                frame("second", one.clone()),
+            ]));
+        report
+            .frame_obligations
+            .push(crate::ingress::FrameObligation::test_frames(vec![frame(
+                "third",
+                two.clone(),
+            )]));
+        let batch = execute_committed_message(
+            std::future::ready(report),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            batch
+                .frames
+                .iter()
+                .map(ResponseFrame::provenance)
+                .collect::<Vec<_>>(),
+            vec![one.clone(), one, two]
+        );
+    }
+}

@@ -235,6 +235,7 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
             &mut late_rx,
             super::super::replay::ReplayDrainSink {
                 detached_stream_id: Some(STREAM),
+                bound_resource: None,
                 pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
                 drained_appends: &mut Vec::new(),
             },
@@ -360,6 +361,7 @@ async fn first_drain_is_bounded_by_the_backlog_it_found(fixture: IngressFixture)
             &mut socket.rx,
             super::super::replay::ReplayDrainSink {
                 detached_stream_id: None,
+                bound_resource: None,
                 pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
                 drained_appends: &mut Vec::new(),
             },

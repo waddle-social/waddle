@@ -386,8 +386,13 @@ where
         }
         let current_was_recorded = current_should_record;
         let request_ack = if current_was_recorded {
-            let (request_ack, accepted) =
-                record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch, policy);
+            let (request_ack, accepted) = record_live_sm_frame(
+                conn,
+                frame_xml.clone(),
+                SmEvictionPath::Batch,
+                policy,
+                frame.provenance(),
+            );
             if accepted {
                 // Only an entry inside the replay window can carry the
                 // obligation forward; a gapped queue cannot prove redelivery.
@@ -812,16 +817,18 @@ fn record_live_sm_frame(
     frame_xml: String,
     eviction_path: SmEvictionPath,
     policy: BatchSmPolicy,
+    provenance: waddle_xmpp::stream_management::SmFrameProvenance,
 ) -> (bool, bool) {
-    let recorded = match policy {
-        BatchSmPolicy::RecordAt(received_at) => {
-            conn.sm_state
-                .record_outbound_with_receipt_at(frame_xml, received_at, eviction_path)
-        }
-        BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => {
-            conn.sm_state.record_outbound(frame_xml, eviction_path)
-        }
+    let received_at = match policy {
+        BatchSmPolicy::RecordAt(received_at) => received_at,
+        BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => chrono::Utc::now(),
     };
+    let recorded = conn.sm_state.record_outbound_with_provenance(
+        frame_xml,
+        received_at,
+        eviction_path,
+        provenance,
+    );
     let request_ack = recorded.request_ack;
     // A replay gap means resume can no longer guarantee recovery of newly
     // recorded-but-unwritten frames. Keep them in recovery inventory, but do
@@ -891,17 +898,20 @@ where
     for (frame_index, frame) in frames {
         let frame: ResponseFrame = frame.into();
         let ingress_receipts = frame.ingress_receipts().to_vec();
+        let provenance = frame.provenance();
         let frame_xml = frame.into_serialized_xml();
         if should_record(conn, &frame_xml, policy) {
             let accepted = if conn.sm_recovery_required {
                 let before = conn.terminal_sm_recovery.queue_len();
-                match policy {
-                    BatchSmPolicy::RecordAt(received_at) => conn
-                        .record_terminal_recovery_outbound_with_receipt_at(frame_xml, received_at),
-                    BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => {
-                        conn.record_terminal_recovery_outbound(frame_xml)
-                    }
-                }
+                let received_at = match policy {
+                    BatchSmPolicy::RecordAt(received_at) => received_at,
+                    BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => chrono::Utc::now(),
+                };
+                conn.record_terminal_recovery_outbound_with_provenance(
+                    frame_xml,
+                    received_at,
+                    provenance,
+                );
                 let accepted = conn.terminal_sm_recovery.queue_len() > before;
                 if accepted {
                     conn.terminal_sm_recovery
@@ -909,8 +919,13 @@ where
                 }
                 accepted
             } else {
-                let (_, accepted) =
-                    record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail, policy);
+                let (_, accepted) = record_live_sm_frame(
+                    conn,
+                    frame_xml,
+                    SmEvictionPath::ReplayTail,
+                    policy,
+                    provenance,
+                );
                 if accepted {
                     conn.sm_state.attach_ingress_receipts(ingress_receipts);
                 }

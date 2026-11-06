@@ -65,16 +65,24 @@ where
             let mut request_ack_after = false;
             let mut resumable_recovery_owned = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                let record_result = match pending_row_receipt_at {
-                    Some(receipt_at) => conn.sm_state.record_outbound_with_receipt_at(
-                        xml.clone(),
-                        receipt_at,
-                        SmEvictionPath::DirectOutbound,
-                    ),
-                    None => conn
-                        .sm_state
-                        .record_outbound(xml.clone(), SmEvictionPath::DirectOutbound),
-                };
+                let provenance = ingress_append.as_ref().map_or(
+                    waddle_xmpp::stream_management::SmFrameProvenance::Unknown,
+                    |obligation| {
+                        if conn.phase.bound_jid() == Some(&obligation.key.resource) {
+                            waddle_xmpp::stream_management::SmFrameProvenance::ingress([obligation
+                                .key
+                                .clone()])
+                        } else {
+                            waddle_xmpp::stream_management::SmFrameProvenance::Unknown
+                        }
+                    },
+                );
+                let record_result = conn.sm_state.record_outbound_with_provenance(
+                    xml.clone(),
+                    pending_row_receipt_at.unwrap_or_else(chrono::Utc::now),
+                    SmEvictionPath::DirectOutbound,
+                    provenance,
+                );
                 // Pending copies can hold archive-order barriers for other
                 // resources. Ask even on a quiet stream below the normal
                 // cadence; otherwise those resources may await an ack forever.

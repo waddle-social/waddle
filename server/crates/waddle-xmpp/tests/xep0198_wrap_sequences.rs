@@ -178,6 +178,7 @@ async fn persistence_hydration_and_followup_eviction_stay_in_wrap_order() {
         .iter()
         .rev()
         .map(|sequence| DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: *sequence,
             stanza_xml: stanza_xml.clone(),
@@ -235,4 +236,50 @@ async fn persistence_hydration_and_followup_eviction_stay_in_wrap_order() {
     assert_eq!(restored.replay_gap_through, Some(expected[0]));
     assert_eq!(sequence_numbers(&restored)[0], expected[1]);
     assert_eq!(sequence_numbers(&restored).last(), Some(&newest));
+}
+
+#[test]
+fn wrapping_ack_and_repeated_replay_keep_exact_frame_provenance() {
+    use waddle_xmpp::ingress::MessageKey;
+    use waddle_xmpp::stream_management::{
+        SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind,
+    };
+    let key = |hash| SmIngressAppendKey {
+        message_key: MessageKey::new(),
+        kind: SmIngressReceiptKind::from_storage(1),
+        semantic_identity_hash: [hash; 32],
+        resource: "user@example.com/resource".parse().expect("resource"),
+    };
+    let first = SmFrameProvenance::ingress([key(1)]);
+    let second = SmFrameProvenance::ingress([key(2)]);
+    let mut state = StreamManagementState::new();
+    state.enable("wrapped-provenance".to_owned(), true, Some(300));
+    state.last_acked = u32::MAX - 1;
+    state.outbound_count = u32::MAX - 1;
+    let _ = state.record_outbound_with_provenance(
+        message_xml("max"),
+        Utc::now(),
+        SmEvictionPath::Batch,
+        first.clone(),
+    );
+    let _ = state.record_outbound_with_provenance(
+        message_xml("zero"),
+        Utc::now(),
+        SmEvictionPath::Batch,
+        second.clone(),
+    );
+    for _ in 0..2 {
+        let replay = state.stanzas_to_resend(u32::MAX - 1);
+        assert_eq!(
+            replay
+                .iter()
+                .map(|frame| &frame.provenance)
+                .collect::<Vec<_>>(),
+            vec![&first, &second]
+        );
+    }
+    state.acknowledge(u32::MAX);
+    assert_eq!(state.stanzas_to_resend(u32::MAX)[0].provenance, second);
+    state.acknowledge(0);
+    assert!(state.stanzas_to_resend(0).is_empty());
 }

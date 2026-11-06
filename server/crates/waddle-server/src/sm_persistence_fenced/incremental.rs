@@ -79,13 +79,14 @@ impl PostgresFencedSmPersistence {
         }
 
         tx.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) VALUES (?, ?, ?, ?, ?, ?)",
             crate::db_params![
                 stream_id.as_str().to_string(),
                 i64::from(append.stanza.sequence),
                 serialize_stanza(&append.stanza.stanza)?,
                 append.stanza.original_receipt_at.timestamp_millis(),
                 crate::sm_persistence::codec::encode_ingress_receipts(&append.stanza.ingress_receipts),
+                append.stanza.provenance.encode(),
             ],
         ).await.map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         // Explicit sequences are wrap-safe and bounded by this buffer push. The

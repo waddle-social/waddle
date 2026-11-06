@@ -3,8 +3,8 @@ use super::{
     no_client_reply_outcome_with_commit_state, remote_replies_from_frames, room_entity,
     synthetic_session_for_full_jid, Arc, FullJidDeliveryOutcome, MucProxyOrigin,
     OrderedRelayDeliveryServices, OrderedRelayMucProxyKind, OrderedRelayMucProxyOutcome,
-    OrderedRelayNackReason, OrderedRelayRouteOrigin, RemoteDeliveryOutcome, RemoteStanza, Stanza,
-    WebSocketState, ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+    OrderedRelayNackReason, OrderedRelayRouteOrigin, RemoteDeliveryOutcome, Stanza, WebSocketState,
+    ORDERED_RECEIVER_DELIVERY_TIMEOUT,
 };
 use crate::ingress::execute::ExecutionReport;
 use crate::ingress::identity::IngressRelayAdmission;
@@ -28,7 +28,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
     stanza: &Stanza,
     admission: Option<&IngressRelayAdmission>,
     completion: &mut Option<RelayFrameCompletion>,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     let Some(state) = services.web_socket_state.upgrade() else {
         tracing::warn!(
             room = %room_jid,
@@ -88,7 +88,7 @@ pub(in super::super::super) async fn deliver_reserved_muji_iq(
     room_jid: &jid::BareJid,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     iq: &xmpp_parsers::iq::Iq,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     let frames = tokio::time::timeout(
         ORDERED_RECEIVER_DELIVERY_TIMEOUT,
         crate::server::routes::websocket::handlers::iq::jingle_muji_relay::handle_relayed_muji_initiate(
@@ -113,7 +113,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_occupant_presence(
     room_jid: &jid::BareJid,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     if presence.type_ == xmpp_parsers::presence::Type::Unavailable {
         return deliver_reserved_muc_leave(state, room_jid, occupancy_session, presence).await;
     }
@@ -125,7 +125,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
     room_jid: &jid::BareJid,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     let Some(sender_jid) = presence
         .from
         .as_ref()
@@ -180,7 +180,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_update(
     room_jid: &jid::BareJid,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     let Some(sender_jid) = presence
         .from
         .as_ref()
@@ -228,7 +228,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_leave(
     room_jid: &jid::BareJid,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     let Some(sender_jid) = presence
         .from
         .as_ref()
@@ -276,7 +276,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
     message: &xmpp_parsers::message::Message,
     admission: Option<&IngressRelayAdmission>,
     completion: &mut Option<RelayFrameCompletion>,
-) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
+) -> Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason> {
     use crate::ingress::{ImmediateSink, IngressStreamIdentity, IngressSubmission};
     use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, NormalizedTarget};
     let admission = admission.ok_or(OrderedRelayNackReason::ParseFailure)?;
@@ -363,7 +363,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
         .frame_obligations
         .iter()
         .flat_map(|obligation| obligation.frames.iter().cloned())
-        .map(RemoteStanza)
+        .map(crate::clustering::codec::RemoteReplyFrame::from)
         .collect();
     *completion = Some(RelayFrameCompletion {
         authority: Arc::clone(authority),
@@ -373,13 +373,13 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
 }
 
 pub(in super::super::super) fn muc_proxy_result_to_outcome(
-    result: Result<Vec<RemoteStanza>, OrderedRelayNackReason>,
+    result: Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason>,
 ) -> RemoteDeliveryOutcome {
     match result {
         Ok(replies) => RemoteDeliveryOutcome {
             frame_completion: None,
             delivery: FullJidDeliveryOutcome::Delivered,
-            client_replies: replies.into_iter().map(|reply| reply.0).collect(),
+            client_replies: replies.into_iter().map(Into::into).collect(),
             maybe_committed: false,
             join_repair_allowed: false,
             relay_target: None,
@@ -397,12 +397,12 @@ pub(in super::super::super) fn muc_proxy_result_to_outcome(
 
 pub(in super::super::super) fn muc_proxy_result_to_ordered_outcome(
     kind: OrderedRelayMucProxyKind,
-    result: Result<Vec<RemoteStanza>, OrderedRelayNackReason>,
+    result: Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason>,
 ) -> OrderedRelayMucProxyOutcome {
     match result {
-        Ok(replies) => OrderedRelayMucProxyOutcome::Delivered(
-            replies.into_iter().map(|reply| reply.0).collect(),
-        ),
+        Ok(replies) => {
+            OrderedRelayMucProxyOutcome::Delivered(replies.into_iter().map(Into::into).collect())
+        }
         Err(OrderedRelayNackReason::TargetUnavailable) => OrderedRelayMucProxyOutcome::Unavailable,
         Err(OrderedRelayNackReason::MaybeCommitted)
             if kind == OrderedRelayMucProxyKind::JoinPresence =>

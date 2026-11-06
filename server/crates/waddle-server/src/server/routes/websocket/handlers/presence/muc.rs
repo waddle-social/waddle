@@ -76,7 +76,8 @@ mod tests {
                 crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
                     Stanza::Presence(xmpp_parsers::presence::Presence::new(
                         xmpp_parsers::presence::Type::None,
-                    )),
+                    ))
+                    .into(),
                 ]),
             )),
             Some(RemoteMucJoinDecision::Delivered(_))
@@ -110,7 +111,8 @@ mod tests {
             crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
                 Stanza::Presence(xmpp_parsers::presence::Presence::new(
                     xmpp_parsers::presence::Type::None,
-                )),
+                ))
+                .into(),
             ]),
         ));
         let Some(RemoteMucJoinDecision::Delivered(replies)) = decision else {
@@ -141,7 +143,8 @@ mod tests {
             crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
                 Stanza::Presence(xmpp_parsers::presence::Presence::new(
                     xmpp_parsers::presence::Type::None,
-                )),
+                ))
+                .into(),
             ]),
         ));
         let RemoteMucLeaveDecision::Delivered(replies) = decision else {

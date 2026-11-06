@@ -1006,7 +1006,7 @@ impl RegisteredRemoteOwner {
         processed: bool,
         obligation: IngressAppendObligationRef,
     ) -> (
-        Result<Vec<RemoteStanza>, OrderedRelayNackReason>,
+        Result<Vec<crate::clustering::codec::RemoteReplyFrame>, OrderedRelayNackReason>,
         Vec<RemoteResourceOutboundFrame>,
     ) {
         let recipient = target_full();

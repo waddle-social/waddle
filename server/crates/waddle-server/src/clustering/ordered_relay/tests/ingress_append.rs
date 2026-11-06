@@ -32,6 +32,7 @@ fn obligation_envelope() -> RemoteStanzaEnvelope {
         *ingress_append = Some(obligation());
     }
     RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: OrderedRelayChannel {
             recipient: OrderedRelayRecipient::FullJid(recipient),

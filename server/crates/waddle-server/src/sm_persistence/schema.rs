@@ -107,6 +107,7 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), SmPersistenceEr
                 stanza_xml TEXT NOT NULL,
                 original_receipt_at_ms {bigint} NOT NULL,
                 ingress_receipts {receipts_type},
+                provenance {receipts_type},
                 PRIMARY KEY (stream_id, sequence)
             )
             "#
@@ -159,6 +160,12 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), SmPersistenceEr
         &storage,
         "sm_unacked",
         &format!("ingress_receipts {receipts_type}"),
+    )
+    .await?;
+    add_column_if_missing(
+        &storage,
+        "sm_unacked",
+        &format!("provenance {receipts_type}"),
     )
     .await?;
     add_column_if_missing(&storage, "sm_sessions", "occupancy_session TEXT").await?;

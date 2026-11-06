@@ -590,7 +590,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) fn remote_muc_
 ) -> Option<RemoteMucJoinDecision> {
     match outcome {
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
-            Some(RemoteMucJoinDecision::Delivered(replies))
+            // The legacy Stanza return type cannot retain the per-frame metadata.
+            Some(RemoteMucJoinDecision::Delivered(
+                replies.into_iter().map(|reply| reply.stanza).collect(),
+            ))
         }
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
             ..
@@ -611,7 +614,10 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) fn remote_muc_
 ) -> RemoteMucLeaveDecision {
     match outcome {
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
-            RemoteMucLeaveDecision::Delivered(replies)
+            // As for join, these Stanzas re-enter the SM queue as Unknown.
+            RemoteMucLeaveDecision::Delivered(
+                replies.into_iter().map(|reply| reply.stanza).collect(),
+            )
         }
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
             ..

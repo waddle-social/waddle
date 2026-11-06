@@ -57,6 +57,8 @@ use crate::xep::NS_DELAY;
 /// XEP-0198's no-loss guarantee outranks the stamp.
 #[derive(Debug, Clone)]
 pub struct ReplayStanza {
+    /// Origin claims for this exact frame; they do not grant settlement authority.
+    pub provenance: super::SmFrameProvenance,
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
     pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// The wire XML captured when the stanza was first sent.

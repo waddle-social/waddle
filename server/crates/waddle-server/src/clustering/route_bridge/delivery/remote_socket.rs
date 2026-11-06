@@ -360,7 +360,7 @@ impl OrderedRelayDeliveryBridge {
                             reply_receipt: None,
                             owner_receipts: Vec::new(),
                             outcome: RemoteResourceRouteOutcome::Delivered,
-                            replies: frames.into_iter().map(RemoteStanza).collect(),
+                            replies: frames.into_iter().map(Into::into).collect(),
                         }
                     }
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
@@ -368,7 +368,7 @@ impl OrderedRelayDeliveryBridge {
                             reply_receipt: None,
                             owner_receipts: Vec::new(),
                             outcome: RemoteResourceRouteOutcome::Delivered,
-                            replies: replies.into_iter().map(RemoteStanza).collect(),
+                            replies: replies.into_iter().map(Into::into).collect(),
                         }
                     }
                     OrderedRelayMucProxyOutcome::Unavailable => {

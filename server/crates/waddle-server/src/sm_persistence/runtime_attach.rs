@@ -99,6 +99,7 @@ const UNACKED: &[Column] = &[
     column("stanza_xml", "text", true, None),
     column("original_receipt_at_ms", "bigint", true, None),
     column("ingress_receipts", "bytea", false, None),
+    column("provenance", "bytea", false, None),
     column("origin_stream_id", "text", false, None),
     column("inbound_seq", "bigint", false, None),
     column("pair_sequence", "bigint", false, None),

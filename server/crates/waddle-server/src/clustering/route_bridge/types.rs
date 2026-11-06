@@ -576,7 +576,7 @@ pub(super) struct PreparedRemoteDelivery {
 pub(super) struct RemoteDeliveryOutcome {
     pub(super) frame_completion: Option<RelayFrameReceiptCompletion>,
     pub(super) delivery: FullJidDeliveryOutcome,
-    pub(super) client_replies: Vec<Stanza>,
+    pub(super) client_replies: Vec<waddle_xmpp::stream_management::SmProvenancedStanza>,
     pub(super) maybe_committed: bool,
     pub(super) join_repair_allowed: bool,
     /// The owner that actually accepted this delivery.  A target-refresh can

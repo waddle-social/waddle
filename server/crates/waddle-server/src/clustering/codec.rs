@@ -202,6 +202,32 @@ impl<'de> Deserialize<'de> for RemoteStanza {
     }
 }
 
+/// A reply stanza and its own retained-frame provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteReplyFrame {
+    pub stanza: RemoteStanza,
+    #[serde(default)]
+    pub provenance: waddle_xmpp::stream_management::SmFrameProvenance,
+}
+
+impl From<waddle_xmpp::stream_management::SmProvenancedStanza> for RemoteReplyFrame {
+    fn from(frame: waddle_xmpp::stream_management::SmProvenancedStanza) -> Self {
+        Self {
+            stanza: RemoteStanza(frame.stanza),
+            provenance: frame.provenance,
+        }
+    }
+}
+
+impl From<RemoteReplyFrame> for waddle_xmpp::stream_management::SmProvenancedStanza {
+    fn from(frame: RemoteReplyFrame) -> Self {
+        Self {
+            stanza: frame.stanza.0,
+            provenance: frame.provenance,
+        }
+    }
+}
+
 /// An arbitrary XML `Element` carried across the kameo remote boundary as
 /// bounded XML text.
 #[derive(Debug, Clone)]

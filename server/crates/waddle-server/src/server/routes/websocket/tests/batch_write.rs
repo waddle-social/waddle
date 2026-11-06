@@ -747,15 +747,35 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
     let mut sink = CollectSink::default();
     // The drain after the first <r/> (frame 5) sees a Close frame.
     let mut reader = ScriptedReader::new(vec![Some(Message::Close(None))]);
-    let frames: Vec<String> = (1..=12).map(countable_message).collect();
-
-    let outcome = write_response_batch(
+    use waddle_xmpp::stream_management::{
+        SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind,
+    };
+    let provenance = SmFrameProvenance::ingress([SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: SmIngressReceiptKind::from_storage(1),
+        semantic_identity_hash: [3; 32],
+        resource: "a@example.com/phone".parse().expect("full JID"),
+    }]);
+    let frames: Vec<super::super::frame::ResponseFrame> = (1..=12)
+        .map(|n| {
+            super::super::frame::ResponseFrame::from(countable_message(n))
+                .with_provenance(provenance.clone())
+        })
+        .collect();
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let outcome = write_response_batch_with_admission(
         &mut sink,
         &mut reader,
         state.as_ref(),
         &mut conn,
         frames,
         BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
     )
     .await;
 
@@ -767,6 +787,7 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
     let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 12);
     assert_eq!(replay[11].stanza_xml, countable_message(12));
+    assert!(replay.iter().all(|frame| frame.provenance == provenance));
     // Only 5 stanzas + 1 <r/> actually hit the wire.
     assert_eq!(sink_texts(&sink).len(), 6);
 }
@@ -2068,4 +2089,35 @@ async fn timestamped_batch_failed_write_retains_same_receipt_time_for_unsent_tai
     assert!(replay
         .iter()
         .all(|frame| frame.original_receipt_at == received_at));
+}
+
+#[test]
+fn terminal_recovery_tail_preserves_frame_provenance() {
+    use waddle_xmpp::stream_management::{
+        SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind,
+    };
+    let provenance = SmFrameProvenance::ingress([SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: SmIngressReceiptKind::from_storage(1),
+        semantic_identity_hash: [8; 32],
+        resource: "a@example.com/phone".parse().expect("resource"),
+    }]);
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("terminal-provenance".to_owned(), true, Some(300));
+    conn.begin_terminal_sm_recovery();
+    let frames = [
+        super::super::frame::ResponseFrame::from(countable_message(1))
+            .with_provenance(provenance.clone()),
+        super::super::frame::ResponseFrame::from(countable_message(2)),
+    ];
+    super::super::batch_write::record_remaining_for_replay(
+        &mut conn,
+        frames.into_iter(),
+        BatchSmPolicy::Record,
+    );
+    let retained = conn.terminal_sm_recovery.stanzas_to_resend(0);
+    assert_eq!(retained.len(), 2);
+    assert_eq!(retained[0].provenance, provenance);
+    assert_eq!(retained[1].provenance, SmFrameProvenance::Unknown);
 }

@@ -64,6 +64,7 @@ async fn fixture() -> (
             last_acked: 0,
             replay_gap_through: None,
             unacked_stanzas: vec![DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: stanza_to_xml(&Stanza::Message(message)),
