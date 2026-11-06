@@ -56,7 +56,7 @@ pub(super) async fn exercise(
         .await
         .expect("API OID");
     let expected = RestrictedIngressProfileObservation {
-        manifest_version: 1,
+        manifest_version: 2,
         schema_oid: fixture
             .lineage
             .postgres_identity

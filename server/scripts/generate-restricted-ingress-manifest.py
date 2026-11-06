@@ -28,7 +28,7 @@ FILES = {
     "pending_recovery": ROOT.parent / "pending_delivery/database/recovery_order.rs",
     "structure_query": ROOT / "physical_attestation/restricted_ingress/structure.sql",
 }
-OUTPUT = ROOT / "physical_attestation/restricted_ingress_manifest_v1.json"
+OUTPUT = ROOT / "physical_attestation/restricted_ingress_manifest_v2.json"
 
 
 def render(source):
@@ -154,7 +154,7 @@ SET search_path=pg_catalog,pg_temp;
         if not found:
             raise ValueError(f"exact source body not found: {function['name']}")
     return {
-        "version": 1,
+        "version": 2,
         "postgres_major": 17,
         "source_sha256": {key: hashlib.sha256(value.encode()).hexdigest() for key, value in sources.items()},
         "functions": sorted(functions, key=lambda value: value["name"]),
@@ -174,7 +174,7 @@ def main():
             raise SystemExit("restricted ingress manifest differs")
     else:
         OUTPUT.write_text(encoded)
-    print(f"PG17 restricted ingress v1: {len(manifest['functions'])} functions, {len(manifest['structure'])} tables")
+    print(f"PG17 restricted ingress v2: {len(manifest['functions'])} functions, {len(manifest['structure'])} tables")
 
 
 if __name__ == "__main__":

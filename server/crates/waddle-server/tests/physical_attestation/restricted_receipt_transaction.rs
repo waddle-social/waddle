@@ -17,7 +17,11 @@ use waddle_xmpp::ingress::MessageKey;
 
 use super::super::{proxy_runtime_options, Fixture};
 
-fn database(fixture: &Fixture, config: PhysicalAttestationConfig, name: &str) -> Database {
+pub(super) fn database(
+    fixture: &Fixture,
+    config: PhysicalAttestationConfig,
+    name: &str,
+) -> Database {
     let pool = attested_pool(
         fixture.runtime_options.clone().application_name(name),
         config,
@@ -28,7 +32,7 @@ fn database(fixture: &Fixture, config: PhysicalAttestationConfig, name: &str) ->
     database_from_attested_postgres_pool(name, pool)
 }
 
-fn pilot(
+pub(super) fn pilot(
     db: &Database,
     api: &PgRoleName,
     expected: &RestrictedIngressProfileObservation,
@@ -36,7 +40,7 @@ fn pilot(
     RestrictedReceiptPilot::new(db.clone(), db, api.clone(), expected.clone()).expect("exact pool")
 }
 
-async fn seed(fixture: &Fixture, count: u8) -> Vec<RestrictedEffectReceipt> {
+pub(super) async fn seed(fixture: &Fixture, count: u8) -> Vec<RestrictedEffectReceipt> {
     let mut connection = PgConnection::connect_with(&fixture.runtime_options)
         .await
         .expect("seed runtime");
@@ -95,7 +99,7 @@ pub(super) async fn exercise(
         .await
         .expect("API OID");
     let expected = RestrictedIngressProfileObservation {
-        manifest_version: 1,
+        manifest_version: 2,
         schema_oid: fixture
             .lineage
             .postgres_identity
@@ -407,7 +411,7 @@ async fn reconnect(
     drop(db);
 }
 
-async fn terminal(fixture: &Fixture, pid: i32) {
+pub(super) async fn terminal(fixture: &Fixture, pid: i32) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let active: bool = sqlx::query_scalar(
@@ -493,7 +497,7 @@ async fn lost_commit(
 
 // Confirm the server emitted the exact COMMIT CommandComplete frame, then
 // discard it and close both sides before the client can observe it.
-async fn lose_receipt_commit_reply(
+pub(super) async fn lose_receipt_commit_reply(
     listener: tokio::net::TcpListener,
     upstream: sqlx::postgres::PgConnectOptions,
     held: oneshot::Sender<()>,
@@ -534,7 +538,7 @@ async fn lose_receipt_commit_reply(
 
 // Parse frontend frames and hold the actual simple-query COMMIT before it is
 // forwarded. The server still owns the open transaction while readback runs.
-async fn hold_commit_request(
+pub(super) async fn hold_commit_request(
     listener: tokio::net::TcpListener,
     upstream: sqlx::postgres::PgConnectOptions,
     held: oneshot::Sender<()>,
@@ -565,7 +569,7 @@ async fn hold_commit_request(
             }
             let mut body = vec![0; (length - 4) as usize];
             client_read.read_exact(&mut body).await?;
-            if tag == b'Q' && body == b"COMMIT\0" {
+            if tag == b'Q' && body == b"COMMIT\0" && held.is_some() {
                 held.take()
                     .ok_or_else(|| std::io::Error::other("second COMMIT"))?
                     .send(())

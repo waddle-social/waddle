@@ -43,6 +43,29 @@ pub enum RestrictedReceiptReadback {
     Indeterminate,
 }
 
+/// Current state observed under the canonical message lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestrictedTerminalization {
+    Incomplete,
+    Terminalized,
+    AlreadyTerminal,
+    MessageVanished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestrictedTerminalizationWrite {
+    /// PostgreSQL acknowledged the transaction COMMIT.
+    Committed { outcome: RestrictedTerminalization },
+    /// The COMMIT may have reached PostgreSQL, or the operation timed out.
+    Indeterminate,
+}
+
+#[derive(Clone, Copy)]
+enum Limits {
+    Receipt,
+    Completion,
+}
+
 // Neither the factory nor its transaction can be cloned, and neither exposes
 // SQL, callbacks, GUCs, a transaction or a separable writer capability.
 struct Factory {
@@ -74,7 +97,7 @@ impl RestrictedReceiptPilot {
             .ok_or(PhysicalAttestationError::WrongPool)?;
         database.verify_attested_pg_writer_capability(&capability)?;
         if !database.is_main_lane()
-            || expected.manifest_version != 1
+            || expected.manifest_version != super::MANIFEST_VERSION
             || expected.schema_oid != capability.identity().schema.oid
         {
             return Err(RestrictedIngressProfileError::Mismatch("receipt binding"));
@@ -95,7 +118,7 @@ impl RestrictedReceiptPilot {
         receipt: &RestrictedEffectReceipt,
     ) -> Result<RestrictedReceiptWrite> {
         match tokio::time::timeout(Duration::from_secs(15), async {
-            let mut tx = self.factory.begin().await?;
+            let mut tx = self.factory.begin(Limits::Receipt).await?;
             let inserted = tx.record(receipt).await?;
             Ok(match tx.tx.commit().await {
                 Ok(()) => RestrictedReceiptWrite::Committed { inserted },
@@ -112,7 +135,7 @@ impl RestrictedReceiptPilot {
     /// Fresh exact readback is positive-only; failure and absence are unknown.
     pub async fn readback(&self, receipt: &RestrictedEffectReceipt) -> RestrictedReceiptReadback {
         let result = tokio::time::timeout(Duration::from_secs(15), async {
-            let mut tx = self.factory.begin().await?;
+            let mut tx = self.factory.begin(Limits::Receipt).await?;
             let exists = tx.exists(receipt).await?;
             tx.tx.rollback().await.map_err(|_| {
                 RestrictedIngressProfileError::Mismatch("receipt readback rollback")
@@ -130,7 +153,7 @@ impl RestrictedReceiptPilot {
     /// Fixture-only acknowledged rollback of the same fixed candidate write.
     pub async fn record_rolled_back(&self, receipt: &RestrictedEffectReceipt) -> Result<bool> {
         tokio::time::timeout(Duration::from_secs(15), async {
-            let mut tx = self.factory.begin().await?;
+            let mut tx = self.factory.begin(Limits::Receipt).await?;
             let inserted = tx.record(receipt).await?;
             tx.tx.rollback().await.map_err(|_| {
                 RestrictedIngressProfileError::Mismatch("receipt rollback unacknowledged")
@@ -149,7 +172,7 @@ impl RestrictedReceiptPilot {
         release: oneshot::Receiver<()>,
     ) -> Result<RestrictedReceiptWrite> {
         match tokio::time::timeout(Duration::from_secs(15), async {
-            let mut tx = self.factory.begin().await?;
+            let mut tx = self.factory.begin(Limits::Receipt).await?;
             let connection = tx
                 .tx
                 .postgres_connection()
@@ -175,23 +198,72 @@ impl RestrictedReceiptPilot {
             Err(_) => Ok(RestrictedReceiptWrite::Indeterminate),
         }
     }
+
+    /// A later acknowledged call establishes current state only; it cannot
+    /// establish whether an earlier unknown COMMIT succeeded.
+    pub async fn terminalize_if_complete(
+        &self,
+        message: MessageKey,
+    ) -> Result<RestrictedTerminalizationWrite> {
+        match tokio::time::timeout(Duration::from_secs(15), async {
+            let mut tx = self.factory.begin(Limits::Completion).await?;
+            let outcome = tx.terminalize_if_complete(message).await?;
+            Ok(match tx.tx.commit().await {
+                Ok(()) => RestrictedTerminalizationWrite::Committed { outcome },
+                Err(_) => RestrictedTerminalizationWrite::Indeterminate,
+            })
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Ok(RestrictedTerminalizationWrite::Indeterminate),
+        }
+    }
+
+    /// Fixture-only acknowledged rollback of the closed completion operation.
+    pub async fn terminalize_rolled_back(
+        &self,
+        message: MessageKey,
+    ) -> Result<RestrictedTerminalization> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut tx = self.factory.begin(Limits::Completion).await?;
+            let outcome = tx.terminalize_if_complete(message).await?;
+            tx.tx.rollback().await.map_err(|_| {
+                RestrictedIngressProfileError::Mismatch("terminalization rollback unacknowledged")
+            })?;
+            Ok(outcome)
+        })
+        .await
+        .map_err(|_| RestrictedIngressProfileError::Timeout)?
+    }
 }
 
 impl Factory {
-    async fn begin(&self) -> Result<VerifiedReceiptTransaction<'_>> {
+    async fn begin(&self, limits: Limits) -> Result<VerifiedReceiptTransaction<'_>> {
         self.database
             .verify_attested_pg_writer_capability(&self.capability)?;
-        let mut tx =
-            self.database.begin().await.map_err(|_| {
-                RestrictedIngressProfileError::Mismatch("receipt checkout/transaction")
-            })?;
+        // The PostgreSQL lease owns cleanup even if BEGIN is cancelled before
+        // it returns. Completion must bound checkout/BEGIN as well as SQL lock
+        // and statement waits, matching its existing 100ms caller bound.
+        let acquisition = self.database.begin();
+        let mut tx = match limits {
+            Limits::Receipt => acquisition.await,
+            Limits::Completion => tokio::time::timeout(Duration::from_millis(100), acquisition)
+                .await
+                .map_err(|_| RestrictedIngressProfileError::Timeout)?,
+        }
+        .map_err(|_| RestrictedIngressProfileError::Mismatch("receipt checkout/transaction"))?;
         let connection = tx
             .postgres_connection()
             .ok_or(PhysicalAttestationError::PostgresRequired)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE")
             .execute(&mut *connection)
             .await?;
-        for (name, cap) in [("lock_timeout", 3_000), ("statement_timeout", 5_000)] {
+        let caps = match limits {
+            Limits::Receipt => [("lock_timeout", 3_000), ("statement_timeout", 5_000)],
+            Limits::Completion => [("lock_timeout", 100), ("statement_timeout", 250)],
+        };
+        for (name, cap) in caps {
             let current: String = sqlx::query_scalar("SELECT pg_catalog.current_setting($1)")
                 .bind(name)
                 .fetch_one(&mut *connection)
@@ -270,6 +342,34 @@ impl Factory {
 }
 
 impl VerifiedReceiptTransaction<'_> {
+    async fn terminalize_if_complete(
+        &mut self,
+        message: MessageKey,
+    ) -> Result<RestrictedTerminalization> {
+        let schema = &self.factory.capability.config.postgres().schema.name.0;
+        let query = format!(
+            "SELECT {}.waddle_ingress_terminalize_if_complete($1)",
+            quote_identifier(schema)
+        );
+        let connection = self
+            .tx
+            .postgres_connection()
+            .ok_or(PhysicalAttestationError::PostgresRequired)?;
+        let outcome: i32 = sqlx::query_scalar(&query)
+            .bind(message.to_storage())
+            .fetch_one(connection)
+            .await?;
+        match outcome {
+            0 => Ok(RestrictedTerminalization::Incomplete),
+            1 => Ok(RestrictedTerminalization::Terminalized),
+            2 => Ok(RestrictedTerminalization::AlreadyTerminal),
+            3 => Ok(RestrictedTerminalization::MessageVanished),
+            _ => Err(RestrictedIngressProfileError::Mismatch(
+                "terminalization result",
+            )),
+        }
+    }
+
     async fn record(&mut self, receipt: &RestrictedEffectReceipt) -> Result<bool> {
         let schema = &self.factory.capability.config.postgres().schema.name.0;
         let query = format!(

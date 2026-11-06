@@ -20,7 +20,7 @@ const WADDLE: &str = include_str!("../../migrations/waddle.rs");
 const PENDING_SCHEMA: &str = include_str!("../../../pending_delivery/database/schema.rs");
 const PENDING_RECOVERY: &str = include_str!("../../../pending_delivery/database/recovery_order.rs");
 const STRUCTURE_SQL: &str = include_str!("structure.sql");
-const MANIFEST: &str = include_str!("../restricted_ingress_manifest_v1.json");
+const MANIFEST: &str = include_str!("../restricted_ingress_manifest_v2.json");
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -71,7 +71,10 @@ pub(super) async fn verify(
 ) -> Result<()> {
     let manifest: Manifest = serde_json::from_str(MANIFEST)
         .map_err(|_| RestrictedIngressProfileError::Mismatch("manifest encoding"))?;
-    if manifest.version != 1 || manifest.postgres_major != 17 || manifest.source_sha256.len() != 7 {
+    if manifest.version != super::MANIFEST_VERSION
+        || manifest.postgres_major != 17
+        || manifest.source_sha256.len() != 7
+    {
         return Err(RestrictedIngressProfileError::Mismatch("manifest version"));
     }
     for (key, expected) in &manifest.source_sha256 {
