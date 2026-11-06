@@ -435,6 +435,11 @@ remain separate, unimplemented gates. The existing owner-rejection grant
 attestor deliberately verifies the historical cascade and rejects the new FK
 shape: it is not a v1 transition attestor and must not be weakened to accept an
 unverified mixture of states.
+The transition and each GC invocation refuse a schema containing either
+`ingress_admission_pins` or `direct_admission_lab`: their custody semantics are
+not attested by this candidate. Pins have no canonical FK and would otherwise
+be invisible to the FK preflight. Privileged DDL must remain quiescent while the
+pilot is installed and used; an absence check does not fence concurrent DDL.
 
 The fixed API consumes one candidate key with no caller-supplied clock or
 cutoff. It requires the calling transaction to have already prelocked and

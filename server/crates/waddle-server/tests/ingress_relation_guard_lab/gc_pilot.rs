@@ -6,6 +6,7 @@ const FK_TRANSITION: &str =
 const GC_API: &str = include_str!("../../src/db/migrations/owner/ingress_gc_api_v1_candidate.sql");
 const SOURCE: &str = "00000000-0000-0000-0000-000000000001";
 const CHILD: &str = "00000000-0000-0000-0000-000000000002";
+const STANDALONE: &str = "00000000-0000-0000-0000-000000000031";
 const NULL_TAIL: &str = "00000000-0000-0000-0000-000000000011";
 const MISSING_RECEIPT: &str = "00000000-0000-0000-0000-000000000012";
 const UNSETTLED: &str = "00000000-0000-0000-0000-000000000013";
@@ -73,7 +74,8 @@ async fn seed(owner: &mut PgConnection) {
         '00000000-0000-0000-0000-000000000014',
         '00000000-0000-0000-0000-000000000015',
         '00000000-0000-0000-0000-000000000016',
-        '00000000-0000-0000-0000-000000000022']) AS key;
+        '00000000-0000-0000-0000-000000000022',
+        '00000000-0000-0000-0000-000000000031']) AS key;
       UPDATE guarded.ingress_messages SET owner_decision=0 WHERE message_key IN
         ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000017','00000000-0000-0000-0000-000000000021');
       INSERT INTO guarded.ingress_owner_rejections VALUES
@@ -105,6 +107,15 @@ async fn seed(owner: &mut PgConnection) {
              CASE WHEN message_key='00000000-0000-0000-0000-000000000015' THEN '' ELSE 'resource' END,
              CASE WHEN message_key='00000000-0000-0000-0000-000000000015' THEN 'pending' ELSE '' END
       FROM guarded.ingress_effect_intents WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000015');
+      INSERT INTO guarded.ingress_origin_aliases (alias_key_hash,sender_bare_jid,target_kind,target_jid,origin_id,message_key)
+      SELECT decode(repeat(replace(message_key::text,'-',''),2),'hex'),'source@example.test',1,'target@example.test','origin-' || message_key::text,message_key
+      FROM guarded.ingress_messages WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000031');
+      INSERT INTO guarded.ingress_deliveries (delivery_key,message_key)
+      SELECT message_key,message_key FROM guarded.ingress_messages
+      WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000031');
+      INSERT INTO guarded.sm_ingress_appends (message_key,receipt_kind,semantic_identity_hash,resource,accepting_stream_id,sequence,appended_at_ms,custody_payload,original_receipt_at_ms,disposition)
+      SELECT message_key::text,1,decode(repeat('04',32),'hex'),'settled','stream',1,1,'payload',1,1
+      FROM guarded.ingress_messages WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000031');
       INSERT INTO guarded.pending_delivery VALUES ('pending');
       INSERT INTO guarded.muc_invite_claims SELECT message_key,'room','invitee','inviter',1 FROM guarded.ingress_messages
       WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002');
@@ -198,6 +209,34 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
         .await
         .is_err());
 
+    // A pin can exist without an FK and without any other custody barrier.
+    // Installing either experimental schema after transition must still make
+    // every invocation fail before touching even an expired source pair.
+    for relation in ["ingress_admission_pins", "direct_admission_lab"] {
+        sql(&mut admin, &format!("CREATE TABLE guarded.{relation} (message_key uuid NOT NULL); INSERT INTO guarded.{relation} VALUES ('{SOURCE}'::uuid), ('{NULL_TAIL}'::uuid)")).await;
+        for key in [SOURCE, NULL_TAIL] {
+            begin(&mut runtime).await;
+            writer_lock(&mut runtime).await;
+            let error = gc(&mut runtime, key)
+                .await
+                .expect_err("unsupported admission custody must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported admission custody relation"),
+                "{relation}: {error}"
+            );
+            sql(&mut runtime, "ROLLBACK").await;
+        }
+        let intact: i64 = sqlx::query_scalar("SELECT count(*) FROM guarded.ingress_messages WHERE message_key IN ($1::uuid, $2::uuid)")
+            .bind(SOURCE).bind(CHILD).fetch_one(&mut admin).await.expect("retained pinned pair");
+        assert_eq!(intact, 2);
+        let still_unset: bool = sqlx::query_scalar("SELECT retention_eligible_at IS NULL FROM guarded.ingress_messages WHERE message_key=$1::uuid")
+            .bind(NULL_TAIL).fetch_one(&mut admin).await.expect("pin blocks frontier adoption");
+        assert!(still_unset);
+        sql(&mut admin, &format!("DROP TABLE guarded.{relation}")).await;
+    }
+
     // A table-owner SECURITY DEFINER trigger cannot impersonate the API owner.
     sql(&mut admin, &format!(r#"
       CREATE TABLE guarded.gc_hostile (id int);
@@ -233,6 +272,31 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
         .bind(NULL_TAIL).fetch_one(&mut admin).await.expect("database clock");
     assert!(adopted);
     assert_eq!(gc_tx(&mut runtime, NULL_TAIL).await, "skipped");
+
+    assert_eq!(gc_tx(&mut runtime, STANDALONE).await, "deleted_one");
+    for table in [
+        "ingress_messages",
+        "ingress_effect_intents",
+        "ingress_effect_receipts",
+        "ingress_origin_aliases",
+        "ingress_deliveries",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM guarded.{table} WHERE message_key=$1::uuid"
+        ))
+        .bind(STANDALONE)
+        .fetch_one(&mut admin)
+        .await
+        .expect("standalone graph removal");
+        assert_eq!(count, 0, "{table}");
+    }
+    let settled: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM guarded.sm_ingress_appends WHERE message_key=$1")
+            .bind(STANDALONE)
+            .fetch_one(&mut admin)
+            .await
+            .expect("settled standalone append removal");
+    assert_eq!(settled, 0);
 
     // Both canonical locks use SKIP LOCKED; the epoch-exclusive transition
     // waits behind a runtime prelock and is bounded by lock_timeout.
@@ -344,6 +408,8 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
         "ingress_effect_descendants",
         "ingress_send_attempts",
         "ingress_archive_dispatch",
+        "ingress_origin_aliases",
+        "ingress_deliveries",
         "muc_invite_claims",
     ] {
         let count: i64 = sqlx::query_scalar(&format!(
@@ -359,6 +425,15 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
     let mappings: i64 = sqlx::query_scalar("SELECT count(*) FROM guarded.ingress_owner_rejections WHERE source_message_key=$1::uuid OR child_message_key=$2::uuid")
         .bind(SOURCE).bind(CHILD).fetch_one(&mut admin).await.expect("verify mapping removal");
     assert_eq!(mappings, 0);
+    let settled_pair: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM guarded.sm_ingress_appends WHERE message_key IN ($1, $2)",
+    )
+    .bind(SOURCE)
+    .bind(CHILD)
+    .fetch_one(&mut admin)
+    .await
+    .expect("settled pair appends removed");
+    assert_eq!(settled_pair, 0);
 
     // A stopped writer is a laboratory prerequisite, not a database-enforced
     // fence. Model an already-authorized late append after collection and
@@ -391,9 +466,29 @@ async fn gc_v1_transition_rejects_unknown_graph_and_breaks_old_cascade_writer() 
     };
     let mut owner = fixture.owner().await;
     let mut runtime = fixture.runtime().await;
+    let transition = render(FK_TRANSITION, "unused_api", &fixture.runtime);
+    for relation in ["ingress_admission_pins", "direct_admission_lab"] {
+        sql(
+            &mut owner,
+            &format!("CREATE TABLE guarded.{relation} (message_key uuid NOT NULL)"),
+        )
+        .await;
+        begin(&mut owner).await;
+        let error = sqlx::raw_sql(&transition)
+            .execute(&mut owner)
+            .await
+            .expect_err("admission schema must fail transition preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported admission custody relation"),
+            "{relation}: {error}"
+        );
+        sql(&mut owner, "ROLLBACK").await;
+        sql(&mut owner, &format!("DROP TABLE guarded.{relation}")).await;
+    }
     sql(&mut owner, "CREATE TABLE guarded.gc_unexpected (id uuid REFERENCES guarded.ingress_messages(message_key) ON DELETE CASCADE)").await;
     begin(&mut owner).await;
-    let transition = render(FK_TRANSITION, "unused_api", &fixture.runtime);
     assert!(
         sqlx::raw_sql(&transition)
             .execute(&mut owner)

@@ -34,6 +34,13 @@ BEGIN
     IF live_epoch > 1 THEN
         RAISE EXCEPTION 'waddle gc v1: unsupported protocol epoch';
     END IF;
+    -- The v1 pilot cannot interpret either experimental admission record.
+    -- Recheck after preparation even if installation checked the schema.
+    -- As with the FK manifest, privileged DDL must remain quiescent.
+    IF pg_catalog.to_regclass('__SCHEMA_PATH__.ingress_admission_pins') IS NOT NULL
+       OR pg_catalog.to_regclass('__SCHEMA_PATH__.direct_admission_lab') IS NOT NULL THEN
+        RAISE EXCEPTION 'waddle gc v1: unsupported admission custody relation';
+    END IF;
 
     -- Match the collector's source-then-child order and never wait on a
     -- competing canonical-row owner. The caller bounds all other lock waits.

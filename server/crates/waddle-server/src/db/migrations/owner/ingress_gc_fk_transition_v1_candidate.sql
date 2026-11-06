@@ -30,6 +30,12 @@ BEGIN
     IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
         RAISE EXCEPTION 'waddle gc v1: requires READ COMMITTED';
     END IF;
+    -- Neither experimental admission schema is part of this GC contract.
+    -- In particular, admission pins have no FK back to ingress_messages.
+    IF pg_catalog.to_regclass('__SCHEMA_PATH__.ingress_admission_pins') IS NOT NULL
+       OR pg_catalog.to_regclass('__SCHEMA_PATH__.direct_admission_lab') IS NOT NULL THEN
+        RAISE EXCEPTION 'waddle gc v1: unsupported admission custody relation';
+    END IF;
     IF EXISTS (
       WITH expected(child, name, parent, child_keys, parent_keys, delete_action, is_deferrable, valid_contract) AS (
       VALUES
