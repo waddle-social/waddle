@@ -20,6 +20,7 @@ use waddle_xmpp::ownership::NodeIdentity;
 use waddle_xmpp_core::xep0359::{add_origin_id, add_stanza_id, StanzaId};
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
+use crate::ingress_substrate::EffectReceiptKind;
 use crate::ingress_uow::{
     CanonicalMessageRepository, CapturedRoomSource, EffectIntentRepository, IngressUnitOfWork,
     IngressUowTransaction, ObservationWork, RoomObservationRepository,
@@ -52,6 +53,7 @@ pub struct ObserverPilotClaim {
     intent: IngressEffectIntent,
     digest: SemanticDigest,
     effect_hash: [u8; 32],
+    receipt: ObserverPilotReceiptIdentity,
 }
 
 impl ObserverPilotClaim {
@@ -66,6 +68,7 @@ impl ObserverPilotClaim {
     /// Corrupt a caller-held identity without changing the database.
     pub fn corrupt_for_test(&mut self, field: &str) -> anyhow::Result<()> {
         match field {
+            "work" => self.work.id = uuid::Uuid::new_v4(),
             "token" => self.work.lease = uuid::Uuid::new_v4(),
             "body" => self.work.body = DisplayText::try_new("different body")?,
             "attempt" => self.work.attempt = self.work.attempt.saturating_add(1),
@@ -73,6 +76,9 @@ impl ObserverPilotClaim {
                 self.observer.max_concurrent = self.observer.max_concurrent.saturating_add(1)
             }
             "generation" => self.observer.generation = ObservationGeneration::try_new(2)?,
+            "subscription_generation" => {
+                self.work.subscription.generation = ObservationGeneration::try_new(2)?
+            }
             "identity" => self.work.subscription.identity = Sha256Digest::try_new("b".repeat(64))?,
             "source" => {
                 self.work.source.revision =
@@ -80,6 +86,9 @@ impl ObserverPilotClaim {
             }
             "digest" => self.digest = SemanticDigest::from_storage(1, [9; 32])?,
             "hash" => self.effect_hash = [8; 32],
+            "receipt_message" => self.receipt.message = MessageKey::new(),
+            "receipt_kind" => self.receipt.kind = EffectReceiptKind::from_storage(0),
+            "receipt_hash" => self.receipt.semantic_identity_hash = [7; 32],
             "kind" => {
                 self.intent = IngressEffectIntent::RouteOccupantPm {
                     recipient: "room@conference.example.org/recipient".parse()?,
@@ -98,30 +107,137 @@ impl ObserverPilotClaim {
     }
 }
 
+// Kept private and derived from the verified work. An independently created
+// receipt is not authority to invoke the callback or recover its result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ObserverPilotReceiptIdentity {
+    message: MessageKey,
+    kind: EffectReceiptKind,
+    semantic_identity_hash: [u8; 32],
+}
+
+fn receipt_identity(work: &ObservationWork) -> ObserverPilotReceiptIdentity {
+    let effect = work.effect_key();
+    ObserverPilotReceiptIdentity {
+        message: work.message_key,
+        kind: EffectReceiptKind::from_storage(effect.storage_kind()),
+        semantic_identity_hash: Sha256::digest(effect.storage_identity().as_bytes()).into(),
+    }
+}
+
+// The complete guard snapshot captures the work, lease, node incarnation,
+// source, configuration, canonical message, delivery and effect at start.
+// This is process-local evidence, not a durable result or an attestation.
+struct ObserverPilotStartIdentity {
+    snapshot: serde_json::Value,
+    receipt: ObserverPilotReceiptIdentity,
+}
+
+impl ObserverPilotStartIdentity {
+    fn verify(&self, claim: &ObserverPilotClaim) -> anyhow::Result<()> {
+        ensure!(
+            claim.receipt == self.receipt,
+            "fixture receipt identity mismatch"
+        );
+        verify_snapshot(&self.snapshot, claim)
+    }
+}
+
 /// A start whose transaction has not yet been committed. It carries no grant.
 pub struct PreparedObserverPilotStart<'a> {
     tx: IngressUowTransaction<'a>,
+    identity: ObserverPilotStartIdentity,
 }
 
 /// One acknowledged start. This value is intentionally neither `Clone` nor `Copy`.
-pub struct ObserverPilotGrant(());
+pub struct ObserverPilotGrant {
+    identity: ObserverPilotStartIdentity,
+}
+
+// Result custody is private, non-cloneable and tied to the acknowledged start.
+// It exists only after the callback returned in this process.
+struct ReturnedObserverPilotResult<T> {
+    identity: ObserverPilotStartIdentity,
+    value: T,
+}
+
+enum ObserverPilotState<T> {
+    Ready,
+    Invoking,
+    Returned(ReturnedObserverPilotResult<T>),
+}
+
+/// Fixture-only state owned by the live caller, not recoverable after a crash.
+pub struct ObserverPilotCustody<T> {
+    identity: Option<ObserverPilotStartIdentity>,
+    state: ObserverPilotState<T>,
+}
 
 impl PreparedObserverPilotStart<'_> {
     /// Only an acknowledged COMMIT creates a live-caller grant.
     pub async fn commit(self) -> anyhow::Result<ObserverPilotGrant> {
         self.tx.commit().await?;
-        Ok(ObserverPilotGrant(()))
+        Ok(ObserverPilotGrant {
+            identity: self.identity,
+        })
     }
 }
 
 impl ObserverPilotGrant {
-    /// Consume the sole grant before entering the fixture callback.
-    pub async fn invoke<F, Fut, T>(self, callback: F) -> T
+    /// Transfer the single-use grant into caller-owned fixture custody.
+    pub fn into_custody<T>(self) -> ObserverPilotCustody<T> {
+        ObserverPilotCustody {
+            identity: Some(self.identity),
+            state: ObserverPilotState::Ready,
+        }
+    }
+}
+
+impl<T> ObserverPilotCustody<T> {
+    /// Enter the callback at most once. Dropping an unpolled future does not
+    /// enter it; cancellation or panic after entry leaves the outcome unknown.
+    pub async fn invoke<F, Fut>(
+        &mut self,
+        claim: &ObserverPilotClaim,
+        callback: F,
+    ) -> anyhow::Result<()>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        callback().await
+        ensure!(
+            matches!(self.state, ObserverPilotState::Ready),
+            "fixture callback already entered"
+        );
+        self.identity
+            .as_ref()
+            .context("fixture start identity missing")?
+            .verify(claim)?;
+        self.state = ObserverPilotState::Invoking;
+        let value = callback().await;
+        // No await separates observing callback completion and taking custody.
+        let identity = self
+            .identity
+            .take()
+            .context("fixture start identity missing")?;
+        self.state = ObserverPilotState::Returned(ReturnedObserverPilotResult { identity, value });
+        Ok(())
+    }
+
+    /// Use the exact returned value for a fixture retry without invoking again.
+    /// This rechecks the caller-held claim against the frozen start snapshot,
+    /// not current database authority. It cannot authorize a production receipt
+    /// or publication. A returned future may borrow the value; dropping it
+    /// leaves custody here.
+    pub fn retry<'a, F, R>(&'a self, claim: &ObserverPilotClaim, retry: F) -> anyhow::Result<R>
+    where
+        F: FnOnce(&'a T) -> R,
+    {
+        let ObserverPilotState::Returned(returned) = &self.state else {
+            anyhow::bail!("fixture callback result unavailable");
+        };
+        returned.identity.verify(claim)?;
+        Ok(retry(&returned.value))
     }
 }
 
@@ -216,13 +332,15 @@ pub async fn claim_observer_pilot(
     let work = RoomObservationRepository::claim(&mut tx, &subscription, now_ms).await?;
     tx.commit().await?;
     Ok(work.map(|work| {
-        let effect_hash = Sha256::digest(work.effect_key().storage_identity().as_bytes()).into();
+        let receipt = receipt_identity(&work);
+        let effect_hash = receipt.semantic_identity_hash;
         ObserverPilotClaim {
             work,
             observer: seed.observer.clone(),
             intent: seed.intent.clone(),
             digest: seed.digest.clone(),
             effect_hash,
+            receipt,
         }
     }))
 }
@@ -256,6 +374,23 @@ pub async fn prepare_observer_pilot_start<'a>(
     );
     let snapshot: serde_json::Value =
         serde_json::from_str(&snapshot.context("fixture snapshot missing")?)?;
+    verify_snapshot(&snapshot, claim)?;
+    Ok(Some(PreparedObserverPilotStart {
+        tx,
+        identity: ObserverPilotStartIdentity {
+            snapshot,
+            receipt: claim.receipt,
+        },
+    }))
+}
+
+fn verify_snapshot(snapshot: &serde_json::Value, claim: &ObserverPilotClaim) -> anyhow::Result<()> {
+    let derived_receipt = receipt_identity(&claim.work);
+    ensure!(
+        claim.receipt == derived_receipt
+            && claim.effect_hash == derived_receipt.semantic_identity_hash,
+        "fixture receipt identity mismatch"
+    );
     let work = &snapshot["work"];
     let observer = &snapshot["observer"];
     let source = &snapshot["source"];
@@ -302,10 +437,11 @@ pub async fn prepare_observer_pilot_start<'a>(
             && delivery["message_key"] == claim.work.message_key.to_storage().to_string()
             && delivery["delivery_key"] == claim.work.delivery_key().to_storage().to_string()
             && effect["kind"] == kind
+            && effect["kind"] == derived_receipt.kind.to_storage()
             && effect["identity_hash"] == hex::encode(claim.effect_hash)
             && effect["payload_version"] == 1
             && effect["payload"] == hex::encode(payload),
         "fixture start identity mismatch"
     );
-    Ok(Some(PreparedObserverPilotStart { tx }))
+    Ok(())
 }
