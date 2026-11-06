@@ -1310,3 +1310,7 @@ mod allocation_tests;
 #[cfg(feature = "clustering")]
 #[path = "custody.rs"]
 mod custody_tests;
+
+#[cfg(feature = "clustering")]
+#[path = "sm_custody.rs"]
+mod sm_custody_tests;

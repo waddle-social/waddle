@@ -144,6 +144,11 @@ pub(crate) struct AttestedPostgresWriterCapability {
 }
 
 impl AttestedPostgresWriterCapability {
+    #[cfg(all(feature = "test-support", feature = "clustering"))]
+    pub(crate) fn matches_config(&self, config: &PhysicalAttestationConfig) -> bool {
+        &self.config == config
+    }
+
     pub(crate) fn identity(&self) -> &PgIdentity {
         self.config.postgres()
     }

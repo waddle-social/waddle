@@ -1,0 +1,116 @@
+-- Dark candidate only. Immutable journals remain bounded and are not reclaimed.
+CREATE TABLE __SCHEMA__.sm_custody_quota (id INTEGER PRIMARY KEY CHECK (id = 1));
+INSERT INTO __SCHEMA__.sm_custody_quota VALUES (1);
+CREATE TABLE __SCHEMA__.sm_custody_gates (
+    gate_id UUID PRIMARY KEY,
+    token UUID NOT NULL,
+    resource TEXT NOT NULL,
+    session_id TEXT NOT NULL UNIQUE,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    endpoint TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    node_incarnation TEXT NOT NULL,
+    claim_epoch BIGINT NOT NULL,
+    sealed BOOLEAN NOT NULL DEFAULT FALSE,
+    appended BIGINT NOT NULL DEFAULT 0 CHECK (appended >= 0),
+    exposed BIGINT NOT NULL DEFAULT 0 CHECK (exposed >= 0),
+    peer_acked BIGINT NOT NULL DEFAULT 0 CHECK (peer_acked >= 0),
+    UNIQUE (session_id, generation),
+    CHECK (peer_acked <= exposed AND exposed <= appended)
+);
+CREATE TABLE __SCHEMA__.sm_custody_operations (
+    operation_id UUID PRIMARY KEY,
+    gate_id UUID NOT NULL UNIQUE REFERENCES __SCHEMA__.sm_custody_gates (gate_id),
+    message_key UUID NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
+    resource TEXT NOT NULL,
+    attempt_token UUID NOT NULL UNIQUE,
+    payload TEXT NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 262144),
+    received_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (message_key, receipt_kind, semantic_identity_hash, resource)
+);
+CREATE TABLE __SCHEMA__.sm_custody_slots (
+    operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
+    gate_id UUID NOT NULL REFERENCES __SCHEMA__.sm_custody_gates (gate_id),
+    ordinal BIGINT NOT NULL CHECK (ordinal > 0),
+    UNIQUE (gate_id, ordinal)
+);
+CREATE TABLE __SCHEMA__.sm_custody_terminals (
+    operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
+    disposition INTEGER NOT NULL CHECK (disposition IN (1, 2))
+);
+-- A transfer is independent of the canonical row and includes its full payload.
+CREATE TABLE __SCHEMA__.sm_custody_transfers (
+    operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
+    resource TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL
+);
+CREATE FUNCTION __SCHEMA__.sm_custody_immutable() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN RAISE EXCEPTION 'immutable SM custody evidence'; END $$;
+CREATE TRIGGER sm_custody_operations_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_operations FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE TRIGGER sm_custody_slots_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_slots FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE TRIGGER sm_custody_terminals_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_terminals FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE TRIGGER sm_custody_transfers_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_transfers FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE FUNCTION __SCHEMA__.sm_custody_gate_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF (NEW.gate_id, NEW.token, NEW.resource, NEW.session_id, NEW.generation, NEW.endpoint,
+        NEW.node_id, NEW.node_incarnation, NEW.claim_epoch)
+        IS DISTINCT FROM (OLD.gate_id, OLD.token, OLD.resource, OLD.session_id, OLD.generation,
+        OLD.endpoint, OLD.node_id, OLD.node_incarnation, OLD.claim_epoch)
+        OR (OLD.sealed AND NOT NEW.sealed)
+        OR NEW.appended < OLD.appended OR NEW.exposed < OLD.exposed OR NEW.peer_acked < OLD.peer_acked THEN
+        RAISE EXCEPTION 'SM custody identity or frontier cannot roll back';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_gate_guard BEFORE UPDATE ON __SCHEMA__.sm_custody_gates
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_gate_guard();
+CREATE TRIGGER sm_custody_gate_no_delete BEFORE DELETE OR TRUNCATE ON __SCHEMA__.sm_custody_gates
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+-- This triggers even for a raw delayed candidate INSERT: gate -> canonical.
+CREATE FUNCTION __SCHEMA__.sm_custody_admission_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE closed BOOLEAN;
+BEGIN
+    SELECT sealed INTO closed FROM __SCHEMA__.sm_custody_gates WHERE gate_id = NEW.gate_id FOR UPDATE;
+    IF closed IS DISTINCT FROM FALSE THEN RAISE EXCEPTION 'SM custody gate is closed'; END IF;
+    PERFORM 1 FROM __SCHEMA__.ingress_messages WHERE message_key = NEW.message_key FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM custody canonical source is absent'; END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_admission_guard BEFORE INSERT ON __SCHEMA__.sm_custody_operations
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_admission_guard();
+CREATE FUNCTION __SCHEMA__.sm_custody_slot_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE closed BOOLEAN;
+BEGIN
+    SELECT sealed INTO closed FROM __SCHEMA__.sm_custody_gates WHERE gate_id = NEW.gate_id FOR UPDATE;
+    IF closed IS DISTINCT FROM FALSE OR NOT EXISTS (
+        SELECT 1 FROM __SCHEMA__.sm_custody_operations o WHERE o.operation_id = NEW.operation_id
+        AND o.gate_id = NEW.gate_id AND NOT EXISTS (
+            SELECT 1 FROM __SCHEMA__.sm_custody_terminals t WHERE t.operation_id = o.operation_id)) THEN
+        RAISE EXCEPTION 'SM custody slot is no longer admissible';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_slot_guard BEFORE INSERT ON __SCHEMA__.sm_custody_slots
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_slot_guard();
+CREATE FUNCTION __SCHEMA__.sm_custody_parent_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM __SCHEMA__.sm_custody_operations o WHERE o.message_key = OLD.message_key
+        AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.sm_custody_terminals t WHERE t.operation_id = o.operation_id)) THEN
+        RAISE EXCEPTION 'pending SM custody prevents canonical deletion';
+    END IF;
+    RETURN OLD;
+END $$;
+CREATE TRIGGER sm_custody_parent_guard BEFORE DELETE ON __SCHEMA__.ingress_messages
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_parent_guard();
