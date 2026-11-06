@@ -15,10 +15,12 @@ use crate::server::routes::websocket::supervised_io::StopReason;
 use jid::BareJid;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::ConnectionRef;
 
@@ -146,6 +148,7 @@ pub(super) struct ConnectionActorDriverTaskCleanup {
 struct DriverCleanupInner {
     shared: Arc<DriverShared>,
     abort: AbortHandle,
+    shutdown_deadline_armed: AtomicBool,
     _data: mpsc::Sender<DriverCommand>,
     _control: mpsc::Sender<DriverControl>,
     supervisor: AsyncMutex<SupervisorJoinState>,
@@ -174,6 +177,8 @@ struct DriverShared {
 
 struct DriverLedger {
     accepting: bool,
+    stop_reason: Option<StopReason>,
+    stop_started_at: Option<Instant>,
     next_id: u64,
     operations: HashMap<u64, Arc<DriverOperation>>,
 }
@@ -326,6 +331,8 @@ impl ConnectionActorDriverTask {
             limits,
             state: Mutex::new(DriverLedger {
                 accepting: true,
+                stop_reason: None,
+                stop_started_at: None,
                 next_id: 1,
                 operations: HashMap::new(),
             }),
@@ -354,6 +361,7 @@ impl ConnectionActorDriverTask {
             inner: Arc::new(DriverCleanupInner {
                 shared: Arc::clone(&shared),
                 abort,
+                shutdown_deadline_armed: AtomicBool::new(false),
                 _data: data.clone(),
                 _control: control.clone(),
                 supervisor: AsyncMutex::new(SupervisorJoinState {
@@ -799,6 +807,15 @@ impl ConnectionActorDriverTestHandle {
         self.task.request_stop(reason);
     }
 
+    pub async fn wait_stopped(&self) -> Instant {
+        self.task.shared.stop.cancelled().await;
+        self.task
+            .shared
+            .lock_state()
+            .stop_started_at
+            .unwrap_or_else(Instant::now)
+    }
+
     pub async fn wait_joined(&self) {
         self.task.wait_joined().await;
     }
@@ -923,11 +940,62 @@ impl DriverShared {
     }
 
     fn request_stop(&self, reason: StopReason) {
+        {
+            let mut ledger = self.lock_state();
+            if ledger.stop_reason.is_none() {
+                ledger.stop_reason = Some(reason);
+                ledger.stop_started_at = Some(Instant::now());
+            }
+            ledger.accepting = false;
+            // Admission and result publication use this same ledger lock. The
+            // first stop therefore closes both boundaries before the token
+            // wakes the worker or its shutdown timer.
+            self.stop.cancel();
+        }
         self.lifecycle.request_stop(reason);
+    }
+
+    fn publish_completion(
+        &self,
+        operation: &DriverOperation,
+        result: Arc<ConnectionActorDriverTaskResult>,
+        exceeds_reservation: bool,
+        authority_revoked: bool,
+    ) {
         let mut ledger = self.lock_state();
-        ledger.accepting = false;
-        self.stop.cancel();
+        let unknown_reason = if exceeds_reservation {
+            if ledger.stop_reason.is_none() {
+                ledger.stop_reason = Some(StopReason::OutboundOverload);
+                ledger.stop_started_at = Some(Instant::now());
+            }
+            ledger.accepting = false;
+            self.stop.cancel();
+            Some(ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded)
+        } else if authority_revoked {
+            Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
+        } else if !ledger.accepting {
+            Some(match ledger.stop_reason {
+                Some(StopReason::LeaseLost) => {
+                    ConnectionActorDriverTaskUnknownReason::AuthorityRevoked
+                }
+                _ => ConnectionActorDriverTaskUnknownReason::WorkerStopped,
+            })
+        } else {
+            None
+        };
+        match unknown_reason {
+            Some(reason) => {
+                operation.set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                    reason,
+                    result: Some(result),
+                })
+            }
+            None => operation.set_snapshot(ConnectionActorDriverTaskSnapshot::Completed(result)),
+        }
         drop(ledger);
+        if exceeds_reservation {
+            self.lifecycle.request_stop(StopReason::OutboundOverload);
+        }
     }
 
     fn operation_acknowledged(&self) {
@@ -1049,19 +1117,44 @@ impl ConnectionActorDriverTaskCleanup {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
+    /// Arm the one grace timer for this driver. Its deadline is based on the
+    /// synchronous first-stop timestamp in the ledger, so executor scheduling
+    /// delay cannot extend the configured grace. The worker supervisor remains
+    /// the sole owner of the JoinHandle and reports its join independently.
+    pub(super) fn arm_shutdown_deadline(&self, grace: Duration) {
+        if self
+            .inner
+            .shutdown_deadline_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let shared = Arc::clone(&self.inner.shared);
+        let abort = self.inner.abort.clone();
+        tokio::spawn(async move {
+            shared.stop.cancelled().await;
+            let started_at = shared
+                .lock_state()
+                .stop_started_at
+                .unwrap_or_else(Instant::now);
+            let deadline = started_at.checked_add(grace).unwrap_or_else(Instant::now);
+            tokio::select! {
+                biased;
+                _ = shared.wait_joined() => {}
+                _ = tokio::time::sleep_until(deadline) => abort.abort(),
+            }
+        });
+    }
+
     /// Stop admission, let the active handler return for `grace`, then abort
     /// and join the worker if it remains stalled. Accepted queued inputs are
     /// classified as `NotStarted`; the active input remains
     /// `CompletionUnknown` after a forced abort.
     pub(super) async fn shutdown_and_join(&self, grace: Duration) {
         self.request_stop(StopReason::Requested);
-        if tokio::time::timeout(grace, self.inner.shared.wait_joined())
-            .await
-            .is_err()
-        {
-            self.inner.abort.abort();
-        }
-        self.join_supervisor().await;
+        self.arm_shutdown_deadline(grace);
+        self.wait_joined().await;
     }
 
     async fn force_abort_and_join(&self) {
@@ -1236,17 +1329,8 @@ impl ActiveOperationGuard {
         });
         let exceeds_reservation =
             result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
-        if exceeds_reservation {
-            self.shared.request_stop(StopReason::OutboundOverload);
-            self.operation
-                .set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
-                    reason: ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded,
-                    result: Some(result),
-                });
-        } else {
-            self.operation
-                .set_snapshot(ConnectionActorDriverTaskSnapshot::Completed(result));
-        }
+        self.shared
+            .publish_completion(&self.operation, result, exceeds_reservation, false);
         self.complete = true;
     }
 
@@ -1257,18 +1341,9 @@ impl ActiveOperationGuard {
         });
         let exceeds_reservation =
             result.accounted_bytes() > self.operation._reservation.result_reservation_bytes;
-        if exceeds_reservation {
-            self.shared.request_stop(StopReason::OutboundOverload);
-        }
-        self.operation
-            .set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
-                reason: if exceeds_reservation {
-                    ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded
-                } else {
-                    ConnectionActorDriverTaskUnknownReason::AuthorityRevoked
-                },
-                result: Some(result),
-            });
+        self.shared.request_stop(StopReason::LeaseLost);
+        self.shared
+            .publish_completion(&self.operation, result, exceeds_reservation, true);
         self.complete = true;
     }
 }
@@ -1618,6 +1693,129 @@ mod tests {
         ));
         active.acknowledge().expect("active custody acknowledged");
         queued.acknowledge().expect("queued custody acknowledged");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_deadline_is_measured_from_the_synchronous_first_stop() {
+        let task = test_task().await;
+        let cleanup = task.cleanup_handle();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "held")
+            .expect("active operation accepted");
+        let queued = task.submit_immediate(0).expect("queued operation accepted");
+        entered.notified().await;
+        tokio::time::pause();
+        let grace = Duration::from_secs(10);
+        cleanup.arm_shutdown_deadline(grace);
+
+        task.request_stop(StopReason::Requested);
+        // Leave the timer task unscheduled past its deadline. It must use the
+        // stop Instant recorded synchronously under DriverLedger, not start a
+        // fresh grace when the detached timer gets CPU time.
+        tokio::time::advance(grace + Duration::from_secs(1)).await;
+        tokio::time::timeout(Duration::from_secs(1), cleanup.wait_joined())
+            .await
+            .expect("the original first-stop deadline has already elapsed");
+
+        assert!(matches!(
+            active.snapshot(),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::WorkerAborted,
+                result: None,
+            }
+        ));
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        active.acknowledge().expect("active custody acknowledged");
+        queued.acknowledge().expect("queued custody acknowledged");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stop_and_submit_share_one_admission_linearization_gate() {
+        let task = Arc::new(test_task().await);
+        let cleanup = task.cleanup_handle();
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let submit_task = Arc::clone(&task);
+        let submit_start = Arc::clone(&start);
+        let submit = tokio::task::spawn_blocking(move || {
+            submit_start.wait();
+            submit_task.submit_immediate(0)
+        });
+        let stop_cleanup = cleanup.clone();
+        let stop_start = Arc::clone(&start);
+        let stop = tokio::task::spawn_blocking(move || {
+            stop_start.wait();
+            stop_cleanup.request_stop(StopReason::Requested);
+        });
+        start.wait();
+        let submitted = submit.await.expect("submit thread joins");
+        stop.await.expect("stop thread joins");
+
+        assert!(
+            task.submit_immediate(0).is_err(),
+            "later admission is sealed"
+        );
+        cleanup.wait_joined().await;
+        match submitted {
+            Ok(ticket) => {
+                assert!(matches!(
+                    ticket.snapshot(),
+                    ConnectionActorDriverTaskSnapshot::Completed(_)
+                        | ConnectionActorDriverTaskSnapshot::CompletionUnknown { .. }
+                        | ConnectionActorDriverTaskSnapshot::NotStarted
+                ));
+                ticket
+                    .acknowledge()
+                    .expect("the winner of the admission gate remains recoverable");
+            }
+            Err(error) => {
+                assert_eq!(error, ConnectionActorDriverTaskAdmissionError::Stopped)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_before_handler_return_wins_completion_snapshot_publication() {
+        let task = test_task().await;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = task
+            .submit_paused(Arc::clone(&entered), Arc::clone(&release), "late result")
+            .expect("active operation accepted");
+        let queued = task
+            .submit_immediate(4)
+            .expect("queued operation accepted before stop");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("handler reached deterministic pause");
+
+        task.request_stop(StopReason::Requested);
+        assert!(matches!(
+            task.submit_immediate(0),
+            Err(ConnectionActorDriverTaskAdmissionError::Stopped)
+        ));
+        release.notify_one();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), active.wait())
+                .await
+                .expect("late handler result remains observable"),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::WorkerStopped,
+                result: Some(result),
+            } if matches!(result.value, ConnectionActorDriverTaskResultValue::Paused("late result"))
+        ));
+        task.wait_joined().await;
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        active.acknowledge().expect("late result custody settled");
+        queued.acknowledge().expect("queued input custody settled");
     }
 
     #[tokio::test]

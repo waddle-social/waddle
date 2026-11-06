@@ -102,6 +102,7 @@ pub enum ActorLocalWriteError {
 
 struct CleanupRecord {
     custodian: IoCustodianHandle,
+    driver_shutdown_grace: Duration,
     custodies: Mutex<Vec<Arc<ActorOutboundCustody>>>,
     publications: Mutex<PublicationState>,
     lifecycle: Mutex<CleanupLifecycle>,
@@ -320,6 +321,7 @@ impl CleanupRecord {
             return Err(ActorLocalEndpointError::DriverAlreadyAttached);
         }
         driver.set_settlement_callback(settlement_callback);
+        driver.arm_shutdown_deadline(self.driver_shutdown_grace);
         lifecycle.driver = Some(driver);
         Ok(())
     }
@@ -338,6 +340,7 @@ impl CleanupRecord {
         };
         if let Some(driver) = &driver {
             driver.request_stop(reason);
+            driver.arm_shutdown_deadline(self.driver_shutdown_grace);
         }
         driver
     }
@@ -410,6 +413,7 @@ impl ActorEndpointCleanupIndex {
         &self,
         connection: ConnectionRef,
         custodian: IoCustodianHandle,
+        driver_shutdown_grace: Duration,
     ) -> Result<Arc<CleanupRecord>, ActorLocalEndpointError> {
         let mut index = self
             .state
@@ -420,6 +424,7 @@ impl ActorEndpointCleanupIndex {
         }
         let record = Arc::new(CleanupRecord {
             custodian,
+            driver_shutdown_grace,
             custodies: Mutex::new(Vec::new()),
             publications: Mutex::new(PublicationState {
                 stopped: false,
@@ -653,25 +658,23 @@ impl ActorLocalEndpointOwner {
         let (custodian, input, output) = admission
             .start_socket(socket, limits, retirement_deadline)
             .await?;
-        let cleanup = match index.insert(connection.clone(), custodian.clone()) {
+        let cleanup = match index.insert(connection.clone(), custodian.clone(), retirement_deadline)
+        {
             Ok(cleanup) => cleanup,
             Err(error) => {
                 custodian.request_stop(StopReason::Requested);
                 return Err(error);
             }
         };
-        let driver_shutdown_grace = retirement_deadline;
-        let stop_signal = cleanup.custodian.stop_signal();
         let stop_cleanup = Arc::downgrade(&cleanup);
-        tokio::spawn(async move {
-            stop_signal.cancelled().await;
-            if let Some(cleanup) = stop_cleanup.upgrade() {
-                let reason = stop_signal.reason().unwrap_or(StopReason::PumpExited);
-                if let Some(driver) = cleanup.begin_shutdown(reason) {
-                    driver.shutdown_and_join(driver_shutdown_grace).await;
+        cleanup
+            .custodian
+            .set_retirement_listener(Arc::new(move |reason| {
+                if let Some(cleanup) = stop_cleanup.upgrade() {
+                    cleanup.begin_shutdown(reason);
                 }
-            }
-        });
+            }));
+        let driver_shutdown_grace = retirement_deadline;
         let joined_cleanup = Arc::clone(&cleanup);
         let joined_index = index.clone();
         let joined_connection = connection.clone();
