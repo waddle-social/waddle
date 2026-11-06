@@ -60,8 +60,8 @@ async fn run_quota_race(isolation: &str, byte_limit: bool) {
     } else {
         (1023_i32, "x".to_owned())
     };
-    sqlx::query(&format!("INSERT INTO {q}.sm_custody_operations (operation_id,gate_id,message_key,receipt_kind,semantic_identity_hash,resource,attempt_token,payload,received_at) SELECT gen_random_uuid(),$1,$2,1,$3,'seed-' || n::text,gen_random_uuid(),$4,clock_timestamp() FROM generate_series(1,$5) AS n"))
-        .bind(c.capture.gate_id).bind(seed_parent).bind([1_u8;32].as_slice()).bind(&payload).bind(seeds)
+    sqlx::query(&format!("INSERT INTO {q}.sm_custody_operations (operation_id,gate_id,message_key,receipt_kind,semantic_identity_hash,resource,attempt_token,payload,received_at) SELECT gen_random_uuid(),$1,$2,1,decode(lpad(to_hex(n),64,'0'),'hex'),'bob@example.test/laptop',gen_random_uuid(),$3,clock_timestamp() FROM generate_series(1,$4) AS n"))
+        .bind(c.capture.gate_id).bind(seed_parent).bind(&payload).bind(seeds)
         .execute(&c.fixture.admin).await.expect("seed just below hard quota");
     let expected_bytes = if byte_limit {
         16_i64 * 1024 * 1024
