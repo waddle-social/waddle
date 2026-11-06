@@ -76,6 +76,53 @@ pub(super) async fn exercise(
         .expect("reset sentinel");
     }
 
+    // The table shape is valid, but a malformed owner can still put too many
+    // rows or a long key in the manifest. The verifier must bound the read.
+    for extra_rows in [false, true] {
+        if extra_rows {
+            sqlx::query(&format!(
+                "INSERT INTO {s}.ingress_epoch_guard_manifest (table_name) \
+                 SELECT 'preflight_extra_' || value::text \
+                 FROM pg_catalog.generate_series(1, 20) AS series(value)"
+            ))
+            .execute(&fixture.admin)
+            .await
+            .expect("insert excess manifest rows");
+        } else {
+            sqlx::query(&format!(
+                "INSERT INTO {s}.ingress_epoch_guard_manifest (table_name) VALUES ($1)"
+            ))
+            .bind("x".repeat(2048))
+            .execute(&fixture.admin)
+            .await
+            .expect("insert long manifest key");
+        }
+        let rejected = pool
+            .inspect_restricted_ingress_profile(api, epoch_oid)
+            .await;
+        assert!(
+            matches!(
+                rejected,
+                Err(RestrictedIngressProfileError::Mismatch(
+                    "guard manifest rows"
+                ))
+            ),
+            "malformed manifest contents were not refused: {rejected:?}"
+        );
+        assert_sentinel_not_called(fixture).await;
+        execute(
+            &fixture.admin,
+            &format!(
+                "ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
+                 DELETE FROM {s}.ingress_epoch_guard_manifest WHERE pg_catalog.length(table_name) > 100 \
+                   OR table_name LIKE 'preflight_extra_%'; \
+                 ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row"
+            ),
+        )
+        .await;
+        assert_pool_restored(fixture, pool, api, epoch_oid, backend_pid).await;
+    }
+
     // A replacement heap can have SELECT grants yet invoke a user cast when
     // the old verifier's manifest query coerces its enum column to text.
     execute(

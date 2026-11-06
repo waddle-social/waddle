@@ -200,14 +200,31 @@ pub(super) async fn verify_manifest_rows(
     connection: &mut PgConnection,
     schema: &str,
 ) -> Result<()> {
-    let actual: Vec<String> = sqlx::query_scalar(&format!(
-        "SELECT table_name::text FROM ONLY {}.ingress_epoch_guard_manifest ORDER BY table_name",
-        crate::db::physical_attestation::quote_identifier(schema),
-    ))
-    .fetch_all(&mut *connection)
-    .await?;
     let mut expected = EPOCH_GUARDED_TABLES.to_vec();
     expected.sort_unstable();
+    let max_name = expected.iter().map(|name| name.len()).max().unwrap_or(0);
+    let name_limit = i32::try_from(max_name.saturating_add(1))
+        .map_err(|_| RestrictedIngressProfileError::Mismatch("guard manifest rows"))?;
+    let row_limit = i64::try_from(expected.len().saturating_add(1))
+        .map_err(|_| RestrictedIngressProfileError::Mismatch("guard manifest rows"))?;
+    // The manifest heap is pinned, but its contents can still be malformed.
+    // Bound rows and text before SQLx decodes them. Sorting happens locally so
+    // PostgreSQL never sorts arbitrary-length row values before the LIMIT.
+    let actual: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.substr(table_name, 1, $1) FROM ONLY {}.ingress_epoch_guard_manifest LIMIT $2",
+        crate::db::physical_attestation::quote_identifier(schema),
+    ))
+    .bind(name_limit)
+    .bind(row_limit)
+    .fetch_all(&mut *connection)
+    .await?;
+    if actual.len() > expected.len() || actual.iter().any(|name| name.len() > max_name) {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "guard manifest rows",
+        ));
+    }
+    let mut actual = actual;
+    actual.sort_unstable();
     if actual.iter().map(String::as_str).ne(expected) {
         return Err(RestrictedIngressProfileError::Mismatch(
             "guard manifest rows",

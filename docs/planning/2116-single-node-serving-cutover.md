@@ -36,7 +36,9 @@ against V1030.
    types, owner, ACL, dependencies, rules, triggers, RLS, inheritance, and
    callable functions before reading epoch, `_migrations`, observation,
    PubSub, or guard-marker data or invoking the PubSub helper. Recheck after
-   each relevant wait with fresh statements.
+   each relevant wait with fresh statements. Bound catalog inventories and
+   variable-length trigger, function and expression data before aggregating
+   or deparsing them; a catalog-only query can still exhaust client memory.
    Factor V1023 ledger verification under a lexical caller-held shared-ledger
    proof; it must not upgrade to exclusive after epoch. Hostile view, cast,
    operator, child-lock, and catalog-replacement witnesses must fail before
@@ -86,6 +88,7 @@ against V1030.
    then re-enter and revalidate sibling inventory before pending acceptance.
    ACK, transfer, tombstone, late counted drains, pending and canonical GC
    share this fence and retain exact terminal evidence after row deletion.
+   Give persistent route guards an enforced quota and safe retirement rule.
    Unknown provenance remains ineligible until positively classified. Drain
    and fence old sockets, queues, raw writers and existing backends before
    selecting the new sink. A relay-envelope shape change needs its mandated
