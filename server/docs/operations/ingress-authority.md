@@ -400,6 +400,57 @@ A `partial` result means bounded progress with more work pending, not failure;
 [ingress epoch guards](ingress-epoch-guards.md) for lock order and activation
 preconditions; the cutover does not itself authorize an epoch activation.
 
+### Restricted-runtime GC v1 laboratory (#2116, #2046)
+
+The unregistered `ingress_gc_fk_transition_v1_candidate.sql` and
+`ingress_gc_api_v1_candidate.sql` are **quiescent-writer experiments**, not a
+rollout procedure or production GC implementation. They are not installed by
+startup or registered as migrations. In particular, a detached stream may hold
+an already-authorized, already-counted frame and write `sm_ingress_appends`
+after the canonical message lock/check and even after its deletion. That table
+has no canonical FK. Checking for a pending append under the canonical lock
+cannot fence this delayed write; rejecting the accepted frame at a later parent
+lock would lose custody. A production design must durably establish custody
+before that delay, fence old in-memory writers, and prove safe handoff before
+collection. The pending design must admit a recoverable full payload with its
+obligation, resource, attempt, endpoint and session identity under the
+epoch-first canonical lock before the frame enters memory; pending custody
+must block GC until exact SM binding and positive settlement. Unknown commits
+need discoverable reconciliation and settlement must start a fresh full tail.
+The fenced SM path currently acquires its claim before the canonical lock, so
+this also requires a reviewed global lock-order redesign. Until then, the laboratory requires all custody writers stopped
+from retention adoption through deletion, and no runtime activation is allowed.
+
+The PG17 experiment takes an epoch-exclusive relation lock before locking the
+canonical FK graph, checks the exact historical graph, and in the same outer
+transaction replaces the seven guarded cascade edges with immediate `NO ACTION`
+and the rejection child's cascade with a uniquely named, initially-immediate
+`NO ACTION DEFERRABLE` FK. The rejection source remains `RESTRICT`; the
+unguarded `muc_invite_claims` cascade stays in the catalog and the candidate
+explicitly removes its rows. Old GC expects cascades, so its writers and all
+privileged DDL must be drained before any such transition. A lock timeout rolls
+the transition back. The experiment does not prove that drain, physical
+identity, role provisioning, or a provider-managed migration is safe; these
+remain separate, unimplemented gates. The existing owner-rejection grant
+attestor deliberately verifies the historical cascade and rejects the new FK
+shape: it is not a v1 transition attestor and must not be weakened to accept an
+unverified mixture of states.
+
+The fixed API consumes one candidate key with no caller-supplied clock or
+cutoff. It requires the calling transaction to have already prelocked and
+physically attested the expected epoch relation, and takes source then child
+row locks before rechecking receipts, owner decision, descendants, SM and
+pending-delivery custody. A NULL frontier starts a new database-clock eight-day
+tail; eligible rows are deleted leaves first, with only the named child FK
+deferred and checked again before return. The outer transaction's commit is
+the only completion boundary; after a lost acknowledgement, fence the old
+backend before readback or retry. This fragment has no integrated attested GC
+caller, restricted candidate scanner, bounded orphan-proof sweep, or durable
+custody fence. The existing `sm_ingress_appends` orphan sweep and its cursor
+remain separate work; the candidate only deletes settled append proofs for a
+collected key. These gaps block replacing the existing coordinator or claiming
+production safety, even when the laboratory checks pass.
+
 ### Extension effect delivery (#1660)
 
 Activity and preview mutations commit with their canonical receipts. Recovery

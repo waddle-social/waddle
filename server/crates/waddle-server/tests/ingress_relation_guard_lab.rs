@@ -2615,3 +2615,6 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     drop((runtime, owner, observer, wait_observer, loser));
     fixture.cleanup().await;
 }
+
+#[path = "ingress_relation_guard_lab/gc_pilot.rs"]
+mod gc_pilot;
