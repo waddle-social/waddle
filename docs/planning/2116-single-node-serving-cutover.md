@@ -125,3 +125,40 @@ release CI after implementation is complete.
 Unresolved catalog, role, source, lock-order, or recovery findings block the
 affected selector. A dark fixture or schema check alone does not authorize
 serving.
+
+## Next grouped implementation after #2243
+
+The #2243 role graph, pinned MAM read, and recipient route guard are merged as
+unregistered candidates. The next group can implement these independent dark
+packages while both startup refusals stay closed:
+
+1. **Versioned all-store role profile.** Reconcile the H-owned PubSub helper,
+   A/H schema usage, room observation, MUC room, and every enabled store under
+   one independently pinned S/R/A/H/T/I/M/migrator function and ACL graph.
+   Exercise the real combined PG17 owner-prepared schema with negative
+   alternate-definer, PUBLIC, membership, grant-option, TEMP, and catalog-drift
+   cases. The legacy detached SM ingress writer is incompatible with R's
+   guarded-table denial; a profile that leaves it live cannot be selected.
+2. **Catalog mutation and pre-attestor fence.** Define an enforceable
+   all-privileged-mutator protocol, or prove their quiescence, before a pool
+   hook can execute an attestor. Cover the complete bounded lineage/attestor
+   dependency graph and every concurrent-index maintenance transaction from
+   start through reader rollback. A heap or index ACCESS SHARE lock alone does
+   not prevent `DROP INDEX CONCURRENTLY` or `REINDEX INDEX CONCURRENTLY` from
+   changing a pinned index identity. Test a cooperative multi-session barrier
+   and refuse startup when the external ownership premise is not established.
+3. **Production source and recipient interlock.** Inventory and carry stable
+   source occurrence, complete sibling/source sets, and immutable payload
+   through live, relay, batch, detached, drained, snapshot, ACK, transfer,
+   tombstone, pending, and GC paths. Move every participating writer to one
+   source → per-source guard → recipient guard → gate lock order. Add a guard
+   quota and safe retirement rule. Test both race winners and retain counted
+   payload and terminal evidence on refusal. No pending acceptance or GC
+   selector may use a partial conversion.
+
+Selected startup remains a later integration gate. Cold bind, inherited
+listener traffic, port-file publication, effectful workers, and the single-node
+durable claim must stay gated until every package composes on the actual
+clustering-compiled single-node path. The durable exposed-window limit must
+match the XEP-0198 ACK validator's current half-range rule before replay is
+selected.
