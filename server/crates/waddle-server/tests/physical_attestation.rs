@@ -3236,28 +3236,16 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
     ));
 
-    let mut runtime_url =
-        url::Url::parse(&url_with_schema(&fixture.base_url, &fixture.target)).expect("runtime URL");
-    let retained: Vec<_> = runtime_url
-        .query_pairs()
-        .filter(|(key, _)| key != "user")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    runtime_url
-        .query_pairs_mut()
-        .clear()
-        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
-        .append_pair("user", &fixture.runtime);
     let control = ControlPlanePoolLimits {
         connections: 1,
         acquire_timeout: Duration::from_secs(3),
     };
-    assert!(matches!(
-        identity
-            .attach(runtime_url.as_str(), limits, Some(control))
-            .await,
-        Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
-    ));
+    let control_result = identity.attach(&unreachable, limits, Some(control)).await;
+    match control_result {
+        Err(RuntimeStartupError::UnconvertedPinnedBootstrap) => {}
+        Err(error) => panic!("unexpected v2 attachment error: {error:?}"),
+        Ok(_) => panic!("unconverted v2 attachment must refuse"),
+    }
 
     let temp = tempfile::tempdir().expect("startup gate directory");
     let port_file = temp.path().join("port");
@@ -3279,7 +3267,7 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
             "integration-test-occupant-id-secret-32-bytes-long",
         )
         .env("WADDLE_DB_DRIVER", "postgres")
-        .env("WADDLE_DATABASE_URL", runtime_url.as_str())
+        .env("WADDLE_DATABASE_URL", &unreachable)
         .env(
             "WADDLE_DEPLOYMENT_UUID",
             fixture.lineage.deployment_uuid.to_string(),
@@ -3309,7 +3297,7 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
     );
 
     assert!(matches!(
-        identity.attach(runtime_url.as_str(), limits, None).await,
+        identity.attach(&unreachable, limits, None).await,
         Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
     ));
 }

@@ -217,9 +217,12 @@ pub async fn prepare_pinned_install(
     })
 }
 
-/// Fresh read-only reconciliation. It never invokes the attestor; absence is
-/// indeterminate and an observed OID must be independently handed off before
-/// a runtime verifier may pin it.
+/// Fresh read-only reconciliation on the original, directly authenticated and
+/// authoritative fenced PG17 primary. The caller must retain the original
+/// operation/backend fence across unknown or cancelled COMMIT outcomes and
+/// enforce the same privileged-mutation quiescence or cooperative protocol as
+/// preparation. It never invokes the attestor; absence is indeterminate and
+/// an observed OID must be independently handed off before runtime may pin it.
 pub async fn inspect_pinned_installation(
     options: &PgConnectOptions,
     config: &PhysicalAttestationConfig,
