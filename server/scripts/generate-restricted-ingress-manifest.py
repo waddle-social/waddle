@@ -46,6 +46,12 @@ def render(source):
 
 def migrations(source):
     constants = dict(re.findall(r'pub const (V\w+): &str = r#"(.*?)"#;', source, re.S))
+    # Small migrations may use an ordinary, unescaped Rust string literal.
+    # Reject other forms rather than silently omitting registered SQL.
+    for name, value in re.findall(r'pub const (V\w+): &str\s*=\s*"([^"\\]*)";', source):
+        if name in constants:
+            raise ValueError(f"duplicate migration constant: {name}")
+        constants[name] = value
     names = re.findall(r"sql_postgres:\s*(V\w+)", source)
     if not names or len(names) != len(set(names)):
         raise ValueError("migration catalog format changed")

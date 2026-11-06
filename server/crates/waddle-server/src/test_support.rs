@@ -96,6 +96,14 @@ use crate::ingress_uow::{
 #[cfg(feature = "test-support")]
 use sqlx::postgres::PgPool;
 
+/// Prepare the legacy observation schema before applying registered migrations.
+#[cfg(feature = "test-support")]
+pub async fn initialize_room_observations_for_test(
+    database: &Database,
+) -> Result<(), crate::ingress_uow::ObservationError> {
+    crate::ingress_uow::initialize_room_observations(database).await
+}
+
 /// Exercise the production SM store selection and attachment path.
 #[cfg(feature = "test-support")]
 pub async fn attach_sm_startup(
