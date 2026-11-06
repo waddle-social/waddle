@@ -24,7 +24,8 @@ use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::db::{Database, DatabaseDriver};
 use crate::ingress_substrate::{
-    self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
+    self, DefinerApiCandidateContext, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome,
+    TerminalizeOutcome,
 };
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
@@ -360,10 +361,16 @@ impl CanonicalMessageRepository {
             return Err(IngressUowError::ClaimFenceMissing);
         }
         let (tx, prepared) = transaction.prepared_parts();
-        let sql = ingress_substrate::prepared_ingress_sql(tx.driver(), prepared,
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
             ingress_substrate::PreparedIngressRelation::Claims,
-            ("SELECT 1 FROM ", " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE"),
-            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?");
+            (
+                "SELECT 1 FROM ",
+                " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+            ),
+            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?",
+        );
         let mut rows = tx
             .query(
                 &sql,
@@ -405,6 +412,15 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_message_is_terminal");
+            return super::candidate_boolean(
+                tx,
+                &format!("SELECT {function}(?::uuid)"),
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await;
+        }
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT 1 FROM {} WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
@@ -471,9 +487,11 @@ impl CanonicalMessageRepository {
         room: &BareJid,
         coordinates: waddle_xmpp::muc::durable::RoomCommittedCoordinates,
     ) -> Result<(), IngressUowError> {
-        let sql = dialect_sql(transaction,
+        let sql = dialect_sql(
+            transaction,
             "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ? FOR SHARE NOWAIT",
-            "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ?");
+            "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ?",
+        );
         let mut rows = transaction
             .transaction_mut()
             .query(sql, crate::db_params![room.to_string()])
@@ -524,10 +542,35 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
     ) -> Result<DateTime<Utc>, IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_message_created_at");
+            let mut rows = tx
+                .query(
+                    &format!("SELECT created_at FROM {function}(?::uuid)"),
+                    crate::db_params![message_key.to_storage().to_string()],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+            let timestamp: String = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return DateTime::parse_from_rfc3339(&timestamp)
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+                .map_err(|_| IngressUowError::InvalidStoredMessageTimestamp);
+        }
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM {} WHERE message_key = ?::uuid",
-                ingress_substrate::prepared_ingress_relation(prepared, ingress_substrate::PreparedIngressRelation::Messages)
+                ingress_substrate::prepared_ingress_relation(
+                    prepared,
+                    ingress_substrate::PreparedIngressRelation::Messages
+                )
             )
         } else {
             "SELECT created_at FROM ingress_messages WHERE message_key = ?".to_owned()
@@ -839,7 +882,7 @@ impl CanonicalMessageRepository {
                     .await?
                 {
                     ReconcileVerdict::Contradiction { .. } | ReconcileVerdict::Divergent { .. } => {
-                        return Err(IngressUowError::EffectIntentConflict)
+                        return Err(IngressUowError::EffectIntentConflict);
                     }
                     ReconcileVerdict::FirstCommit
                     | ReconcileVerdict::Consistent
@@ -909,7 +952,7 @@ impl CanonicalMessageRepository {
                     ReconcileVerdict::Repaired { .. }
                     | ReconcileVerdict::Contradiction { .. }
                     | ReconcileVerdict::Divergent { .. } => {
-                        return Err(IngressUowError::EffectIntentConflict)
+                        return Err(IngressUowError::EffectIntentConflict);
                     }
                 }
                 Self::record_owner_rejection(transaction, message_key, child).await?;
@@ -1058,6 +1101,35 @@ impl CanonicalMessageRepository {
         source: MessageKey,
     ) -> Result<Option<MessageKey>, IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_owner_rejection_child");
+            let mut rows = tx
+                .query(
+                    &format!("SELECT {function}(?::uuid)"),
+                    crate::db_params![source.to_storage().to_string()],
+                )
+                .await?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let child: Option<String> = row.get(0)?;
+            if rows.next().await?.is_some() {
+                return Err(
+                    ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+                );
+            }
+            return child
+                .map(|child| {
+                    child
+                        .parse::<Uuid>()
+                        .map(MessageKey::from_storage)
+                        .map_err(|_| {
+                            ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey.into()
+                        })
+                })
+                .transpose();
+        }
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT child_message_key::text FROM {} WHERE source_message_key = ?::uuid",
@@ -1097,6 +1169,24 @@ impl CanonicalMessageRepository {
             return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
         }
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_record_owner_rejection");
+            if !super::candidate_boolean(
+                tx,
+                &format!("SELECT {function}(?::uuid, ?::uuid)"),
+                crate::db_params![
+                    source.to_storage().to_string(),
+                    child.to_storage().to_string(),
+                ],
+            )
+            .await?
+            {
+                return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
+            }
+            ingress_substrate::invalidate_retention_in_prepared_transaction(tx, prepared, source)
+                .await?;
+            return Ok(());
+        }
         let state_sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT source_binding_version::int, owner_decision::int FROM {} WHERE message_key = ?::uuid",
@@ -1166,6 +1256,19 @@ impl CanonicalMessageRepository {
             return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
         }
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_initialize_owner_decision");
+            if !super::candidate_boolean(
+                tx,
+                &format!("SELECT {function}(?::uuid)"),
+                crate::db_params![source.to_storage().to_string()],
+            )
+            .await?
+            {
+                return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
+            }
+            return Ok(());
+        }
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "UPDATE {} SET owner_decision = 0 WHERE message_key = ?::uuid AND owner_decision IS NULL AND source_binding_version = 1",
@@ -1196,10 +1299,29 @@ impl CanonicalMessageRepository {
             RoomOwnerDecision::Accepted => 1,
             RoomOwnerDecision::Rejected => 2,
             RoomOwnerDecision::Undecided => {
-                return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into())
+                return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
             }
         };
         let (tx, prepared) = transaction.prepared_parts();
+        if let Some(api) = prepared.and_then(DefinerApiCandidateContext::from_prepared) {
+            let function = api.qualified_function("waddle_ingress_decide_owner");
+            if !super::candidate_boolean(
+                tx,
+                &format!("SELECT {function}(?::uuid, ?::integer)"),
+                crate::db_params![value, source.to_storage().to_string()],
+            )
+            .await?
+            {
+                return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
+            }
+            ingress_substrate::invalidate_retention_in_prepared_transaction(tx, prepared, source)
+                .await?;
+            ingress_substrate::refresh_retention_in_prepared_transaction_with_db_clock(
+                tx, prepared, source,
+            )
+            .await?;
+            return Ok(());
+        }
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "UPDATE {} SET owner_decision = ? WHERE message_key = ?::uuid AND owner_decision = 0",
@@ -1244,7 +1366,10 @@ impl CanonicalMessageRepository {
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "UPDATE {} SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-                ingress_substrate::prepared_ingress_relation(prepared, ingress_substrate::PreparedIngressRelation::Messages)
+                ingress_substrate::prepared_ingress_relation(
+                    prepared,
+                    ingress_substrate::PreparedIngressRelation::Messages
+                )
             )
         } else {
             "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL".to_owned()
@@ -1466,8 +1591,7 @@ impl SmIngressRepository {
             }
             u64::from(deleted)
         } else {
-            const POSTGRES: &str =
-                "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
+            const POSTGRES: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
             const SQLITE: &str =
                 "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
             let sql = if tx.driver() == DatabaseDriver::Postgres {
@@ -1532,7 +1656,10 @@ impl SmIngressStreamRepository {
             tx.driver(),
             prepared,
             ingress_substrate::PreparedIngressRelation::SmStreams,
-            ("INSERT INTO ", " (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING"),
+            (
+                "INSERT INTO ",
+                " (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
+            ),
             "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING",
         );
         tx.execute(
@@ -1970,6 +2097,27 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<bool, IngressUowError> {
+        if transaction.uses_definer_api_candidate() {
+            let (tx, prepared) = transaction.prepared_parts();
+            let prepared = prepared
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, NULL::text)",
+                api.qualified_function("waddle_ingress_effect_receipt_exists"),
+            );
+            return super::candidate_boolean(
+                tx,
+                &query,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    kind.to_storage(),
+                    hash.to_vec()
+                ],
+            )
+            .await;
+        }
         let driver = transaction.transaction_mut().driver();
         let schema = receipt_schema(transaction);
         let sql = if driver == DatabaseDriver::Postgres {
@@ -2004,6 +2152,28 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<(), IngressUowError> {
+        if transaction.uses_definer_api_candidate() {
+            let (tx, prepared) = transaction.prepared_parts();
+            let prepared = prepared
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea)",
+                api.qualified_function("waddle_ingress_record_effect_receipt"),
+            );
+            let _ = super::candidate_boolean(
+                tx,
+                &query,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    kind.to_storage(),
+                    hash.to_vec()
+                ],
+            )
+            .await?;
+            return Ok(());
+        }
         let schema = receipt_schema(transaction).map(str::to_owned);
         if let Some(schema) = schema {
             ingress_substrate::record_receipt_in_prepared_transaction(
@@ -2031,6 +2201,23 @@ impl EffectReceiptRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
+        if transaction.uses_definer_api_candidate() {
+            let (tx, prepared) = transaction.prepared_parts();
+            let prepared = prepared
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT {}(?::uuid)",
+                api.qualified_function("waddle_ingress_receipts_complete"),
+            );
+            return super::candidate_boolean(
+                tx,
+                &query,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await;
+        }
         let schema = receipt_schema(transaction).map(str::to_owned);
         ingress_substrate::receipts_complete_in_schema(
             transaction.transaction_mut(),
@@ -2055,6 +2242,59 @@ impl EffectReceiptRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Vec<EffectReceiptKey>, IngressUowError> {
+        if transaction.uses_definer_api_candidate() {
+            let (_, prepared) = transaction.prepared_parts();
+            let prepared = prepared
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT * FROM {}(?::uuid, ?::integer, ?::bytea, ?::integer)",
+                api.qualified_function("waddle_ingress_list_effect_receipts"),
+            );
+            let page_size = super::DEFINER_API_PAGE_SIZE;
+            let mut after: Option<(i64, Vec<u8>)> = None;
+            let mut keys = Vec::new();
+            loop {
+                let mut rows = transaction
+                    .transaction_mut()
+                    .query(
+                        &query,
+                        crate::db_params![
+                            message_key.to_storage().to_string(),
+                            after.as_ref().map(|(kind, _)| *kind),
+                            after.as_ref().map(|(_, hash)| hash.clone()),
+                            page_size
+                        ],
+                    )
+                    .await?;
+                let mut page_count = 0_i64;
+                let mut last = None;
+                while let Some(row) = rows.next().await? {
+                    let kind: i64 = row.get(0)?;
+                    let hash: Vec<u8> = row.get(1)?;
+                    let semantic_identity_hash: [u8; 32] = hash
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| IngressUowError::InvalidStoredReceiptHash)?;
+                    keys.push(EffectReceiptKey {
+                        kind: EffectReceiptKind::from_storage(
+                            i32::try_from(kind)
+                                .map_err(|_| IngressUowError::InvalidStoredReceiptHash)?,
+                        ),
+                        semantic_identity_hash,
+                    });
+                    last = Some((kind, hash));
+                    page_count += 1;
+                }
+                drop(rows);
+                if page_count < page_size {
+                    break;
+                }
+                after = last;
+            }
+            return Ok(keys);
+        }
         let driver = transaction.transaction_mut().driver();
         let schema = receipt_schema(transaction);
         let sql = if driver == DatabaseDriver::Postgres {
@@ -2323,9 +2563,69 @@ async fn load_effects(
     prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<Vec<RecordedEffect>, IngressUowError> {
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let api = ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+        let query = format!(
+            "SELECT * FROM {}(?::uuid, ?::numeric, ?::integer)",
+            api.qualified_function("waddle_ingress_list_effect_intents"),
+        );
+        let page_size = super::DEFINER_API_PAGE_SIZE;
+        let mut after_ordinal: Option<String> = None;
+        let mut recorded = Vec::new();
+        loop {
+            let mut rows = transaction
+                .query(
+                    &query,
+                    crate::db_params![
+                        message_key.to_storage().to_string(),
+                        after_ordinal.clone(),
+                        page_size
+                    ],
+                )
+                .await?;
+            let mut page_count = 0_i64;
+            let mut last_ordinal = None;
+            while let Some(row) = rows.next().await? {
+                let kind = i32::try_from(row.get::<i64>(0)?)
+                    .map_err(|_| IngressUowError::EffectIntentConflict)?;
+                let hash: Vec<u8> = row.get(1)?;
+                let ordinal: String = row.get(2)?;
+                let version: i64 = row.get(3)?;
+                let payload: Vec<u8> = row.get(4)?;
+                if version != 1 {
+                    return Err(IngressUowError::EffectIntentConflict);
+                }
+                let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
+                if hash.as_slice() != semantic_identity_hash(&intent) {
+                    return Err(IngressUowError::EffectIntentConflict);
+                }
+                recorded.push(RecordedEffect {
+                    ordinal: ordinal
+                        .parse()
+                        .map_err(|_| IngressUowError::EffectIntentConflict)?,
+                    intent,
+                });
+                last_ordinal = Some(ordinal);
+                page_count += 1;
+            }
+            drop(rows);
+            if page_count < page_size {
+                break;
+            }
+            after_ordinal = last_ordinal;
+        }
+        return Ok(recorded);
+    }
+
     let sql = ingress_substrate::prepared_ingress_sql(
-        transaction.driver(), prepared, ingress_substrate::PreparedIngressRelation::Effects,
-        ("SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ", " WHERE message_key = ?::uuid ORDER BY effect_ordinal"),
+        transaction.driver(),
+        prepared,
+        ingress_substrate::PreparedIngressRelation::Effects,
+        (
+            "SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ",
+            " WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+        ),
         "SELECT kind, semantic_identity_hash, CAST(effect_ordinal AS TEXT), payload_version, payload FROM ingress_effect_intents WHERE message_key = ? ORDER BY effect_ordinal",
     );
     let mut rows = transaction
@@ -2590,9 +2890,43 @@ async fn insert_effect(
     intent: &IngressEffectIntent,
 ) -> Result<(), IngressUowError> {
     let (kind, payload) = intent.with_encoded_v1(|kind, payload| (kind, payload.to_vec()))?;
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let api = ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+            .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+        let query = format!(
+            "SELECT {}(?::uuid, ?::numeric, ?::integer, ?::bytea, ?::bytea)",
+            api.qualified_function("waddle_ingress_insert_effect_intent"),
+        );
+        let mut rows = transaction
+            .query(
+                &query,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    ordinal.to_string(),
+                    i64::from(kind),
+                    semantic_identity_hash(intent).to_vec(),
+                    payload
+                ],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+        let inserted: bool = row.get(0)?;
+        if rows.next().await?.is_some() || !inserted {
+            return Err(ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into());
+        }
+        return Ok(());
+    }
     let sql = ingress_substrate::prepared_ingress_sql(
-        transaction.driver(), prepared, ingress_substrate::PreparedIngressRelation::Effects,
-        ("INSERT INTO ", " (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)"),
+        transaction.driver(),
+        prepared,
+        ingress_substrate::PreparedIngressRelation::Effects,
+        (
+            "INSERT INTO ",
+            " (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)",
+        ),
         "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, ?, ?, ?, 1, ?)",
     );
     transaction
@@ -2853,10 +3187,16 @@ impl ClaimRepository {
             stream_id.as_str()
         );
         let (tx, prepared) = transaction.prepared_parts();
-        let sql = ingress_substrate::prepared_ingress_sql(tx.driver(), prepared,
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
             ingress_substrate::PreparedIngressRelation::Claims,
-            ("SELECT 1 FROM ", " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE"),
-            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?");
+            (
+                "SELECT 1 FROM ",
+                " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+            ),
+            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?",
+        );
         let mut rows = tx
             .query(
                 &sql,
@@ -2897,10 +3237,16 @@ impl ClaimRepository {
         let authority = transaction.acquire_authority(owner).await?;
         let entity = format!("{}:{}", EntityType::RoomActor.as_db_str(), room);
         let (tx, prepared) = transaction.prepared_parts();
-        let sql = ingress_substrate::prepared_ingress_sql(tx.driver(), prepared,
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
             ingress_substrate::PreparedIngressRelation::Claims,
-            ("SELECT 1 FROM ", " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE"),
-            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?");
+            (
+                "SELECT 1 FROM ",
+                " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+            ),
+            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?",
+        );
         let mut rows = tx
             .query(
                 &sql,

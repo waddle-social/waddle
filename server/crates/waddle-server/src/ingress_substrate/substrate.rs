@@ -839,6 +839,7 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
 /// remains lazy. A second call with that key performs the insert and rechecks
 /// the alias under the function's canonical parent lock, all inside the same
 /// caller-owned transaction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_alias_via_definer_api(
     tx: &mut Transaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,

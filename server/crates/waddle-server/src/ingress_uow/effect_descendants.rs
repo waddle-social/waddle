@@ -304,18 +304,14 @@ impl EffectDescendantRepository {
         tx: &mut Transaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         descendant: Uuid,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> Result<(), IngressUowError> {
         let query = format!(
-            "SELECT {}(?::uuid, ?::timestamptz)",
+            "SELECT {}(?::uuid)",
             api.qualified_function("waddle_ingress_settle_descendant"),
         );
-        let settled = candidate_boolean(
-            tx,
-            &query,
-            crate::db_params![descendant.to_string(), now.to_rfc3339()],
-        )
-        .await?;
+        let settled =
+            candidate_boolean(tx, &query, crate::db_params![descendant.to_string()]).await?;
         if settled {
             Ok(())
         } else {

@@ -36,30 +36,99 @@ impl DeliveryProgressRepository {
         message: MessageKey,
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<FullJid>, IngressUowError> {
-        let (transaction, prepared) = tx.prepared_parts();
-        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+        let mut recipients;
+        if tx.uses_definer_api_candidate() {
+            recipients = {
+                let (transaction, prepared) = tx.prepared_parts();
+                let prepared = prepared.ok_or(
+                    crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                )?;
+                let api =
+                    crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                        .ok_or(
+                        crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                    )?;
+                let query = format!(
+                    "SELECT * FROM {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::integer)",
+                    api.qualified_function("waddle_ingress_list_delivery_receipts"),
+                );
+                let page_size = super::DEFINER_API_PAGE_SIZE;
+                let mut after_resource: Option<String> = None;
+                let mut recipients = Vec::new();
+                loop {
+                    let mut rows = transaction
+                        .query(
+                            &query,
+                            crate::db_params![
+                                message.to_storage().to_string(),
+                                receipt.kind.to_storage(),
+                                receipt.semantic_identity_hash.to_vec(),
+                                after_resource.clone(),
+                                page_size
+                            ],
+                        )
+                        .await?;
+                    let mut page_count = 0_i64;
+                    let mut last = None;
+                    while let Some(row) = rows.next().await? {
+                        let resource: String = row.get(0)?;
+                        recipients.push(
+                            resource
+                                .parse()
+                                .map_err(|_| IngressUowError::InvalidStoredDeliveryResource)?,
+                        );
+                        last = Some(resource);
+                        page_count += 1;
+                    }
+                    drop(rows);
+                    if page_count < page_size {
+                        break;
+                    }
+                    after_resource = last;
+                }
+                recipients
+            };
+        } else {
+            let (transaction, prepared) = tx.prepared_parts();
+            let candidate_query = if let Some(prepared) =
+                prepared.filter(|prepared| prepared.uses_definer_api_candidate())
+            {
+                let api =
+                    crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                        .ok_or(
+                        crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                    )?;
+                Some(format!(
+                    "SELECT resource FROM {}(?::uuid, ?::integer, ?::bytea) ORDER BY resource",
+                    api.qualified_function("waddle_ingress_list_delivery_receipts"),
+                ))
+            } else {
+                None
+            };
+            let sql = candidate_query.unwrap_or_else(|| prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
             ("SELECT resource FROM ", " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY resource"),
-            "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY resource");
-        let mut rows = transaction
-            .query(
-                &sql,
-                crate::db_params![
-                    message.to_storage().to_string(),
-                    receipt.kind.to_storage(),
-                    receipt.semantic_identity_hash.to_vec()
-                ],
-            )
-            .await?;
-        let mut recipients = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let recipient: String = row.get(0)?;
-            recipients.push(
-                recipient
-                    .parse()
-                    .map_err(|_| IngressUowError::InvalidStoredDeliveryResource)?,
-            );
+            "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY resource").into_owned());
+            let mut rows = transaction
+                .query(
+                    &sql,
+                    crate::db_params![
+                        message.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec()
+                    ],
+                )
+                .await?;
+            recipients = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let recipient: String = row.get(0)?;
+                recipients.push(
+                    recipient
+                        .parse()
+                        .map_err(|_| IngressUowError::InvalidStoredDeliveryResource)?,
+                );
+            }
+            drop(rows);
         }
-        drop(rows);
         for (policy_receipt, target) in Self::no_transport_children(tx, message).await? {
             if &policy_receipt == receipt {
                 recipients.push(target);
@@ -79,18 +148,74 @@ impl DeliveryProgressRepository {
         tx: &mut IngressUowTransaction<'_>,
         message: MessageKey,
     ) -> Result<Vec<(EffectReceiptKey, Vec<FullJid>)>, IngressUowError> {
-        let (transaction, prepared) = tx.prepared_parts();
-        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
-            ("SELECT kind, semantic_identity_hash, resource FROM ", " WHERE message_key = ?::uuid ORDER BY kind, semantic_identity_hash, resource"),
-            "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY kind, semantic_identity_hash, resource");
-        let mut rows = transaction
-            .query(&sql, crate::db_params![message.to_storage().to_string()])
-            .await?;
+        let stored_rows = if tx.uses_definer_api_candidate() {
+            let (transaction, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT kind, semantic_identity_hash, resource FROM {} \
+                 (?::uuid, ?::integer, ?::bytea, ?::text, ?::integer)",
+                api.qualified_function("waddle_ingress_list_all_delivery_receipts"),
+            );
+            let page_size = super::DEFINER_API_PAGE_SIZE;
+            let mut after: Option<(i64, Vec<u8>, String)> = None;
+            let mut stored_rows = Vec::new();
+            loop {
+                let mut rows = transaction
+                    .query(
+                        &query,
+                        crate::db_params![
+                            message.to_storage().to_string(),
+                            after.as_ref().map(|(kind, _, _)| *kind),
+                            after.as_ref().map(|(_, hash, _)| hash.clone()),
+                            after.as_ref().map(|(_, _, resource)| resource.clone()),
+                            page_size
+                        ],
+                    )
+                    .await?;
+                let mut page_count = 0_i64;
+                let mut last = None;
+                while let Some(row) = rows.next().await? {
+                    let kind: i64 = row.get(0)?;
+                    let hash: Vec<u8> = row.get(1)?;
+                    let resource: String = row.get(2)?;
+                    last = Some((kind, hash.clone(), resource.clone()));
+                    stored_rows.push((kind, hash, resource));
+                    page_count += 1;
+                }
+                drop(rows);
+                if page_count < page_size {
+                    break;
+                }
+                after = last;
+            }
+            stored_rows
+        } else {
+            let (transaction, prepared) = tx.prepared_parts();
+            let sql = prepared_ingress_sql(
+                transaction.driver(),
+                prepared,
+                PreparedIngressRelation::DeliveryReceipts,
+                (
+                    "SELECT kind, semantic_identity_hash, resource FROM ",
+                    " WHERE message_key = ?::uuid ORDER BY kind, semantic_identity_hash, resource",
+                ),
+                "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY kind, semantic_identity_hash, resource",
+            );
+            let mut rows = transaction
+                .query(&sql, crate::db_params![message.to_storage().to_string()])
+                .await?;
+            let mut stored_rows = Vec::new();
+            while let Some(row) = rows.next().await? {
+                stored_rows.push((row.get(0)?, row.get(1)?, row.get(2)?));
+            }
+            drop(rows);
+            stored_rows
+        };
         let mut progress: Vec<(EffectReceiptKey, Vec<FullJid>)> = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let kind: i64 = row.get(0)?;
-            let hash: Vec<u8> = row.get(1)?;
-            let resource: String = row.get(2)?;
+        for (kind, hash, resource) in stored_rows {
             let receipt = EffectReceiptKey {
                 kind: EffectReceiptKind::from_storage(
                     i32::try_from(kind).map_err(|_| IngressUowError::InvalidStoredReceiptHash)?,
@@ -107,7 +232,6 @@ impl DeliveryProgressRepository {
                 _ => progress.push((receipt, vec![recipient])),
             }
         }
-        drop(rows);
         for (receipt, target) in Self::no_transport_children(tx, message).await? {
             match progress.iter_mut().find(|(stored, _)| *stored == receipt) {
                 Some((_, recipients)) => recipients.push(target),
@@ -162,21 +286,37 @@ impl DeliveryProgressRepository {
             return Ok(());
         }
         let (transaction, prepared) = tx.prepared_parts();
-        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+        let candidate_api = match prepared.filter(|prepared| prepared.uses_definer_api_candidate())
+        {
+            Some(prepared) => Some(
+                crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                    .ok_or(
+                        crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                    )?,
+            ),
+            None => None,
+        };
+        let sql = candidate_api.as_ref().map(|api| {
+            format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text, NULL::text)",
+                api.qualified_function("waddle_ingress_insert_delivery_receipt"),
+            )
+        });
+        let sql = sql.unwrap_or_else(|| prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
             ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, resource) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"),
-            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING");
+            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING").into_owned());
         for recipient in recipients {
-            transaction
-                .execute(
-                    &sql,
-                    crate::db_params![
-                        message.to_storage().to_string(),
-                        receipt.kind.to_storage(),
-                        receipt.semantic_identity_hash.to_vec(),
-                        recipient.to_string()
-                    ],
-                )
-                .await?;
+            let params = crate::db_params![
+                message.to_storage().to_string(),
+                receipt.kind.to_storage(),
+                receipt.semantic_identity_hash.to_vec(),
+                recipient.to_string()
+            ];
+            if candidate_api.is_some() {
+                let _ = super::candidate_boolean(transaction, &sql, params).await?;
+            } else {
+                transaction.execute(&sql, params).await?;
+            }
         }
         Ok(())
     }
@@ -191,22 +331,38 @@ impl DeliveryProgressRepository {
         reason: DeliveryPolicyDiscardReason,
     ) -> Result<(), IngressUowError> {
         let (transaction, prepared) = tx.prepared_parts();
-        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+        let candidate_api = match prepared.filter(|prepared| prepared.uses_definer_api_candidate())
+        {
+            Some(prepared) => Some(
+                crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                    .ok_or(
+                        crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                    )?,
+            ),
+            None => None,
+        };
+        let sql = candidate_api.as_ref().map(|api| {
+            format!(
+                "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::text)",
+                api.qualified_function("waddle_ingress_insert_delivery_receipt"),
+            )
+        });
+        let sql = sql.unwrap_or_else(|| prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
             ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"),
-            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING");
+            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING").into_owned());
         for recipient in recipients {
-            transaction
-                .execute(
-                    &sql,
-                    crate::db_params![
-                        message.to_storage().to_string(),
-                        receipt.kind.to_storage(),
-                        receipt.semantic_identity_hash.to_vec(),
-                        recipient.to_string(),
-                        reason.as_storage(),
-                    ],
-                )
-                .await?;
+            let params = crate::db_params![
+                message.to_storage().to_string(),
+                receipt.kind.to_storage(),
+                receipt.semantic_identity_hash.to_vec(),
+                recipient.to_string(),
+                reason.as_storage(),
+            ];
+            if candidate_api.is_some() {
+                let _ = super::candidate_boolean(transaction, &sql, params).await?;
+            } else {
+                transaction.execute(&sql, params).await?;
+            }
         }
         Ok(())
     }

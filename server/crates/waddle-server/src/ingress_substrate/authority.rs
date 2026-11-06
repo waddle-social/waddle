@@ -135,7 +135,7 @@ impl MessageEnvelope {
     ) -> Result<Self, IngressSubstrateError> {
         match &self.room_manifest {
             Some(stored) if stored != &manifest => {
-                return Err(IngressSubstrateError::MessageContentConflict)
+                return Err(IngressSubstrateError::MessageContentConflict);
             }
             Some(_) => {}
             None => self.room_manifest = Some(manifest),
@@ -148,7 +148,7 @@ impl MessageEnvelope {
         if let Some(manifest) = &stored.room_manifest {
             match &self.room_manifest {
                 Some(candidate) if candidate != manifest => {
-                    return Err(IngressSubstrateError::MessageContentConflict)
+                    return Err(IngressSubstrateError::MessageContentConflict);
                 }
                 Some(_) => {}
                 None => self.room_manifest = Some(manifest.clone()),
@@ -176,7 +176,7 @@ impl MessageEnvelope {
         for context in &stored.archive_contexts {
             match self.archive_context(&context.stanza_id) {
                 Some(candidate) if candidate != context => {
-                    return Err(IngressSubstrateError::MessageContentConflict)
+                    return Err(IngressSubstrateError::MessageContentConflict);
                 }
                 Some(_) => {}
                 None => self.archive_contexts.push(context.clone()),
@@ -342,6 +342,23 @@ pub(crate) async fn record_room_envelope_in_prepared_transaction(
     updated.preserve_archive_contexts(&stored)?;
     updated.preserve_room_manifest(&stored)?;
     if updated == stored {
+        return Ok(());
+    }
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_update_message_envelope",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let _ = candidate_boolean(
+            tx,
+            &format!("SELECT {function}(?::uuid, ?::smallint, ?::bytea)"),
+            crate::db_params![
+                key.to_storage().to_string(),
+                updated.version().to_storage(),
+                serialize_envelope(&updated)?,
+            ],
+        )
+        .await?;
         return Ok(());
     }
     const POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid";
@@ -562,6 +579,28 @@ pub(crate) async fn load_envelope_in_prepared_transaction(
         "SELECT envelope_version::int, envelope FROM ingress_messages WHERE message_key = ?::uuid";
     const SQLITE: &str =
         "SELECT envelope_version, envelope FROM ingress_messages WHERE message_key = ?";
+    if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
+        let function = format!(
+            "{}.waddle_ingress_load_message_envelope",
+            quote_postgres_identifier(prepared.schema())
+        );
+        let mut rows = tx
+            .query(
+                &format!("SELECT envelope_version, envelope FROM {function}(?::uuid)"),
+                crate::db_params![key.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?;
+        let Some(row) = rows.next().await.map_err(discard_database_error)? else {
+            return Ok(None);
+        };
+        let version: Option<i64> = row.get(0).map_err(discard_database_error)?;
+        let bytes: Option<Vec<u8>> = row.get(1).map_err(discard_database_error)?;
+        if rows.next().await.map_err(discard_database_error)?.is_some() {
+            return Err(IngressSubstrateError::InvalidDefinerApiResult);
+        }
+        return decode_envelope(key, version, bytes);
+    }
     let qualified;
     let postgres = if prepared.is_some() {
         qualified = format!(
@@ -588,6 +627,14 @@ pub(crate) async fn load_envelope_in_prepared_transaction(
     };
     let version: Option<i64> = row.get(0).map_err(discard_database_error)?;
     let bytes: Option<Vec<u8>> = row.get(1).map_err(discard_database_error)?;
+    decode_envelope(key, version, bytes)
+}
+
+fn decode_envelope(
+    key: MessageKey,
+    version: Option<i64>,
+    bytes: Option<Vec<u8>>,
+) -> Result<Option<MessageEnvelope>, IngressSubstrateError> {
     match (version, bytes) {
         (None, None) => Ok(None),
         (Some(version), Some(bytes)) => {
@@ -602,6 +649,27 @@ pub(crate) async fn load_envelope_in_prepared_transaction(
         }
         _ => Err(IngressSubstrateError::InvalidStoredEnvelope),
     }
+}
+
+async fn candidate_boolean(
+    tx: &mut Transaction<'_>,
+    query: &str,
+    params: impl crate::db::IntoParams,
+) -> Result<bool, IngressSubstrateError> {
+    let mut rows = tx
+        .query(query, params)
+        .await
+        .map_err(discard_database_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::InvalidDefinerApiResult)?;
+    let result: bool = row.get(0).map_err(discard_database_error)?;
+    if rows.next().await.map_err(discard_database_error)?.is_some() {
+        return Err(IngressSubstrateError::InvalidDefinerApiResult);
+    }
+    Ok(result)
 }
 
 /// Resolve a reserved wire count within the checkpoint's unambiguous SM window.
@@ -792,7 +860,10 @@ pub(crate) async fn advance_frontier_in_prepared_transaction(
     if stored != offered - 1 {
         return Ok(FrontierOutcome::Stale { stored });
     }
-    const WRITE_POSTGRES: (&str, &str) = ("UPDATE ", " SET handled_ordinal = ?::numeric, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND handled_ordinal = ?::numeric");
+    const WRITE_POSTGRES: (&str, &str) = (
+        "UPDATE ",
+        " SET handled_ordinal = ?::numeric, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND handled_ordinal = ?::numeric",
+    );
     const WRITE_SQLITE: &str = "UPDATE ingress_sm_streams SET handled_ordinal = ?, row_revision = row_revision + 1, updated_at = CURRENT_TIMESTAMP WHERE sm_ingress_id = ? AND handled_ordinal = ?";
     let changed =
         if let Some(prepared) = prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
@@ -935,7 +1006,10 @@ pub(crate) async fn flush_checkpoint_in_prepared_transaction(
             return Err(IngressSubstrateError::InvalidDefinerApiResult);
         }
     } else {
-        const POSTGRES: (&str, &str) = ("UPDATE ", " SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?::uuid");
+        const POSTGRES: (&str, &str) = (
+            "UPDATE ",
+            " SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?::uuid",
+        );
         const SQLITE: &str = "UPDATE ingress_sm_streams SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?";
         let write = prepared_ingress_sql(
             tx.driver(),

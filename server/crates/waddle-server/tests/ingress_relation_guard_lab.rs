@@ -1107,6 +1107,9 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     let legacy_origin = format!("legacy-{suffix}");
     let legacy_hash = alias_hash(&sender, "target@example.test", 1, &legacy_origin);
     let legacy_key = uuid::Uuid::new_v4();
+    let retention_key = uuid::Uuid::new_v4();
+    let retention_descendant = uuid::Uuid::new_v4();
+    let retention_hash = [81_u8; 32];
     let legacy_digest = [34_u8; 32];
     begin(&mut owner).await;
     writer_lock(&mut owner).await;
@@ -1132,6 +1135,45 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .execute(&mut owner)
     .await
     .expect("seed legacy unbound alias before API boundary");
+    sqlx::query(
+        "INSERT INTO guarded.ingress_messages \
+         (message_key, digest_version, digest, terminal_at) \
+         VALUES ($1, 1, decode(repeat('51', 32), 'hex'), '2000-01-01T00:00:00Z')",
+    )
+    .bind(retention_key)
+    .execute(&mut owner)
+    .await
+    .expect("seed old terminal row for database-clock retention test");
+    sqlx::query(
+        "INSERT INTO guarded.ingress_effect_intents \
+         (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) \
+         VALUES ($1, 0, 1, $2, 1, '{}'::bytea)",
+    )
+    .bind(retention_key)
+    .bind(retention_hash.to_vec())
+    .execute(&mut owner)
+    .await
+    .expect("seed retention intent");
+    sqlx::query(
+        "INSERT INTO guarded.ingress_effect_receipts \
+         (message_key, kind, semantic_identity_hash) VALUES ($1, 1, $2)",
+    )
+    .bind(retention_key)
+    .bind(retention_hash.to_vec())
+    .execute(&mut owner)
+    .await
+    .expect("seed completed retention intent");
+    sqlx::query(
+        "INSERT INTO guarded.ingress_effect_descendants \
+         (message_key, kind, semantic_identity_hash, descendant_key) \
+         VALUES ($1, 1, $2, $3)",
+    )
+    .bind(retention_key)
+    .bind(retention_hash.to_vec())
+    .bind(retention_descendant.to_string())
+    .execute(&mut owner)
+    .await
+    .expect("seed unsettled retention descendant");
     commit(&mut owner).await;
 
     let candidate_sql = render_definer_api_candidate("guarded", &api_owner, &fixture.runtime);
@@ -1193,7 +1235,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     sqlx::raw_sql(&candidate_sql)
         .execute(&mut transition_admin)
         .await
-        .expect("install dark two-table definer boundary");
+        .expect("install dark guarded-table definer candidate");
     sqlx::query(&format!("REVOKE CREATE ON SCHEMA guarded FROM {api_owner}"))
         .execute(&mut transition_admin)
         .await
@@ -1316,6 +1358,35 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
     .await
     .expect("inspect retained V1009 guard search path");
     assert!(retained_guard_safe_path);
+    let timestamp_api_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT \
+           pg_catalog.to_regprocedure('guarded.waddle_ingress_refresh_retention(uuid)') IS NOT NULL, \
+           pg_catalog.to_regprocedure('guarded.waddle_ingress_refresh_retention(uuid,timestamptz)') IS NULL, \
+           pg_catalog.to_regprocedure('guarded.waddle_ingress_settle_descendant(uuid)') IS NOT NULL, \
+           pg_catalog.to_regprocedure('guarded.waddle_ingress_settle_descendant(uuid,timestamptz)') IS NULL, \
+           pg_catalog.has_function_privilege($1, \
+             pg_catalog.to_regprocedure('guarded.waddle_ingress_refresh_retention(uuid)'), 'EXECUTE'), \
+           pg_catalog.has_function_privilege($1, \
+             pg_catalog.to_regprocedure('guarded.waddle_ingress_settle_descendant(uuid)'), 'EXECUTE')",
+    )
+    .bind(&fixture.runtime)
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect timestamp-free retention APIs");
+    assert_eq!(timestamp_api_shape, (true, true, true, true, true, true));
+    let timestamp_api_uses_database_clock: (bool, bool) = sqlx::query_as(
+        "SELECT \
+           pg_catalog.strpos(pg_catalog.lower(pg_catalog.pg_get_functiondef( \
+             pg_catalog.to_regprocedure('guarded.waddle_ingress_refresh_retention(uuid)'))), \
+             'clock_timestamp()') > 0, \
+           pg_catalog.strpos(pg_catalog.lower(pg_catalog.pg_get_functiondef( \
+             pg_catalog.to_regprocedure('guarded.waddle_ingress_settle_descendant(uuid)'))), \
+             'clock_timestamp()') > 0",
+    )
+    .fetch_one(&mut owner)
+    .await
+    .expect("inspect database-clock retention implementation");
+    assert_eq!(timestamp_api_uses_database_clock, (true, true));
     let function_execute_grantees: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT COALESCE(
@@ -1369,8 +1440,7 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
               'waddle_ingress_owner_rejection_insert_guard',
               'waddle_ingress_source_binding_guard',
               'waddle_ingress_source_insert_guard',
-              'waddle_ingress_definer_prepare', 'waddle_ingress_definer_epoch_guard',
-              'waddle_ingress_refresh_retention'
+              'waddle_ingress_definer_prepare', 'waddle_ingress_definer_epoch_guard'
           )
         ORDER BY p.proname
         "#,
@@ -1813,7 +1883,33 @@ async fn definer_api_keeps_canonical_resolution_inside_outer_transaction() {
             .expect("read owner rejection through fixed API");
     let expected_child = child_key.to_string();
     assert_eq!(stored_child.as_deref(), Some(expected_child.as_str()));
+    let settled: bool = sqlx::query_scalar("SELECT guarded.waddle_ingress_settle_descendant($1)")
+        .bind(retention_descendant)
+        .fetch_one(&mut runtime)
+        .await
+        .expect("settle descendant with database-controlled time");
+    assert!(settled);
+    let refreshed: bool = sqlx::query_scalar("SELECT guarded.waddle_ingress_refresh_retention($1)")
+        .bind(retention_key)
+        .fetch_one(&mut runtime)
+        .await
+        .expect("refresh retention with database-controlled time");
+    assert!(refreshed);
     commit(&mut runtime).await;
+    let retention_clock_is_current: (bool, bool, bool) = sqlx::query_as(
+        "SELECT terminal_at < pg_catalog.clock_timestamp() - interval '8 days', \
+           settled_at > pg_catalog.clock_timestamp() - interval '5 seconds', \
+           retention_eligible_at > pg_catalog.clock_timestamp() - interval '5 seconds' \
+         FROM guarded.ingress_messages AS m \
+         JOIN guarded.ingress_effect_descendants AS d ON d.message_key = m.message_key \
+         WHERE m.message_key = $1 AND d.descendant_key = $2",
+    )
+    .bind(retention_key)
+    .bind(retention_descendant.to_string())
+    .fetch_one(&mut owner)
+    .await
+    .expect("verify retention starts at database time, not the old terminal time");
+    assert_eq!(retention_clock_is_current, (true, true, true));
     begin(&mut runtime).await;
     writer_lock(&mut runtime).await;
     proof(&mut runtime, 0).await;

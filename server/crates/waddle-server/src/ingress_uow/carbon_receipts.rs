@@ -30,7 +30,9 @@ impl CarbonReceiptRepository {
                 "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)",
             )
         };
-        let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state = 2 OR expires_at_ms > {clock}) UNION SELECT resource FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? UNION SELECT recipient FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ?");
+        let sql = format!(
+            "SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state = 2 OR expires_at_ms > {clock}) UNION SELECT resource FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? UNION SELECT recipient FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ?"
+        );
         let mut rows = tx
             .query(
                 &sql,
@@ -111,32 +113,81 @@ impl CarbonReceiptRepository {
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<FullJid>, IngressUowError> {
         let mut tx = uow.begin().await?;
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "SELECT recipient FROM ingress_carbon_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY recipient"
-        } else {
-            "SELECT recipient FROM ingress_carbon_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY recipient"
-        };
-        let mut rows = tx
-            .transaction_mut()
-            .query(
-                sql,
-                crate::db_params![
-                    message.to_storage().to_string(),
-                    receipt.kind.to_storage(),
-                    receipt.semantic_identity_hash.to_vec()
-                ],
-            )
-            .await?;
-        let mut recipients = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let recipient: String = row.get(0)?;
-            recipients.push(
-                recipient
-                    .parse()
-                    .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+        let recipients = if tx.uses_definer_api_candidate() {
+            let (_, prepared) = tx.prepared_parts();
+            let prepared = prepared
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let api = crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+            let query = format!(
+                "SELECT * FROM {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::integer)",
+                api.qualified_function("waddle_ingress_list_carbon_receipts"),
             );
-        }
-        drop(rows);
+            let page_size = super::DEFINER_API_PAGE_SIZE;
+            let mut after_resource: Option<String> = None;
+            let mut recipients = Vec::new();
+            loop {
+                let mut rows = tx
+                    .transaction_mut()
+                    .query(
+                        &query,
+                        crate::db_params![
+                            message.to_storage().to_string(),
+                            receipt.kind.to_storage(),
+                            receipt.semantic_identity_hash.to_vec(),
+                            after_resource.clone(),
+                            page_size
+                        ],
+                    )
+                    .await?;
+                let mut page_count = 0_i64;
+                let mut last = None;
+                while let Some(row) = rows.next().await? {
+                    let recipient: String = row.get(0)?;
+                    recipients.push(
+                        recipient
+                            .parse()
+                            .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+                    );
+                    last = Some(recipient);
+                    page_count += 1;
+                }
+                drop(rows);
+                if page_count < page_size {
+                    break;
+                }
+                after_resource = last;
+            }
+            recipients
+        } else {
+            let query = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
+                "SELECT recipient FROM ingress_carbon_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY recipient"
+            } else {
+                "SELECT recipient FROM ingress_carbon_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY recipient"
+            };
+            let mut rows = tx
+                .transaction_mut()
+                .query(
+                    query,
+                    crate::db_params![
+                        message.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec()
+                    ],
+                )
+                .await?;
+            let mut recipients = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let recipient: String = row.get(0)?;
+                recipients.push(
+                    recipient
+                        .parse()
+                        .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+                );
+            }
+            drop(rows);
+            recipients
+        };
         tx.commit().await?;
         Ok(recipients)
     }
@@ -164,23 +215,42 @@ impl CarbonReceiptRepository {
         if !CanonicalMessageRepository::lock(&mut tx, message).await? {
             return Err(IngressUowError::EffectIntentMessageMissing);
         }
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "INSERT INTO ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"
-        } else {
-            "INSERT INTO ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING"
-        };
-        for recipient in recipients {
-            tx.transaction_mut()
-                .execute(
-                    sql,
-                    crate::db_params![
-                        message.to_storage().to_string(),
-                        receipt.kind.to_storage(),
-                        receipt.semantic_identity_hash.to_vec(),
-                        recipient.to_string()
-                    ],
+        {
+            let (transaction, prepared) = tx.prepared_parts();
+            let candidate_api = match prepared
+                .filter(|prepared| prepared.uses_definer_api_candidate())
+            {
+                Some(prepared) => Some(
+                    crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(prepared)
+                        .ok_or(
+                        crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult,
+                    )?,
+                ),
+                None => None,
+            };
+            let sql = if let Some(api) = &candidate_api {
+                format!(
+                    "SELECT {}(?::uuid, ?::integer, ?::bytea, ?::text)",
+                    api.qualified_function("waddle_ingress_insert_carbon_receipt"),
                 )
-                .await?;
+            } else if transaction.driver() == DatabaseDriver::Postgres {
+                "INSERT INTO ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING".to_owned()
+            } else {
+                "INSERT INTO ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING".to_owned()
+            };
+            for recipient in recipients {
+                let params = crate::db_params![
+                    message.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    recipient.to_string()
+                ];
+                if candidate_api.is_some() {
+                    let _ = super::candidate_boolean(transaction, &sql, params).await?;
+                } else {
+                    transaction.execute(&sql, params).await?;
+                }
+            }
         }
         let mut settled = !complete;
         if complete {
@@ -195,28 +265,85 @@ impl CarbonReceiptRepository {
                     "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)",
                 )
             };
-            let sql = format!("SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state IN (0, 1) AND expires_at_ms > {clock})");
-            let mut rows = tx
-                .transaction_mut()
-                .query(
-                    &sql,
-                    crate::db_params![
-                        message.to_storage().to_string(),
-                        receipt.kind.to_storage(),
-                        receipt.semantic_identity_hash.to_vec()
-                    ],
-                )
-                .await?;
-            let mut pending = Vec::new();
-            while let Some(row) = rows.next().await? {
-                let recipient: String = row.get(0)?;
-                pending.push(
-                    recipient
-                        .parse()
-                        .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
-                );
-            }
-            drop(rows);
+            let pending = {
+                let (transaction, prepared) = tx.prepared_parts();
+                let candidate_api = if let Some(prepared) =
+                    prepared.filter(|prepared| prepared.uses_definer_api_candidate())
+                {
+                    Some(
+                        crate::ingress_substrate::DefinerApiCandidateContext::from_prepared(
+                            prepared,
+                        )
+                        .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?,
+                    )
+                } else {
+                    None
+                };
+                let mut pending = Vec::new();
+                if let Some(api) = candidate_api {
+                    let query = format!(
+                        "SELECT * FROM {}(?::uuid, ?::integer, ?::bytea, ?::text, ?::integer)",
+                        api.qualified_function("waddle_ingress_list_pending_send_attempts"),
+                    );
+                    let page_size = super::DEFINER_API_PAGE_SIZE;
+                    let mut after_resource: Option<String> = None;
+                    loop {
+                        let mut rows = transaction
+                            .query(
+                                &query,
+                                crate::db_params![
+                                    message.to_storage().to_string(),
+                                    receipt.kind.to_storage(),
+                                    receipt.semantic_identity_hash.to_vec(),
+                                    after_resource.clone(),
+                                    page_size
+                                ],
+                            )
+                            .await?;
+                        let mut page_count = 0_i64;
+                        let mut last = None;
+                        while let Some(row) = rows.next().await? {
+                            let recipient: String = row.get(0)?;
+                            pending.push(
+                                recipient
+                                    .parse()
+                                    .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+                            );
+                            last = Some(recipient);
+                            page_count += 1;
+                        }
+                        drop(rows);
+                        if page_count < page_size {
+                            break;
+                        }
+                        after_resource = last;
+                    }
+                } else {
+                    let pending_attempts = format!(
+                        "SELECT recipient FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND (state IN (0, 1) AND expires_at_ms > {clock})"
+                    );
+                    let mut rows = transaction
+                        .query(
+                            &pending_attempts,
+                            crate::db_params![
+                                message.to_storage().to_string(),
+                                receipt.kind.to_storage(),
+                                receipt.semantic_identity_hash.to_vec()
+                            ],
+                        )
+                        .await?;
+                    while let Some(row) = rows.next().await? {
+                        let recipient: String = row.get(0)?;
+                        pending.push(
+                            recipient
+                                .parse()
+                                .map_err(|_| IngressUowError::InvalidStoredCarbonRecipient)?,
+                        );
+                    }
+                    drop(rows);
+                }
+                pending
+            };
             settled = true;
             for recipient in pending {
                 let obligation = super::SendObligation {

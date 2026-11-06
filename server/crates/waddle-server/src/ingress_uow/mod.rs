@@ -81,6 +81,27 @@ pub(crate) use repositories::{
 pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
+pub(crate) async fn candidate_boolean(
+    transaction: &mut Transaction<'_>,
+    query: &str,
+    params: impl crate::db::IntoParams,
+) -> Result<bool, IngressUowError> {
+    let mut rows = transaction.query(query, params).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult)?;
+    let result: bool = row.get(0)?;
+    if rows.next().await?.is_some() {
+        return Err(
+            crate::ingress_substrate::IngressSubstrateError::InvalidDefinerApiResult.into(),
+        );
+    }
+    Ok(result)
+}
+
+pub(super) const DEFINER_API_PAGE_SIZE: i64 = 256;
+
 use std::time::Duration;
 
 use crate::config::LineageConfig;
@@ -581,6 +602,12 @@ impl<'a> IngressUowTransaction<'a> {
         self.prepared_receipt_writer
             .as_ref()
             .map(PreparedAttestedReceiptWriter::schema)
+    }
+
+    pub(crate) fn uses_definer_api_candidate(&self) -> bool {
+        self.prepared_receipt_writer
+            .as_ref()
+            .is_some_and(PreparedAttestedReceiptWriter::uses_definer_api_candidate)
     }
 
     /// Select the unregistered function-owner API only in its disposable
