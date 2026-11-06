@@ -1,7 +1,8 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::postgres::{types::Oid, PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::types::Oid;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -189,6 +190,60 @@ async fn reject_without_relation_lock(fixture: &Fixture, pins: DarkMigrationLedg
     assert_eq!(row.get::<i64>(1).expect("lock count"), 0);
     drop(rows);
     tx.rollback().await.expect("rollback failed proof");
+}
+
+async fn reject_oversized_ledger(fixture: &Fixture) {
+    let db = fixture.database();
+    let mut tx = db.begin().await.expect("runtime transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    let result =
+        acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, fixture.pins().await)
+            .await;
+    assert!(matches!(
+        result,
+        Err(DarkLedgerPreflightError::Database(
+            DatabaseError::MigrationLedger(MigrationLedgerError::OversizedLedger)
+        ))
+    ));
+    tx.rollback().await.expect("rollback oversized proof");
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_bounds_rows_and_text_before_decode() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url).await;
+    for column in ["description", "checksum"] {
+        sqlx::query(&format!(
+            "UPDATE {}._migrations SET {column} = $1 WHERE version = 1023",
+            fixture.schema
+        ))
+        .bind("x".repeat(1_000_000))
+        .execute(&fixture.admin)
+        .await
+        .expect("oversize one ledger field");
+        reject_oversized_ledger(&fixture).await;
+        fixture.reset_ledger().await;
+    }
+    let extra = i32::try_from(MigrationRunner::single().migrations.len() + 2)
+        .expect("bounded fixture catalog");
+    sqlx::query(&format!(
+        "INSERT INTO {}._migrations (version, description, checksum) \
+         SELECT 2000 + value, 'excess', '0000' FROM pg_catalog.generate_series(1, $1) AS series(value)",
+        fixture.schema
+    ))
+    .bind(extra)
+    .execute(&fixture.admin)
+    .await
+    .expect("oversize ledger row count");
+    reject_oversized_ledger(&fixture).await;
+    fixture.close().await;
 }
 
 #[tokio::test]

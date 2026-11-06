@@ -342,11 +342,38 @@ impl MigrationRunner {
         ledger_table: &str,
         required_version: i64,
     ) -> Result<(), DatabaseError> {
-        // No ORDER BY: an ordering operator need not be resolved to validate
-        // the checksum and version-prefix invariants.
-        let sql = format!("SELECT version, description, checksum FROM ONLY {ledger_table}");
-        let rows: Vec<(i64, String, Option<String>)> =
-            sqlx::query_as(&sql).fetch_all(connection).await?;
+        // Bound both rows and text before SQLx decodes them. An untrusted
+        // ledger may contain arbitrarily many rows or very large TEXT fields;
+        // a statement timeout does not bound client allocation. One extra
+        // row/character is enough to refuse a malformed ledger. No ORDER BY
+        // means no ordering operator is needed for prefix validation.
+        let max_description = self
+            .migrations
+            .iter()
+            .map(|migration| migration.description.chars().count())
+            .max()
+            .unwrap_or(0);
+        let description_limit = i32::try_from(max_description.saturating_add(1))
+            .map_err(|_| MigrationLedgerError::OversizedLedger)?;
+        let row_limit = i64::try_from(self.migrations.len().saturating_add(1))
+            .map_err(|_| MigrationLedgerError::OversizedLedger)?;
+        let sql = format!(
+            "SELECT version, pg_catalog.substr(description, 1, $1), \
+             pg_catalog.substr(checksum, 1, 65) FROM ONLY {ledger_table} LIMIT $2"
+        );
+        let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(&sql)
+            .bind(description_limit)
+            .bind(row_limit)
+            .fetch_all(connection)
+            .await?;
+        if rows.len() > self.migrations.len()
+            || rows.iter().any(|(_, description, checksum)| {
+                description.chars().count() > max_description
+                    || checksum.as_ref().is_some_and(|value| value.len() > 64)
+            })
+        {
+            return Err(MigrationLedgerError::OversizedLedger.into());
+        }
         let applied_rows = rows
             .into_iter()
             .map(|(version, description, checksum)| LedgerRow {

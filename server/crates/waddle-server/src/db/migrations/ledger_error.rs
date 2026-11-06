@@ -41,6 +41,9 @@ pub enum MigrationLedgerError {
     #[error("migration runtime attachment refuses duplicate ledger version v{version}")]
     DuplicateVersion { version: i64 },
 
+    #[error("migration runtime attachment refuses an oversized migration ledger")]
+    OversizedLedger,
+
     #[error("migration runtime attachment requires committed migration v{version}")]
     PendingMigration { version: i64 },
 
