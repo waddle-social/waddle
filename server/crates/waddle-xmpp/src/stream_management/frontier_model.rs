@@ -5,72 +5,103 @@
 //! one write attempt. It cannot prove the fence, authority, an actual write, or
 //! durable recovery. Replay rows are represented only by their ordinals.
 
+use std::collections::BTreeSet;
+
 const HALF_SPACE: u32 = 1 << 31;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FrontierModel {
+pub struct FrontierModel {
     peer_acked: u64,
     exposed: u64,
     appended: u64,
+    ingress: u64,
+    uncertain_writes: BTreeSet<u64>,
     capacity: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum InitError {
+pub enum InitError {
     AmbiguousCapacity,
     OutOfOrder,
     OutstandingExceedsCapacity,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AppendError {
+pub enum AppendError {
     OrdinalExhausted,
     Capacity,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AttemptError {
+pub enum AttemptError {
     NotRetained,
     OutOfOrder,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AttemptOutcome {
+pub enum AttemptOutcome {
     NewlyExposed,
     Retry,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum AckKind {
+pub enum AckKind {
     Live,
     Resume,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AckOutcome {
+pub enum AckOutcome {
     Advanced { through: u64 },
     Duplicate,
     StaleIgnored,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AckError {
+pub enum AckError {
     HandledTooHigh { h: u32, send_count: u32 },
     StaleResume { h: u32 },
     Antipodal { h: u32 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameWriteResult {
+    Accepted,
+    Unknown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FrameWriteError {
+    NotExposed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum IngressError {
+    NonContiguous { expected: u64, actual: u64 },
+    OrdinalExhausted,
+}
+
 impl FrontierModel {
-    fn new(capacity: u32) -> Result<Self, InitError> {
+    pub fn new(capacity: u32) -> Result<Self, InitError> {
         Self::from_ordinals(0, 0, 0, capacity)
     }
 
     /// Model a supplied contiguous history; this constructor does not validate
     /// that the history, retained rows, fence, or owner exist outside the model.
-    fn from_ordinals(
+    pub fn from_ordinals(
         peer_acked: u64,
         exposed: u64,
         appended: u64,
+        capacity: u32,
+    ) -> Result<Self, InitError> {
+        Self::from_ordinals_and_ingress(peer_acked, exposed, appended, 0, capacity)
+    }
+
+    pub fn from_ordinals_and_ingress(
+        peer_acked: u64,
+        exposed: u64,
+        appended: u64,
+        ingress: u64,
         capacity: u32,
     ) -> Result<Self, InitError> {
         if capacity >= HALF_SPACE {
@@ -86,12 +117,38 @@ impl FrontierModel {
             peer_acked,
             exposed,
             appended,
+            ingress,
+            uncertain_writes: BTreeSet::new(),
             capacity,
         })
     }
 
+    pub fn peer_acked(&self) -> u64 {
+        self.peer_acked
+    }
+
+    pub fn exposed(&self) -> u64 {
+        self.exposed
+    }
+
+    pub fn appended(&self) -> u64 {
+        self.appended
+    }
+
+    pub fn ingress(&self) -> u64 {
+        self.ingress
+    }
+
+    pub fn has_uncertain_writes(&self) -> bool {
+        !self.uncertain_writes.is_empty()
+    }
+
+    pub fn uncertain_writes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.uncertain_writes.iter().copied()
+    }
+
     /// Retain the next replay ordinal without asserting any exposure.
-    fn append(&mut self) -> Result<u64, AppendError> {
+    pub fn append(&mut self) -> Result<u64, AppendError> {
         let next = self
             .appended
             .checked_add(1)
@@ -106,7 +163,7 @@ impl FrontierModel {
     /// Caller assumes a current authority and known committed fence, and calls
     /// immediately before one write attempt. Previously exposed retained rows
     /// may be retried; new exposure must advance by exactly one ordinal.
-    fn record_assumed_committed_attempt(
+    pub fn record_assumed_committed_attempt(
         &mut self,
         ordinal: u64,
     ) -> Result<AttemptOutcome, AttemptError> {
@@ -129,7 +186,41 @@ impl FrontierModel {
     /// far-ahead value. An older ACK outside the backward half-space can alias
     /// an exposed forward ordinal and advance the floor; this model cannot
     /// identify its actual ordinal from the wire value.
-    fn acknowledge(&mut self, h: u32, kind: AckKind) -> Result<AckOutcome, AckError> {
+    pub fn record_frame_write_result(
+        &mut self,
+        ordinal: u64,
+        result: FrameWriteResult,
+    ) -> Result<(), FrameWriteError> {
+        if ordinal <= self.peer_acked || ordinal > self.exposed {
+            return Err(FrameWriteError::NotExposed);
+        }
+        match result {
+            FrameWriteResult::Accepted => {
+                self.uncertain_writes.remove(&ordinal);
+            }
+            FrameWriteResult::Unknown => {
+                self.uncertain_writes.insert(ordinal);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn record_contiguous_ingress(&mut self, ordinal: u64) -> Result<(), IngressError> {
+        let expected = self
+            .ingress
+            .checked_add(1)
+            .ok_or(IngressError::OrdinalExhausted)?;
+        if ordinal != expected {
+            return Err(IngressError::NonContiguous {
+                expected,
+                actual: ordinal,
+            });
+        }
+        self.ingress = ordinal;
+        Ok(())
+    }
+
+    pub fn acknowledge(&mut self, h: u32, kind: AckKind) -> Result<AckOutcome, AckError> {
         let distance = h.wrapping_sub(self.peer_acked as u32);
         if distance == 0 {
             return Ok(AckOutcome::Duplicate);
@@ -150,13 +241,15 @@ impl FrontierModel {
             });
         }
         self.peer_acked += u64::from(distance);
+        self.uncertain_writes
+            .retain(|ordinal| *ordinal > self.peer_acked);
         Ok(AckOutcome::Advanced {
             through: self.peer_acked,
         })
     }
 
     /// All retained rows, including appended rows with no write attempt yet.
-    fn replay(&self) -> impl DoubleEndedIterator<Item = u64> {
+    pub fn replay(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
         (self.peer_acked..self.appended).map(|ordinal| ordinal + 1)
     }
 }
@@ -169,8 +262,8 @@ mod tests {
     use proptest::prelude::{any, prop_assert, prop_assert_eq, prop_assume, proptest};
 
     use super::{
-        AckError, AckKind, AckOutcome, AppendError, AttemptError, AttemptOutcome, FrontierModel,
-        InitError, HALF_SPACE,
+        AckError, AckKind, AckOutcome, AppendError, AttemptError, AttemptOutcome, FrameWriteResult,
+        FrontierModel, IngressError, InitError, HALF_SPACE,
     };
 
     #[test]
@@ -427,6 +520,76 @@ mod tests {
             Ok(AttemptOutcome::NewlyExposed)
         );
         assert_eq!(model.replay().collect::<Vec<_>>(), vec![101, 102, 103]);
+    }
+
+    #[test]
+    fn uncertain_write_keeps_replay_and_repair_until_retry_or_ack() {
+        let mut model = FrontierModel::new(4).unwrap();
+        assert_eq!(model.append(), Ok(1));
+        assert_eq!(model.append(), Ok(2));
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2]);
+
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(model.exposed(), 1);
+        assert_eq!(
+            model.record_frame_write_result(1, FrameWriteResult::Unknown),
+            Ok(())
+        );
+        assert_eq!(model.uncertain_writes().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2]);
+
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Ok(AttemptOutcome::Retry)
+        );
+        assert_eq!(
+            model.record_frame_write_result(1, FrameWriteResult::Accepted),
+            Ok(())
+        );
+        assert!(!model.has_uncertain_writes());
+        assert_eq!(
+            model.record_assumed_committed_attempt(2),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(
+            model.record_frame_write_result(2, FrameWriteResult::Unknown),
+            Ok(())
+        );
+
+        assert_eq!(
+            model.acknowledge(2, AckKind::Live),
+            Ok(AckOutcome::Advanced { through: 2 })
+        );
+        assert_eq!(model.peer_acked(), 2);
+        assert!(!model.has_uncertain_writes());
+        assert_eq!(model.replay().next(), None);
+    }
+
+    #[test]
+    fn contiguous_ingress_rejects_gaps_and_never_wraps() {
+        let mut model = FrontierModel::new(1).unwrap();
+        let before = model.clone();
+        assert_eq!(
+            model.record_contiguous_ingress(2),
+            Err(IngressError::NonContiguous {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(model, before);
+        assert_eq!(model.record_contiguous_ingress(1), Ok(()));
+        assert_eq!(model.ingress(), 1);
+
+        let mut exhausted = FrontierModel::from_ordinals_and_ingress(0, 0, 0, u64::MAX, 1).unwrap();
+        let before = exhausted.clone();
+        assert_eq!(
+            exhausted.record_contiguous_ingress(0),
+            Err(IngressError::OrdinalExhausted)
+        );
+        assert_eq!(exhausted, before);
     }
 
     proptest! {
