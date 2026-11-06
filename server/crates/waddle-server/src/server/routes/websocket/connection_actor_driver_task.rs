@@ -7,7 +7,7 @@
 use super::connection_actor_core::{
     ConnectionActorCore, ConnectionActorDriverCompletion, ConnectionActorDriverError,
 };
-use super::frame::ResponseBatch;
+use super::frame::{ClassifiedInboundFrame, ResponseBatch};
 use super::replay::DriveOutcome;
 use super::{OutboundStanza, WebSocketState};
 use crate::clustering::NodeAdmissionPermit;
@@ -204,9 +204,10 @@ struct DriverAdmissionReservation {
 #[derive(Debug, Clone)]
 pub(super) enum ConnectionActorDriverTaskInput {
     InboundFrame {
-        parsed: waddle_xmpp::protocol::frame::ParsedFrame,
+        input: ClassifiedInboundFrame,
         domain: BareJid,
-        wire_bytes: usize,
+        #[cfg(test)]
+        before_start: Option<(Arc<Notify>, Arc<Notify>)>,
     },
     PeerStanza(Box<OutboundStanza>),
     #[cfg(any(test, feature = "test-support"))]
@@ -244,12 +245,9 @@ enum DriverControl {
 impl ConnectionActorDriverTaskInput {
     fn input_bytes(&self) -> usize {
         match self {
-            Self::InboundFrame {
-                parsed,
-                domain,
-                wire_bytes,
-            } => (*wire_bytes)
-                .max(accounted_debug_bytes(parsed))
+            Self::InboundFrame { input, domain, .. } => input
+                .wire_bytes()
+                .max(accounted_debug_bytes(input))
                 .saturating_add(domain.as_str().len()),
             // Count a typed representation only. XML serialization belongs
             // to the eventual socket adapter, not actor admission.
@@ -401,17 +399,17 @@ impl ConnectionActorDriverTask {
     /// and source input become shared custody before the worker can run it.
     pub(super) fn submit_inbound_frame(
         &self,
-        parsed: waddle_xmpp::protocol::frame::ParsedFrame,
+        input: ClassifiedInboundFrame,
         domain: BareJid,
-        wire_bytes: usize,
     ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
-        if wire_bytes > waddle_xmpp::protocol::frame::MAX_FRAME_SIZE {
+        if input.wire_bytes() > waddle_xmpp::protocol::frame::MAX_FRAME_SIZE {
             return Err(ConnectionActorDriverTaskAdmissionError::Overloaded);
         }
         self.submit(ConnectionActorDriverTaskInput::InboundFrame {
-            parsed,
+            input,
             domain,
-            wire_bytes,
+            #[cfg(test)]
+            before_start: None,
         })
     }
 
@@ -1298,6 +1296,15 @@ async fn run_driver(worker: DriverWorker) {
             dequeued.notify_one();
             release.notified().await;
         }
+        #[cfg(test)]
+        if let DriverInput::InboundFrame {
+            before_start: Some((dequeued, release)),
+            ..
+        } = &command.operation.input
+        {
+            dequeued.notify_one();
+            release.notified().await;
+        }
         match permit.with_current(|| shared.begin_operation(&command.operation)) {
             Ok(true) => {}
             Ok(false) => {
@@ -1314,21 +1321,18 @@ async fn run_driver(worker: DriverWorker) {
         let mut active =
             ActiveOperationGuard::new(Arc::clone(&command.operation), Arc::clone(&shared));
         let result = match &command.operation.input {
-            DriverInput::InboundFrame {
-                parsed,
-                domain,
-                wire_bytes,
-            } => ConnectionActorDriverTaskResultValue::InboundFrame(
-                core.process_inbound_frame(
-                    parsed.clone(),
-                    domain,
-                    *wire_bytes,
-                    websocket.as_ref(),
-                    &permit,
-                    &shutdown,
+            DriverInput::InboundFrame { input, domain, .. } => {
+                ConnectionActorDriverTaskResultValue::InboundFrame(
+                    core.process_inbound_frame(
+                        input.clone(),
+                        domain,
+                        websocket.as_ref(),
+                        &permit,
+                        &shutdown,
+                    )
+                    .await,
                 )
-                .await,
-            ),
+            }
             DriverInput::PeerStanza(stanza) => ConnectionActorDriverTaskResultValue::PeerStanza(
                 core.interpret_peer_stanza(websocket.as_ref(), stanza, &permit, &shutdown)
                     .await,
@@ -1479,6 +1483,164 @@ mod tests {
             limits,
         )
         .expect("valid test limits")
+    }
+
+    fn submit_typed_sm(task: &ConnectionActorDriverTask) -> ConnectionActorDriverTicket {
+        task.submit_inbound_frame(
+            ClassifiedInboundFrame::classify("<enable xmlns='urn:xmpp:sm:3'/>"),
+            "example.com".parse().expect("domain"),
+        )
+        .expect("typed SM accepted")
+    }
+
+    #[tokio::test]
+    async fn typed_input_completion_and_source_survive_caller_drop() {
+        let task = test_task().await;
+        let ticket = submit_typed_sm(&task);
+        let id = ticket.id();
+        let connection_ref = task.connection_ref().clone();
+        // The task cannot run before this synchronous drop on the current
+        // thread runtime. Caller cancellation therefore precedes dispatch.
+        drop(ticket);
+        let retained = task
+            .lookup(&connection_ref, id)
+            .expect("retained operation");
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), retained.wait())
+            .await
+            .expect("completed");
+        let ConnectionActorDriverTaskSnapshot::Completed(result) = snapshot else {
+            panic!("typed result retained")
+        };
+        let ConnectionActorDriverTaskResultValue::InboundFrame(Ok(
+            ConnectionActorDriverCompletion::CurrentAtCompletion(batch),
+        )) = &result.value
+        else {
+            panic!("inbound handler completed")
+        };
+        assert_eq!(batch.frames.len(), 1);
+        assert!(batch.frames[0]
+            .clone()
+            .into_serialized_xml()
+            .contains("unexpected-request"));
+        assert_eq!(retained.run_count(), 1);
+        let DriverInput::InboundFrame { input, .. } = retained.input_snapshot() else {
+            panic!("typed source retained")
+        };
+        assert_eq!(input.wire_bytes(), "<enable xmlns='urn:xmpp:sm:3'/>".len());
+        retained.acknowledge().expect("settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn typed_input_stop_or_cancellation_before_dequeue_retains_not_started_source() {
+        for cancelled in [false, true] {
+            let task = test_task().await;
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let active = task
+                .submit_paused(
+                    Arc::clone(&entered),
+                    Arc::clone(&release),
+                    "blocking predecessor",
+                )
+                .expect("accepted");
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .expect("predecessor running");
+            let queued = submit_typed_sm(&task);
+            if cancelled {
+                task.shared.shutdown.cancel();
+            } else {
+                task.request_stop(StopReason::Requested);
+            }
+            release.notify_one();
+            task.wait_joined().await;
+            assert!(matches!(
+                queued.snapshot(),
+                ConnectionActorDriverTaskSnapshot::NotStarted
+            ));
+            assert_eq!(queued.run_count(), 0);
+            assert!(matches!(
+                queued.input_snapshot(),
+                DriverInput::InboundFrame { .. }
+            ));
+            assert!(queued.retains_input());
+            active.acknowledge().expect("predecessor settled");
+            queued.acknowledge().expect("typed source settled");
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_input_stop_or_cancellation_after_dequeue_prevents_handler_start() {
+        for cancelled in [false, true] {
+            let task = test_task().await;
+            let dequeued = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let ticket = task
+                .submit(DriverInput::InboundFrame {
+                    input: ClassifiedInboundFrame::classify("<enable xmlns='urn:xmpp:sm:3'/>"),
+                    domain: "example.com".parse().expect("domain"),
+                    before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                })
+                .expect("typed SM accepted");
+            tokio::time::timeout(Duration::from_secs(1), dequeued.notified())
+                .await
+                .expect("dequeued before start claim");
+            assert!(matches!(
+                ticket.snapshot(),
+                ConnectionActorDriverTaskSnapshot::Accepted
+            ));
+            if cancelled {
+                task.shared.shutdown.cancel();
+            } else {
+                task.request_stop(StopReason::Requested);
+            }
+            release.notify_one();
+            task.wait_joined().await;
+            assert!(matches!(
+                ticket.snapshot(),
+                ConnectionActorDriverTaskSnapshot::NotStarted
+            ));
+            assert_eq!(ticket.run_count(), 0);
+            assert!(ticket.retains_input());
+            assert!(matches!(
+                ticket.input_snapshot(),
+                DriverInput::InboundFrame { .. }
+            ));
+            ticket.acknowledge().expect("typed source settled");
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_input_oversized_frame_is_rejected_before_task_admission() {
+        let task = test_task().await;
+        let input = ClassifiedInboundFrame::classify(
+            &" ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1),
+        );
+        assert!(matches!(
+            task.submit_inbound_frame(input, "example.com".parse().expect("domain")),
+            Err(ConnectionActorDriverTaskAdmissionError::Overloaded)
+        ));
+        assert!(task.shared.lock_state().operations.is_empty());
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn typed_input_size_is_preserved_in_bounded_admission() {
+        let task = test_task_with_limits(ConnectionActorDriverTaskLimits::with_bounds(
+            4, 1, 4096, 1024,
+        ))
+        .await;
+        let input = ClassifiedInboundFrame::classify(&" ".repeat(4096));
+        assert_eq!(input.wire_bytes(), 4096);
+        assert!(matches!(
+            task.submit_inbound_frame(input, "example.com".parse().expect("domain")),
+            Err(ConnectionActorDriverTaskAdmissionError::Overloaded)
+        ));
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
     }
 
     #[tokio::test]

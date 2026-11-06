@@ -3,7 +3,8 @@ use super::frame_backstop::{
     StanzaTimeout,
 };
 use super::parse_errors::{
-    is_sasl2_response_parse_failure, is_sasl_parse_failure, parse_error_responses,
+    is_sasl2_parse_failure, is_sasl2_response_parse_failure, is_sasl_parse_failure,
+    parse_error_responses,
 };
 use super::resource_binding::handle_resource_binding;
 use super::sasl::{
@@ -369,6 +370,101 @@ fn sasl2_failure_from_sasl1(responses: &[Element]) -> Element {
     sasl2_failure_element(condition)
 }
 
+/// One bounded input classified at the transport boundary. No raw XML survives
+/// admission into the dormant owner task; size and error-routing metadata do.
+#[derive(Debug, Clone)]
+pub(super) struct ClassifiedInboundFrame {
+    wire_bytes: usize,
+    input: ClassifiedInboundInput,
+}
+
+#[derive(Debug, Clone)]
+enum ClassifiedInboundInput {
+    Parsed(Box<waddle_xmpp::protocol::frame::ParsedFrame>),
+    StreamManagement(SmStanza),
+    Empty,
+    Oversized,
+    Malformed(MalformedInboundInput),
+}
+
+#[derive(Debug, Clone)]
+enum MalformedInboundInput {
+    Open(DefinedCondition),
+    Protocol {
+        sasl: MalformedSaslInput,
+        responses: Option<Vec<ResponseFrame>>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MalformedSaslInput {
+    None,
+    Sasl,
+    Sasl2,
+    Sasl2Response,
+}
+
+impl ClassifiedInboundFrame {
+    pub(super) fn classify(frame: &str) -> Self {
+        let input = if frame.len() > MAX_FRAME_SIZE {
+            ClassifiedInboundInput::Oversized
+        } else if let Some(sm) = SmStanza::is_client_nonza_candidate(frame)
+            .then(|| SmStanza::parse(frame))
+            .flatten()
+        {
+            ClassifiedInboundInput::StreamManagement(sm)
+        } else {
+            match waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame) {
+                Ok(parsed) => ClassifiedInboundInput::Parsed(Box::new(parsed)),
+                Err(ParseError::Empty) => ClassifiedInboundInput::Empty,
+                Err(error) => {
+                    let malformed = match error {
+                        ParseError::InvalidOpenFrom => {
+                            MalformedInboundInput::Open(DefinedCondition::InvalidFrom)
+                        }
+                        ParseError::InvalidOpenXml => {
+                            MalformedInboundInput::Open(DefinedCondition::NotWellFormed)
+                        }
+                        ParseError::InvalidOpenNamespace => {
+                            MalformedInboundInput::Open(DefinedCondition::InvalidNamespace)
+                        }
+                        ParseError::InvalidOpenContent => {
+                            MalformedInboundInput::Open(DefinedCondition::InvalidXml)
+                        }
+                        _ => {
+                            let sasl = if is_sasl2_response_parse_failure(frame, &error) {
+                                MalformedSaslInput::Sasl2Response
+                            } else if is_sasl2_parse_failure(frame, &error) {
+                                MalformedSaslInput::Sasl2
+                            } else if is_sasl_parse_failure(frame, &error) {
+                                MalformedSaslInput::Sasl
+                            } else {
+                                MalformedSaslInput::None
+                            };
+                            // Reuse the existing error mapping and retain only its typed
+                            // output template, never the rejected client XML or parse text.
+                            let responses = parse_error_responses(frame, &error).map(|responses| {
+                                responses.into_iter().map(ResponseFrame::from).collect()
+                            });
+                            warn!(error = %error, len = frame.len(), "Classified malformed XMPP frame");
+                            MalformedInboundInput::Protocol { sasl, responses }
+                        }
+                    };
+                    ClassifiedInboundInput::Malformed(malformed)
+                }
+            }
+        };
+        Self {
+            wire_bytes: frame.len(),
+            input,
+        }
+    }
+
+    pub(super) fn wire_bytes(&self) -> usize {
+        self.wire_bytes
+    }
+}
+
 /// Handle an XMPP frame per RFC 7395
 #[cfg(test)]
 pub(super) async fn handle_xmpp_frame(
@@ -378,7 +474,11 @@ pub(super) async fn handle_xmpp_frame(
     conn: &mut WsConnState,
 ) -> Vec<String> {
     Box::pin(handle_xmpp_frame_impl(
-        frame, domain, state, conn, None, None,
+        ClassifiedInboundFrame::classify(frame),
+        domain,
+        state,
+        conn,
+        None,
     ))
     .await
     .into_serialized_frames()
@@ -393,12 +493,11 @@ pub(super) async fn handle_xmpp_frame_with_admission(
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> ResponseBatch {
     Box::pin(handle_xmpp_frame_impl(
-        frame,
+        ClassifiedInboundFrame::classify(frame),
         domain,
         state,
         conn,
         Some((permit, shutdown)),
-        None,
     ))
     .await
 }
@@ -406,29 +505,20 @@ pub(super) async fn handle_xmpp_frame_with_admission(
 /// Handle an already-classified frame from an actor mailbox. The task command
 /// carries typed protocol data and a typed XMPP domain; legacy `/ws` still
 /// parses at its current input boundary and shares the dispatch body below.
-pub(super) async fn handle_parsed_xmpp_frame_with_admission(
-    parsed: waddle_xmpp::protocol::frame::ParsedFrame,
+pub(super) async fn handle_classified_xmpp_frame_with_admission(
+    input: ClassifiedInboundFrame,
     domain: &jid::BareJid,
-    wire_bytes: usize,
     state: &WebSocketState,
     conn: &mut WsConnState,
     permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> ResponseBatch {
-    if wire_bytes > MAX_FRAME_SIZE {
-        warn!(len = wire_bytes, "Dropping oversized typed XMPP frame");
-        if sasl2_authentication_pending(&conn.phase) {
-            return close_pending_sasl2_exchange(conn);
-        }
-        return ResponseBatch::default();
-    }
     Box::pin(handle_xmpp_frame_impl(
-        "",
+        input,
         domain.as_str(),
         state,
         conn,
         Some((permit, shutdown)),
-        Some(parsed),
     ))
     .await
 }
@@ -450,15 +540,14 @@ async fn await_control_stage<T>(
 }
 
 async fn handle_xmpp_frame_impl(
-    frame: &str,
+    input: ClassifiedInboundFrame,
     domain: &str,
     state: &WebSocketState,
     conn: &mut WsConnState,
     admission: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
-    parsed_input: Option<waddle_xmpp::protocol::frame::ParsedFrame>,
 ) -> ResponseBatch {
-    if parsed_input.is_none() && frame.len() > MAX_FRAME_SIZE {
-        warn!(len = frame.len(), "Dropping oversized XMPP frame");
+    if matches!(input.input, ClassifiedInboundInput::Oversized) {
+        warn!(len = input.wire_bytes, "Dropping oversized XMPP frame");
         if sasl2_authentication_pending(&conn.phase) {
             return close_pending_sasl2_exchange(conn);
         }
@@ -508,119 +597,93 @@ async fn handle_xmpp_frame_impl(
     }
     let muc_domain = state.deps.service_domains.muc.clone();
 
-    // SM nonzas (enable/resume/r/a) are not part of the parse_frame typed
-    // vocabulary — keep the direct SmStanza check before parse_frame.
-    if parsed_input.is_none() && SmStanza::is_client_nonza_candidate(frame) {
-        if let Some(sm) = SmStanza::parse(frame) {
-            let ctx = SmCtx {
-                connection_ref,
-                binding_ref,
-                #[cfg(test)]
-                resume_binding_attempts,
-                phase,
-                sm_state,
-                sm_ingress_fence,
-                sm_inbound_completion,
-                authenticated_session,
-                occupancy_session,
-                carbons_enabled,
-                presence_available,
-                presence_show,
-                presence_status,
-                presence_priority,
-                presence_payloads,
-                pending_subscribes_flushed,
-                pending_resume_stream_id,
-                pending_resume_h,
-                pending_resume_claim,
-                #[cfg(test)]
-                pre_final_principal_recheck_test_hook,
-                suppress_sm_record_next_batch,
-                roster_interested,
-                blocklist_interested,
-                pending_sm_enable_commit,
-            };
-            return match await_control_stage(
-                admission,
-                handle_sm_stanza(sm, state, ctx, pending_finalized_resume_outcome),
-            )
-            .await
-            {
-                Ok(responses) => responses.into(),
-                Err(terminal) => {
-                    *inbound_frame_terminal = Some(terminal);
-                    ResponseBatch::default()
-                }
-            };
-        }
+    // Both transport and dormant owner inputs share the same typed SM dispatch.
+    if let ClassifiedInboundInput::StreamManagement(sm) = input.input {
+        let ctx = SmCtx {
+            connection_ref,
+            binding_ref,
+            #[cfg(test)]
+            resume_binding_attempts,
+            phase,
+            sm_state,
+            sm_ingress_fence,
+            sm_inbound_completion,
+            authenticated_session,
+            occupancy_session,
+            carbons_enabled,
+            presence_available,
+            presence_show,
+            presence_status,
+            presence_priority,
+            presence_payloads,
+            pending_subscribes_flushed,
+            pending_resume_stream_id,
+            pending_resume_h,
+            pending_resume_claim,
+            #[cfg(test)]
+            pre_final_principal_recheck_test_hook,
+            suppress_sm_record_next_batch,
+            roster_interested,
+            blocklist_interested,
+            pending_sm_enable_commit,
+        };
+        return match await_control_stage(
+            admission,
+            handle_sm_stanza(sm, state, ctx, pending_finalized_resume_outcome),
+        )
+        .await
+        {
+            Ok(responses) => responses.into(),
+            Err(terminal) => {
+                *inbound_frame_terminal = Some(terminal);
+                ResponseBatch::default()
+            }
+        };
     }
 
-    let parsed = if let Some(parsed) = parsed_input {
-        parsed
-    } else {
-        match waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame) {
-            Ok(parsed) => parsed,
-            Err(ParseError::Empty) if sasl2_authentication_pending(phase) => {
+    let parsed = match input.input {
+        ClassifiedInboundInput::Parsed(parsed) => *parsed,
+        ClassifiedInboundInput::Empty => {
+            if sasl2_authentication_pending(phase) {
                 clear_sasl2_authentication_pending(phase, AuthFailure::ScramOther);
                 *authenticated_session = None;
                 *phase = ConnectionPhase::closing(None);
                 return vec![websocket_stream_close_element()].into();
             }
-            Err(ParseError::Empty) => return ResponseBatch::default(),
-            Err(
-                error @ (ParseError::InvalidOpenFrom
-                | ParseError::InvalidOpenXml
-                | ParseError::InvalidOpenNamespace
-                | ParseError::InvalidOpenContent),
-            ) => {
-                let condition = match error {
-                    ParseError::InvalidOpenFrom => DefinedCondition::InvalidFrom,
-                    ParseError::InvalidOpenXml => DefinedCondition::NotWellFormed,
-                    ParseError::InvalidOpenNamespace => DefinedCondition::InvalidNamespace,
-                    ParseError::InvalidOpenContent => DefinedCondition::InvalidXml,
-                    _ => unreachable!(),
-                };
-                *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
-                *stream_open_from = None;
-                conn.begin_server_stream_open_response();
-                return stream_open_error_response(domain, None, condition);
-            }
-            Err(err) => {
-                if sasl2_authentication_pending(phase) {
-                    if is_sasl2_response_parse_failure(frame, &err) {
-                        clear_sasl2_authentication_pending(phase, AuthFailure::ScramMalformed);
-                        *authenticated_session = None;
-                        if let Some(responses) = parse_error_responses(frame, &err) {
-                            return responses.into();
-                        }
-                    }
-                    // XEP-0388 permits only a response or abort while a SASL2
-                    // challenge is outstanding. Terminate the stream on any
-                    // other malformed traffic rather than leaving the challenge
-                    // state active for a later frame.
-                    clear_sasl2_authentication_pending(phase, AuthFailure::ScramOther);
-                    *phase = ConnectionPhase::closing(None);
+            return ResponseBatch::default();
+        }
+        ClassifiedInboundInput::Malformed(MalformedInboundInput::Open(condition)) => {
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            *stream_open_from = None;
+            conn.begin_server_stream_open_response();
+            return stream_open_error_response(domain, None, condition);
+        }
+        ClassifiedInboundInput::Malformed(MalformedInboundInput::Protocol { sasl, responses }) => {
+            if sasl2_authentication_pending(phase) {
+                if sasl == MalformedSaslInput::Sasl2Response {
+                    clear_sasl2_authentication_pending(phase, AuthFailure::ScramMalformed);
                     *authenticated_session = None;
-                    return vec![websocket_stream_close_element()].into();
-                }
-                if let Some(responses) = parse_error_responses(frame, &err) {
-                    if phase.scram_pending_username().is_some()
-                        && is_sasl_parse_failure(frame, &err)
-                    {
-                        record_scram_failure(AuthFailure::ScramMalformed, None);
-                        let _ = phase.take_scram_pending();
+                    if let Some(responses) = responses {
+                        return ResponseBatch::from_frames(responses);
                     }
-                    warn!(
-                        error = %err,
-                        len = frame.len(),
-                        responses = responses.len(),
-                        "Handled XMPP parse error with protocol response"
-                    );
-                    return responses.into();
                 }
-                warn!(error = %err, len = frame.len(), "Unhandled XMPP frame");
-                return ResponseBatch::default();
+                // XEP-0388 permits only a response or abort during a challenge.
+                clear_sasl2_authentication_pending(phase, AuthFailure::ScramOther);
+                *phase = ConnectionPhase::closing(None);
+                *authenticated_session = None;
+                return vec![websocket_stream_close_element()].into();
             }
+            if let Some(responses) = responses {
+                if phase.scram_pending_username().is_some() && sasl != MalformedSaslInput::None {
+                    record_scram_failure(AuthFailure::ScramMalformed, None);
+                    let _ = phase.take_scram_pending();
+                }
+                return ResponseBatch::from_frames(responses);
+            }
+            return ResponseBatch::default();
+        }
+        ClassifiedInboundInput::Oversized | ClassifiedInboundInput::StreamManagement(_) => {
+            unreachable!("size and stream management inputs are handled before frame dispatch")
         }
     };
     let stanza_lang = parsed.message_stanza_lang;
