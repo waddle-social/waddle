@@ -47,6 +47,8 @@ struct Candidate {
     lease: SendLease,
 }
 
+#[path = "sm_custody_drain_races.rs"]
+mod drain_races;
 #[path = "sm_custody_marker_transfer.rs"]
 mod marker_transfer;
 #[path = "sm_custody_multiframe.rs"]
