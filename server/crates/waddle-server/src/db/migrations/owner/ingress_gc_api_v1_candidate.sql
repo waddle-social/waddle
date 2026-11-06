@@ -12,6 +12,9 @@ CREATE FUNCTION __SCHEMA__.waddle_ingress_gc_candidate_v1(p_key UUID)
 RETURNS TEXT
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
+-- Do not bypass RLS. PostgreSQL errors if any referenced relation would
+-- filter rows, rather than letting hidden custody look absent to this API.
+SET row_security = off
 AS $$
 DECLARE
     live_epoch BIGINT;

@@ -440,6 +440,10 @@ The transition and each GC invocation refuse a schema containing either
 not attested by this candidate. Pins have no canonical FK and would otherwise
 be invisible to the FK preflight. Privileged DDL must remain quiescent while the
 pilot is installed and used; an absence check does not fence concurrent DDL.
+The non-owner API function fixes `row_security` to `off`: PostgreSQL then
+rejects a query that would be filtered by row-level security rather than hiding
+custody. This is not an RLS bypass, and it depends on retaining the dedicated
+non-owner, `NOBYPASSRLS` role; role and catalog attestation remain rollout gates.
 
 The fixed API consumes one candidate key with no caller-supplied clock or
 cutoff. It requires the calling transaction to have already prelocked and

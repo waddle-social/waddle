@@ -83,7 +83,7 @@ async fn seed(owner: &mut PgConnection) {
         ('00000000-0000-0000-0000-000000000021','00000000-0000-0000-0000-000000000022');
       UPDATE guarded.ingress_messages SET owner_decision=2 WHERE message_key IN ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000021');
       UPDATE guarded.ingress_messages SET terminal_at='2000-01-01',retention_eligible_at='2000-01-01';
-      UPDATE guarded.ingress_messages SET retention_eligible_at=NULL WHERE message_key='00000000-0000-0000-0000-000000000011';
+      UPDATE guarded.ingress_messages SET retention_eligible_at=NULL WHERE message_key IN ('00000000-0000-0000-0000-000000000011','00000000-0000-0000-0000-000000000014');
       INSERT INTO guarded.ingress_effect_intents (message_key,effect_ordinal,kind,semantic_identity_hash,payload_version,payload)
       SELECT message_key,0,CASE WHEN message_key='00000000-0000-0000-0000-000000000017' THEN 12 ELSE 1 END,
              decode(repeat('04',32),'hex'),1,''::bytea FROM guarded.ingress_messages
@@ -208,6 +208,50 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
         .execute(&mut runtime)
         .await
         .is_err());
+
+    // Prove that the candidate executes as a non-owner without BYPASSRLS,
+    // then hide existing custody rows with real policies. Plain SELECT as the
+    // API owner sees zero rows, but row_security=off on the function must turn
+    // that filtering into an error before it can adopt or delete a message.
+    let api_restricted: bool = sqlx::query_scalar("SELECT NOT rolsuper AND NOT rolbypassrls AND NOT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname=$1")
+        .bind(&api).fetch_one(&mut admin).await.expect("API role attributes");
+    assert!(api_restricted);
+    let secure_config: bool = sqlx::query_scalar("SELECT 'row_security=off' = ANY(proconfig) FROM pg_catalog.pg_proc WHERE oid='guarded.waddle_ingress_gc_candidate_v1(uuid)'::regprocedure")
+        .fetch_one(&mut admin).await.expect("GC RLS setting");
+    assert!(secure_config);
+    for (table, key, select_sql, expected_null) in [
+        ("sm_ingress_appends", PENDING_SM, "SELECT count(*) FROM guarded.sm_ingress_appends WHERE message_key=$1 AND disposition=0", true),
+        ("pending_delivery", PENDING_DELIVERY, "SELECT count(*) FROM guarded.pending_delivery WHERE row_id=$1", false),
+    ] {
+        let lookup = if table == "pending_delivery" { "pending" } else { key };
+        let (nonowner, can_select): (bool, bool) = sqlx::query_as("SELECT c.relowner <> r.oid, pg_catalog.has_table_privilege(r.oid,c.oid,'SELECT') FROM pg_catalog.pg_class c JOIN pg_catalog.pg_roles r ON r.rolname=$1 WHERE c.oid=pg_catalog.to_regclass($2)")
+            .bind(&api).bind(format!("guarded.{table}"))
+            .fetch_one(&mut admin).await.expect("nonowner and SELECT ACL");
+        assert!(nonowner && can_select, "{table}: role must be subject to RLS and allowed to read");
+        let visible: i64 = sqlx::query_scalar(select_sql).bind(lookup)
+            .fetch_one(&mut admin).await.expect("administrator sees custody");
+        assert_eq!(visible, 1, "{table}: seed must contain the custody row");
+        sql(&mut admin, &format!("ALTER TABLE guarded.{table} ENABLE ROW LEVEL SECURITY; CREATE POLICY gc_hide_custody ON guarded.{table} FOR SELECT USING (false)")).await;
+        begin(&mut admin).await;
+        sql(&mut admin, &format!("SET LOCAL ROLE {api}; SET LOCAL row_security=on")).await;
+        let hidden: i64 = sqlx::query_scalar(select_sql).bind(lookup)
+            .fetch_one(&mut admin).await.expect("API SELECT is permitted but filtered");
+        assert_eq!(hidden, 0, "{table}: policy must actually hide custody");
+        commit(&mut admin).await;
+        begin(&mut runtime).await;
+        writer_lock(&mut runtime).await;
+        let error = gc(&mut runtime, key).await.expect_err("RLS-filtered custody must fail closed");
+        assert_eq!(error.as_database_error().and_then(|e| e.code()).as_deref(), Some("42501"));
+        assert!(error.to_string().contains("row-level security"), "{table}: {error}");
+        sql(&mut runtime, "ROLLBACK").await;
+        let remains: (bool, bool) = sqlx::query_as("SELECT true, retention_eligible_at IS NULL FROM guarded.ingress_messages WHERE message_key=$1::uuid")
+            .bind(key).fetch_one(&mut admin).await.expect("canonical remains");
+        assert_eq!(remains, (true, expected_null), "{table}: no deletion or frontier adoption");
+        let still_visible: i64 = sqlx::query_scalar(select_sql).bind(lookup)
+            .fetch_one(&mut admin).await.expect("custody remains");
+        assert_eq!(still_visible, 1);
+        sql(&mut admin, &format!("DROP POLICY gc_hide_custody ON guarded.{table}; ALTER TABLE guarded.{table} DISABLE ROW LEVEL SECURITY")).await;
+    }
 
     // A pin can exist without an FK and without any other custody barrier.
     // Installing either experimental schema after transition must still make
