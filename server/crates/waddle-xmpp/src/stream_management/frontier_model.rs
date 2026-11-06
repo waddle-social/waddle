@@ -36,6 +36,7 @@ pub enum AppendError {
 pub enum AttemptError {
     NotRetained,
     OutOfOrder,
+    UncertainWritePending,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +74,11 @@ pub enum FrameWriteResult {
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameWriteError {
     NotExposed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResumeReconcileError {
+    AckFloorMismatch { expected: u64, actual: u64 },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -167,6 +173,9 @@ impl FrontierModel {
         &mut self,
         ordinal: u64,
     ) -> Result<AttemptOutcome, AttemptError> {
+        if !self.uncertain_writes.is_empty() {
+            return Err(AttemptError::UncertainWritePending);
+        }
         if ordinal <= self.peer_acked || ordinal > self.appended {
             return Err(AttemptError::NotRetained);
         }
@@ -195,13 +204,32 @@ impl FrontierModel {
             return Err(FrameWriteError::NotExposed);
         }
         match result {
-            FrameWriteResult::Accepted => {
-                self.uncertain_writes.remove(&ordinal);
-            }
+            // An accepted retry cannot disambiguate whether an earlier
+            // uncertain attempt reached the peer. ACK or resume reconciliation
+            // is required before subsequent exposure is safe.
+            FrameWriteResult::Accepted => {}
             FrameWriteResult::Unknown => {
                 self.uncertain_writes.insert(ordinal);
             }
         }
+        Ok(())
+    }
+
+    /// A completed resume supplies the authoritative peer ACK floor and makes
+    /// every retained row above it part of the new stream's replay suffix.
+    /// This is the only path besides an ACK that clears uncertain old-stream
+    /// write outcomes; an Accepted result on the same stream is insufficient.
+    pub(super) fn reconcile_uncertain_after_resume(
+        &mut self,
+        acknowledged: u64,
+    ) -> Result<(), ResumeReconcileError> {
+        if acknowledged != self.peer_acked {
+            return Err(ResumeReconcileError::AckFloorMismatch {
+                expected: self.peer_acked,
+                actual: acknowledged,
+            });
+        }
+        self.uncertain_writes.clear();
         Ok(())
     }
 
@@ -523,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_write_keeps_replay_and_repair_until_retry_or_ack() {
+    fn uncertain_write_keeps_replay_and_repair_until_ack_or_resume() {
         let mut model = FrontierModel::new(4).unwrap();
         assert_eq!(model.append(), Ok(1));
         assert_eq!(model.append(), Ok(2));
@@ -543,11 +571,22 @@ mod tests {
 
         assert_eq!(
             model.record_assumed_committed_attempt(1),
-            Ok(AttemptOutcome::Retry)
+            Err(AttemptError::UncertainWritePending)
         );
         assert_eq!(
             model.record_frame_write_result(1, FrameWriteResult::Accepted),
             Ok(())
+        );
+        assert!(model.has_uncertain_writes());
+        assert_eq!(
+            model.record_assumed_committed_attempt(2),
+            Err(AttemptError::UncertainWritePending)
+        );
+        assert_eq!(model.exposed(), 1);
+
+        assert_eq!(
+            model.acknowledge(1, AckKind::Live),
+            Ok(AckOutcome::Advanced { through: 1 })
         );
         assert!(!model.has_uncertain_writes());
         assert_eq!(
@@ -566,6 +605,93 @@ mod tests {
         assert_eq!(model.peer_acked(), 2);
         assert!(!model.has_uncertain_writes());
         assert_eq!(model.replay().next(), None);
+    }
+
+    #[test]
+    fn uncertain_prefix_blocks_later_exposure_and_false_acknowledgement() {
+        let mut model = FrontierModel::new(4).unwrap();
+        assert_eq!(model.append(), Ok(1));
+        assert_eq!(model.append(), Ok(2));
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        model
+            .record_frame_write_result(1, FrameWriteResult::Unknown)
+            .unwrap();
+
+        let before = model.clone();
+        assert_eq!(
+            model.record_assumed_committed_attempt(2),
+            Err(AttemptError::UncertainWritePending)
+        );
+        assert_eq!(model, before);
+        assert_eq!(
+            model.acknowledge(1, AckKind::Live),
+            Ok(AckOutcome::Advanced { through: 1 })
+        );
+        assert_eq!(model.peer_acked(), 1);
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![2]);
+
+        let mut duplicate_attempt = FrontierModel::new(4).unwrap();
+        duplicate_attempt.append().unwrap();
+        duplicate_attempt.append().unwrap();
+        duplicate_attempt
+            .record_assumed_committed_attempt(1)
+            .unwrap();
+        duplicate_attempt
+            .record_frame_write_result(1, FrameWriteResult::Unknown)
+            .unwrap();
+        // Even an Accepted completion for a same-stream retry does not prove
+        // whether the first attempt was counted by the peer.
+        assert_eq!(
+            duplicate_attempt.record_frame_write_result(1, FrameWriteResult::Accepted),
+            Ok(())
+        );
+        assert!(duplicate_attempt.has_uncertain_writes());
+        assert_eq!(
+            duplicate_attempt.record_assumed_committed_attempt(2),
+            Err(AttemptError::UncertainWritePending)
+        );
+        let before = duplicate_attempt.clone();
+        assert_eq!(
+            duplicate_attempt.acknowledge(2, AckKind::Live),
+            Err(AckError::HandledTooHigh {
+                h: 2,
+                send_count: 1
+            })
+        );
+        assert_eq!(duplicate_attempt, before);
+        assert_eq!(duplicate_attempt.replay().collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn resume_boundary_reconciles_unknown_writes_only_at_exact_ack_floor() {
+        let mut model = FrontierModel::new(4).unwrap();
+        model.append().unwrap();
+        model
+            .record_assumed_committed_attempt(1)
+            .expect("first exposure");
+        model
+            .record_frame_write_result(1, FrameWriteResult::Unknown)
+            .unwrap();
+
+        assert_eq!(
+            model.reconcile_uncertain_after_resume(1),
+            Err(super::ResumeReconcileError::AckFloorMismatch {
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert!(model.has_uncertain_writes());
+        assert_eq!(
+            model.acknowledge(0, AckKind::Resume),
+            Ok(AckOutcome::Duplicate)
+        );
+        assert!(model.has_uncertain_writes());
+        model.reconcile_uncertain_after_resume(0).unwrap();
+        assert!(!model.has_uncertain_writes());
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]

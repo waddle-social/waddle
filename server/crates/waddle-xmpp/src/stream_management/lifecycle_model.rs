@@ -15,6 +15,8 @@ use super::frontier_model::{
 };
 use crate::ownership::{BindingRef, ConnectionRef};
 
+const MAX_PENDING_INGRESS: usize = 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(u64);
 
@@ -162,6 +164,19 @@ pub struct EnableCommitReceipt {
     pub fence: LifecycleFence,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnableCommitResolution {
+    Committed,
+    NotCommitted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnableCommitResolutionReceipt {
+    pub operation: OperationId,
+    pub fence: LifecycleFence,
+    pub resolution: EnableCommitResolution,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeRequest {
     pub authentication: AuthenticationProof,
@@ -238,6 +253,7 @@ pub struct TombstoneEvidence {
     pub final_exposed: u64,
     pub final_appended: u64,
     pub final_ingress: u64,
+    pub enable_commit_resolution: Option<EnableCommitResolution>,
     pub retention: TombstoneRetention,
     pub cleanup_complete: bool,
 }
@@ -278,6 +294,8 @@ pub enum ModelError {
     TransferUnknown,
     InputUnavailable,
     StaleBinding,
+    PendingIngressCapacity,
+    RepairNotPending,
     Append(AppendError),
     Attempt(AttemptError),
     FrameWrite(FrameWriteError),
@@ -387,6 +405,17 @@ impl SmLifecycleModel {
         }
     }
 
+    pub fn expected_terminal_enable_resolution(
+        &self,
+        resolution: EnableCommitResolution,
+    ) -> EnableCommitResolutionReceipt {
+        EnableCommitResolutionReceipt {
+            operation: self.enable_operation,
+            fence: self.fence(),
+            resolution,
+        }
+    }
+
     pub fn record_enable_commit_unknown(&mut self) -> Result<(), ModelError> {
         if self.state != LifecycleStatus::EnablingLive {
             return Err(ModelError::WrongState);
@@ -421,6 +450,29 @@ impl SmLifecycleModel {
             ));
         self.enabled_effect_ready = true;
         self.state = LifecycleStatus::Live;
+        Ok(())
+    }
+
+    /// Resolve an enable commit that became unknown before terminalization.
+    /// This clears repair custody without reviving the session or releasing
+    /// buffered input.
+    pub fn reconcile_terminal_enable_commit(
+        &mut self,
+        receipt: &EnableCommitResolutionReceipt,
+    ) -> Result<(), ModelError> {
+        if self.state != LifecycleStatus::Terminal {
+            return Err(ModelError::WrongState);
+        }
+        let tombstone = self.tombstone.as_mut().ok_or(ModelError::WrongState)?;
+        if receipt.operation != self.enable_operation || receipt.fence != tombstone.fence {
+            return Err(ModelError::ReceiptMismatch);
+        }
+        let responsibility = RepairResponsibility::EnableCommitUnknown(self.enable_operation);
+        if !self.repair.contains(&responsibility) {
+            return Err(ModelError::RepairNotPending);
+        }
+        tombstone.enable_commit_resolution = Some(receipt.resolution);
+        self.repair.remove(&responsibility);
         Ok(())
     }
 
@@ -597,12 +649,16 @@ impl SmLifecycleModel {
         {
             return Ok(false);
         }
+        let reconciled_peer_ack = state.plan.commit.peer_acked;
         let mut frontier = self.frontier.clone();
         for ordinal in &self.pending_ingress {
             frontier
                 .record_contiguous_ingress(*ordinal)
                 .map_err(ModelError::Input)?;
         }
+        frontier
+            .reconcile_uncertain_after_resume(reconciled_peer_ack)
+            .map_err(|_| ModelError::ReceiptMismatch)?;
         self.frontier = frontier;
         self.pending_ingress.clear();
         self.transfer = None;
@@ -639,17 +695,17 @@ impl SmLifecycleModel {
         Ok(())
     }
 
-    pub fn append_outbound(&mut self) -> Result<u64, ModelError> {
-        if self.state != LifecycleStatus::Live {
-            return Err(ModelError::WrongState);
-        }
+    pub fn append_outbound(&mut self, expected: &LifecycleFence) -> Result<u64, ModelError> {
+        self.ensure_live_fence(expected)?;
         self.frontier.append().map_err(ModelError::Append)
     }
 
-    pub fn record_write_attempt(&mut self, ordinal: u64) -> Result<AttemptOutcome, ModelError> {
-        if self.state != LifecycleStatus::Live {
-            return Err(ModelError::WrongState);
-        }
+    pub fn record_write_attempt(
+        &mut self,
+        expected: &LifecycleFence,
+        ordinal: u64,
+    ) -> Result<AttemptOutcome, ModelError> {
+        self.ensure_live_fence(expected)?;
         self.frontier
             .record_assumed_committed_attempt(ordinal)
             .map_err(ModelError::Attempt)
@@ -657,12 +713,11 @@ impl SmLifecycleModel {
 
     pub fn record_frame_write_result(
         &mut self,
+        expected: &LifecycleFence,
         ordinal: u64,
         result: FrameWriteResult,
     ) -> Result<(), ModelError> {
-        if self.state != LifecycleStatus::Live {
-            return Err(ModelError::WrongState);
-        }
+        self.ensure_live_fence(expected)?;
         self.frontier
             .record_frame_write_result(ordinal, result)
             .map_err(ModelError::FrameWrite)
@@ -672,13 +727,25 @@ impl SmLifecycleModel {
         (self.state == LifecycleStatus::Live).then(|| self.frontier.replay().collect())
     }
 
-    pub fn acknowledge_live(&mut self, h: u32) -> Result<AckOutcome, ModelError> {
-        if self.state != LifecycleStatus::Live {
-            return Err(ModelError::WrongState);
-        }
+    pub fn acknowledge_live(
+        &mut self,
+        expected: &LifecycleFence,
+        h: u32,
+    ) -> Result<AckOutcome, ModelError> {
+        self.ensure_live_fence(expected)?;
         self.frontier
             .acknowledge(h, AckKind::Live)
             .map_err(ModelError::Ack)
+    }
+
+    fn ensure_live_fence(&self, expected: &LifecycleFence) -> Result<(), ModelError> {
+        if self.state != LifecycleStatus::Live {
+            return Err(ModelError::WrongState);
+        }
+        if *expected != self.fence() {
+            return Err(ModelError::StaleFence);
+        }
+        Ok(())
     }
 
     pub fn receive_input(
@@ -699,6 +766,9 @@ impl SmLifecycleModel {
         }
         let buffered = self.state != LifecycleStatus::Live;
         if buffered {
+            if self.pending_ingress.len() == MAX_PENDING_INGRESS {
+                return Err(ModelError::PendingIngressCapacity);
+            }
             let queued = u64::try_from(self.pending_ingress.len())
                 .map_err(|_| ModelError::Input(IngressError::OrdinalExhausted))?;
             let expected = self
@@ -745,6 +815,7 @@ impl SmLifecycleModel {
             final_exposed: self.frontier.exposed(),
             final_appended: self.frontier.appended(),
             final_ingress: self.frontier.ingress(),
+            enable_commit_resolution: None,
             retention: TombstoneRetention::Pending,
             cleanup_complete: false,
         });
@@ -807,10 +878,11 @@ impl SmLifecycleModel {
 mod tests {
     use super::{
         AttemptOutcome, AuthenticationProof, AuthenticationStatus, ClaimId, CleanupOutcome,
-        CleanupReceipt, EnableConfig, HydrationReceipt, InputDisposition, LifecycleStatus,
-        ModelError, OperationId, PrincipalId, PublicationReceipt, RepairResponsibility,
-        ResourceContinuity, ResumeRequest, SessionGeneration, SessionId, SmLifecycleModel,
-        TerminalReason, TombstoneCustodyReceipt, TombstoneId, TombstoneRetention,
+        CleanupReceipt, EnableCommitResolution, EnableConfig, HydrationReceipt, InputDisposition,
+        LifecycleStatus, ModelError, OperationId, PrincipalId, PublicationReceipt,
+        RepairResponsibility, ResourceContinuity, ResumeRequest, SessionGeneration, SessionId,
+        SmLifecycleModel, TerminalReason, TombstoneCustodyReceipt, TombstoneId, TombstoneRetention,
+        MAX_PENDING_INGRESS,
     };
     use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
     use crate::stream_management::frontier_model::{AckError, AckOutcome, FrameWriteResult};
@@ -898,7 +970,10 @@ mod tests {
         assert_eq!(model.state(), LifecycleStatus::EnablingLive);
         assert!(!model.enabled_effect_ready());
         assert_eq!(model.replay_ordinals(), None);
-        assert_eq!(model.append_outbound(), Err(ModelError::WrongState));
+        assert_eq!(
+            model.append_outbound(&model.fence()),
+            Err(ModelError::WrongState)
+        );
         let initial_binding = model.fence().binding.clone();
         assert_eq!(
             model.receive_input(&initial_binding, 1),
@@ -929,7 +1004,10 @@ mod tests {
             Some(super::InstallationStatus::Installing)
         );
         assert_eq!(model.replay_ordinals(), None);
-        assert_eq!(model.append_outbound(), Err(ModelError::WrongState));
+        assert_eq!(
+            model.append_outbound(&model.fence()),
+            Err(ModelError::WrongState)
+        );
         assert_eq!(
             model.receive_input(&plan.commit.fence.binding, 2),
             Ok(InputDisposition::Buffered)
@@ -942,6 +1020,28 @@ mod tests {
         assert_eq!(model.frontier().ingress(), 2);
         assert_eq!(model.resources(), resources());
         assert!(model.replay_ordinals().is_some());
+
+        let after_resume = model.clone();
+        assert_eq!(
+            model.append_outbound(&old_fence),
+            Err(ModelError::StaleFence)
+        );
+        assert_eq!(model, after_resume);
+        assert_eq!(
+            model.record_write_attempt(&old_fence, 1),
+            Err(ModelError::StaleFence)
+        );
+        assert_eq!(model, after_resume);
+        assert_eq!(
+            model.record_frame_write_result(&old_fence, 1, FrameWriteResult::Accepted),
+            Err(ModelError::StaleFence)
+        );
+        assert_eq!(model, after_resume);
+        assert_eq!(
+            model.acknowledge_live(&old_fence, 1),
+            Err(ModelError::StaleFence)
+        );
+        assert_eq!(model, after_resume);
 
         let current = model.fence();
         model
@@ -1082,6 +1182,55 @@ mod tests {
         assert!(model.enabled_effect_ready());
         assert!(model.repair_responsibilities().next().is_none());
         assert_eq!(model.frontier().ingress(), 1);
+
+        let mut bounded = enabling_model(7);
+        let bounded_binding = bounded.fence().binding;
+        for ordinal in 1..=u64::try_from(MAX_PENDING_INGRESS).unwrap() {
+            assert_eq!(
+                bounded.receive_input(&bounded_binding, ordinal),
+                Ok(InputDisposition::Buffered)
+            );
+        }
+        assert_eq!(
+            bounded.receive_input(
+                &bounded_binding,
+                u64::try_from(MAX_PENDING_INGRESS).unwrap() + 1
+            ),
+            Err(ModelError::PendingIngressCapacity)
+        );
+        make_live(&mut bounded);
+        assert_eq!(
+            bounded.frontier().ingress(),
+            u64::try_from(MAX_PENDING_INGRESS).unwrap()
+        );
+
+        let mut terminal = enabling_model(7);
+        let terminal_binding = terminal.fence().binding;
+        terminal.receive_input(&terminal_binding, 1).unwrap();
+        terminal.record_enable_commit_unknown().unwrap();
+        let terminal_fence = terminal.fence();
+        let terminal_id = TombstoneId::new(702);
+        terminal
+            .terminalize(&terminal_fence, terminal_id, TerminalReason::EnableRejected)
+            .unwrap();
+        assert!(terminal
+            .repair_responsibilities()
+            .any(|item| item == RepairResponsibility::EnableCommitUnknown(OperationId::new(404))));
+        let resolution =
+            terminal.expected_terminal_enable_resolution(EnableCommitResolution::NotCommitted);
+        terminal
+            .reconcile_terminal_enable_commit(&resolution)
+            .expect("terminal commit result resolves repair custody");
+        assert_eq!(terminal.state(), LifecycleStatus::Terminal);
+        assert!(!terminal.enabled_effect_ready());
+        assert_eq!(terminal.frontier().ingress(), 0);
+        assert_eq!(
+            terminal.tombstone().unwrap().enable_commit_resolution,
+            Some(EnableCommitResolution::NotCommitted)
+        );
+        assert!(!terminal
+            .repair_responsibilities()
+            .any(|item| matches!(item, RepairResponsibility::EnableCommitUnknown(_))));
     }
 
     #[test]
@@ -1287,27 +1436,60 @@ mod tests {
     }
 
     #[test]
-    fn checked_frontier_records_uncertain_frame_write_until_retry_or_ack() {
+    fn checked_frontier_reconciles_uncertain_write_only_after_resume_boundary() {
         let mut model = enabling_model(7);
         make_live(&mut model);
-        assert_eq!(model.append_outbound(), Ok(1));
+        let fence = model.fence();
+        assert_eq!(model.append_outbound(&fence), Ok(1));
+        assert_eq!(model.append_outbound(&fence), Ok(2));
         assert_eq!(
-            model.record_write_attempt(1),
+            model.record_write_attempt(&fence, 1),
             Ok(AttemptOutcome::NewlyExposed)
         );
         model
-            .record_frame_write_result(1, FrameWriteResult::Unknown)
+            .record_frame_write_result(&fence, 1, FrameWriteResult::Unknown)
             .unwrap();
-        assert_eq!(model.replay_ordinals(), Some(vec![1]));
+        assert_eq!(model.replay_ordinals(), Some(vec![1, 2]));
         assert!(model.frontier().has_uncertain_writes());
-        assert_eq!(model.record_write_attempt(1), Ok(AttemptOutcome::Retry));
-        model
-            .record_frame_write_result(1, FrameWriteResult::Accepted)
-            .unwrap();
-        assert!(!model.frontier().has_uncertain_writes());
         assert_eq!(
-            model.acknowledge_live(1),
-            Ok(AckOutcome::Advanced { through: 1 })
+            model.record_write_attempt(&fence, 2),
+            Err(ModelError::Attempt(
+                crate::stream_management::frontier_model::AttemptError::UncertainWritePending
+            ))
+        );
+        model
+            .record_frame_write_result(&fence, 1, FrameWriteResult::Accepted)
+            .unwrap();
+        assert!(model.frontier().has_uncertain_writes());
+        assert_eq!(model.replay_ordinals(), Some(vec![1, 2]));
+
+        model.detach(&fence).unwrap();
+        let (_, resumed_binding) = new_binding();
+        let plan = model
+            .begin_resume(resume_request(&model, resumed_binding, 304, 500))
+            .expect("authenticated peer ACK establishes resume boundary");
+        complete_transfer(&mut model, &plan);
+        assert!(!model.frontier().has_uncertain_writes());
+        assert_eq!(model.replay_ordinals(), Some(vec![1, 2]));
+
+        let resumed_fence = model.fence();
+        assert_eq!(
+            model.record_write_attempt(&resumed_fence, 1),
+            Ok(AttemptOutcome::Retry)
+        );
+        model
+            .record_frame_write_result(&resumed_fence, 1, FrameWriteResult::Accepted)
+            .unwrap();
+        assert_eq!(
+            model.record_write_attempt(&resumed_fence, 2),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        model
+            .record_frame_write_result(&resumed_fence, 2, FrameWriteResult::Accepted)
+            .unwrap();
+        assert_eq!(
+            model.acknowledge_live(&resumed_fence, 2),
+            Ok(AckOutcome::Advanced { through: 2 })
         );
         assert_eq!(model.replay_ordinals(), Some(vec![]));
     }
