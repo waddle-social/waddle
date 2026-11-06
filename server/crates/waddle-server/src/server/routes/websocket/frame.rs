@@ -378,6 +378,19 @@ pub(super) struct ClassifiedInboundFrame {
     input: ClassifiedInboundInput,
 }
 
+/// Proof that classification accepted exactly an SM acknowledgement request.
+/// The original byte count is retained for admission accounting.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ClassifiedSmRequest {
+    wire_bytes: usize,
+}
+
+impl ClassifiedSmRequest {
+    pub(super) fn wire_bytes(self) -> usize {
+        self.wire_bytes
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ClassifiedInboundInput {
     Parsed(Box<waddle_xmpp::protocol::frame::ParsedFrame>),
@@ -463,6 +476,16 @@ impl ClassifiedInboundFrame {
     pub(super) fn wire_bytes(&self) -> usize {
         self.wire_bytes
     }
+
+    pub(super) fn sm_request(&self) -> Option<ClassifiedSmRequest> {
+        matches!(
+            self.input,
+            ClassifiedInboundInput::StreamManagement(SmStanza::Request)
+        )
+        .then_some(ClassifiedSmRequest {
+            wire_bytes: self.wire_bytes,
+        })
+    }
 }
 
 /// Handle an XMPP frame per RFC 7395
@@ -505,6 +528,10 @@ pub(super) async fn handle_xmpp_frame_with_admission(
 /// Handle an already-classified frame from an actor mailbox. The task command
 /// carries typed protocol data and a typed XMPP domain; legacy `/ws` still
 /// parses at its current input boundary and shares the dispatch body below.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "generic inbound work awaits bounded producers")
+)]
 pub(super) async fn handle_classified_xmpp_frame_with_admission(
     input: ClassifiedInboundFrame,
     domain: &jid::BareJid,
@@ -537,6 +564,41 @@ async fn await_control_stage<T>(
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+pub(super) type SmCheckpointTestGate = (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+/// The dark bounded driver uses the same request handler and authority fence
+/// as the ordinary frame dispatcher, but retains its single typed response.
+pub(super) async fn handle_classified_sm_request_with_admission(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    permit: &NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+    #[cfg(test)] after_checkpoint: Option<&SmCheckpointTestGate>,
+) -> Option<waddle_xmpp::stream_management::SmAck> {
+    // Finish the checkpoint even if admission changes while it is pending.
+    // The actor must retain its typed result for unknown-completion recovery.
+    let response = super::stream_management::handle_sm_request(
+        state,
+        &mut conn.phase,
+        &mut conn.sm_state,
+        &mut conn.sm_inbound_completion,
+    )
+    .await;
+    #[cfg(test)]
+    if let Some((completed, release)) = after_checkpoint {
+        completed.notify_one();
+        release.notified().await;
+    }
+    if shutdown.is_cancelled() || permit.revalidate().is_err() {
+        conn.inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+    }
+    response
 }
 
 async fn handle_xmpp_frame_impl(

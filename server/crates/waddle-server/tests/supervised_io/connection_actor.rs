@@ -705,6 +705,23 @@ async fn app_cleanup_index_recovers_driver_after_caller_and_task_handles_drop() 
     assert_eq!(owner.connection_ref(), &connection);
     let observer = inventory.observe(&connection).expect("physical observer");
 
+    let sm = driver
+        .submit_sm_request()
+        .expect("bounded SM request admitted");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, sm.wait())
+            .await
+            .expect("request completes"),
+        ConnectionActorDriverTestSnapshot::Completed
+    );
+    assert_eq!(sm.sm_acknowledged_count(), Some(0));
+    assert!(sm.acknowledge());
+    let peer = waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None));
+    assert!(matches!(
+        driver.submit_peer_stanza(&peer),
+        Err(waddle_server::test_support::actor_local_endpoint::ConnectionActorDriverTestAdmissionError::UnsupportedOperation)
+    ));
+
     let gate = ConnectionActorDriverTestGate::default();
     let caller_ticket = driver.submit_paused(&gate).expect("operation admitted");
     let id = caller_ticket.id();

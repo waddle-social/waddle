@@ -374,8 +374,6 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
     ctx: SmCtx<'_>,
     finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
-    use waddle_xmpp::stream_management::SmAck;
-
     match sm {
         SmStanza::Enable(enable) => {
             handle_sm_enable(
@@ -388,16 +386,11 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
             .await
         }
         SmStanza::Request => {
-            if flush_ingress_checkpoint(state, ctx.sm_state, ctx.sm_inbound_completion)
+            handle_sm_request(state, ctx.phase, ctx.sm_state, ctx.sm_inbound_completion)
                 .await
-                .is_err()
-            {
-                *ctx.phase = ConnectionPhase::closing(ctx.phase.bound_jid().cloned());
-                return vec![];
-            }
-            vec![ResponseFrame::from_serialized_xml(
-                SmAck::new(ctx.sm_state.inbound_count()).to_xml(),
-            )]
+                .map(|ack| ResponseFrame::from_serialized_xml(ack.to_xml()))
+                .into_iter()
+                .collect()
         }
         SmStanza::Ack(ack) => {
             apply_sm_ack_with_fence(
@@ -415,6 +408,25 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
     }
+}
+
+/// Flush the handled prefix before returning the one possible SM response.
+pub(in crate::server::routes::websocket) async fn handle_sm_request(
+    state: &WebSocketState,
+    phase: &mut ConnectionPhase,
+    sm_state: &mut StreamManagementState,
+    completion: &mut SmInboundCompletionTracker,
+) -> Option<waddle_xmpp::stream_management::SmAck> {
+    if flush_ingress_checkpoint(state, sm_state, completion)
+        .await
+        .is_err()
+    {
+        *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+        return None;
+    }
+    Some(waddle_xmpp::stream_management::SmAck::new(
+        sm_state.inbound_count(),
+    ))
 }
 
 pub(in crate::server::routes::websocket::stream_management) async fn complete_acknowledged_ingress_custody(
