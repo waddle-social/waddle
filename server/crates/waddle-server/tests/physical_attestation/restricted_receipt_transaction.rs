@@ -258,7 +258,7 @@ pub(super) async fn exercise(
     concurrent(fixture, &db, api, &expected, [receipts[2], receipts[2]]).await;
     waited_drift(fixture, &db, api, &expected, receipts[4]).await;
     replacement_epoch_view(fixture, &db, api, &expected, receipts[9]).await;
-    reconnect(fixture, &db, api, &expected, receipts[5]).await;
+    reconnect(fixture, config, api, &expected, receipts[5]).await;
     lost_commit(fixture, config, api, &expected, receipts[6], &writer).await;
     delayed_commit(fixture, config, api, &expected, receipts[7], &writer).await;
     cancelled_commit(fixture, config, api, &expected, receipts[8], &writer).await;
@@ -361,12 +361,21 @@ async fn waited_drift(
 
 async fn reconnect(
     fixture: &Fixture,
-    db: &Database,
+    config: &PhysicalAttestationConfig,
     api: &PgRoleName,
     expected: &RestrictedIngressProfileObservation,
     receipt: RestrictedEffectReceipt,
 ) {
-    let candidate = pilot(db, api, expected);
+    let name = "restricted-receipt-reconnect";
+    let pool = attested_pool(
+        fixture.runtime_options.clone().application_name(name),
+        config.clone(),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("one-slot reconnect pool");
+    let db = database_from_attested_postgres_pool(name, pool);
+    let candidate = pilot(&db, api, expected);
     let (ready, got) = oneshot::channel();
     let (release, wait) = oneshot::channel();
     let task = tokio::spawn(async move { candidate.record_paused(&receipt, ready, wait).await });
@@ -383,9 +392,19 @@ async fn reconnect(
         .expect("terminate idle backend");
     assert!(terminated);
     assert_eq!(
-        pilot(db, api, expected).readback(&receipt).await,
+        pilot(&db, api, expected).readback(&receipt).await,
         RestrictedReceiptReadback::Exists
     );
+    let replacement: i32 = sqlx::query_scalar(
+        "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name=$1 AND pid<>$2",
+    )
+    .bind(name)
+    .bind(pid)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("one-slot pool reconnected on a new backend");
+    assert_ne!(replacement, pid);
+    drop(db);
 }
 
 async fn terminal(fixture: &Fixture, pid: i32) {
