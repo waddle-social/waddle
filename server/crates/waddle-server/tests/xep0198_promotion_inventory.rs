@@ -319,12 +319,15 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
 
     // Fixture creation ran the fresh migration. Recreate the pre-V1029 state
     // with a retained replay row, then let the older owner bootstrap run first.
-    fixture
-        .execute("DELETE FROM _migrations WHERE version = 1029", ())
-        .await;
-    fixture
-        .execute("ALTER TABLE sm_unacked DROP COLUMN provenance", ())
-        .await;
+    let mut tx = match fixture.db.driver() {
+        DatabaseDriver::Sqlite => fixture.db.begin_immediate().await.unwrap(),
+        DatabaseDriver::Postgres => fixture.db.begin().await.unwrap(),
+    };
+    reset_to_pre_v1029(&mut tx, fixture.db.driver()).await;
+    tx.execute("ALTER TABLE sm_unacked DROP COLUMN provenance", ())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     fixture.execute(
         "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) VALUES ('before-v1029', 1, '<message/>', 1)",
         (),
@@ -337,7 +340,7 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
         .unwrap();
     assert_eq!(
         MigrationRunner::single().run(&fixture.db).await.unwrap(),
-        vec![1029]
+        vec![1029, 1030]
     );
     assert!(MigrationRunner::single()
         .run(&fixture.db)
@@ -363,9 +366,7 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
         DatabaseDriver::Sqlite => fixture.db.begin_immediate().await.unwrap(),
         DatabaseDriver::Postgres => fixture.db.begin().await.unwrap(),
     };
-    tx.execute("DELETE FROM _migrations WHERE version = 1029", ())
-        .await
-        .unwrap();
+    reset_to_pre_v1029(&mut tx, fixture.db.driver()).await;
     tx.execute_batch(
         "ALTER TABLE sm_unacked RENAME COLUMN provenance TO provenance_before_drift;\
          ALTER TABLE sm_unacked ADD COLUMN provenance TEXT;",
@@ -397,6 +398,23 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
     drop(rows);
     drop(conn);
     fixture.close().await;
+}
+
+async fn reset_to_pre_v1029(tx: &mut waddle_server::db::Transaction<'_>, driver: DatabaseDriver) {
+    if driver == DatabaseDriver::Postgres {
+        tx.execute(
+            "DROP FUNCTION waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA)",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    tx.execute("DROP TABLE p21_receipt_operation_results", ())
+        .await
+        .unwrap();
+    tx.execute("DELETE FROM _migrations WHERE version >= 1029", ())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

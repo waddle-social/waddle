@@ -21,6 +21,12 @@ use super::{
 
 mod catalog;
 mod manifest;
+mod receipt_authority;
+mod receipt_catalog;
+pub use receipt_authority::{
+    ReceiptAuthorityError, ReceiptCommit, ReceiptOperation, ReceiptOperationAuthority,
+    ReceiptOperationPins, ReceiptReadback,
+};
 #[cfg(feature = "test-support")]
 mod receipt_transaction;
 #[cfg(feature = "test-support")]
@@ -110,6 +116,21 @@ async fn inspect_profile_on_connection(
     api_owner: &str,
     epoch_oid: u32,
 ) -> Result<RestrictedIngressProfileObservation> {
+    inspect_profile_with_receipt_journal(
+        connection, schema, schema_oid, runtime, api_owner, epoch_oid, false,
+    )
+    .await
+}
+
+async fn inspect_profile_with_receipt_journal(
+    connection: &mut PgConnection,
+    schema: &str,
+    schema_oid: u32,
+    runtime: &str,
+    api_owner: &str,
+    epoch_oid: u32,
+    receipt_journal: bool,
+) -> Result<RestrictedIngressProfileObservation> {
     let row = sqlx::query(
         "SELECT pg_catalog.current_setting('server_version_num')::integer, \
          pg_catalog.current_setting('search_path'), session_user::text, current_user::text, \
@@ -138,7 +159,11 @@ async fn inspect_profile_on_connection(
         connection, schema, schema_oid, runtime, api_owner, epoch_oid,
     )
     .await?;
-    manifest::verify(connection, schema, runtime, api_owner).await?;
+    if receipt_journal {
+        manifest::verify_with_receipt_journal(connection, schema, runtime, api_owner, true).await?;
+    } else {
+        manifest::verify(connection, schema, runtime, api_owner).await?;
+    }
     restore_application_path(connection, schema, runtime).await?;
     Ok(RestrictedIngressProfileObservation {
         manifest_version: MANIFEST_VERSION,

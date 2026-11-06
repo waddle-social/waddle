@@ -1735,6 +1735,12 @@ pub const V1029_SM_FRAME_PROVENANCE: &str = "ALTER TABLE sm_unacked ADD COLUMN p
 pub const V1029_SM_FRAME_PROVENANCE_POSTGRES: &str =
     "ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS provenance BYTEA;";
 
+/// Inert receipt-operation journal; runtime grants require a separate owner transition.
+pub const V1030_RECEIPT_OPERATION_JOURNAL: &str =
+    include_str!("owner/p21_receipt_journal_sqlite.sql");
+pub const V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES: &str =
+    include_str!("owner/p21_receipt_journal_postgres.sql");
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1915,6 +1921,12 @@ pub fn all() -> Vec<Migration> {
             description: "Preserve per-frame stream-management provenance".to_string(),
             sql_sqlite: V1029_SM_FRAME_PROVENANCE,
             sql_postgres: V1029_SM_FRAME_PROVENANCE_POSTGRES,
+        },
+        Migration {
+            version: 1030,
+            description: "Create inert receipt-operation result journal".to_string(),
+            sql_sqlite: V1030_RECEIPT_OPERATION_JOURNAL,
+            sql_postgres: V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES,
         },
     ]
 }
