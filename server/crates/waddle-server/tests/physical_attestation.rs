@@ -6639,3 +6639,7 @@ mod restricted_ingress_tests;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/observer_quarantine.rs"]
 mod observer_quarantine;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/combined_restricted_profile.rs"]
+mod combined_restricted_profile;
