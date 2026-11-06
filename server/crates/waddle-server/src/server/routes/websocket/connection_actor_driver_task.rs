@@ -5,7 +5,8 @@
 //! handler or release its retained input. This module is not selected by `/ws`.
 
 use super::connection_actor_core::{
-    ConnectionActorCore, ConnectionActorDriverCompletion, ConnectionActorDriverError,
+    ConnectionActorCore, ConnectionActorDriverCompletion,
+    ConnectionActorDriverCompletionUnknownReason, ConnectionActorDriverError,
 };
 use super::frame::{ClassifiedInboundFrame, ClassifiedSmRequest};
 use super::{OutboundStanza, WebSocketState};
@@ -253,6 +254,8 @@ pub(super) enum ConnectionActorDriverTaskInput {
         input: ClassifiedSmRequest,
         #[cfg(test)]
         before_start: Option<(Arc<Notify>, Arc<Notify>)>,
+        #[cfg(test)]
+        after_checkpoint: Option<super::frame::SmCheckpointTestGate>,
     },
     #[cfg(any(test, feature = "test-support"))]
     Paused {
@@ -476,6 +479,8 @@ impl ConnectionActorDriverTask {
             input,
             #[cfg(test)]
             before_start: None,
+            #[cfg(test)]
+            after_checkpoint: None,
         })
     }
 
@@ -1107,17 +1112,33 @@ impl DriverShared {
         result: Arc<ConnectionActorDriverTaskResult>,
         exceeds_reservation: bool,
         authority_revoked: bool,
-    ) {
+    ) -> Option<StopReason> {
+        let handler_unknown = match &result.value {
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CompletionUnknown { reason, .. },
+            )) => Some(match reason {
+                ConnectionActorDriverCompletionUnknownReason::AuthorityRevoked => {
+                    ConnectionActorDriverTaskUnknownReason::AuthorityRevoked
+                }
+                ConnectionActorDriverCompletionUnknownReason::Stopped => {
+                    ConnectionActorDriverTaskUnknownReason::WorkerStopped
+                }
+            }),
+            _ => None,
+        };
+        let checkpoint_failed = matches!(
+            &result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CurrentAtCompletion(None)
+                    | ConnectionActorDriverCompletion::CompletionUnknown { retained: None, .. }
+            ))
+        );
         let mut ledger = self.lock_state();
         let unknown_reason = if exceeds_reservation {
-            if ledger.stop_reason.is_none() {
-                ledger.stop_reason = Some(StopReason::OutboundOverload);
-                ledger.stop_started_at = Some(Instant::now());
-            }
-            ledger.accepting = false;
-            self.stop.cancel();
             Some(ConnectionActorDriverTaskUnknownReason::ResultReservationExceeded)
-        } else if authority_revoked {
+        } else if authority_revoked
+            || handler_unknown == Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
+        {
             Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
         } else if !ledger.accepting {
             Some(match ledger.stop_reason {
@@ -1127,8 +1148,32 @@ impl DriverShared {
                 _ => ConnectionActorDriverTaskUnknownReason::WorkerStopped,
             })
         } else {
+            handler_unknown
+        };
+        let stop_reason = if exceeds_reservation {
+            Some(StopReason::OutboundOverload)
+        } else if handler_unknown == Some(ConnectionActorDriverTaskUnknownReason::AuthorityRevoked)
+        {
+            Some(if self.shutdown.is_cancelled() {
+                StopReason::ShutdownDeadline
+            } else {
+                StopReason::LeaseLost
+            })
+        } else if handler_unknown.is_some() || checkpoint_failed {
+            Some(StopReason::Requested)
+        } else {
             None
         };
+        if let Some(reason) = stop_reason {
+            if ledger.stop_reason.is_none() {
+                ledger.stop_reason = Some(reason);
+                ledger.stop_started_at = Some(Instant::now());
+            }
+            // Seal admission before publishing the terminal result. The
+            // worker cannot dequeue another operation after this transition.
+            ledger.accepting = false;
+            self.stop.cancel();
+        }
         match unknown_reason {
             Some(reason) => {
                 operation.set_snapshot(ConnectionActorDriverTaskSnapshot::CompletionUnknown {
@@ -1138,10 +1183,7 @@ impl DriverShared {
             }
             None => operation.set_snapshot(ConnectionActorDriverTaskSnapshot::Completed(result)),
         }
-        drop(ledger);
-        if exceeds_reservation {
-            self.request_stop(StopReason::OutboundOverload);
-        }
+        stop_reason
     }
 
     fn operation_acknowledged(&self) {
@@ -1423,12 +1465,24 @@ async fn run_driver(worker: DriverWorker) {
         let mut active =
             ActiveOperationGuard::new(Arc::clone(&command.operation), Arc::clone(&shared));
         let result = match &command.operation.input {
-            DriverInput::SmRequest { input, .. } => {
+            DriverInput::SmRequest {
+                input,
+                #[cfg(test)]
+                after_checkpoint,
+                ..
+            } => {
                 let request = command.operation._reservation.sm_request(input);
                 ConnectionActorDriverTaskResultValue::SmRequest(match request {
                     Some(request) => {
-                        core.process_sm_request(request, websocket.as_ref(), &permit, &shutdown)
-                            .await
+                        core.process_sm_request(
+                            request,
+                            websocket.as_ref(),
+                            &permit,
+                            &shutdown,
+                            #[cfg(test)]
+                            after_checkpoint.as_ref(),
+                        )
+                        .await
                     }
                     None => Err(ConnectionActorDriverError::OutputReservationMissing),
                 })
@@ -1463,11 +1517,15 @@ async fn run_driver(worker: DriverWorker) {
             }
         };
         let mut result = Some(result);
-        if permit
+        match permit
             .with_current(|| active.complete(result.take().expect("operation result is present")))
-            .is_err()
         {
-            active.complete_non_current(result.take().expect("revoked operation result remains"));
+            Ok(Some(reason)) => shared.request_stop(reason),
+            Ok(None) => {}
+            Err(_) => {
+                active
+                    .complete_non_current(result.take().expect("revoked operation result remains"));
+            }
         }
     }
 }
@@ -1492,16 +1550,18 @@ impl ActiveOperationGuard {
         }
     }
 
-    fn complete(&mut self, value: ConnectionActorDriverTaskResultValue) {
+    fn complete(&mut self, value: ConnectionActorDriverTaskResultValue) -> Option<StopReason> {
         let result = Arc::new(ConnectionActorDriverTaskResult {
             value,
             _reservation: Arc::clone(&self.operation._reservation),
         });
         let exceeds_reservation =
             result.accounted_bytes() > self.operation._reservation.output_bound.bytes();
-        self.shared
-            .publish_completion(&self.operation, result, exceeds_reservation, false);
+        let stop_reason =
+            self.shared
+                .publish_completion(&self.operation, result, exceeds_reservation, false);
         self.complete = true;
+        stop_reason
     }
 
     fn complete_non_current(&mut self, value: ConnectionActorDriverTaskResultValue) {
@@ -1512,7 +1572,8 @@ impl ActiveOperationGuard {
         let exceeds_reservation =
             result.accounted_bytes() > self.operation._reservation.output_bound.bytes();
         self.shared.request_stop(StopReason::LeaseLost);
-        self.shared
+        let _ = self
+            .shared
             .publish_completion(&self.operation, result, exceeds_reservation, true);
         self.complete = true;
     }
@@ -1686,6 +1747,7 @@ mod tests {
                         .sm_request()
                         .expect("typed request"),
                     before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                    after_checkpoint: None,
                 })
                 .expect("typed SM accepted");
             tokio::time::timeout(Duration::from_secs(1), dequeued.notified())
@@ -1897,7 +1959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_checkpoint_returns_no_ack_on_the_bounded_path() {
+    async fn failed_checkpoint_seals_admission_and_leaves_queued_request_not_started() {
         let mut state = super::super::state::WsConnState::new();
         state
             .sm_state
@@ -1912,8 +1974,27 @@ mod tests {
             .sm_inbound_completion
             .complete(sequence, &mut state.sm_state);
         let task = test_task_with_state(ConnectionActorDriverTaskLimits::default(), state).await;
-        let ticket = submit_typed_sm(&task);
-        let ConnectionActorDriverTaskSnapshot::Completed(result) = ticket.wait().await else {
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let first = task
+            .submit(DriverInput::SmRequest {
+                input: ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>")
+                    .sm_request()
+                    .expect("typed request"),
+                before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                after_checkpoint: None,
+            })
+            .expect("first request admitted");
+        tokio::time::timeout(Duration::from_secs(5), dequeued.notified())
+            .await
+            .expect("first request dequeued");
+        let queued = submit_typed_sm(&task);
+        release.notify_one();
+        let ConnectionActorDriverTaskSnapshot::Completed(result) =
+            tokio::time::timeout(Duration::from_secs(5), first.wait())
+                .await
+                .expect("first request returns")
+        else {
             panic!("request completes");
         };
         assert!(matches!(
@@ -1922,9 +2003,204 @@ mod tests {
                 ConnectionActorDriverCompletion::CurrentAtCompletion(None)
             ))
         ));
-        ticket.acknowledge().expect("settled");
-        task.request_stop(StopReason::Requested);
+        assert!(matches!(
+            task.submit_inbound_frame(&ClassifiedInboundFrame::classify(
+                "<r xmlns='urn:xmpp:sm:3'/>"
+            )),
+            Err(ConnectionActorDriverTaskAdmissionError::Stopped)
+        ));
         task.wait_joined().await;
+        assert!(matches!(
+            queued.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        assert_eq!(queued.run_count(), 0);
+        assert!(queued.retains_input());
+        assert_eq!(first.run_count(), 1);
+        first.acknowledge().expect("first result settled");
+        queued.acknowledge().expect("queued input settled");
+    }
+
+    #[tokio::test]
+    async fn authority_revoked_after_checkpoint_retains_ack_as_unknown_with_reservation() {
+        use waddle_xmpp::ingress::WireHandledCount;
+        use waddle_xmpp::pending_delivery::SmSessionId;
+
+        let websocket = create_test_websocket_state().await;
+        let stream = SmSessionId::new("bounded-sm-revoked-after-checkpoint");
+        websocket
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll stream");
+        let mut state = super::super::state::WsConnState::new();
+        state.sm_state.enable(stream.to_string(), true, Some(300));
+        let sequence = state.sm_inbound_completion.reserve(&state.sm_state);
+        state
+            .sm_inbound_completion
+            .complete(sequence, &mut state.sm_state);
+        assert!(state.sm_inbound_completion.checkpoint_dirty());
+        let lifecycle = NodeLifecycle::new();
+        let task = ConnectionActorDriverTask::spawn(
+            state,
+            Arc::clone(&websocket),
+            lifecycle.admit().expect("serving permit"),
+            CancellationToken::new(),
+        )
+        .expect("valid limits");
+        let completed = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let input = ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>");
+        let charged = input.wire_bytes() + MAX_SM_ACK_OUTPUT_BYTES;
+        let ticket = task
+            .submit(DriverInput::SmRequest {
+                input: input.sm_request().expect("typed request"),
+                before_start: None,
+                after_checkpoint: Some((Arc::clone(&completed), Arc::clone(&release))),
+            })
+            .expect("request admitted");
+        tokio::time::timeout(Duration::from_secs(5), completed.notified())
+            .await
+            .expect("checkpoint completes before revocation");
+        assert_eq!(
+            websocket
+                .deps
+                .protocol
+                .ingress
+                .load_resume_checkpoint(&stream)
+                .await
+                .expect("read committed checkpoint"),
+            Some(WireHandledCount::from_storage(1))
+        );
+        lifecycle.begin_drain();
+        tokio::time::timeout(Duration::from_secs(5), task.shared.stop.cancelled())
+            .await
+            .expect("authority watcher seals admission");
+        release.notify_one();
+        let ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+            reason: ConnectionActorDriverTaskUnknownReason::AuthorityRevoked,
+            result: Some(result),
+        } = tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+            .await
+            .expect("revoked operation returns")
+        else {
+            panic!("revoked result remains unknown and retained");
+        };
+        assert!(matches!(
+            &result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CompletionUnknown {
+                    retained: Some(ack),
+                    reason: super::super::connection_actor_core::ConnectionActorDriverCompletionUnknownReason::AuthorityRevoked,
+                }
+            )) if ack.h == 1
+        ));
+        task.wait_joined().await;
+        assert_eq!(ticket.run_count(), 1);
+        assert_eq!(
+            task.shared.byte_permits.available_permits(),
+            task.shared.limits.byte_capacity - charged
+        );
+        ticket.acknowledge().expect("result transferred");
+        assert_eq!(
+            task.shared.byte_permits.available_permits(),
+            task.shared.limits.byte_capacity - charged,
+            "the retained result still holds its reservation"
+        );
+        drop(result);
+        assert_eq!(
+            task.shared.byte_permits.available_permits(),
+            task.shared.limits.byte_capacity
+        );
+    }
+
+    #[tokio::test]
+    async fn returned_unknown_is_sealed_before_the_authority_watcher_runs() {
+        let task = test_task().await;
+        let dequeued = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let ticket = task
+            .submit(DriverInput::SmRequest {
+                input: ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>")
+                    .sm_request()
+                    .expect("typed request"),
+                before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                after_checkpoint: None,
+            })
+            .expect("request admitted");
+        tokio::time::timeout(Duration::from_secs(5), dequeued.notified())
+            .await
+            .expect("worker is held before its start claim");
+        let mut active =
+            ActiveOperationGuard::new(Arc::clone(&ticket.operation), Arc::clone(&task.shared));
+        let stop_reason = active.complete(ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+            ConnectionActorDriverCompletion::CompletionUnknown {
+                retained: Some(waddle_xmpp::stream_management::SmAck::new(7)),
+                reason: ConnectionActorDriverCompletionUnknownReason::AuthorityRevoked,
+            },
+        )));
+        assert_eq!(stop_reason, Some(StopReason::LeaseLost));
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+                reason: ConnectionActorDriverTaskUnknownReason::AuthorityRevoked,
+                result: Some(_),
+            }
+        ));
+        assert!(task.shared.stop.is_cancelled());
+        assert!(matches!(
+            task.submit_inbound_frame(&ClassifiedInboundFrame::classify(
+                "<r xmlns='urn:xmpp:sm:3'/>"
+            )),
+            Err(ConnectionActorDriverTaskAdmissionError::Stopped)
+        ));
+        task.shared.request_stop(StopReason::LeaseLost);
+        release.notify_one();
+        task.wait_joined().await;
+        ticket.acknowledge().expect("unknown result settled");
+    }
+
+    #[tokio::test]
+    async fn prior_lease_loss_keeps_its_reason_when_handler_observes_stop() {
+        let task = test_task().await;
+        let completed = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let ticket = task
+            .submit(DriverInput::SmRequest {
+                input: ClassifiedInboundFrame::classify("<r xmlns='urn:xmpp:sm:3'/>")
+                    .sm_request()
+                    .expect("typed request"),
+                before_start: None,
+                after_checkpoint: Some((Arc::clone(&completed), Arc::clone(&release))),
+            })
+            .expect("request admitted");
+        tokio::time::timeout(Duration::from_secs(5), completed.notified())
+            .await
+            .expect("checkpoint handler completes");
+        task.request_stop(StopReason::LeaseLost);
+        release.notify_one();
+        let ConnectionActorDriverTaskSnapshot::CompletionUnknown {
+            reason: ConnectionActorDriverTaskUnknownReason::AuthorityRevoked,
+            result: Some(result),
+        } = tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+            .await
+            .expect("stopped request returns")
+        else {
+            panic!("the prior lease loss remains the outer reason");
+        };
+        assert!(matches!(
+            &result.value,
+            ConnectionActorDriverTaskResultValue::SmRequest(Ok(
+                ConnectionActorDriverCompletion::CompletionUnknown {
+                    retained: Some(ack),
+                    reason: ConnectionActorDriverCompletionUnknownReason::Stopped,
+                }
+            )) if ack.h == 0
+        ));
+        task.wait_joined().await;
+        ticket.acknowledge().expect("unknown result settled");
     }
 
     #[tokio::test]
@@ -1938,6 +2214,7 @@ mod tests {
                     .sm_request()
                     .expect("typed request"),
                 before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                after_checkpoint: None,
             })
             .expect("request admitted");
         dequeued.notified().await;
@@ -1980,6 +2257,7 @@ mod tests {
             .submit(DriverInput::SmRequest {
                 input: input.sm_request().expect("typed request"),
                 before_start: Some((Arc::clone(&dequeued), Arc::clone(&release))),
+                after_checkpoint: None,
             })
             .expect("request admitted");
         dequeued.notified().await;

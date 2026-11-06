@@ -142,14 +142,22 @@ impl ConnectionActorCore {
         state: &WebSocketState,
         permit: &NodeAdmissionPermit,
         shutdown: &CancellationToken,
+        #[cfg(test)] after_checkpoint: Option<&super::frame::SmCheckpointTestGate>,
     ) -> Result<
         ConnectionActorDriverCompletion<Option<waddle_xmpp::stream_management::SmAck>>,
         ConnectionActorDriverError,
     > {
         let lifecycle = Arc::clone(&self.lifecycle);
         run_with_driver_completion(lifecycle, permit, shutdown, || async {
-            handle_classified_sm_request_with_admission(state, &mut self.state, permit, shutdown)
-                .await
+            handle_classified_sm_request_with_admission(
+                state,
+                &mut self.state,
+                permit,
+                shutdown,
+                #[cfg(test)]
+                after_checkpoint,
+            )
+            .await
         })
         .await
     }

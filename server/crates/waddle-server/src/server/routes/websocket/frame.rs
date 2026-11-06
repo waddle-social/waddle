@@ -566,6 +566,12 @@ async fn await_control_stage<T>(
     Ok(output)
 }
 
+#[cfg(test)]
+pub(super) type SmCheckpointTestGate = (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
 /// The dark bounded driver uses the same request handler and authority fence
 /// as the ordinary frame dispatcher, but retains its single typed response.
 pub(super) async fn handle_classified_sm_request_with_admission(
@@ -573,24 +579,26 @@ pub(super) async fn handle_classified_sm_request_with_admission(
     conn: &mut WsConnState,
     permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
+    #[cfg(test)] after_checkpoint: Option<&SmCheckpointTestGate>,
 ) -> Option<waddle_xmpp::stream_management::SmAck> {
-    match await_control_stage(
-        Some((permit, shutdown)),
-        super::stream_management::handle_sm_request(
-            state,
-            &mut conn.phase,
-            &mut conn.sm_state,
-            &mut conn.sm_inbound_completion,
-        ),
+    // Finish the checkpoint even if admission changes while it is pending.
+    // The actor must retain its typed result for unknown-completion recovery.
+    let response = super::stream_management::handle_sm_request(
+        state,
+        &mut conn.phase,
+        &mut conn.sm_state,
+        &mut conn.sm_inbound_completion,
     )
-    .await
-    {
-        Ok(response) => response,
-        Err(terminal) => {
-            conn.inbound_frame_terminal = Some(terminal);
-            None
-        }
+    .await;
+    #[cfg(test)]
+    if let Some((completed, release)) = after_checkpoint {
+        completed.notify_one();
+        release.notified().await;
     }
+    if shutdown.is_cancelled() || permit.revalidate().is_err() {
+        conn.inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+    }
+    response
 }
 
 async fn handle_xmpp_frame_impl(
