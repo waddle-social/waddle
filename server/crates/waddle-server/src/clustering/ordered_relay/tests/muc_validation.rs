@@ -12,6 +12,7 @@ use std::str::FromStr;
 fn muc_proxy_kind_validates_the_carried_stanza_kind() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),
@@ -41,6 +42,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
     ));
 
     let wrong_kind = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),
@@ -97,6 +99,7 @@ fn room_lane_must_match_the_muc_proxy_kind() {
 
     let mut receiver = OrderedRelayReceiverState::default();
     let groupchat_on_muji_lane = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel_for_lane(OrderedRelayRoomLane::MujiSignaling),
         sequence: OrderedRelaySequence(1),
@@ -269,6 +272,7 @@ fn muji_jingle_iq_validation_rejects_other_actions_and_non_muji_iqs() {
 #[test]
 fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
     let unavailable_join = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),
@@ -291,6 +295,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         origin_proof: None,
     };
     let bare_groupchat = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         payload: OrderedRelayPayload::MucProxy {
             canonical: None,
             principal: None,
@@ -303,6 +308,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         ..unavailable_join.clone()
     };
     let full_groupchat = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         payload: OrderedRelayPayload::MucProxy {
             canonical: None,
             principal: None,
@@ -341,6 +347,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
 fn muc_proxy_origin_must_match_kind_policy() {
     let mut receiver = OrderedRelayReceiverState::default();
     let join_with_server_origin = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),
@@ -369,6 +376,7 @@ fn muc_proxy_origin_must_match_kind_policy() {
 
     let mut receiver = OrderedRelayReceiverState::default();
     let server_kind_with_connection_origin = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),

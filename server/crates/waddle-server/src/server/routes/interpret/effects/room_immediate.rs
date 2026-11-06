@@ -110,7 +110,7 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
                 ) if reflect_replies_to_sender => EffectOutcome::RelayFrames { frames, completion },
                 Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
                     replies,
-                )) if reflect_replies_to_sender => EffectOutcome::Frames(replies),
+                )) if reflect_replies_to_sender => EffectOutcome::ProvenancedFrames(replies),
                 Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(
                     _,
                 )) => EffectOutcome::Completed,

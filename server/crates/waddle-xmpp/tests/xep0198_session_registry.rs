@@ -82,6 +82,7 @@ async fn promotion_inventory_survives_restart_without_allowing_resume() {
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: queued_stanza_xml("durable", "survive restart"),
@@ -121,6 +122,7 @@ async fn promotion_inventory_registration_never_restores_settled_sequences() {
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: queued_stanza_xml("settled", "settled payload"),
@@ -269,6 +271,7 @@ async fn promotion_inventory_registration_recovers_a_newer_captured_suffix() {
     capture
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 12,
             stanza_xml: queued_stanza_xml("captured-tail", "tail after failed append"),
@@ -396,6 +399,7 @@ async fn promotion_inventory_failed_initial_write_can_retry_without_a_durable_ro
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: queued_stanza_xml("first-write", "retained initial payload"),
@@ -435,6 +439,7 @@ async fn promotion_inventory_failed_suffix_survives_registration_and_reinsertion
     capture
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 12,
             stanza_xml: queued_stanza_xml("failed-tail", "retained failed suffix"),
@@ -462,6 +467,7 @@ async fn promotion_inventory_cancelled_initial_registration_keeps_its_payload() 
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: queued_stanza_xml("cancelled-create", "cancelled registration payload"),
@@ -511,6 +517,7 @@ async fn promotion_inventory_nested_cancelled_captures_preserve_an_earlier_faile
         capture
             .unacked_stanzas
             .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence,
                 stanza_xml: queued_stanza_xml(&format!("capture-{sequence}"), body),
@@ -1272,6 +1279,7 @@ impl SmPersistenceStorage for MislabelingStore {
         for (_, unacked) in &mut groups {
             let to: FullJid = "mallory@example.test/phone".parse().expect("valid jid");
             unacked.push(PersistedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 stream_id: SmSessionId::new("attacker-stream"),
                 sequence: 99,
@@ -1424,6 +1432,7 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 12,
             stanza_xml:
@@ -1669,6 +1678,7 @@ async fn xep0198_release_claim_moves_expired_session_to_promotion() {
     let entity = Entity::new(EntityType::SmSession, stream_id);
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("queued", "queued"),
@@ -1781,6 +1791,7 @@ async fn xep0198_expired_claim_promotion_rehydrates_durable_only_unacked_stanzas
     let second_receipt = chrono::Utc::now() - chrono::Duration::seconds(1);
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("queued-11", "first"),
@@ -1798,6 +1809,7 @@ async fn xep0198_expired_claim_promotion_rehydrates_durable_only_unacked_stanzas
 
     persistence
         .append_unacked(PersistedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             stream_id: SmSessionId::new(stream_id),
             sequence: 12,
@@ -1854,6 +1866,7 @@ async fn xep0198_deferred_release_moves_expired_session_to_promotion() {
     let entity = Entity::new(EntityType::SmSession, stream_id);
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("deferred", "queued"),
@@ -1990,6 +2003,7 @@ async fn xep0198_expired_claim_handoff_recovers_after_restart_before_confirmatio
         .with_claim_store(claims, SharedNodeIdentity::new(owner.clone()));
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("restart", "queued"),
@@ -2471,6 +2485,7 @@ async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
     // Use jabber:client namespace so the persistence layer's XML
     // round-trip can re-parse the stanza into a typed Stanza.
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 12,
         stanza_xml: "<message xmlns='jabber:client' id='m12'><body>queued at T1</body></message>"
@@ -2628,6 +2643,7 @@ async fn xep0198_typed_unkeyed_appends_preserve_replay_bytes() {
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: original_xml.clone(),
@@ -2794,6 +2810,7 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
     let stream_id = "stream-expiring-claim-shutdown";
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("queued", "queued"),
@@ -2882,6 +2899,7 @@ async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
             &chat_stanza(&resource, "once"),
             chrono::Utc::now(),
             key.clone(),
+            Default::default(),
         )
         .await
         .expect("first drain record");
@@ -2899,6 +2917,7 @@ async fn xep0198_keyed_detach_drain_record_allocates_an_obligation_once() {
             &chat_stanza(&resource, "once"),
             chrono::Utc::now(),
             key,
+            Default::default(),
         )
         .await
         .expect("duplicate drain record");
@@ -2944,6 +2963,7 @@ fn drained_payload(sequence: u32) -> waddle_xmpp::Stanza {
 
 fn drained_entry(sequence: u32) -> waddle_xmpp::stream_management::DetachedUnackedStanza {
     waddle_xmpp::stream_management::DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence,
         stanza_xml: queued_stanza_xml(&format!("m{sequence}"), "drained"),

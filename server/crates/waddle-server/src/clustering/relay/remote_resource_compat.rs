@@ -1,11 +1,10 @@
 //! Rolling-upgrade contracts for remote-owned live resources (#1804).
 //!
-//! `v8`/`v3` are frozen receive contracts, not aliases for evolving domain types.
-//! Live operations have their own stable endpoints and cannot carry append
-//! obligations. An unknown live endpoint permits exactly one baseline ask;
-//! ambiguous failures never permit a second effect. Shared typed leaves are
-//! pinned by the codec fixtures in `tests`; changing them requires a new DTO
-//! and endpoint while retaining these receivers through the upgrade window.
+//! Route reply provenance changes the baseline route contract to `v9` and the
+//! live route contract to `v3`; the frame contract remains `v3`. Live operations
+//! cannot carry append obligations. An unknown live endpoint permits exactly
+//! one baseline ask; ambiguous failures never permit a second effect. Shared
+//! typed leaves are pinned by the codec fixtures in `tests`.
 
 use super::{
     relay_dispatch_span, spawn_in_dispatch_span, Arc, Context, Deserialize, Duration, Message,
@@ -23,7 +22,7 @@ use std::future::Future;
 use waddle_xmpp::registry::DeliveryKind;
 
 mod wire;
-use wire::{FrameReply, FrameV3, LiveFrame, LiveRoute, RouteReply, RouteV8};
+use wire::{FrameReply, FrameV3, LiveFrame, LiveRoute, RouteReply, RouteV9};
 
 #[cfg(test)]
 mod tests;
@@ -56,7 +55,7 @@ pub(super) async fn ask_route(
         }
     );
     let baseline_ask = async {
-        let baseline = RouteV8::from(message.clone());
+        let baseline = RouteV9::from(message.clone());
         remote
             .ask(&baseline)
             .mailbox_timeout(mailbox_timeout)
@@ -153,13 +152,13 @@ async fn route_on_owner(
     reply.into()
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v8")]
-impl Message<RouteV8> for RelayActor {
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v9")]
+impl Message<RouteV9> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RouteReply>;
 
     async fn handle(
         &mut self,
-        message: RouteV8,
+        message: RouteV9,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceRoute, &message.trace);
@@ -176,7 +175,7 @@ impl Message<RouteV8> for RelayActor {
     }
 }
 
-#[kameo::remote_message("waddle.clustering.relay.live_resource_route.v2")]
+#[kameo::remote_message("waddle.clustering.relay.live_resource_route.v3")]
 impl Message<LiveRoute> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RouteReply>;
 
@@ -242,4 +241,4 @@ impl Message<LiveFrame> for RelayActor {
 }
 
 #[cfg(test)]
-pub(super) use wire::{FrameV3 as BaselineFrame, RouteV8 as BaselineRoute};
+pub(super) use wire::{FrameV3 as BaselineFrame, RouteV9 as BaselineRoute};

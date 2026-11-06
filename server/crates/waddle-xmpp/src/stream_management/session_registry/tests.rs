@@ -133,18 +133,21 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 13,
                 stanza_xml: "<msg1/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 14,
                 stanza_xml: "<msg2/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 15,
                 stanza_xml: "<msg3/>".to_string(),
@@ -171,6 +174,7 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
     s.unacked_stanzas = unacked
         .into_iter()
         .map(|(sequence, stanza_xml)| DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence,
             stanza_xml,
@@ -3490,12 +3494,14 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 6,
                 stanza_xml: realistic_message_stanza("first"),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 7,
                 stanza_xml: realistic_message_stanza("second"),
@@ -4395,6 +4401,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
         .insert(xmpp_parsers::message::Lang::new(), "missed".to_string());
     storage
         .append_unacked(super::super::persistence::PersistedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
             sequence: 1,
@@ -5244,6 +5251,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
     let mut old_session = realistic_test_session_for_jid(old_stream, jid.clone());
     old_session.unacked_stanzas = vec![
         DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 6,
             stanza_xml: realistic_dm_stanza_xml(
@@ -5255,6 +5263,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
             original_receipt_at: Utc::now(),
         },
         DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: realistic_dm_stanza_xml(
@@ -5843,6 +5852,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
     let mut session = session;
     session.unacked_stanzas = vec![
         DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 6,
             stanza_xml: realistic_dm_stanza_xml(
@@ -5854,6 +5864,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
             original_receipt_at: Utc::now(),
         },
         DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: realistic_dm_stanza_xml(
@@ -6292,6 +6303,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
     );
     session.unacked_stanzas = vec![
         DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 6,
             stanza_xml: realistic_dm_stanza_xml(
@@ -6303,6 +6315,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
             original_receipt_at: Utc::now(),
         },
         DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: realistic_dm_stanza_xml(
@@ -6378,6 +6391,7 @@ async fn reinsert_for_retry_keeps_queue_when_session_was_never_persisted() {
         "user@example.com/resource".parse().unwrap(),
     );
     session.unacked_stanzas = vec![DetachedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         sequence: 3,
         stanza_xml: realistic_dm_stanza_xml(

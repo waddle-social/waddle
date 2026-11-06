@@ -56,6 +56,7 @@ struct TerminalInventoryProgress {
 struct TerminalDrainedFrame {
     xml: String,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
+    provenance: waddle_xmpp::stream_management::SmFrameProvenance,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
 }
 
@@ -74,6 +75,8 @@ pub(super) struct DrainedAppend(pub(super) waddle_xmpp::stream_management::SmDra
 pub(super) struct ReplayDrainSink<'a> {
     /// The stored detached session, once one exists (the second drain).
     pub(super) detached_stream_id: Option<&'a str>,
+    /// Exact authenticated connection binding for the frame being drained.
+    pub(super) bound_resource: Option<&'a jid::FullJid>,
     pub(super) pending_row_policy: PendingRowDrainPolicy,
     /// Keyed entries recorded before the detached session exists (the first drain).
     pub(super) drained_appends: &'a mut Vec<DrainedAppend>,
@@ -86,6 +89,7 @@ struct DrainedFrame {
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
     ingress_append: Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
+    provenance: waddle_xmpp::stream_management::SmFrameProvenance,
 }
 
 /// Drain `outbound_rx` of all immediately-available
@@ -155,6 +159,18 @@ pub(super) async fn drain_outbound_into_replay(
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
+                let provenance = ingress_append.as_ref().map_or(
+                    waddle_xmpp::stream_management::SmFrameProvenance::Unknown,
+                    |obligation| {
+                        if sink.bound_resource == Some(&obligation.key.resource) {
+                            waddle_xmpp::stream_management::SmFrameProvenance::ingress([obligation
+                                .key
+                                .clone()])
+                        } else {
+                            waddle_xmpp::stream_management::SmFrameProvenance::Unknown
+                        }
+                    },
+                );
                 record_drained_xml(
                     state,
                     sm_state,
@@ -165,6 +181,7 @@ pub(super) async fn drain_outbound_into_replay(
                         original_receipt_at: receipt_at,
                         pending_row_id,
                         ingress_append: ingress_append.take().map(|obligation| obligation.key),
+                        provenance,
                     },
                 )
                 .await;
@@ -212,6 +229,8 @@ pub(super) async fn drain_outbound_into_replay(
                             original_receipt_at: receipt_at,
                             pending_row_id: row_for_this,
                             ingress_append: keyed,
+                            // Recipient-pass output is not yet associated frame by frame.
+                            provenance: Default::default(),
                         },
                     )
                     .await;
@@ -246,13 +265,33 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     let mut queued_pending_rows = false;
     let mut release_failed_pending_rows = false;
     let mut redrive_aborted = false;
-    while let Ok(outbound_stanza) = outbound_rx.try_recv() {
+    let mut authority = super::drain_append::DrainAuthority::default();
+    while let Ok(mut outbound_stanza) = outbound_rx.try_recv() {
         let receipt_at = outbound_stanza
             .original_receipt_at
             .unwrap_or_else(chrono::Utc::now);
         let pending_row_id = outbound_stanza.pending_row_id.clone();
         match outbound_stanza.kind {
             DeliveryKind::DirectFrame => {
+                let authorized = authority
+                    .authorize(
+                        state,
+                        Some(&outbound_stanza.stanza),
+                        outbound_stanza.ingress_append.take(),
+                    )
+                    .await;
+                let provenance = authorized.as_ref().map_or(
+                    waddle_xmpp::stream_management::SmFrameProvenance::Unknown,
+                    |obligation| {
+                        if obligation.key.resource == terminal.session.jid {
+                            waddle_xmpp::stream_management::SmFrameProvenance::ingress([obligation
+                                .key
+                                .clone()])
+                        } else {
+                            waddle_xmpp::stream_management::SmFrameProvenance::Unknown
+                        }
+                    },
+                );
                 let xml = stanza_to_xml(&outbound_stanza.stanza);
                 let result = record_drained_terminal_xml(
                     state,
@@ -260,6 +299,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                     TerminalDrainedFrame {
                         xml,
                         original_receipt_at: receipt_at,
+                        provenance,
                         pending_row_id,
                     },
                     pending_row_policy,
@@ -321,6 +361,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         TerminalDrainedFrame {
                             xml,
                             original_receipt_at: receipt_at,
+                            provenance: Default::default(),
                             pending_row_id: row_for_this,
                         },
                         pending_row_policy,
@@ -382,11 +423,13 @@ async fn record_drained_xml(
         original_receipt_at,
         pending_row_id,
         ingress_append,
+        provenance,
     } = frame;
     let ReplayDrainSink {
         detached_stream_id,
         pending_row_policy,
         drained_appends,
+        ..
     } = sink;
     let (detached_stream_id, pending_row_policy) = (*detached_stream_id, *pending_row_policy);
     if matches!(
@@ -472,7 +515,10 @@ async fn record_drained_xml(
                 next_sequence,
                 &stanza,
                 original_receipt_at,
-                key,
+                super::drain_append::DrainedAppendIdentity {
+                    key,
+                    provenance: &provenance,
+                },
                 drained_appends,
             )
             .await
@@ -485,10 +531,17 @@ async fn record_drained_xml(
     };
     // This record runs while a live transport is detaching; it keeps the
     // connection-local replay queue aligned with the detached-session drain.
-    let _ = sm_state.record_outbound_with_receipt_at(
+    let provenance = if matches!(&keyed, Some(super::drain_append::Claim::Unkeyed)) {
+        // The key was not established; keep the counted frame but lose the claim.
+        waddle_xmpp::stream_management::SmFrameProvenance::Unknown
+    } else {
+        provenance
+    };
+    let _ = sm_state.record_outbound_with_provenance(
         xml,
         original_receipt_at,
         SmEvictionPath::DetachDrain,
+        provenance,
     );
     let sequence = sm_state.outbound_count;
     if let Some(row_id) = pending_row_id.as_ref() {
@@ -566,6 +619,7 @@ async fn record_drained_terminal_xml(
     let TerminalDrainedFrame {
         xml,
         original_receipt_at,
+        provenance,
         pending_row_id,
     } = frame;
     if matches!(
@@ -632,6 +686,7 @@ async fn record_drained_terminal_xml(
     }
     inventory.outbound_count = inventory.outbound_count.wrapping_add(1);
     let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
+        provenance,
         ingress_receipts: Vec::new(),
         sequence: inventory.outbound_count,
         stanza_xml: xml,

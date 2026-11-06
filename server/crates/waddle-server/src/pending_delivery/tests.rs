@@ -4868,6 +4868,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         last_acked: 0,
         replay_gap_through: None,
         unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: replay_xml.clone(),

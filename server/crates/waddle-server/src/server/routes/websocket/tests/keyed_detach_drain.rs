@@ -15,8 +15,8 @@ use crate::ingress::commit::commit_submission;
 use crate::ingress::test_support::IngressFixture;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey};
 use waddle_xmpp::stream_management::{
-    SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, SmRelayedAppendObligation,
-    SmSessionRegistry as _,
+    SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome,
+    SmRelayedAppendObligation, SmSessionRegistry as _,
 };
 
 const STREAM: &str = "keyed-detach-drain";
@@ -137,6 +137,39 @@ async fn detach(socket: &mut DetachingSocket) -> waddle_xmpp::stream_management:
         .expect("resumable snapshot")
 }
 
+async fn reloaded_session(
+    socket: &DetachingSocket,
+) -> waddle_xmpp::stream_management::DetachedSession {
+    let storage = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(socket.fixture.db.database_url()))
+            .await
+            .expect("reopen SM persistence"),
+    );
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage);
+    assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
+    restarted.peek_session(STREAM).await.unwrap().unwrap()
+}
+
+async fn close_socket(socket: DetachingSocket) {
+    let DetachingSocket {
+        fixture,
+        state,
+        sm,
+        conn,
+        tx,
+        rx,
+        ..
+    } = socket;
+    drop((state, sm, conn, tx, rx));
+    fixture.close().await;
+}
+
+fn assert_same_replay_stanza(left: &str, right: &str) {
+    let left: minidom::Element = left.parse().expect("original replay stanza");
+    let right: minidom::Element = right.parse().expect("reloaded replay stanza");
+    assert_eq!(left, right);
+}
+
 /// The issue's failure path: the socket node accepted the frame, the origin lost its
 /// receipt, the socket detached unwritten, and recovery re-executes the obligation.
 async fn recovery_after_drain_finds_the_proof(fixture: IngressFixture) {
@@ -219,6 +252,7 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
 
     let mut socket = detaching_socket(fixture).await;
     let (stanza, obligation) = committed_obligation(&socket).await;
+    let expected = SmFrameProvenance::ingress([obligation.key.clone()]);
     detach(&mut socket).await;
 
     for _ in 0..2 {
@@ -235,6 +269,7 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
             &mut late_rx,
             super::super::replay::ReplayDrainSink {
                 detached_stream_id: Some(STREAM),
+                bound_resource: Some(&socket.recipient),
                 pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
                 drained_appends: &mut Vec::new(),
             },
@@ -244,12 +279,25 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
 
     let detached = socket.sm.peek_session(STREAM).await.unwrap().unwrap();
     assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(detached.unacked_stanzas[0].provenance, expected);
+    assert_eq!(
+        socket.conn.sm_state.stanzas_to_resend(0)[0].provenance,
+        expected
+    );
+    let restored = reloaded_session(&socket).await;
+    assert_eq!(restored.unacked_stanzas.len(), 1);
+    assert_eq!(restored.unacked_stanzas[0].provenance, expected);
+    assert_same_replay_stanza(
+        &detached.unacked_stanzas[0].stanza_xml,
+        &restored.unacked_stanzas[0].stanza_xml,
+    );
     assert_eq!(detached.outbound_count, 1);
     assert_eq!(
         socket.conn.sm_state.outbound_count, 1,
         "the connection-local counter stays aligned with the detached stream"
     );
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+    close_socket(socket).await;
 }
 
 /// A relayed `PeerStanza` runs the recipient pass inside the drain, so the queued
@@ -278,6 +326,10 @@ async fn peer_stanza_frames_are_keyed_after_the_recipient_pass(fixture: IngressF
     let detached = detach(&mut socket).await;
     assert_eq!(detached.unacked_stanzas.len(), 1);
     assert_eq!(
+        detached.unacked_stanzas[0].provenance,
+        SmFrameProvenance::Unknown
+    );
+    assert_eq!(
         detached.outbound_count, 1,
         "the duplicate was never counted"
     );
@@ -289,6 +341,87 @@ async fn peer_stanza_frames_are_keyed_after_the_recipient_pass(fixture: IngressF
         detached.unacked_stanzas[0].stanza_xml
     );
     assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+    let restored = reloaded_session(&socket).await;
+    assert_eq!(restored.unacked_stanzas.len(), 1);
+    assert_eq!(
+        restored.unacked_stanzas[0].provenance,
+        SmFrameProvenance::Unknown
+    );
+    assert_eq!(
+        restored.unacked_stanzas[0].sequence,
+        detached.unacked_stanzas[0].sequence
+    );
+    assert_same_replay_stanza(
+        &detached.unacked_stanzas[0].stanza_xml,
+        &restored.unacked_stanzas[0].stanza_xml,
+    );
+    close_socket(socket).await;
+}
+
+/// The same recipient-pass path must stay Unknown after the detached snapshot
+/// exists, even though its ledger proof is committed with the replay entry.
+async fn late_peer_stanza_keeps_unknown_provenance(fixture: IngressFixture) {
+    use super::super::replay::{drain_outbound_into_replay, PendingRowDrainPolicy};
+
+    let mut socket = detaching_socket(fixture).await;
+    socket.conn.ensure_state_machine(
+        "example.com",
+        &socket.state.deps.protocol.dispatcher,
+        socket.recipient.clone(),
+        false,
+        Blocklist::empty(),
+    );
+    let (stanza, obligation) = committed_obligation(&socket).await;
+    detach(&mut socket).await;
+    for _ in 0..2 {
+        let (late_tx, mut late_rx) = mpsc::channel::<OutboundStanza>(1);
+        late_tx
+            .send(
+                OutboundStanza::peer_stanza(stanza.clone()).with_ingress_append(obligation.clone()),
+            )
+            .await
+            .unwrap();
+        drain_outbound_into_replay(
+            socket.state.as_ref(),
+            socket.conn.state_machine.as_mut(),
+            &mut socket.conn.sm_state,
+            socket.conn.authenticated_session.as_ref(),
+            &mut late_rx,
+            super::super::replay::ReplayDrainSink {
+                detached_stream_id: Some(STREAM),
+                bound_resource: Some(&socket.recipient),
+                pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
+                drained_appends: &mut Vec::new(),
+            },
+        )
+        .await;
+    }
+    let local = socket.conn.sm_state.stanzas_to_resend(0);
+    let detached = socket.sm.peek_session(STREAM).await.unwrap().unwrap();
+    let restored = reloaded_session(&socket).await;
+    assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+    assert_eq!(socket.conn.sm_state.outbound_count, 1);
+    assert_eq!(detached.outbound_count, 1);
+    assert_eq!(local.len(), 1);
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(restored.unacked_stanzas.len(), 1);
+    assert_eq!(local[0].provenance, SmFrameProvenance::Unknown);
+    assert_eq!(
+        detached.unacked_stanzas[0].provenance,
+        SmFrameProvenance::Unknown
+    );
+    assert_eq!(
+        restored.unacked_stanzas[0].provenance,
+        SmFrameProvenance::Unknown
+    );
+    assert!(restored.unacked_stanzas[0]
+        .stanza_xml
+        .contains("by='juliet@example.com'"));
+    assert_same_replay_stanza(
+        &local[0].stanza_xml,
+        &restored.unacked_stanzas[0].stanza_xml,
+    );
+    close_socket(socket).await;
 }
 
 /// A frame the live handler already recorded into the SM queue — written or not,
@@ -360,6 +493,7 @@ async fn first_drain_is_bounded_by_the_backlog_it_found(fixture: IngressFixture)
             &mut socket.rx,
             super::super::replay::ReplayDrainSink {
                 detached_stream_id: None,
+                bound_resource: None,
                 pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
                 drained_appends: &mut Vec::new(),
             },
@@ -423,6 +557,12 @@ paired!(
     "drain_peer",
     sqlite_peer_stanza_frames_are_keyed_after_the_recipient_pass,
     postgres_peer_stanza_frames_are_keyed_after_the_recipient_pass
+);
+paired!(
+    late_peer_stanza_keeps_unknown_provenance,
+    "drain_pl",
+    sqlite_late_peer_stanza_keeps_unknown_provenance,
+    postgres_late_peer_stanza_keeps_unknown_provenance
 );
 paired!(
     first_drain_is_bounded_by_the_backlog_it_found,

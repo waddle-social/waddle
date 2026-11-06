@@ -4584,6 +4584,7 @@ fn cutover_sm_unacked(
 ) -> waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
     let message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
         sequence,

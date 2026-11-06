@@ -4191,6 +4191,7 @@ mod tests {
                 last_acked: 0,
                 replay_gap_through: None,
                 unacked_stanzas: vec![DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 1,
                     stanza_xml: String::from_utf8(stanza_xml).expect("utf8 stanza"),

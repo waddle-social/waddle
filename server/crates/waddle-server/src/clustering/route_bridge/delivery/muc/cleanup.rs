@@ -130,7 +130,7 @@ impl OrderedRelayDeliveryBridge {
         };
         match outcome {
             OrderedRelayMucProxyOutcome::Delivered(frames)
-                if frames.iter().all(|frame| !matches!(frame, Stanza::Presence(presence) if presence.type_ == xmpp_parsers::presence::Type::Error)) =>
+                if frames.iter().all(|frame| !matches!(&frame.stanza, Stanza::Presence(presence) if presence.type_ == xmpp_parsers::presence::Type::Error)) =>
             {
                 RelayMucCleanupOutcome::Converged
             }

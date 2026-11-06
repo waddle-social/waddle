@@ -2,7 +2,6 @@ use super::{
     confirm, Arc, CancellationToken, Duration, Mutex, NodeId, PendingReplyReceipts,
     RelayFrameReceiptCompletion,
 };
-use crate::clustering::codec::RemoteStanza;
 use crate::clustering::ordered_relay::{
     OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation,
 };
@@ -71,7 +70,7 @@ async fn cached_reply_receipt(fixture: IngressFixture, fail_storage: bool) {
         .frame_obligations
         .iter()
         .flat_map(|obligation| obligation.frames.iter().cloned())
-        .map(RemoteStanza)
+        .map(crate::clustering::codec::RemoteReplyFrame::from)
         .collect::<Vec<_>>();
     let receipts = Arc::new(Mutex::new(PendingReplyReceipts::default()));
     let token = receipts
@@ -121,7 +120,7 @@ async fn cached_reply_receipt(fixture: IngressFixture, fail_storage: bool) {
     );
     // Only frames from the received duplicate authorize confirmation.
     for frame in &ack.client_replies {
-        let Stanza::Message(message) = &frame.0 else {
+        let Stanza::Message(message) = &frame.stanza.0 else {
             panic!("message reply")
         };
         let mut bytes = Vec::new();
@@ -265,7 +264,7 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
         .frame_obligations
         .iter()
         .flat_map(|obligation| obligation.frames.iter().cloned())
-        .map(RemoteStanza)
+        .map(crate::clustering::codec::RemoteReplyFrame::from)
         .collect();
     let completion =
         RelayFrameReceiptCompletion::new(crate::clustering::route_bridge::RelayFrameCompletion {
@@ -318,7 +317,7 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
         waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag()
     );
     for frame in frames {
-        let Stanza::Message(message) = frame else {
+        let Stanza::Message(message) = frame.stanza else {
             panic!("reflection")
         };
         assert_eq!(message.type_, xmpp_parsers::message::MessageType::Groupchat);

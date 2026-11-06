@@ -227,9 +227,11 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
                                 replies,
                             ),
                         ) => {
+                            // This legacy XML return type loses the association;
+                            // the counted frame re-enters the SM queue as Unknown.
                             return replies
                                 .into_iter()
-                                .map(|reply| stanza_to_xml(&reply))
+                                .map(|reply| stanza_to_xml(&reply.stanza))
                                 .collect();
                         }
                         Some(

@@ -10,7 +10,8 @@ use super::{warn, Stanza, StreamManagementState, WebSocketState};
 use crate::ingress::append_authority::AppendAuthorityRejection;
 use crate::ingress::identity::IngressAppendObligationRef;
 use waddle_xmpp::stream_management::{
-    SmDrainedAppendTicket, SmIngressAppendKey, SmKeyedAppendOutcome, SmRelayedAppendObligation,
+    SmDrainedAppendTicket, SmFrameProvenance, SmIngressAppendKey, SmKeyedAppendOutcome,
+    SmRelayedAppendObligation,
 };
 
 /// Canonical-read health across one drain.
@@ -136,7 +137,7 @@ impl DrainAuthority {
 /// the sequence is counted and the client may already have the stanza.
 pub(super) async fn reserve_live_recorded(
     state: &WebSocketState,
-    sm_state: &StreamManagementState,
+    sm_state: &mut StreamManagementState,
     drained_appends: &mut Vec<DrainedAppend>,
 ) {
     let mut authority = DrainAuthority::default();
@@ -146,18 +147,21 @@ pub(super) async fn reserve_live_recorded(
                 sequence,
                 "ingress replay payload unavailable at detach; entry stays unkeyed"
             );
+            sm_state.mark_provenance_unknown(sequence);
             continue;
         };
         let Some(obligation) = authority
             .authorize(state, Some(&payload), Some(obligation))
             .await
         else {
+            sm_state.mark_provenance_unknown(sequence);
             continue;
         };
         if drained_appends
             .iter()
             .any(|drained| drained.0.key() == &obligation.key)
         {
+            sm_state.mark_provenance_unknown(sequence);
             continue;
         }
         match state
@@ -170,8 +174,9 @@ pub(super) async fn reserve_live_recorded(
             Ok(Some(ticket)) => {
                 drained_appends.push(DrainedAppend(ticket.at(sequence, payload, received_at)));
             }
-            Ok(None) => {}
+            Ok(None) => sm_state.mark_provenance_unknown(sequence),
             Err(error) => {
+                sm_state.mark_provenance_unknown(sequence);
                 warn!(%error, "ingress append ledger unreadable at detach; entry stays unkeyed");
             }
         }
@@ -241,15 +246,22 @@ pub(super) enum Claim {
     Unkeyed,
 }
 
+/// A ledger key and the independently chosen classification of this frame.
+pub(super) struct DrainedAppendIdentity<'a> {
+    pub(super) key: SmIngressAppendKey,
+    pub(super) provenance: &'a SmFrameProvenance,
+}
+
 pub(super) async fn claim(
     state: &WebSocketState,
     detached_stream_id: Option<&str>,
     sequence: u32,
     stanza: &Stanza,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
-    key: SmIngressAppendKey,
+    identity: DrainedAppendIdentity<'_>,
     drained_appends: &[DrainedAppend],
 ) -> Claim {
+    let DrainedAppendIdentity { key, provenance } = identity;
     let registry = &state.deps.protocol.sm_session_registry;
     let Some(stream_id) = detached_stream_id else {
         // A re-execution can queue the same obligation twice before the detach;
@@ -276,6 +288,7 @@ pub(super) async fn claim(
             stanza,
             original_receipt_at,
             key,
+            provenance.clone(),
         )
         .await
     {

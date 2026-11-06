@@ -1935,6 +1935,7 @@ mod tests {
                 last_acked: 0,
                 replay_gap_through: None,
                 unacked_stanzas: vec![DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 1,
                     stanza_xml: "<message xmlns='jabber:client' type='chat' from='bob@example.com/web' to='alice@example.com/detached-proof' id='late-detached'><body>retained by resume cleanup</body></message>".to_owned(),

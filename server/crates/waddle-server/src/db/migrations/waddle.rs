@@ -1730,6 +1730,11 @@ ALTER TABLE ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejecti
 INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_owner_rejections');
 "#;
 
+/// Preserve per-frame SM provenance; existing rows remain unknown.
+pub const V1029_SM_FRAME_PROVENANCE: &str = "ALTER TABLE sm_unacked ADD COLUMN provenance BLOB;";
+pub const V1029_SM_FRAME_PROVENANCE_POSTGRES: &str =
+    "ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS provenance BYTEA;";
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1904,6 +1909,12 @@ pub fn all() -> Vec<Migration> {
                 .to_string(),
             sql_sqlite: V1028_INGRESS_SOURCE_BINDING,
             sql_postgres: V1028_INGRESS_SOURCE_BINDING_POSTGRES,
+        },
+        Migration {
+            version: 1029,
+            description: "Preserve per-frame stream-management provenance".to_string(),
+            sql_sqlite: V1029_SM_FRAME_PROVENANCE,
+            sql_postgres: V1029_SM_FRAME_PROVENANCE_POSTGRES,
         },
     ]
 }

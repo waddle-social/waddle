@@ -7568,6 +7568,7 @@ mod graceful_shutdown_drain_tests {
             let mut session = detached_session(stream, jid.parse().unwrap());
             session.outbound_count = 1;
             session.unacked_stanzas.push(DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: message_xml(&transient_message(
@@ -7649,6 +7650,7 @@ mod graceful_shutdown_drain_tests {
             let mut session = detached_session("legacy-authority", jid.clone());
             session.outbound_count = 1;
             session.unacked_stanzas.push(DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: message_xml(&transient_message(&recipient, "recover now")),
@@ -7761,6 +7763,7 @@ mod graceful_shutdown_drain_tests {
         let mut session = detached_session("foreign-legacy-authority", jid.clone());
         session.outbound_count = 1;
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: message_xml(&transient_message(&jid.to_bare(), "foreign custody")),
@@ -8055,6 +8058,7 @@ mod graceful_shutdown_drain_tests {
         let mut healthy = detached_session(healthy_stream, healthy_jid);
         healthy.outbound_count = 1;
         healthy.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: message_xml(&transient_message(
@@ -8308,6 +8312,7 @@ mod graceful_shutdown_drain_tests {
             ),
         ] {
             session.unacked_stanzas.push(DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence,
                 stanza_xml,
@@ -8448,6 +8453,7 @@ mod graceful_shutdown_drain_tests {
         );
         session.outbound_count = 1;
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: message_xml(&transient_message(&recipient, "durable before live")),
@@ -8524,6 +8530,7 @@ mod graceful_shutdown_drain_tests {
         );
         session.outbound_count = 1;
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: message_xml(&transient_message(&recipient, "ordered prefix")),
@@ -8778,6 +8785,7 @@ mod graceful_shutdown_drain_tests {
             "romeo@example.com/phone".parse().expect("full jid"),
         );
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: message_xml(&message),
@@ -8846,6 +8854,7 @@ mod graceful_shutdown_drain_tests {
         );
         session.outbound_count = 11;
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: message_xml(&message),
@@ -8935,6 +8944,7 @@ mod graceful_shutdown_drain_tests {
         );
         session.outbound_count = 11;
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: message_xml(&transient_message(&recipient, "successor retains replay")),

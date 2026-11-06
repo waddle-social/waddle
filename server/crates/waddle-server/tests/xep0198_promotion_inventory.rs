@@ -39,6 +39,16 @@ fn message(id: &str) -> Stanza {
     Stanza::Message(message)
 }
 
+fn retained(id: &str, sequence: u32) -> waddle_xmpp::stream_management::DetachedUnackedStanza {
+    waddle_xmpp::stream_management::DetachedUnackedStanza {
+        provenance: Default::default(),
+        ingress_receipts: Vec::new(),
+        sequence,
+        stanza_xml: waddle_xmpp::parser::element_to_string(&message(id).to_element()).unwrap(),
+        original_receipt_at: chrono::Utc::now(),
+    }
+}
+
 async fn durable_inventory(fixture: IngressFixture) {
     let storage = Arc::new(
         DatabaseSmPersistence::open(Some(fixture.db.database_url()))
@@ -76,10 +86,96 @@ async fn durable_inventory(fixture: IngressFixture) {
         waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
     let stream = SmSessionId::new(&session.stream_id);
     let inventory = registry.register_promotion_session(&session).await.unwrap();
+    let mut suffix = retained("suffix", 2);
+    suffix.provenance = waddle_xmpp::stream_management::SmFrameProvenance::ingress([
+        waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(1),
+            semantic_identity_hash: [9; 32],
+            resource: "alice@example.com/web".parse().unwrap(),
+        },
+    ]);
     registry
-        .append_promotion_stanza(&session, &message("suffix"), 2, chrono::Utc::now())
+        .append_promotion_stanza(&session, &suffix)
         .await
         .unwrap();
+    let entries = storage.list_unacked(&stream).await.unwrap();
+    assert_eq!(entries[1].provenance, suffix.provenance);
+    // An incremental append and a later full snapshot retain the same frame identity.
+    let mut independent = storage.get_session(&stream).await.unwrap().unwrap();
+    independent.stream_id = SmSessionId::new("provenance-incremental");
+    independent.outbound_count = 1;
+    independent.last_acked = 0;
+    storage.upsert_session(independent.clone()).await.unwrap();
+    let mut incremental = entries[1].clone();
+    incremental.stream_id = independent.stream_id.clone();
+    incremental.sequence = 1;
+    storage
+        .append_detached_stanza_atomic(
+            waddle_xmpp::stream_management::persistence::PersistedDetachedAppend {
+                session: independent.clone(),
+                stanza: incremental.clone(),
+                evicted_sequences: Vec::new(),
+                ingress_append: None,
+                new_delivery: false,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.list_unacked(&independent.stream_id).await.unwrap()[0].provenance,
+        suffix.provenance
+    );
+    storage
+        .store_session_atomic(independent.clone(), vec![incremental])
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.list_unacked(&independent.stream_id).await.unwrap()[0].provenance,
+        suffix.provenance
+    );
+    storage
+        .delete_session(&independent.stream_id)
+        .await
+        .unwrap();
+    let joined = storage.list_all_sessions_with_unacked().await.unwrap();
+    assert_eq!(
+        joined
+            .iter()
+            .find(|(row, _)| row.stream_id == stream)
+            .unwrap()
+            .1[1]
+            .provenance,
+        suffix.provenance
+    );
+    let mut changed = suffix.clone();
+    changed.provenance = Default::default();
+    assert!(
+        registry
+            .append_promotion_stanza(&session, &changed)
+            .await
+            .is_err(),
+        "retry identity includes provenance"
+    );
+    // A malformed or oversized metadata value never hides the replay payload.
+    for value in [
+        vec![1, 2, 3],
+        vec![0; waddle_xmpp::stream_management::MAX_SM_PROVENANCE_BYTES + 1],
+    ] {
+        fixture
+            .execute(
+                "UPDATE sm_unacked SET provenance = ? WHERE stream_id = ? AND sequence = ?",
+                waddle_server::db_params![value, stream.as_str().to_string(), 1_i64],
+            )
+            .await;
+        let entries = storage.list_unacked(&stream).await.unwrap();
+        assert_eq!(
+            entries[0].provenance,
+            waddle_xmpp::stream_management::SmFrameProvenance::Unknown
+        );
+        assert_eq!(entries.len(), 2, "invalid metadata must not hide replay");
+    }
     let persisted = storage.get_session(&stream).await.unwrap().unwrap();
     assert_eq!(persisted.outbound_count, 2);
     assert_eq!(persisted.max_resume_time, Some(0));
@@ -100,7 +196,7 @@ async fn durable_inventory(fixture: IngressFixture) {
         .await
         .unwrap();
     assert!(registry
-        .append_promotion_stanza(&session, &message("rolled-back"), 3, chrono::Utc::now())
+        .append_promotion_stanza(&session, &retained("rolled-back", 3))
         .await
         .is_err());
     assert_eq!(
@@ -124,7 +220,7 @@ async fn durable_inventory(fixture: IngressFixture) {
         .await
         .unwrap();
     registry
-        .append_promotion_stanza(&session, &message("suffix"), 2, chrono::Utc::now())
+        .append_promotion_stanza(&session, &retained("suffix", 2))
         .await
         .unwrap();
     assert_eq!(
@@ -215,6 +311,105 @@ async fn postgres_nonresumable_inventory_and_atomic_suffix_survive_restart() {
         return;
     };
     durable_inventory(fixture).await;
+}
+
+async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
+    use waddle_server::db::MigrationRunner;
+    use waddle_server::sm_persistence::bootstrap_portable_sm_owner_schema;
+
+    // Fixture creation ran the fresh migration. Recreate the pre-V1029 state
+    // with a retained replay row, then let the older owner bootstrap run first.
+    fixture
+        .execute("DELETE FROM _migrations WHERE version = 1029", ())
+        .await;
+    fixture
+        .execute("ALTER TABLE sm_unacked DROP COLUMN provenance", ())
+        .await;
+    fixture.execute(
+        "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) VALUES ('before-v1029', 1, '<message/>', 1)",
+        (),
+    ).await;
+    bootstrap_portable_sm_owner_schema(&fixture.db)
+        .await
+        .unwrap();
+    bootstrap_portable_sm_owner_schema(&fixture.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        MigrationRunner::single().run(&fixture.db).await.unwrap(),
+        vec![1029]
+    );
+    assert!(MigrationRunner::single()
+        .run(&fixture.db)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fixture
+            .optional_text("SELECT stanza_xml FROM sm_unacked WHERE stream_id = 'before-v1029'")
+            .await
+            .as_deref(),
+        Some("<message/>")
+    );
+    assert_eq!(
+        fixture
+            .optional_text("SELECT provenance FROM sm_unacked WHERE stream_id = 'before-v1029'")
+            .await,
+        None
+    );
+
+    // Existing but incompatible columns must not be marked as migrated.
+    let mut tx = match fixture.db.driver() {
+        DatabaseDriver::Sqlite => fixture.db.begin_immediate().await.unwrap(),
+        DatabaseDriver::Postgres => fixture.db.begin().await.unwrap(),
+    };
+    tx.execute("DELETE FROM _migrations WHERE version = 1029", ())
+        .await
+        .unwrap();
+    tx.execute_batch(
+        "ALTER TABLE sm_unacked RENAME COLUMN provenance TO provenance_before_drift;\
+         ALTER TABLE sm_unacked ADD COLUMN provenance TEXT;",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        MigrationRunner::single().run(&fixture.db).await,
+        Err(waddle_server::db::DatabaseError::MigrationApply { version: 1029, .. })
+    ));
+    assert_eq!(fixture.count("sm_unacked").await, 1);
+    assert_eq!(
+        fixture
+            .optional_text("SELECT stanza_xml FROM sm_unacked WHERE stream_id = 'before-v1029'")
+            .await
+            .as_deref(),
+        Some("<message/>")
+    );
+    let conn = fixture.db.guard().await.unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM _migrations WHERE version = 1029", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    drop(rows);
+    drop(conn);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_provenance_migration_accepts_owner_bootstrap_and_rejects_drift() {
+    provenance_migration_after_owner_bootstrap(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_provenance_migration_accepts_owner_bootstrap_and_rejects_drift() {
+    let Some(fixture) = IngressFixture::postgres("smmigration").await else {
+        return;
+    };
+    provenance_migration_after_owner_bootstrap(fixture).await;
 }
 
 fn recorded_resume_session(
@@ -600,11 +795,79 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     let registry = InMemorySmSessionRegistry::new()
         .with_persistence(storage.clone())
         .with_claim_store(claims.clone(), identity.clone());
-    let stream = SmSessionId::new("fenced-expired-resume-completion");
+    // Exercise a fenced incremental write and reload in this fixture's
+    // isolated PostgreSQL schema before the expiry/promotion scenario.
+    let incremental_stream = SmSessionId::new("fenced-provenance-incremental");
+    let mut incremental = recorded_resume_session(incremental_stream.as_str(), 300);
+    incremental.jid = "alice@example.com/incremental".parse().unwrap();
     registry
-        .store_session(recorded_resume_session(stream.as_str(), 1))
+        .store_session(incremental)
         .await
-        .expect("store queue");
+        .expect("incremental source");
+    let incremental_fence = registry
+        .current_sm_claim_fence(incremental_stream.as_str())
+        .expect("incremental source fence");
+    let mut header = storage
+        .get_session(&incremental_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut entry = storage
+        .list_unacked(&incremental_stream)
+        .await
+        .unwrap()
+        .remove(0);
+    entry.sequence = 3;
+    entry.provenance = waddle_xmpp::stream_management::SmFrameProvenance::ingress([
+        waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(1),
+            semantic_identity_hash: [5; 32],
+            resource: header.jid.clone(),
+        },
+    ]);
+    header.outbound_count = 3;
+    assert_eq!(
+        storage
+            .append_detached_stanza_atomic(
+                waddle_xmpp::stream_management::persistence::PersistedDetachedAppend {
+                    session: header,
+                    stanza: entry.clone(),
+                    evicted_sequences: Vec::new(),
+                    ingress_append: None,
+                    new_delivery: false,
+                },
+                Some(&incremental_fence),
+            )
+            .await
+            .unwrap(),
+        waddle_xmpp::stream_management::persistence::KeyedSnapshotOutcome::Committed
+    );
+    let loaded = storage.list_unacked(&incremental_stream).await.unwrap();
+    assert_eq!(loaded[2].provenance, entry.provenance);
+    let scans = storage.list_all_sessions_with_unacked().await.unwrap();
+    assert_eq!(
+        scans
+            .iter()
+            .find(|(session, _)| session.stream_id == incremental_stream)
+            .unwrap()
+            .1[2]
+            .provenance,
+        entry.provenance
+    );
+    storage.delete_session(&incremental_stream).await.unwrap();
+    let stream = SmSessionId::new("fenced-expired-resume-completion");
+    let mut source = recorded_resume_session(stream.as_str(), 1);
+    let provenance = waddle_xmpp::stream_management::SmFrameProvenance::ingress([
+        waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(1),
+            semantic_identity_hash: [6; 32],
+            resource: source.jid.clone(),
+        },
+    ]);
+    source.unacked_stanzas[0].provenance = provenance.clone();
+    registry.store_session(source).await.expect("store queue");
     registry
         .claim_session(stream.as_str())
         .await
@@ -614,6 +877,7 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
         .current_sm_claim_fence(stream.as_str())
         .expect("original fence");
     let recorded = storage.list_unacked(&stream).await.expect("recorded queue");
+    assert_eq!(recorded[0].provenance, provenance);
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let operation = registry
         .lock_session_operation(stream.as_str())

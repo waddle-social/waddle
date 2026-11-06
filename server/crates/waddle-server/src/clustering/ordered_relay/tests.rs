@@ -154,6 +154,7 @@ fn receive(
 /// room to the channel's room instead of the stanza's `to`.
 fn muji_envelope(kind: OrderedRelayMucProxyKind, stanza: RemoteStanza) -> RemoteStanzaEnvelope {
     RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel_for_lane(OrderedRelayRoomLane::MujiSignaling),
         sequence: OrderedRelaySequence(1),
@@ -206,3 +207,63 @@ mod ingress_append;
 mod muc_validation;
 mod receiver;
 mod sender;
+
+#[test]
+fn per_frame_provenance_is_signed_and_survives_relay_encoding() {
+    use crate::clustering::codec::RemoteReplyFrame;
+    use waddle_xmpp::ingress::MessageKey;
+    use waddle_xmpp::stream_management::{
+        SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind,
+    };
+
+    let message_key = MessageKey::new();
+    let claim = |resource: &str| SmIngressAppendKey {
+        message_key,
+        kind: SmIngressReceiptKind::from_storage(1),
+        semantic_identity_hash: [4; 32],
+        resource: resource.parse().expect("full resource"),
+    };
+    let one = SmFrameProvenance::ingress([claim("juliet@example.test/one")]);
+    let two = SmFrameProvenance::ingress([claim("juliet@example.test/two")]);
+    let mut sender = OrderedRelaySenderState::default();
+    let mut envelope = sender
+        .next_envelope(
+            origin_node(),
+            channel(),
+            inbound(1),
+            claims(),
+            message_payload("one"),
+        )
+        .expect("envelope");
+    let before = envelope.signing_bytes().expect("signing bytes");
+    envelope.provenance = one.clone();
+    assert_ne!(before, envelope.signing_bytes().expect("signing bytes"));
+    let frames = vec![
+        RemoteReplyFrame {
+            stanza: message_payload_stanza("first"),
+            provenance: one,
+        },
+        RemoteReplyFrame {
+            stanza: message_payload_stanza("second"),
+            provenance: two,
+        },
+    ];
+    let encoded = rmp_serde::to_vec_named(&frames).expect("relay encoding");
+    let decoded: Vec<RemoteReplyFrame> = rmp_serde::from_slice(&encoded).expect("relay decoding");
+    assert_eq!(decoded, frames);
+    let mut legacy = serde_json::to_value(&frames[0]).expect("relay frame JSON");
+    legacy
+        .as_object_mut()
+        .expect("frame object")
+        .remove("provenance");
+    let decoded: RemoteReplyFrame = serde_json::from_value(legacy).expect("old reply frame");
+    assert_eq!(decoded.stanza, frames[0].stanza);
+    assert_eq!(decoded.provenance, SmFrameProvenance::Unknown);
+}
+
+fn message_payload_stanza(id: &str) -> RemoteStanza {
+    match message_payload(id) {
+        OrderedRelayPayload::Message { stanza, .. } => stanza,
+        _ => unreachable!("message payload fixture"),
+    }
+}

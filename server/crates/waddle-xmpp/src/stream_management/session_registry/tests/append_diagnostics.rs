@@ -300,6 +300,7 @@ async fn append(fixture: &Fixture, keyed: bool) -> Result<(), super::SmRegistryE
                 &stanza,
                 Utc::now(),
                 key,
+                Default::default(),
             )
             .await
             .map(|_| ())

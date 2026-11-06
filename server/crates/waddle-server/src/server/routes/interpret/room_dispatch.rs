@@ -232,7 +232,10 @@ pub(super) async fn dispatch_to_room(
                         {
                             capture_delivered_remote_room_route(capture, &room_jid, relay_target);
                         }
+                        // This legacy string-only output cannot carry a per-frame
+                        // association. Re-entry to the SM queue defaults to Unknown.
                         for reply in replies {
+                            let reply = reply.stanza;
                             match reply.to_element_string() {
                                 Ok(xml) => {
                                     // A remote room's delivered response may be an

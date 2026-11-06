@@ -934,8 +934,12 @@ async fn cleanup_connection_shutdown_inner(
         if !conn.sm_recovery_required {
             // Entries the live handler recorded before a failed or unacknowledged
             // write never pass through a drain; prove their obligations too.
-            super::drain_append::reserve_live_recorded(state, &conn.sm_state, &mut drained_appends)
-                .await;
+            super::drain_append::reserve_live_recorded(
+                state,
+                &mut conn.sm_state,
+                &mut drained_appends,
+            )
+            .await;
             // First detach drain: snapshot whatever's already in the
             // channel into the unacked queue. No detached_stream_id yet
             // because we haven't decided to store the detached session.
@@ -947,6 +951,7 @@ async fn cleanup_connection_shutdown_inner(
                 outbound_rx,
                 ReplayDrainSink {
                     detached_stream_id: None,
+                    bound_resource: Some(&jid),
                     pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
                     drained_appends: &mut drained_appends,
                 },
@@ -1234,6 +1239,7 @@ async fn cleanup_connection_shutdown_inner(
                         outbound_rx,
                         ReplayDrainSink {
                             detached_stream_id: Some(&stream_id),
+                            bound_resource: Some(&jid),
                             pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
                             drained_appends: &mut Vec::new(),
                         },
@@ -2386,21 +2392,11 @@ pub(super) async fn persist_terminal_suffix_entry(
     stanza: &waddle_xmpp::stream_management::DetachedUnackedStanza,
 ) -> Option<waddle_xmpp::stream_management::persistence::PromotionAppendOutcome> {
     let stream_id = &capture.stream_id;
-    let Some(typed) = stanza
-        .stanza_xml
-        .parse::<xmpp_parsers::minidom::Element>()
-        .ok()
-        .and_then(|element| crate::sm_persistence::codec::parse_stanza(element).ok())
-    else {
-        warn!(%stream_id, sequence = stanza.sequence,
-            "terminal inventory entry is not a valid stanza");
-        return None;
-    };
     match state
         .deps
         .protocol
         .sm_session_registry
-        .append_promotion_stanza(capture, &typed, stanza.sequence, stanza.original_receipt_at)
+        .append_promotion_stanza(capture, stanza)
         .await
     {
         Ok(outcome) => {

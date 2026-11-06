@@ -141,13 +141,19 @@ impl MigrationRunner {
                 description = %migration.description,
                 "Applying migration"
             );
-            tx.execute_batch(migration.sql_for(driver))
-                .await
-                .map_err(|source| DatabaseError::MigrationApply {
-                    version: migration.version,
-                    description: migration.description.clone(),
-                    source: Box::new(source),
-                })?;
+            let apply_result = if migration.version == 1029
+                && migration.sql_sqlite == waddle::V1029_SM_FRAME_PROVENANCE
+                && migration.sql_postgres == waddle::V1029_SM_FRAME_PROVENANCE_POSTGRES
+            {
+                apply_sm_frame_provenance(tx, driver, migration).await
+            } else {
+                tx.execute_batch(migration.sql_for(driver)).await
+            };
+            apply_result.map_err(|source| DatabaseError::MigrationApply {
+                version: migration.version,
+                description: migration.description.clone(),
+                source: Box::new(source),
+            })?;
             tx.execute(
                 "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
                 crate::db_params![
@@ -534,6 +540,61 @@ impl MigrationRunner {
             .map(|migration| migration.version)
             .unwrap_or(0);
         Ok(current < latest)
+    }
+}
+
+/// The SM owner may have bootstrapped this column before the global migration.
+/// SQLite's caller holds BEGIN IMMEDIATE; on PostgreSQL, the idempotent ALTER
+/// takes the table lock even if the column already exists. Validate the shape
+/// while that lock is held before recording the deterministic catalog checksum.
+async fn apply_sm_frame_provenance(
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    migration: &Migration,
+) -> Result<(), DatabaseError> {
+    if driver == DatabaseDriver::Postgres || sm_provenance_column_shape(tx, driver).await?.is_none()
+    {
+        tx.execute_batch(migration.sql_for(driver)).await?;
+    }
+
+    let expected_type = match driver {
+        DatabaseDriver::Sqlite => "blob",
+        DatabaseDriver::Postgres => "bytea",
+    };
+    match sm_provenance_column_shape(tx, driver).await? {
+        Some((column_type, 0, None, 0)) if column_type.eq_ignore_ascii_case(expected_type) => {
+            Ok(())
+        }
+        _ => Err(DatabaseError::QueryFailed(
+            "sm_unacked.provenance must be a nullable binary column without a default or generated value".to_owned(),
+        )),
+    }
+}
+
+async fn sm_provenance_column_shape(
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+) -> Result<Option<(String, i64, Option<String>, i64)>, DatabaseError> {
+    let query = match driver {
+        DatabaseDriver::Sqlite => {
+            "SELECT type, \"notnull\", dflt_value, hidden + pk FROM pragma_table_xinfo('sm_unacked') WHERE name = 'provenance'"
+        }
+        DatabaseDriver::Postgres => {
+            "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod), \
+             CASE WHEN a.attnotnull THEN 1 ELSE 0 END::bigint, \
+             pg_catalog.pg_get_expr(d.adbin, d.adrelid), \
+             CASE WHEN a.attgenerated <> '' OR a.attidentity <> '' THEN 1 ELSE 0 END::bigint \
+             FROM pg_catalog.pg_attribute a \
+             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = pg_catalog.to_regclass('sm_unacked') \
+             AND a.attname = 'provenance' AND NOT a.attisdropped"
+        }
+    };
+    let mut rows = tx.query(query, ()).await?;
+    if let Some(row) = rows.next().await? {
+        Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+    } else {
+        Ok(None)
     }
 }
 

@@ -116,6 +116,9 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
         };
+        // This producer binds the captured ingress obligation to the explicit
+        // target resource before signing. Missing context remains Unknown.
+        envelope.provenance = envelope.payload.frame_provenance();
         let channel = envelope.channel.clone();
         if self.sign_envelope(&mut envelope).is_err() {
             // Local precondition failure: undo the sequence advance so
@@ -256,6 +259,7 @@ impl OrderedRelayDeliveryBridge {
         let Ok(mut envelope) = resent else {
             return (prepared, result);
         };
+        envelope.provenance = prepared.envelope.provenance.clone();
         if self.sign_envelope(&mut envelope).is_err() {
             self.sender_state
                 .lock()

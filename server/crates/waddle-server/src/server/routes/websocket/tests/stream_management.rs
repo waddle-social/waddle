@@ -4375,6 +4375,7 @@ async fn failed_pending_ownership_preflight_never_releases_a_durable_replay_copy
         stream_id,
         &jid,
         vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: message_frame_xml_with_id("terminal-release-replay-copy".to_owned()),
@@ -4469,6 +4470,7 @@ async fn terminal_ownership_discovery_failure_defers_promotion_until_janitor_ret
         &old_stream_id,
         &jid,
         vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: message_frame_xml_with_id("terminal-release-replay-copy".to_string()),
@@ -5340,12 +5342,14 @@ async fn janitor_redrives_released_rows_before_promoting_remainder() {
         &jid,
         vec![
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: message_frame_xml_with_id("row-backed-copy".to_string()),
                 original_receipt_at: chrono::Utc::now(),
             },
             DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 2,
                 stanza_xml: transient_chat_message_xml("janitor-later", &jid.to_bare()),
@@ -6697,6 +6701,7 @@ async fn sm_resume_final_principal_recheck_rejects_without_committing_staged_sta
             last_acked: 0,
             replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: "<message xmlns='jabber:client' id='queued'/>".to_string(),
@@ -8110,18 +8115,21 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
         replay_gap_through: None,
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: u32::MAX,
                 stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 2,
                 stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
@@ -8784,12 +8792,14 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         replay_gap_through: None,
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 9,
                 stanza_xml: "<message xmlns='jabber:client' id='m9'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 10,
                 stanza_xml: "<message xmlns='jabber:client' id='m10'/>".to_string(),
@@ -8911,6 +8921,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             last_acked: 0,
             replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: "<message xmlns='jabber:client' id='m1'/>".to_string(),
@@ -10387,12 +10398,14 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         replay_gap_through: None,
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 1,
                 stanza_xml: "<message xmlns='jabber:client' id='m1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 2,
                 stanza_xml: "<message xmlns='jabber:client' id='m2'/>".to_string(),
@@ -11133,12 +11146,14 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             replay_gap_through: None,
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 1,
                     stanza_xml: queued_message_xml,
                     original_receipt_at: original_receipt,
                 },
                 DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 2,
                     stanza_xml: queued_iq_xml,
@@ -11811,18 +11826,21 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             replay_gap_through: None,
             unacked_stanzas: vec![
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: u32::MAX,
                     stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
                 },
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 1,
                     stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
                 },
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: 2,
                     stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
@@ -12353,6 +12371,7 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             last_acked: 3,
             replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+                provenance: Default::default(),
                 ingress_receipts: Vec::new(),
                 sequence: 4,
                 stanza_xml: "<message xmlns='jabber:client' id='m4'/>".to_string(),

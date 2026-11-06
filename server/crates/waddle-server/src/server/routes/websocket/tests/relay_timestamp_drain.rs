@@ -28,6 +28,7 @@ pub(crate) async fn drain_registered_remote_frame(
         receiver,
         ReplayDrainSink {
             detached_stream_id: Some(&stream),
+            bound_resource: None,
             pending_row_policy: PendingRowDrainPolicy::PreserveForReplay,
             drained_appends: &mut drained_appends,
         },

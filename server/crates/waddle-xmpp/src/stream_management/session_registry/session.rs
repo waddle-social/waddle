@@ -22,6 +22,8 @@ use crate::Stanza;
 /// XEP-0198 §5 line 364.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachedUnackedStanza {
+    /// Origin claims for this exact frame; they do not grant settlement authority.
+    pub provenance: super::super::SmFrameProvenance,
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
     pub ingress_receipts: Vec<SmIngressFrameReceipt>,
     /// XEP-0198 outbound sequence number assigned to this stanza.
@@ -317,54 +319,81 @@ impl DetachedSession {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) {
+        self.record_detached_outbound_with_provenance(
+            stanza,
+            original_receipt_at,
+            Default::default(),
+        );
+    }
+
+    /// Return the complete new entry even when it cannot remain in the queue.
+    pub fn record_detached_outbound_with_provenance(
+        &mut self,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::super::SmFrameProvenance,
+    ) -> DetachedUnackedStanza {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         if self.unacked_stanzas.len() >= DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
             self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);
         }
-        self.unacked_stanzas.push(DetachedUnackedStanza {
+        let entry = DetachedUnackedStanza {
+            provenance,
             ingress_receipts: Vec::new(),
             sequence: self.outbound_count,
             stanza_xml: stanza_to_replay_xml(stanza),
             original_receipt_at,
-        });
+        };
+        self.unacked_stanzas.push(entry.clone());
+        entry
     }
 
     /// Record an explicitly sequenced outbound stanza while detached.
-    ///
-    /// Entries at or behind `last_acked` are rejected before mutating the
-    /// session: acknowledgement has already purged them, so admitting one
-    /// would either restore obsolete state or evict a still-valid entry.
-    ///
-    /// Returns whether the session mutated. Stale and duplicate sequences
-    /// are no-ops; callers must skip the durable write for them so retries
-    /// cannot change counters, replay gaps, or the original detach deadline.
+    /// Stale and duplicate sequences are no-ops.
     pub fn record_detached_outbound_at(
         &mut self,
         sequence: u32,
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> bool {
-        if !sequence_gt(sequence, self.last_acked) {
-            return false;
-        }
-        if self
-            .unacked_stanzas
-            .iter()
-            .any(|entry| entry.sequence == sequence)
+        self.record_detached_outbound_at_with_provenance(
+            sequence,
+            stanza,
+            original_receipt_at,
+            Default::default(),
+        )
+        .is_some()
+    }
+
+    /// Return the complete entry, including one evicted by this insertion.
+    pub fn record_detached_outbound_at_with_provenance(
+        &mut self,
+        sequence: u32,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::super::SmFrameProvenance,
+    ) -> Option<DetachedUnackedStanza> {
+        if !sequence_gt(sequence, self.last_acked)
+            || self
+                .unacked_stanzas
+                .iter()
+                .any(|entry| entry.sequence == sequence)
         {
-            return false;
+            return None;
         }
         if sequence_gt(sequence, self.outbound_count) {
             self.outbound_count = sequence;
         }
-        self.unacked_stanzas.push(DetachedUnackedStanza {
+        let entry = DetachedUnackedStanza {
+            provenance,
             ingress_receipts: Vec::new(),
             sequence,
             stanza_xml: stanza_to_replay_xml(stanza),
             original_receipt_at,
-        });
+        };
+        self.unacked_stanzas.push(entry.clone());
         self.unacked_stanzas
             .sort_by_key(|entry| entry.sequence.wrapping_sub(self.last_acked));
         while self.unacked_stanzas.len() > DEFAULT_MAX_UNACKED_QUEUE_SIZE {
@@ -372,7 +401,7 @@ impl DetachedSession {
             self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);
         }
-        true
+        Some(entry)
     }
 
     /// Surface a detached-queue eviction that was previously silent (issue

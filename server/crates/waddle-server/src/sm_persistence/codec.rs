@@ -217,6 +217,29 @@ fn decode_occupancy_session(
     )
 }
 
+/// Bound database values before the driver allocates a provenance buffer.
+pub(crate) fn bounded_provenance_projection(
+    driver: crate::db::DatabaseDriver,
+    column: &str,
+) -> String {
+    let max = waddle_xmpp::stream_management::MAX_SM_PROVENANCE_BYTES;
+    match driver {
+        crate::db::DatabaseDriver::Sqlite => format!("CASE WHEN typeof({column}) = 'blob' AND length({column}) <= {max} THEN {column} ELSE NULL END"),
+        crate::db::DatabaseDriver::Postgres => format!("CASE WHEN length({column}) <= {max} THEN {column} ELSE NULL END"),
+    }
+}
+
+fn decode_provenance(
+    row: &Row,
+    column: usize,
+) -> waddle_xmpp::stream_management::SmFrameProvenance {
+    let bytes = row.get::<Option<Vec<u8>>>(column).ok().flatten();
+    bytes.as_deref().map_or(
+        waddle_xmpp::stream_management::SmFrameProvenance::Unknown,
+        waddle_xmpp::stream_management::SmFrameProvenance::decode,
+    )
+}
+
 pub(crate) fn decode_unacked(row: &Row) -> Result<PersistedUnackedStanza, SmPersistenceError> {
     let stream_id: String = row
         .get(0)
@@ -241,6 +264,7 @@ pub(crate) fn decode_unacked(row: &Row) -> Result<PersistedUnackedStanza, SmPers
     let stanza = parse_stanza(element)?;
 
     Ok(PersistedUnackedStanza {
+        provenance: decode_provenance(row, 5),
         ingress_receipts: decode_ingress_receipts(
             row.get(4)
                 .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
@@ -281,6 +305,7 @@ pub(super) fn decode_unacked_join_row(
     let sequence =
         u32::try_from(sequence_i64).map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     Ok(PersistedUnackedStanza {
+        provenance: decode_provenance(row, 23),
         ingress_receipts: decode_ingress_receipts(
             row.get(22)
                 .map_err(|error| SmPersistenceError::Other(error.to_string()))?,

@@ -174,17 +174,13 @@ impl OrderedRelayAck {
         owner: NodeId,
         stop_token: CancellationToken,
     ) -> (
-        Vec<waddle_xmpp::Stanza>,
+        Vec<waddle_xmpp::stream_management::SmProvenancedStanza>,
         Option<RelayFrameReceiptCompletion>,
     ) {
         let completion = self.reply_receipt.map(|token| {
             RelayFrameReceiptCompletion::remote(owner, token, self.owner_receipts, stop_token)
         });
-        let frames = self
-            .client_replies
-            .into_iter()
-            .map(|remote| remote.0)
-            .collect();
+        let frames = self.client_replies.into_iter().map(Into::into).collect();
         (frames, completion)
     }
 }

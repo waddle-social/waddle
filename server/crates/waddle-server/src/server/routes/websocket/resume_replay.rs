@@ -33,6 +33,7 @@ pub(super) fn replay_frames(
                 entry.original_receipt_at,
             ))
             .with_ingress_receipts(entry.ingress_receipts)
+            .with_provenance(entry.provenance)
         })
         .collect()
 }
@@ -90,6 +91,44 @@ mod tests {
             std::slice::from_ref(&obligation),
             "a replayed frame must carry its obligation, or reaching the wire settles nothing"
         );
+    }
+
+    #[test]
+    fn provenance_follows_each_replay_and_legacy_conversion_is_unknown() {
+        use waddle_xmpp::stream_management::{SmFrameProvenance, SmIngressAppendKey};
+        let key = SmIngressAppendKey {
+            message_key: MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(7),
+            semantic_identity_hash: [3; 32],
+            resource: "a@example.com/x".parse().expect("resource"),
+        };
+        let known = SmFrameProvenance::ingress([key]);
+        let xml = stanza_to_xml(&message(Id("m1".to_string())));
+        let mut sm = StreamManagementState::new();
+        let _ = sm.record_outbound_with_provenance(
+            xml.clone(),
+            Utc::now(),
+            SmEvictionPath::Batch,
+            known.clone(),
+        );
+        let _ = sm.record_outbound(xml.clone(), SmEvictionPath::Batch);
+        let frames = replay_frames(&sm, 0, "example.com");
+        assert_eq!(frames[0].provenance(), known);
+        assert_eq!(frames[1].provenance(), SmFrameProvenance::Unknown);
+        let legacy = ResponseFrame::from_serialized_xml(frames[0].clone().into_serialized_xml());
+        assert_eq!(legacy.provenance(), SmFrameProvenance::Unknown);
+        assert_eq!(
+            frames[0]
+                .clone()
+                .with_provenance(SmFrameProvenance::Unknown)
+                .provenance(),
+            SmFrameProvenance::Unknown
+        );
+        assert_eq!(
+            legacy.into_serialized_xml(),
+            frames[0].clone().into_serialized_xml()
+        );
+        assert_eq!(replay_frames(&sm, 0, "example.com")[0].provenance(), known);
     }
 
     /// #1178: the replay is stamped with the stanza's original receipt time so

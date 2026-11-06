@@ -162,9 +162,10 @@ async fn xep0045_transient_initial_local_sender_delivery_uses_one_guarded_frame(
         .await;
         assert_eq!(report.frame_obligations.len(), 1);
         assert_eq!(report.frame_obligations[0].frames.len(), 1);
-        let (Stanza::Message(actual), Stanza::Message(expected)) =
-            (&report.frame_obligations[0].frames[0], original.as_ref())
-        else {
+        let (Stanza::Message(actual), Stanza::Message(expected)) = (
+            &report.frame_obligations[0].frames[0].stanza,
+            original.as_ref(),
+        ) else {
             panic!("canonical initial reflection")
         };
         assert_eq!(actual, expected);
@@ -210,8 +211,11 @@ async fn xep0045_transient_initial_no_store_and_no_permanent_store_echo_once_wit
         )
         .await;
         assert_eq!(report.frame_obligations.len(), 1);
-        let [Stanza::Message(message)] = report.frame_obligations[0].frames.as_slice() else {
+        let [frame] = report.frame_obligations[0].frames.as_slice() else {
             panic!("one typed room echo");
+        };
+        let Stanza::Message(message) = &frame.stanza else {
+            panic!("message echo");
         };
         let mut expected = case
             .submission

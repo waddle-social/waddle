@@ -30,6 +30,7 @@ pub mod ingress_append;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod lifecycle_model;
 pub mod persistence;
+mod provenance;
 mod replay;
 mod resume_checkpoint;
 pub mod sequence;
@@ -43,6 +44,10 @@ mod unacked_queue;
 pub use ingress_append::{
     ArchiveDispatchPosition, SmDrainedAppendTicket, SmDrainedIngressAppend, SmIngressAppendKey,
     SmKeyedAppendOutcome, SmRelayedAppendObligation,
+};
+pub use provenance::{
+    SmFrameIngressClaims, SmFrameProvenance, SmProvenancedStanza, MAX_SM_PROVENANCE_BYTES,
+    MAX_SM_PROVENANCE_CLAIMS,
 };
 pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
 pub use resume_checkpoint::{SmResumeCheckpointHandle, SmResumeRejection};

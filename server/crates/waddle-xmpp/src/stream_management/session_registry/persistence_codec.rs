@@ -57,6 +57,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
     stanza_xml: &str,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     ingress_receipts: Vec<super::super::SmIngressFrameReceipt>,
+    provenance: super::super::SmFrameProvenance,
 ) -> Result<super::super::persistence::PersistedUnackedStanza, SmRegistryError> {
     let element: minidom::Element = stanza_xml.parse().map_err(|e: minidom::Error| {
         SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
@@ -81,6 +82,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
         }
     };
     Ok(super::super::persistence::PersistedUnackedStanza {
+        provenance,
         ingress_receipts,
         stream_id: SmSessionId::new(stream_id.to_string()),
         sequence,
@@ -141,6 +143,7 @@ pub(super) fn persisted_to_detached(
             let xml = String::from_utf8(buf)
                 .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
             Ok(DetachedUnackedStanza {
+                provenance: row.provenance.clone(),
                 ingress_receipts: row.ingress_receipts.clone(),
                 sequence: row.sequence,
                 stanza_xml: xml,
@@ -225,6 +228,7 @@ mod tests {
             .bodies
             .insert(Lang::new(), format!("seq-{sequence}"));
         PersistedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
             sequence,

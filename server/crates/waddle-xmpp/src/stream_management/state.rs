@@ -289,11 +289,28 @@ impl StreamManagementState {
         original_receipt_at: chrono::DateTime<chrono::Utc>,
         eviction_path: SmEvictionPath,
     ) -> RecordOutboundResult {
+        self.record_outbound_with_provenance(
+            stanza_xml,
+            original_receipt_at,
+            eviction_path,
+            super::SmFrameProvenance::Unknown,
+        )
+    }
+
+    /// Record the provenance atomically with the counted frame.
+    pub fn record_outbound_with_provenance(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+        eviction_path: SmEvictionPath,
+        provenance: super::SmFrameProvenance,
+    ) -> RecordOutboundResult {
         self.outbound_count = self.outbound_count.wrapping_add(1);
-        match self.unacked_queue.push_with_receipt_at(
+        match self.unacked_queue.push_with_provenance(
             self.outbound_count,
             stanza_xml,
             original_receipt_at,
+            provenance,
         ) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {
@@ -318,6 +335,11 @@ impl StreamManagementState {
     ) {
         self.unacked_queue
             .attach_ingress_append(sequence, obligation);
+    }
+
+    /// Retain the counted frame while discarding an indeterminate association.
+    pub fn mark_provenance_unknown(&mut self, sequence: u32) {
+        self.unacked_queue.mark_provenance_unknown(sequence);
     }
 
     /// Unacknowledged entries that still carry an unproven ingress obligation.

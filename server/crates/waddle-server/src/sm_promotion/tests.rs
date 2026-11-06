@@ -104,6 +104,7 @@ fn detached_session_with_unacked(
             .enumerate()
             .map(
                 |(i, xml)| waddle_xmpp::stream_management::DetachedUnackedStanza {
+                    provenance: Default::default(),
                     ingress_receipts: Vec::new(),
                     sequence: i as u32 + 1,
                     stanza_xml: xml,
@@ -968,6 +969,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         last_acked: 0,
         replay_gap_through: None,
         unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             sequence: 1,
             stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"),
@@ -1222,6 +1224,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
         .insert(xmpp_parsers::message::Lang::new(), "while down".to_string());
     sm_storage
         .append_unacked(PersistedUnackedStanza {
+            provenance: Default::default(),
             ingress_receipts: Vec::new(),
             stream_id: SmSessionId::new("stream-dead"),
             sequence: 1,
@@ -3169,6 +3172,7 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
         Stanza::Message(message)
     };
     let first = PersistedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(STREAM),
         sequence: 1,
@@ -3201,6 +3205,7 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
     let mut appended_session = session.clone();
     appended_session.outbound_count = 2;
     let second = PersistedUnackedStanza {
+        provenance: Default::default(),
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(STREAM),
         sequence: 2,

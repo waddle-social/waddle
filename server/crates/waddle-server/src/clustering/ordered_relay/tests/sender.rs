@@ -174,6 +174,7 @@ fn sender_sticky_diversion_short_circuits_later_envelopes_for_channel() {
 fn changing_muc_proxy_origin_invalidates_existing_signature() {
     let keypair = Keypair::generate_ed25519();
     let mut envelope = RemoteStanzaEnvelope {
+        provenance: Default::default(),
         asserted_origin_node: origin_node(),
         channel: room_channel(),
         sequence: OrderedRelaySequence(1),

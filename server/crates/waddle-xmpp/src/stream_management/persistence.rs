@@ -216,6 +216,8 @@ pub struct PersistedSession {
 /// and parses back to typed on read.
 #[derive(Debug, Clone)]
 pub struct PersistedUnackedStanza {
+    /// Origin claims for this exact frame; they do not grant settlement authority.
+    pub provenance: super::SmFrameProvenance,
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
     pub ingress_receipts: Vec<SmIngressFrameReceipt>,
     /// XEP-0198 stream-id of the owning session.
@@ -1109,6 +1111,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
                 || existing.original_receipt_at.timestamp_millis()
                     != stanza.original_receipt_at.timestamp_millis()
                 || existing.ingress_receipts != stanza.ingress_receipts
+                || existing.provenance != stanza.provenance
             {
                 return Err(SmPersistenceError::PromotionSequenceConflict {
                     stream_id: stream,

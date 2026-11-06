@@ -512,14 +512,15 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         let xml = serialize_stanza(&stanza.stanza)?;
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
         self.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \
+             VALUES (?, ?, ?, ?, ?, ?)",
             crate::db_params![
                 stanza.stream_id.as_str().to_string(),
                 i64::from(stanza.sequence),
                 xml,
                 receipt_ms,
                 crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
+                stanza.provenance.encode(),
             ],
         )
         .await?;
@@ -610,9 +611,9 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
         let mut rows = self
             .query(
-                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts \
+                &format!("SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, {provenance} \
                  FROM sm_unacked WHERE stream_id = ? \
-                 ORDER BY sequence ASC",
+                 ORDER BY sequence ASC", provenance = crate::sm_persistence::codec::bounded_provenance_projection(self.db.driver(), "provenance")),
                 crate::db_params![stream_id.as_str().to_string()],
             )
             .await?;

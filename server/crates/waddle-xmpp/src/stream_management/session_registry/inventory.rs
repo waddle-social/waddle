@@ -1,12 +1,10 @@
 //! Durable unavailable-resource custody, using expired SM rows as inventory.
 use crate::stream_management::persistence::SmClaimFence;
 use crate::stream_management::persistence::SmPersistenceError;
-use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::pending_delivery::SmSessionId;
-use crate::stream_management::persistence::{PersistedUnackedStanza, PromotionAppendOutcome};
-use crate::Stanza;
+use crate::stream_management::persistence::PromotionAppendOutcome;
 
 use super::claims::PendingPromotionRetryLease;
 use super::persistence_codec::{
@@ -163,6 +161,7 @@ impl InMemorySmSessionRegistry {
                         &entry.stanza_xml,
                         entry.original_receipt_at,
                         entry.ingress_receipts.clone(),
+                        entry.provenance.clone(),
                     )?;
                     storage
                         .append_promotion_stanza_with_fence(stanza, &fence)
@@ -203,6 +202,7 @@ impl InMemorySmSessionRegistry {
                             &entry.stanza_xml,
                             entry.original_receipt_at,
                             entry.ingress_receipts.clone(),
+                            entry.provenance.clone(),
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -346,9 +346,7 @@ impl InMemorySmSessionRegistry {
     pub async fn append_promotion_stanza(
         &self,
         capture: &DetachedSession,
-        stanza: &Stanza,
-        sequence: u32,
-        original_receipt_at: DateTime<Utc>,
+        entry: &super::DetachedUnackedStanza,
     ) -> Result<PromotionAppendOutcome, SmRegistryError> {
         let stream_id = &capture.stream_id;
         let stream_lock = self.stream_lock(stream_id)?;
@@ -384,13 +382,14 @@ impl InMemorySmSessionRegistry {
         if let Some(storage) = &self.persistence {
             return storage
                 .append_promotion_stanza_with_fence(
-                    PersistedUnackedStanza {
-                        stream_id: stream,
-                        sequence,
-                        stanza: Box::new(stanza.clone()),
-                        original_receipt_at,
-                        ingress_receipts: Vec::new(),
-                    },
+                    parse_xml_to_persisted_unacked(
+                        stream.as_str(),
+                        entry.sequence,
+                        &entry.stanza_xml,
+                        entry.original_receipt_at,
+                        entry.ingress_receipts.clone(),
+                        entry.provenance.clone(),
+                    )?,
                     &fence,
                 )
                 .await

@@ -307,6 +307,7 @@ async fn keyed_append_losing_transaction_preserves_every_snapshot_field_and_expi
     full.replay_gap_through = Some(0);
     full.unacked_stanzas = (1..=full.outbound_count)
         .map(|sequence| DetachedUnackedStanza {
+            provenance: Default::default(),
             sequence,
             ..full.unacked_stanzas[0].clone()
         })
@@ -703,6 +704,7 @@ async fn keyed_append_confirmation_retries_unseen_durable_entry_before_deletion(
     durable.outbound_count = durable.outbound_count.wrapping_add(1);
     let receipt = Utc::now() - chrono::Duration::hours(4);
     queue.push(PersistedUnackedStanza {
+        provenance: Default::default(),
         stream_id: stream.clone(),
         ingress_receipts: Vec::new(),
         sequence: durable.outbound_count,
@@ -1168,6 +1170,7 @@ async fn live_attempt_blocks_new_allocation_but_allows_accepted_frame_custody() 
             &stanza(),
             Utc::now(),
             key.clone(),
+            Default::default(),
         )
         .await
         .expect("accepted frame custody bypasses new delivery guard");
@@ -1181,4 +1184,40 @@ async fn live_attempt_blocks_new_allocation_but_allows_accepted_frame_custody() 
         .await
         .expect("accepted custody")
         .is_some());
+}
+
+#[test]
+fn self_evicted_detached_entry_retains_exact_provenance_for_storage() {
+    use crate::stream_management::{SmFrameProvenance, DEFAULT_MAX_UNACKED_QUEUE_SIZE};
+    let mut session = realistic_test_session("provenance-self-eviction");
+    session.last_acked = 0;
+    session.outbound_count = (DEFAULT_MAX_UNACKED_QUEUE_SIZE + 1) as u32;
+    session.unacked_stanzas = (2..=session.outbound_count)
+        .map(|sequence| DetachedUnackedStanza {
+            provenance: SmFrameProvenance::Unknown,
+            ingress_receipts: Vec::new(),
+            sequence,
+            stanza_xml: "<message xmlns='jabber:client'/>".to_owned(),
+            original_receipt_at: Utc::now(),
+        })
+        .collect();
+    let previous: Vec<_> = session
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    let provenance = SmFrameProvenance::ingress([obligation(&session.jid)]);
+    let payload = stanza();
+    let entry = session
+        .record_detached_outbound_at_with_provenance(1, &payload, Utc::now(), provenance.clone())
+        .expect("new sequence");
+    assert!(!session
+        .unacked_stanzas
+        .iter()
+        .any(|entry| entry.sequence == 1));
+    let delta =
+        super::super::append::prepare_detached_append(&previous, &session, &entry, &payload)
+            .expect("detached delta");
+    assert_eq!(delta.stanza.provenance, provenance);
+    assert!(delta.evicted_sequences.contains(&1));
 }
