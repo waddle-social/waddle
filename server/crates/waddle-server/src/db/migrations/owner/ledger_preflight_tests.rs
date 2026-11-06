@@ -8,8 +8,9 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use super::{
-    acquire_dark_shared_migration_ledger_v1023, acquire_dark_shared_migration_ledger_v1030_write,
-    DarkLedgerPreflightError, DarkMigrationLedgerPins, MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+    acquire_dark_shared_migration_ledger_v1023, acquire_dark_shared_migration_ledger_v1030_read,
+    acquire_dark_shared_migration_ledger_v1030_write, DarkLedgerPreflightError,
+    DarkMigrationLedgerPins, MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
 };
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 use crate::db::migrations::{migration_checksum, MigrationRunner};
@@ -26,6 +27,201 @@ struct Fixture {
     schema: String,
     owner: String,
     runtime: String,
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_and_boundary() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new_without_temp(&url).await;
+    fixture.seed_v1030().await;
+    let db = fixture.database();
+    let pins = fixture.pins().await;
+
+    let mut tx = db.begin().await.expect("read-only transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    let mut proof = acquire_dark_shared_migration_ledger_v1030_read(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        RESTORE_PATH,
+    )
+    .await
+    .expect("complete registered V1030 prefix");
+    assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
+    assert!(
+        holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await
+    );
+    let boundary: (String, String) = sqlx::query_as(
+        "SELECT pg_catalog.current_setting('transaction_isolation'), \
+                pg_catalog.current_setting('transaction_read_only')",
+    )
+    .fetch_one(
+        &mut *proof
+            .transaction()
+            .postgres_connection()
+            .expect("postgres tx"),
+    )
+    .await
+    .expect("read transaction boundary");
+    assert_eq!(boundary, ("read committed".to_owned(), "on".to_owned()));
+    drop(proof);
+    tx.rollback().await.expect("release read-only proof");
+
+    let mut tx = db.begin().await.expect("read-write transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("read-write boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_read(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH
+        )
+        .await,
+        Err(DarkLedgerPreflightError::TransactionBoundary)
+    ));
+    assert!(!holds_shared_advisory_lock(&mut tx, LINEAGE_ADVISORY_LOCK_KEY).await);
+    assert!(!holds_shared_advisory_lock(&mut tx, MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await);
+    tx.rollback().await.expect("rollback rejected boundary");
+
+    sqlx::query(&format!(
+        "DELETE FROM {}._migrations WHERE version=1030",
+        fixture.schema
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove current migration from fixture");
+    let mut tx = db.begin().await.expect("missing migration transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_read(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH
+        )
+        .await,
+        Err(DarkLedgerPreflightError::Database(
+            DatabaseError::MigrationLedger(MigrationLedgerError::PendingMigration {
+                version: 1030
+            })
+        ))
+    ));
+    tx.rollback().await.expect("rollback missing migration");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_v1030_read_only_locks_in_order() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new_without_temp(&url).await;
+    fixture.seed_v1030().await;
+    let db = fixture.database();
+    let pins = fixture.pins().await;
+
+    let mut lineage_blocker = Some(fixture.admin.begin().await.expect("lineage blocker"));
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(LINEAGE_ADVISORY_LOCK_KEY)
+        .execute(&mut **lineage_blocker.as_mut().expect("lineage blocker"))
+        .await
+        .expect("hold exclusive lineage lock");
+    let mut ledger_blocker = Some(fixture.admin.begin().await.expect("ledger blocker"));
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+        .execute(&mut **ledger_blocker.as_mut().expect("ledger blocker"))
+        .await
+        .expect("hold exclusive ledger lock");
+    let mut relation_blocker = Some(fixture.admin.begin().await.expect("relation blocker"));
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}._migrations IN ACCESS EXCLUSIVE MODE",
+        fixture.schema
+    ))
+    .execute(&mut **relation_blocker.as_mut().expect("relation blocker"))
+    .await
+    .expect("hold exclusive ledger relation lock");
+
+    let mut tx = db.begin().await.expect("read-only transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    let backend_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *tx.postgres_connection().expect("postgres tx"))
+        .await
+        .expect("backend pid");
+    let mut proof_future = Box::pin(acquire_dark_shared_migration_ledger_v1030_read(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        RESTORE_PATH,
+    ));
+
+    // Each tuple records (lineage held, lineage waiting, ledger held, ledger
+    // waiting, relation held, relation waiting) on the proof's backend.
+    for (stage, expected) in [
+        ("lineage", (false, true, false, false, false, false)),
+        ("ledger", (true, false, false, true, false, false)),
+        ("relation", (true, false, true, false, false, true)),
+    ] {
+        tokio::select! {
+            result = &mut proof_future => match result {
+                Ok(_) => panic!("proof completed before {stage} wait"),
+                Err(error) => panic!("proof failed before {stage} wait: {error}"),
+            },
+            () = wait_for_preflight_lock_stage(&fixture.admin, backend_pid, pins.ledger_relation_oid, expected) => {}
+        }
+        match stage {
+            "lineage" => lineage_blocker
+                .take()
+                .expect("lineage blocker")
+                .rollback()
+                .await
+                .expect("release lineage blocker"),
+            "ledger" => ledger_blocker
+                .take()
+                .expect("ledger blocker")
+                .rollback()
+                .await
+                .expect("release ledger blocker"),
+            "relation" => relation_blocker
+                .take()
+                .expect("relation blocker")
+                .rollback()
+                .await
+                .expect("release relation blocker"),
+            _ => unreachable!("fixed lock stages"),
+        }
+    }
+    let mut proof = proof_future
+        .await
+        .expect("read-only proof after blockers release");
+    assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
+    assert!(
+        holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await
+    );
+    drop(proof);
+    tx.rollback().await.expect("release proof locks");
+    fixture.close().await;
 }
 
 impl Fixture {
@@ -726,6 +922,50 @@ async fn holds_shared_advisory_lock(tx: &mut crate::db::Transaction<'_>, key: i6
     .fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
     .await
     .expect("inspect advisory lock")
+}
+
+async fn wait_for_preflight_lock_stage(
+    admin: &PgPool,
+    backend_pid: i32,
+    relation_oid: u32,
+    expected: (bool, bool, bool, bool, bool, bool),
+) {
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let locks: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+                "SELECT \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                   AND objsubid=1 AND classid=(($2::bigint >> 32)::oid) \
+                   AND objid=(($2::bigint & 4294967295)::oid) AND mode='ShareLock' AND granted), \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                   AND objsubid=1 AND classid=(($2::bigint >> 32)::oid) \
+                   AND objid=(($2::bigint & 4294967295)::oid) AND mode='ShareLock' AND NOT granted), \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                   AND objsubid=1 AND classid=(($3::bigint >> 32)::oid) \
+                   AND objid=(($3::bigint & 4294967295)::oid) AND mode='ShareLock' AND granted), \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                   AND objsubid=1 AND classid=(($3::bigint >> 32)::oid) \
+                   AND objid=(($3::bigint & 4294967295)::oid) AND mode='ShareLock' AND NOT granted), \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='relation' \
+                   AND relation=$4 AND granted), \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='relation' \
+                   AND relation=$4 AND mode='AccessShareLock' AND NOT granted)",
+            )
+            .bind(backend_pid)
+            .bind(LINEAGE_ADVISORY_LOCK_KEY)
+            .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+            .bind(Oid(relation_oid))
+            .fetch_one(admin)
+            .await
+            .expect("inspect read-only proof locks");
+            if locks == expected {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("observe expected read-only proof lock stage");
 }
 
 fn error_sqlstate(error: &DarkLedgerPreflightError) -> Option<String> {

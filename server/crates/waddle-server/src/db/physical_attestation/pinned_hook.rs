@@ -22,10 +22,10 @@ use crate::db::DarkMigrationLedgerPins;
 /// the checkout currently proves only the physical attestor and lineage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedRuntimeAuthority {
-    config: PhysicalAttestationConfig,
-    attestor: DarkPhysicalAttestationPins,
-    ledger: DarkMigrationLedgerPins,
-    epoch_relation_oid: u32,
+    pub(super) config: PhysicalAttestationConfig,
+    pub(super) attestor: DarkPhysicalAttestationPins,
+    pub(super) ledger: DarkMigrationLedgerPins,
+    pub(super) epoch_relation_oid: u32,
     epoch_primary_index_oid: u32,
     guard_manifest_relation_oid: u32,
 }

@@ -28,6 +28,8 @@ pub use installer::{
 };
 mod pinned_hook;
 pub use pinned_hook::{pinned_attested_pool, PinnedRuntimeAuthority};
+mod pinned_entry;
+pub use pinned_entry::DarkPinnedEntryError;
 mod preflight;
 pub use preflight::{
     attest_dark_catalog_pinned, DarkPhysicalAttestationError, DarkPhysicalAttestationPins,
