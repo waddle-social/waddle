@@ -653,12 +653,12 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
         ),
         (
             format!(
-                "GRANT SELECT ON {}.waddle_epoch_transition_lab_marker TO {}",
-                fixture.schema, fixture.runtime
+                "GRANT SELECT ON {}.waddle_epoch_transition_lab_marker TO PUBLIC",
+                fixture.schema
             ),
             format!(
-                "REVOKE SELECT ON {}.waddle_epoch_transition_lab_marker FROM {}",
-                fixture.schema, fixture.runtime
+                "REVOKE SELECT ON {}.waddle_epoch_transition_lab_marker FROM PUBLIC",
+                fixture.schema
             ),
         ),
     ] {
