@@ -27,6 +27,14 @@ impl LogicalResourceGeneration {
     pub fn fresh() -> Self {
         Self(Uuid::new_v4())
     }
+
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
 }
 
 /// Monotonic revision of the one endpoint slot for a canonical full JID.

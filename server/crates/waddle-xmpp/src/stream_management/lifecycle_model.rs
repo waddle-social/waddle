@@ -4,7 +4,9 @@
 //! feature. It serializes transitions with `&mut self`; it does not implement a
 //! durable compare-and-set, endpoint, socket, writer, or production registry.
 //! Receipts are equality evidence supplied by tests, not proof of external
-//! commits. The model stores only opaque identity references and revisions.
+//! commits. A non-commit receipt is a test assumption: this model cannot
+//! verify the original transaction or fence its writer. No type or transition
+//! in this module is a production repository or authorization proof.
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -13,36 +15,14 @@ use super::frontier_model::{
     AckError, AckKind, AckOutcome, AppendError, AttemptError, AttemptOutcome, FrameWriteError,
     FrameWriteResult, FrontierModel, IngressError, InitError,
 };
-use crate::ownership::{BindingRef, ConnectionRef};
+use crate::auth::AuthenticatedPrincipalRef;
+pub use crate::ownership::joint_identity::SessionGeneration;
+use crate::ownership::joint_identity::{
+    InstallGeneration, ResourceLifetime, SmClaimIdentity, SmSessionKey,
+};
+use crate::ownership::{BindingRef, ConnectionRef, UserClaimIdentity};
 
 const MAX_PENDING_INGRESS: usize = 64;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SessionId(u64);
-
-impl SessionId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrincipalId(u64);
-
-impl PrincipalId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ClaimId(u64);
-
-impl ClaimId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OperationId(u64);
@@ -62,25 +42,6 @@ impl TombstoneId {
     }
 }
 
-/// Durable session fence value. It is not a transport generation or a local
-/// counter, and it refuses to advance past `u64::MAX`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SessionGeneration(u64);
-
-impl SessionGeneration {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-
-    pub fn checked_next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthenticationStatus {
     Current,
@@ -89,27 +50,27 @@ pub enum AuthenticationStatus {
 
 /// Current authentication evidence supplied for one resume attempt. It carries
 /// no credentials or permission snapshot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthenticationProof {
-    pub principal: PrincipalId,
-    pub identity_revision: u64,
+    pub principal: AuthenticatedPrincipalRef,
     pub status: AuthenticationStatus,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceContinuity {
+    pub lifetime: ResourceLifetime,
+    pub user_claim: UserClaimIdentity,
     pub resource_revision: u64,
-    pub occupancy_revision: u64,
     pub presence_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnableConfig {
-    pub session: SessionId,
-    pub principal: PrincipalId,
-    pub identity_revision: u64,
-    pub claim: ClaimId,
+    pub session: SmSessionKey,
+    pub principal: AuthenticatedPrincipalRef,
+    pub claim: SmClaimIdentity,
     pub generation: SessionGeneration,
+    pub install_generation: InstallGeneration,
     pub binding: BindingRef,
     pub resources: ResourceContinuity,
     pub operation: OperationId,
@@ -119,11 +80,13 @@ pub struct EnableConfig {
 /// Exact current owner fence, including both the binding token and its socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LifecycleFence {
-    pub session: SessionId,
-    pub principal: PrincipalId,
-    pub identity_revision: u64,
-    pub claim: ClaimId,
+    pub session: SmSessionKey,
+    pub principal: AuthenticatedPrincipalRef,
+    pub claim: SmClaimIdentity,
+    pub user_claim: UserClaimIdentity,
+    pub lifetime: ResourceLifetime,
     pub generation: SessionGeneration,
+    pub install_generation: InstallGeneration,
     pub binding: BindingRef,
     pub connection: ConnectionRef,
 }
@@ -190,8 +153,11 @@ pub struct EnableCommitResolutionReceipt {
 pub struct ResumeRequest {
     pub authentication: AuthenticationProof,
     pub expected: LifecycleFence,
+    /// Caller-supplied current account claim. A changed account owner requires
+    /// a separate fenced adoption transition before this fixture can resume.
+    pub current_user_claim: UserClaimIdentity,
     pub new_binding: BindingRef,
-    pub new_claim: ClaimId,
+    pub new_claim: SmClaimIdentity,
     pub acknowledged_h: u32,
     pub transfer: OperationId,
     pub endpoint_installation: OperationId,
@@ -223,10 +189,19 @@ pub struct HydrationReceipt {
     pub resources: ResourceContinuity,
 }
 
+/// Caller-supplied evidence in this fixture, not a verified database barrier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferNonCommitEvidence {
+    OriginalTransactionFinished,
+    WriterFencedAndSerialized,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferAbortReceipt {
     pub transfer: OperationId,
+    pub attempted_fence: LifecycleFence,
     pub restored_fence: LifecycleFence,
+    pub evidence: TransferNonCommitEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,7 +210,6 @@ pub struct TransferPlan {
     pub commit: TransferCommitReceipt,
     pub publication: PublicationReceipt,
     pub hydration: HydrationReceipt,
-    pub abort: TransferAbortReceipt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,8 +270,10 @@ pub enum ModelError {
     StaleFence,
     IdentityMismatch,
     IdentityRevoked,
+    UserClaimChanged,
     GenerationExhausted,
     SameBinding,
+    SameConnection,
     ReceiptMismatch,
     CommitNotConfirmed,
     TransferUnknown,
@@ -316,6 +292,7 @@ pub enum ModelError {
 struct TransferState {
     plan: TransferPlan,
     previous_frontier: FrontierModel,
+    restored_fence: LifecycleFence,
     commit: CommitStatus,
     publication_received: bool,
     hydration_received: bool,
@@ -323,11 +300,11 @@ struct TransferState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmLifecycleModel {
-    session: SessionId,
-    principal: PrincipalId,
-    identity_revision: u64,
-    claim: ClaimId,
+    session: SmSessionKey,
+    principal: AuthenticatedPrincipalRef,
+    claim: SmClaimIdentity,
     generation: SessionGeneration,
+    install_generation: InstallGeneration,
     binding: BindingRef,
     resources: ResourceContinuity,
     state: LifecycleStatus,
@@ -341,15 +318,35 @@ pub struct SmLifecycleModel {
     tombstone: Option<TombstoneEvidence>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum LifecycleInitError {
+    IdentityMismatch,
+    GenerationOutOfRange,
+    Frontier(InitError),
+}
+
 impl SmLifecycleModel {
-    pub fn enabling_live(config: EnableConfig) -> Result<Self, InitError> {
-        let frontier = FrontierModel::new(config.frontier_capacity)?;
+    pub fn enabling_live(config: EnableConfig) -> Result<Self, LifecycleInitError> {
+        if config.claim.session != config.session
+            || config.resources.user_claim.bare_jid() != config.principal.bare_jid()
+            || config.claim.epoch.0 < 0
+            || config.resources.user_claim.claim_epoch().0 < 0
+            || config.principal.auth_context_version().get() == 0
+            || config.principal.auth_epoch().get() == 0
+        {
+            return Err(LifecycleInitError::IdentityMismatch);
+        }
+        if config.install_generation == InstallGeneration::INITIAL {
+            return Err(LifecycleInitError::GenerationOutOfRange);
+        }
+        let frontier =
+            FrontierModel::new(config.frontier_capacity).map_err(LifecycleInitError::Frontier)?;
         Ok(Self {
             session: config.session,
             principal: config.principal,
-            identity_revision: config.identity_revision,
             claim: config.claim,
             generation: config.generation,
+            install_generation: config.install_generation,
             binding: config.binding,
             resources: config.resources,
             state: LifecycleStatus::EnablingLive,
@@ -371,17 +368,19 @@ impl SmLifecycleModel {
     pub fn fence(&self) -> LifecycleFence {
         LifecycleFence {
             session: self.session,
-            principal: self.principal,
-            identity_revision: self.identity_revision,
-            claim: self.claim,
+            principal: self.principal.clone(),
+            claim: self.claim.clone(),
+            user_claim: self.resources.user_claim.clone(),
+            lifetime: self.resources.lifetime,
             generation: self.generation,
+            install_generation: self.install_generation,
             binding: self.binding.clone(),
             connection: self.binding.connection_ref().clone(),
         }
     }
 
     pub fn resources(&self) -> ResourceContinuity {
-        self.resources
+        self.resources.clone()
     }
 
     pub fn frontier(&self) -> &FrontierModel {
@@ -547,18 +546,29 @@ impl SmLifecycleModel {
             return Err(ModelError::IdentityRevoked);
         }
         if request.authentication.principal != self.principal
-            || request.authentication.identity_revision != self.identity_revision
             || request.expected.principal != self.principal
             || request.expected.session != self.session
+            || request.new_claim.session != self.session
+            || request.new_claim.epoch.0 < 0
         {
             return Err(ModelError::IdentityMismatch);
         }
         if request.expected != self.fence() {
             return Err(ModelError::StaleFence);
         }
+        if request.current_user_claim != self.resources.user_claim {
+            return Err(ModelError::UserClaimChanged);
+        }
         if request.new_binding == self.binding {
             return Err(ModelError::SameBinding);
         }
+        if request.new_binding.connection_ref() == self.binding.connection_ref() {
+            return Err(ModelError::SameConnection);
+        }
+        let install_generation = self
+            .install_generation
+            .checked_next()
+            .ok_or(ModelError::GenerationExhausted)?;
         let generation = self
             .generation
             .checked_next()
@@ -572,10 +582,12 @@ impl SmLifecycleModel {
         let restored_fence = self.fence();
         let new_fence = LifecycleFence {
             session: self.session,
-            principal: self.principal,
-            identity_revision: self.identity_revision,
-            claim: request.new_claim,
+            principal: self.principal.clone(),
+            claim: request.new_claim.clone(),
+            user_claim: self.resources.user_claim.clone(),
+            lifetime: self.resources.lifetime,
             generation,
+            install_generation,
             connection: request.new_binding.connection_ref().clone(),
             binding: request.new_binding.clone(),
         };
@@ -592,27 +604,25 @@ impl SmLifecycleModel {
                 transfer: request.transfer,
                 fence: new_fence.clone(),
                 installation: request.endpoint_installation,
-                resources: self.resources,
+                resources: self.resources.clone(),
             },
             hydration: HydrationReceipt {
                 transfer: request.transfer,
                 fence: new_fence.clone(),
                 hydration: request.hydration,
-                resources: self.resources,
-            },
-            abort: TransferAbortReceipt {
-                transfer: request.transfer,
-                restored_fence,
+                resources: self.resources.clone(),
             },
         };
 
         self.claim = request.new_claim;
         self.generation = generation;
+        self.install_generation = install_generation;
         self.binding = request.new_binding;
         self.frontier = frontier;
         self.transfer = Some(TransferState {
             plan: plan.clone(),
             previous_frontier,
+            restored_fence,
             commit: CommitStatus::Pending,
             publication_received: false,
             hydration_received: false,
@@ -629,6 +639,9 @@ impl SmLifecycleModel {
         let state = self.transfer.as_mut().ok_or(ModelError::TransferUnknown)?;
         if self.state != LifecycleStatus::TransferHydrating || state.plan.transfer != transfer {
             return Err(ModelError::TransferUnknown);
+        }
+        if state.commit == CommitStatus::Committed {
+            return Err(ModelError::CommitNotConfirmed);
         }
         state.commit = CommitStatus::Unknown;
         self.repair
@@ -714,8 +727,11 @@ impl SmLifecycleModel {
         Ok(true)
     }
 
-    /// Compensates only a transfer with a known, not-committed result and no
-    /// endpoint publication or hydration receipt.
+    /// Models compensation only with a caller-supplied exact non-commit
+    /// receipt and no endpoint publication or hydration. The receipt assumes
+    /// the original transaction ended or a writer fence/barrier succeeded;
+    /// this fixture cannot verify either and must not authorize a production
+    /// adapter. Pending or unknown alone is not evidence of non-commit.
     pub fn compensate_transfer(
         &mut self,
         receipt: &TransferAbortReceipt,
@@ -724,18 +740,26 @@ impl SmLifecycleModel {
             return Err(ModelError::WrongState);
         }
         let state = self.transfer.as_ref().ok_or(ModelError::TransferUnknown)?;
-        if *receipt != state.plan.abort {
+        if receipt.transfer != state.plan.transfer
+            || receipt.attempted_fence != state.plan.commit.fence
+            || receipt.restored_fence != state.restored_fence
+        {
             return Err(ModelError::ReceiptMismatch);
         }
-        if state.commit != CommitStatus::Pending
+        if state.commit == CommitStatus::Committed
             || state.publication_received
             || state.hydration_received
         {
             return Err(ModelError::CommitNotConfirmed);
         }
-        self.claim = receipt.restored_fence.claim;
+        self.claim = receipt.restored_fence.claim.clone();
         self.generation = receipt.restored_fence.generation;
+        self.install_generation = receipt.restored_fence.install_generation;
         self.binding = receipt.restored_fence.binding.clone();
+        self.repair
+            .remove(&RepairResponsibility::TransferCommitUnknown(
+                receipt.transfer,
+            ));
         self.frontier = state.previous_frontier.clone();
         self.transfer = None;
         self.pending_ingress.clear();
@@ -936,14 +960,59 @@ impl SmLifecycleModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttemptOutcome, AuthenticationProof, AuthenticationStatus, ClaimId, CleanupOutcome,
-        CleanupReceipt, EnableCommitResolution, EnableConfig, HydrationReceipt, InputDisposition,
-        LifecycleStatus, ModelError, OperationId, PrincipalId, PublicationReceipt,
-        RepairResponsibility, ResourceContinuity, ResumeRequest, SessionGeneration, SessionId,
-        SmLifecycleModel, TerminalReason, TombstoneCustodyReceipt, TombstoneId, TombstoneRetention,
-        MAX_PENDING_INGRESS,
+        AttemptOutcome, AuthenticationProof, AuthenticationStatus, CleanupOutcome, CleanupReceipt,
+        EnableCommitResolution, EnableConfig, HydrationReceipt, InputDisposition, LifecycleStatus,
+        ModelError, OperationId, PublicationReceipt, RepairResponsibility, ResourceContinuity,
+        ResumeRequest, SessionGeneration, SmLifecycleModel, TerminalReason,
+        TombstoneCustodyReceipt, TombstoneId, TombstoneRetention, TransferAbortReceipt,
+        TransferNonCommitEvidence, MAX_PENDING_INGRESS,
     };
-    use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+    use crate::auth::{
+        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+    };
+    use crate::ownership::endpoint_transition::LogicalResourceGeneration;
+    use crate::ownership::joint_identity::{
+        InstallGeneration, ResourceLifetime, SmClaimIdentity, SmSessionKey,
+    };
+    use crate::ownership::{
+        BindingRef, ClaimEpoch, ConnectionRef, NodeLeaseIdentity, UserClaimIdentity,
+    };
+    use uuid::Uuid;
+    use waddle_xmpp_core::OccupancySessionGeneration;
+
+    fn session(id: u128) -> SmSessionKey {
+        SmSessionKey::from_uuid(Uuid::from_u128(id))
+    }
+
+    fn principal(id: u128) -> AuthenticatedPrincipalRef {
+        AuthenticatedPrincipalRef::new(
+            "alice@example.test".parse().expect("principal jid"),
+            AuthContextId::new(Uuid::from_u128(id)),
+            AuthContextVersion::new(3),
+            PrincipalAuthEpoch::new(1),
+        )
+    }
+
+    fn claim(session: SmSessionKey, epoch: u64) -> SmClaimIdentity {
+        SmClaimIdentity {
+            session,
+            owner: NodeLeaseIdentity::local_process(),
+            epoch: ClaimEpoch(epoch as i64),
+        }
+    }
+
+    fn user_claim() -> UserClaimIdentity {
+        static CLAIM: std::sync::OnceLock<UserClaimIdentity> = std::sync::OnceLock::new();
+        CLAIM
+            .get_or_init(|| {
+                UserClaimIdentity::fresh(
+                    "alice@example.test".parse().expect("account jid"),
+                    NodeLeaseIdentity::local_process(),
+                    ClaimEpoch(7),
+                )
+            })
+            .clone()
+    }
     use crate::stream_management::frontier_model::{AckError, AckOutcome, FrameWriteResult};
 
     fn new_binding() -> (ConnectionRef, BindingRef) {
@@ -954,8 +1023,12 @@ mod tests {
 
     fn resources() -> ResourceContinuity {
         ResourceContinuity {
+            lifetime: ResourceLifetime {
+                logical: LogicalResourceGeneration::from_uuid(Uuid::from_u128(17)),
+                occupancy: OccupancySessionGeneration::from_uuid(Uuid::from_u128(23)),
+            },
+            user_claim: user_claim(),
             resource_revision: 17,
-            occupancy_revision: 23,
             presence_revision: 41,
         }
     }
@@ -963,11 +1036,11 @@ mod tests {
     fn enabling_model(generation: u64) -> SmLifecycleModel {
         let (_, binding) = new_binding();
         SmLifecycleModel::enabling_live(EnableConfig {
-            session: SessionId::new(101),
-            principal: PrincipalId::new(202),
-            identity_revision: 3,
-            claim: ClaimId::new(303),
-            generation: SessionGeneration::new(generation),
+            session: session(101),
+            principal: principal(202),
+            claim: claim(session(101), 303),
+            generation: SessionGeneration::new(generation).expect("valid session generation"),
+            install_generation: InstallGeneration::new(12).expect("install generation"),
             binding,
             resources: resources(),
             operation: OperationId::new(404),
@@ -1000,13 +1073,13 @@ mod tests {
     ) -> ResumeRequest {
         ResumeRequest {
             authentication: AuthenticationProof {
-                principal: PrincipalId::new(202),
-                identity_revision: 3,
+                principal: principal(202),
                 status: AuthenticationStatus::Current,
             },
             expected: model.fence(),
+            current_user_claim: model.resources().user_claim,
             new_binding,
-            new_claim: ClaimId::new(claim),
+            new_claim: self::claim(model.fence().session, claim),
             acknowledged_h: model.frontier().peer_acked() as u32,
             transfer: OperationId::new(transfer),
             endpoint_installation: OperationId::new(transfer + 100),
@@ -1139,7 +1212,7 @@ mod tests {
             Err(ModelError::WrongState)
         );
         assert_eq!(model, after_winner);
-        assert_eq!(winner.commit.fence.claim, ClaimId::new(304));
+        assert_eq!(winner.commit.fence.claim, claim(session(101), 304));
 
         complete_transfer(&mut model, &winner);
         let current = model.clone();
@@ -1158,12 +1231,12 @@ mod tests {
     fn principal_mismatch_and_revocation_reject_before_mutation() {
         for (principal, status, expected) in [
             (
-                PrincipalId::new(999),
+                principal(999),
                 AuthenticationStatus::Current,
                 ModelError::IdentityMismatch,
             ),
             (
-                PrincipalId::new(202),
+                principal(202),
                 AuthenticationStatus::Revoked,
                 ModelError::IdentityRevoked,
             ),
@@ -1171,11 +1244,7 @@ mod tests {
             let mut model = detached_model();
             let (_, binding) = new_binding();
             let mut request = resume_request(&model, binding, 304, 500);
-            request.authentication = AuthenticationProof {
-                principal,
-                identity_revision: 3,
-                status,
-            };
+            request.authentication = AuthenticationProof { principal, status };
             let before = model.clone();
             assert_eq!(model.begin_resume(request), Err(expected));
             assert_eq!(model, before);
@@ -1183,26 +1252,62 @@ mod tests {
     }
 
     #[test]
+    fn moved_account_claim_requires_separate_adoption_before_resume() {
+        let mut model = detached_model();
+        let (_, binding) = new_binding();
+        let mut request = resume_request(&model, binding, 304, 500);
+        request.current_user_claim = UserClaimIdentity::fresh(
+            "alice@example.test".parse().unwrap(),
+            NodeLeaseIdentity::local_process(),
+            ClaimEpoch(8),
+        );
+        let before = model.clone();
+        assert_eq!(
+            model.begin_resume(request),
+            Err(ModelError::UserClaimChanged)
+        );
+        assert_eq!(model, before);
+    }
+
+    #[test]
     fn stale_session_claim_generation_binding_and_connection_are_non_mutating() {
-        for stale_field in 0..5 {
+        for stale_field in 0..10 {
             let mut model = detached_model();
             let (_, binding) = new_binding();
             let mut request = resume_request(&model, binding, 304, 500);
             let mut expected_error = ModelError::StaleFence;
             match stale_field {
                 0 => {
-                    request.expected.session = SessionId::new(999);
+                    request.expected.session = session(999);
                     expected_error = ModelError::IdentityMismatch;
                 }
-                1 => request.expected.claim = ClaimId::new(999),
-                2 => request.expected.generation = SessionGeneration::new(999),
+                1 => request.expected.claim = claim(session(101), 999),
+                2 => request.expected.generation = SessionGeneration::new(999).unwrap(),
                 3 => {
                     let (_, stale_binding) = new_binding();
                     request.expected.binding = stale_binding;
                 }
-                _ => {
+                4 => {
                     let (stale_connection, _) = new_binding();
                     request.expected.connection = stale_connection;
+                }
+                5 => request.expected.install_generation = InstallGeneration::new(999).unwrap(),
+                6 => request.expected.lifetime = ResourceLifetime::fresh(),
+                7 => {
+                    request.expected.user_claim = UserClaimIdentity::fresh(
+                        "alice@example.test".parse().unwrap(),
+                        NodeLeaseIdentity::local_process(),
+                        ClaimEpoch(7),
+                    )
+                }
+                8 => {
+                    request.expected.claim.owner = NodeLeaseIdentity::from_node_identity(
+                        &crate::ownership::NodeIdentity::new("other-node", "other-lease"),
+                    )
+                }
+                _ => {
+                    request.expected.principal = principal(999);
+                    expected_error = ModelError::IdentityMismatch;
                 }
             }
             let before = model.clone();
@@ -1220,7 +1325,7 @@ mod tests {
             Ok(InputDisposition::Buffered)
         );
         let mut stale_fence = model.fence();
-        stale_fence.claim = ClaimId::new(999);
+        stale_fence.claim = claim(session(101), 999);
         let before = model.clone();
         assert_eq!(
             model.begin_enable_commit(&stale_fence),
@@ -1382,7 +1487,7 @@ mod tests {
         let mut detached = detached_model();
         let old_fence = detached.fence();
         let mut rejected = resume_request(&detached, old_fence.binding.clone(), 304, 500);
-        rejected.new_claim = ClaimId::new(304);
+        rejected.new_claim = claim(session(101), 304);
         let before = detached.clone();
         assert_eq!(
             detached.begin_resume(rejected),
@@ -1390,27 +1495,92 @@ mod tests {
         );
         assert_eq!(detached, before);
 
-        let fallback_binding = BindingRef::fresh(old_fence.connection.clone());
+        let same_socket = resume_request(
+            &detached,
+            BindingRef::fresh(old_fence.connection.clone()),
+            304,
+            501,
+        );
+        assert_eq!(
+            detached.begin_resume(same_socket),
+            Err(ModelError::SameConnection)
+        );
+        assert_eq!(detached, before);
+
+        let (new_connection, failed_binding) = new_binding();
+        let mut failed = resume_request(&detached, failed_binding.clone(), 304, 502);
+        failed.authentication.status = AuthenticationStatus::Revoked;
+        assert_eq!(
+            detached.begin_resume(failed),
+            Err(ModelError::IdentityRevoked)
+        );
+        assert_eq!(detached, before);
+
+        let fallback_binding = BindingRef::fresh(new_connection.clone());
         assert_ne!(fallback_binding, old_fence.binding);
-        assert_eq!(fallback_binding.connection_ref(), &old_fence.connection);
+        assert_ne!(fallback_binding, failed_binding);
+        assert_eq!(fallback_binding.connection_ref(), &new_connection);
         let fallback = SmLifecycleModel::enabling_live(EnableConfig {
-            session: SessionId::new(102),
-            principal: old_fence.principal,
-            identity_revision: old_fence.identity_revision,
-            claim: ClaimId::new(401),
+            session: session(102),
+            principal: old_fence.principal.clone(),
+            claim: claim(session(102), 401),
             generation: old_fence
                 .generation
                 .checked_next()
                 .expect("generation increments"),
+            install_generation: old_fence
+                .install_generation
+                .checked_next()
+                .expect("install advances"),
             binding: fallback_binding.clone(),
-            resources: resources(),
+            resources: ResourceContinuity {
+                lifetime: ResourceLifetime::fresh(),
+                ..resources()
+            },
             operation: OperationId::new(402),
             frontier_capacity: 8,
         })
         .expect("new session on same socket");
         assert_eq!(fallback.state(), LifecycleStatus::EnablingLive);
-        assert_eq!(fallback.fence().connection, old_fence.connection);
+        assert_eq!(fallback.fence().connection, new_connection);
         assert_ne!(fallback.fence().binding, old_fence.binding);
+        assert_ne!(
+            fallback.fence().lifetime.logical,
+            old_fence.lifetime.logical
+        );
+        assert_ne!(
+            fallback.fence().lifetime.occupancy,
+            old_fence.lifetime.occupancy
+        );
+    }
+
+    #[test]
+    fn transfer_compensation_requires_caller_supplied_exact_fixture_evidence() {
+        let mut model = detached_model();
+        let old = model.fence();
+        let (_, binding) = new_binding();
+        let plan = model
+            .begin_resume(resume_request(&model, binding, 304, 500))
+            .unwrap();
+        model.record_transfer_commit_unknown(plan.transfer).unwrap();
+        let pending = model.clone();
+        let mut proof = TransferAbortReceipt {
+            transfer: plan.transfer,
+            attempted_fence: plan.commit.fence.clone(),
+            restored_fence: old.clone(),
+            evidence: TransferNonCommitEvidence::WriterFencedAndSerialized,
+        };
+        proof.attempted_fence.generation = SessionGeneration::new(999).unwrap();
+        assert_eq!(
+            model.compensate_transfer(&proof),
+            Err(ModelError::ReceiptMismatch)
+        );
+        assert_eq!(model, pending);
+        proof.attempted_fence = plan.commit.fence;
+        model.compensate_transfer(&proof).unwrap();
+        assert_eq!(model.state(), LifecycleStatus::DetachedResumable);
+        assert_eq!(model.fence(), old);
+        assert!(model.repair_responsibilities().next().is_none());
     }
 
     #[test]
@@ -1424,12 +1594,19 @@ mod tests {
         complete_transfer(&mut model, &plan);
         let after_resume = model.clone();
         assert_eq!(
-            model.apply_late_cleanup(&CleanupReceipt { fence: old_fence }),
+            model.apply_late_cleanup(&CleanupReceipt {
+                fence: old_fence.clone()
+            }),
             Ok(CleanupOutcome::StaleIgnored)
         );
         assert_eq!(model, after_resume);
         assert_eq!(
-            model.compensate_transfer(&plan.abort),
+            model.compensate_transfer(&TransferAbortReceipt {
+                transfer: plan.transfer,
+                attempted_fence: plan.commit.fence.clone(),
+                restored_fence: old_fence,
+                evidence: TransferNonCommitEvidence::OriginalTransactionFinished,
+            }),
             Err(ModelError::WrongState)
         );
         assert_eq!(model, after_resume);
@@ -1502,7 +1679,7 @@ mod tests {
         );
         assert_eq!(model, before);
 
-        let mut exhausted = enabling_model(u64::MAX);
+        let mut exhausted = enabling_model(i64::MAX as u64);
         make_live(&mut exhausted);
         let fence = exhausted.fence();
         exhausted.detach(&fence).unwrap();

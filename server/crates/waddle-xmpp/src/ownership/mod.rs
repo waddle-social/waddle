@@ -43,6 +43,8 @@ mod connection_identity;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod endpoint_transition;
 pub mod in_process;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod joint_identity;
 mod observe;
 pub mod resume;
 mod user_claim_identity;

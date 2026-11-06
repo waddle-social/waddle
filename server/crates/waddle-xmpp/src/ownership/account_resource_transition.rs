@@ -20,8 +20,7 @@ use minidom::Node;
 use uuid::Uuid;
 use xmpp_parsers::presence::Show;
 
-use crate::pending_delivery::{SmSessionId, SM_SESSION_ID_MAX_LEN};
-
+use super::joint_identity::{InstallGeneration, ResourceLifetime, SmBinding};
 use super::{BindingRef, ConnectionRef, UserClaimIdentity};
 
 /// Maximum number of operation identities retained by one fixture slot.
@@ -375,9 +374,9 @@ impl AccountResourceOperationId {
     }
 }
 
-/// One coherent resource snapshot. The typed SM session id is an opaque
-/// session reference carried with the exact binding evidence below; it is not
-/// a durable foreign key and does not itself authorize any SM operation.
+/// One coherent resource snapshot. The typed internal SM key is distinct from
+/// the resume secret. In this fixture it is equality evidence, not a durable
+/// foreign key or authorization for any SM operation.
 #[derive(Debug, Clone, Default)]
 pub struct AccountResourceSnapshot {
     pub presence_available: bool,
@@ -388,7 +387,7 @@ pub struct AccountResourceSnapshot {
     pub carbons_enabled: bool,
     pub roster_interested: bool,
     pub blocklist_interested: bool,
-    pub stream_management_ref: Option<SmSessionId>,
+    pub stream_management_ref: Option<SmBinding>,
 }
 
 impl PartialEq for AccountResourceSnapshot {
@@ -415,10 +414,6 @@ impl AccountResourceSnapshot {
             .as_ref()
             .is_some_and(|status| status.len() > ACCOUNT_RESOURCE_MAX_STATUS_BYTES)
             || self.presence_payloads.len() > ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOADS
-            || self
-                .stream_management_ref
-                .as_ref()
-                .is_some_and(|stream| stream.as_str().len() > SM_SESSION_ID_MAX_LEN)
         {
             return false;
         }
@@ -433,6 +428,8 @@ pub enum AccountResourceBindingState {
     Prepared,
     Published,
     Active,
+    /// The prior endpoint is sealed; its logical resource remains resumable.
+    Detached,
     Retiring,
     Retired,
 }
@@ -548,7 +545,9 @@ impl ActorRegistrationReceipt {
 pub struct SuccessfulResumeReceipt {
     previous: BindingEvidence,
     resumed: BindingEvidence,
-    stream_management_ref: SmSessionId,
+    previous_sm: SmBinding,
+    resumed_sm: SmBinding,
+    lifetime: ResourceLifetime,
     custody_disposition: BindingRetirementDisposition,
 }
 
@@ -556,13 +555,17 @@ impl SuccessfulResumeReceipt {
     pub fn observed(
         previous: BindingEvidence,
         resumed: BindingEvidence,
-        stream_management_ref: SmSessionId,
+        previous_sm: SmBinding,
+        resumed_sm: SmBinding,
+        lifetime: ResourceLifetime,
         custody_disposition: BindingRetirementDisposition,
     ) -> Self {
         Self {
             previous,
             resumed,
-            stream_management_ref,
+            previous_sm,
+            resumed_sm,
+            lifetime,
             custody_disposition,
         }
     }
@@ -575,8 +578,12 @@ impl SuccessfulResumeReceipt {
         &self.resumed
     }
 
-    pub fn stream_management_ref(&self) -> &SmSessionId {
-        &self.stream_management_ref
+    pub fn previous_sm(&self) -> SmBinding {
+        self.previous_sm
+    }
+
+    pub fn resumed_sm(&self) -> SmBinding {
+        self.resumed_sm
     }
 
     pub fn custody_disposition(&self) -> BindingRetirementDisposition {
@@ -733,14 +740,24 @@ impl AccountResourceRetirementStart {
 pub struct AccountResourceBindingReceipt {
     source: BindingEvidence,
     binding_claim_identity: UserClaimIdentity,
+    lifetime: ResourceLifetime,
+    install_generation: InstallGeneration,
     state: AccountResourceBindingState,
     snapshot: AccountResourceSnapshot,
     snapshot_revision: AccountResourceRevision,
     publication: Option<EndpointPublicationReceipt>,
     registration: Option<ActorRegistrationReceipt>,
+    detachment: Option<AccountResourceDetachmentEvidence>,
     resumed_from: Option<SuccessfulResumeReceipt>,
     retirement_start: Option<AccountResourceRetirementStart>,
     retirement: Option<AccountResourceRetirementEvidence>,
+}
+
+/// Caller-supplied evidence retained after detachment and across resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountResourceDetachmentEvidence {
+    pub endpoint: EndpointRetirementEvidence,
+    pub custody_disposition: BindingRetirementDisposition,
 }
 
 impl AccountResourceBindingReceipt {
@@ -758,6 +775,14 @@ impl AccountResourceBindingReceipt {
 
     pub fn binding_claim_identity(&self) -> &UserClaimIdentity {
         &self.binding_claim_identity
+    }
+
+    pub fn lifetime(&self) -> ResourceLifetime {
+        self.lifetime
+    }
+
+    pub fn install_generation(&self) -> InstallGeneration {
+        self.install_generation
     }
 
     pub fn state(&self) -> AccountResourceBindingState {
@@ -784,6 +809,10 @@ impl AccountResourceBindingReceipt {
         self.resumed_from.as_ref()
     }
 
+    pub fn detachment(&self) -> Option<&AccountResourceDetachmentEvidence> {
+        self.detachment.as_ref()
+    }
+
     pub fn retirement_start(&self) -> Option<&AccountResourceRetirementStart> {
         self.retirement_start.as_ref()
     }
@@ -800,6 +829,7 @@ pub enum AccountResourceMutation {
         claim_identity: UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         binding_ref: BindingRef,
+        lifetime: ResourceLifetime,
     },
     PublishEndpoint {
         claim_identity: UserClaimIdentity,
@@ -818,6 +848,13 @@ pub enum AccountResourceMutation {
         expected_revision: AccountResourceRevision,
         binding_ref: BindingRef,
         snapshot: AccountResourceSnapshot,
+    },
+    Detach {
+        claim_identity: UserClaimIdentity,
+        expected_revision: AccountResourceRevision,
+        binding_ref: BindingRef,
+        endpoint: EndpointRetirementEvidence,
+        custody_disposition: BindingRetirementDisposition,
     },
     BeginRetirement {
         claim_identity: UserClaimIdentity,
@@ -901,6 +938,8 @@ pub enum AccountResourceTransitionError {
     BindingMismatch,
     BindingOwnerMismatch,
     BindingRefReused,
+    ResourceLifetimeReused,
+    InstallGenerationExhausted,
     LifecycleConflict,
     EndpointPublicationMismatch,
     ActorRegistrationMismatch,
@@ -936,9 +975,12 @@ pub struct AccountResourceSlot {
     revision: AccountResourceRevision,
     binding: Option<AccountResourceBindingReceipt>,
     retired_bindings: Vec<AccountResourceBindingReceipt>,
+    resumed_predecessors: Vec<AccountResourceBindingReceipt>,
     successful_resumes: Vec<SuccessfulResumeReceipt>,
     retired_claim_identities: Vec<UserClaimIdentity>,
     seen_binding_refs: Vec<BindingRef>,
+    seen_lifetimes: Vec<ResourceLifetime>,
+    install_generation: InstallGeneration,
     journal: Vec<JournalEntry>,
 }
 
@@ -959,9 +1001,12 @@ impl AccountResourceSlot {
             revision: AccountResourceRevision::INITIAL,
             binding: None,
             retired_bindings: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
+            resumed_predecessors: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
             successful_resumes: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
             retired_claim_identities: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
             seen_binding_refs: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
+            seen_lifetimes: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
+            install_generation: InstallGeneration::INITIAL,
             journal: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
         })
     }
@@ -1036,6 +1081,12 @@ impl AccountResourceSlot {
         &self.retired_bindings
     }
 
+    /// Old exact bindings retained for eventual unregister/cleanup; a resume
+    /// does not claim these predecessor effects have already completed.
+    pub fn resumed_predecessors(&self) -> &[AccountResourceBindingReceipt] {
+        &self.resumed_predecessors
+    }
+
     pub fn successful_resume_receipts(&self) -> &[SuccessfulResumeReceipt] {
         &self.successful_resumes
     }
@@ -1105,7 +1156,8 @@ impl AccountResourceSlot {
                 claim_identity,
                 expected_revision,
                 binding_ref,
-            } => self.bind(claim_identity, *expected_revision, binding_ref),
+                lifetime,
+            } => self.bind(claim_identity, *expected_revision, binding_ref, *lifetime),
             AccountResourceMutation::PublishEndpoint {
                 claim_identity,
                 expected_revision,
@@ -1135,6 +1187,19 @@ impl AccountResourceSlot {
                 *expected_revision,
                 binding_ref,
                 snapshot.clone(),
+            ),
+            AccountResourceMutation::Detach {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                endpoint,
+                custody_disposition,
+            } => self.detach(
+                claim_identity,
+                *expected_revision,
+                binding_ref,
+                endpoint,
+                *custody_disposition,
             ),
             AccountResourceMutation::BeginRetirement {
                 claim_identity,
@@ -1205,6 +1270,7 @@ impl AccountResourceSlot {
         claim_identity: &UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         binding_ref: &BindingRef,
+        lifetime: ResourceLifetime,
     ) -> Result<AccountResourceRevision, AccountResourceTransitionError> {
         self.check_actor(claim_identity)?;
         self.check_revision(expected_revision)?;
@@ -1214,21 +1280,37 @@ impl AccountResourceSlot {
         if self.seen_binding_refs.contains(binding_ref) {
             return Err(AccountResourceTransitionError::BindingRefReused);
         }
+        if self
+            .seen_lifetimes
+            .iter()
+            .any(|seen| seen.logical == lifetime.logical || seen.occupancy == lifetime.occupancy)
+        {
+            return Err(AccountResourceTransitionError::ResourceLifetimeReused);
+        }
+        let install_generation = self
+            .install_generation
+            .checked_next()
+            .ok_or(AccountResourceTransitionError::InstallGenerationExhausted)?;
         let revision = self.next_revision()?;
 
         self.binding = Some(AccountResourceBindingReceipt {
             source: BindingEvidence::for_binding(binding_ref),
             binding_claim_identity: claim_identity.clone(),
+            lifetime,
+            install_generation,
             state: AccountResourceBindingState::Prepared,
             snapshot: AccountResourceSnapshot::default(),
             snapshot_revision: revision,
             publication: None,
             registration: None,
+            detachment: None,
             resumed_from: None,
             retirement_start: None,
             retirement: None,
         });
         self.seen_binding_refs.push(binding_ref.clone());
+        self.seen_lifetimes.push(lifetime);
+        self.install_generation = install_generation;
         self.revision = revision;
         Ok(revision)
     }
@@ -1351,6 +1433,7 @@ impl AccountResourceSlot {
                 AccountResourceBindingState::Prepared
                     | AccountResourceBindingState::Published
                     | AccountResourceBindingState::Active
+                    | AccountResourceBindingState::Detached
             ) {
                 return Err(AccountResourceTransitionError::LifecycleConflict);
             }
@@ -1376,6 +1459,47 @@ impl AccountResourceSlot {
             custody_disposition,
         });
         binding.state = AccountResourceBindingState::Retiring;
+        self.revision = revision;
+        Ok(revision)
+    }
+
+    /// Record caller-supplied sealing and custody evidence; this model does
+    /// not itself seal a physical endpoint or establish durable custody.
+    fn detach(
+        &mut self,
+        claim_identity: &UserClaimIdentity,
+        expected_revision: AccountResourceRevision,
+        binding_ref: &BindingRef,
+        endpoint: &EndpointRetirementEvidence,
+        custody: BindingRetirementDisposition,
+    ) -> Result<AccountResourceRevision, AccountResourceTransitionError> {
+        self.check_actor(claim_identity)?;
+        self.check_revision(expected_revision)?;
+        self.check_binding(binding_ref)?;
+        let binding = self.current_binding()?;
+        if binding.binding_claim_identity != *claim_identity
+            || binding.state != AccountResourceBindingState::Active
+        {
+            return Err(AccountResourceTransitionError::BindingOwnerMismatch);
+        }
+        if binding.snapshot.stream_management_ref.is_none() {
+            return Err(AccountResourceTransitionError::ResumeRequiresStreamManagement);
+        }
+        if custody == BindingRetirementDisposition::Unknown {
+            return Err(AccountResourceTransitionError::RetirementCustodyUnknown);
+        }
+        if !matches!(endpoint, EndpointRetirementEvidence::Unpublished { publication, removed }
+            if Some(publication) == binding.publication.as_ref() && removed == &binding.source)
+        {
+            return Err(AccountResourceTransitionError::EndpointPublicationMismatch);
+        }
+        let revision = self.next_revision()?;
+        let binding = self.current_binding_mut()?;
+        binding.detachment = Some(AccountResourceDetachmentEvidence {
+            endpoint: endpoint.clone(),
+            custody_disposition: custody,
+        });
+        binding.state = AccountResourceBindingState::Detached;
         self.revision = revision;
         Ok(revision)
     }
@@ -1578,10 +1702,10 @@ impl AccountResourceSlot {
         self.check_actor(claim_identity)?;
         self.check_revision(expected_revision)?;
         self.check_binding(previous_binding_ref)?;
-        let (binding_claim_identity, snapshot, snapshot_revision) = {
+        let (binding_claim_identity, mut snapshot, snapshot_revision, lifetime) = {
             let binding = self.current_binding()?;
             if binding.binding_claim_identity != *claim_identity
-                || binding.state != AccountResourceBindingState::Active
+                || binding.state != AccountResourceBindingState::Detached
             {
                 return Err(AccountResourceTransitionError::BindingOwnerMismatch);
             }
@@ -1591,8 +1715,17 @@ impl AccountResourceSlot {
             };
             if receipt.previous != binding.source
                 || receipt.resumed != BindingEvidence::for_binding(binding_ref)
-                || &receipt.stream_management_ref != stream_management_ref
+                || &receipt.previous_sm != stream_management_ref
+                || receipt.resumed_sm.session != receipt.previous_sm.session
+                || receipt.previous_sm.generation.checked_next()
+                    != Some(receipt.resumed_sm.generation)
+                || receipt.lifetime != binding.lifetime
                 || receipt.custody_disposition == BindingRetirementDisposition::Unknown
+                || binding
+                    .detachment
+                    .as_ref()
+                    .map(|evidence| evidence.custody_disposition)
+                    != Some(receipt.custody_disposition)
             {
                 return Err(AccountResourceTransitionError::ResumeBindingMismatch);
             }
@@ -1600,6 +1733,7 @@ impl AccountResourceSlot {
                 binding.binding_claim_identity.clone(),
                 binding.snapshot.clone(),
                 binding.snapshot_revision,
+                binding.lifetime,
             )
         };
         if self.seen_binding_refs.contains(binding_ref) {
@@ -1608,22 +1742,36 @@ impl AccountResourceSlot {
         if binding_ref.connection_ref() == previous_binding_ref.connection_ref() {
             return Err(AccountResourceTransitionError::ResumeConnectionMismatch);
         }
+        let install_generation = self
+            .install_generation
+            .checked_next()
+            .ok_or(AccountResourceTransitionError::InstallGenerationExhausted)?;
         let revision = self.next_revision()?;
 
+        snapshot.stream_management_ref = Some(receipt.resumed_sm);
+        let predecessor = self
+            .binding
+            .take()
+            .ok_or(AccountResourceTransitionError::NotBound)?;
+        self.resumed_predecessors.push(predecessor);
         self.successful_resumes.push(receipt.clone());
         self.binding = Some(AccountResourceBindingReceipt {
             source: BindingEvidence::for_binding(binding_ref),
             binding_claim_identity,
+            lifetime,
+            install_generation,
             state: AccountResourceBindingState::Prepared,
             snapshot,
             snapshot_revision,
             publication: None,
             registration: None,
+            detachment: None,
             resumed_from: Some(receipt.clone()),
             retirement_start: None,
             retirement: None,
         });
         self.seen_binding_refs.push(binding_ref.clone());
+        self.install_generation = install_generation;
         self.revision = revision;
         Ok(revision)
     }
@@ -1707,6 +1855,13 @@ mod tests {
         slot_with_claim(claim("node-a", "epoch-a", 1))
     }
 
+    fn sm_binding(id: u128, generation: u64) -> SmBinding {
+        SmBinding {
+            session: super::super::joint_identity::SmSessionKey::from_uuid(Uuid::from_u128(id)),
+            generation: super::super::joint_identity::SessionGeneration::new(generation).unwrap(),
+        }
+    }
+
     fn local_connection() -> ConnectionRef {
         ConnectionRef::fresh(NodeLeaseIdentity::local_process())
     }
@@ -1763,6 +1918,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: binding_ref.clone(),
+                lifetime: ResourceLifetime::fresh(),
             },
             slot,
         );
@@ -1830,6 +1986,35 @@ mod tests {
         register_actor(slot, claim_identity, binding_ref);
     }
 
+    fn detach_active(
+        slot: &mut AccountResourceSlot,
+        claim_identity: &UserClaimIdentity,
+        binding_ref: &BindingRef,
+    ) {
+        let binding = slot.binding_receipt().expect("active binding");
+        let endpoint = EndpointRetirementEvidence::Unpublished {
+            publication: binding.publication().expect("published").clone(),
+            removed: BindingEvidence::for_binding(binding_ref),
+        };
+        commit(
+            AccountResourceMutation::Detach {
+                claim_identity: claim_identity.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: binding_ref.clone(),
+                endpoint,
+                custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+            },
+            slot,
+        );
+        assert_eq!(
+            slot.binding_receipt().unwrap().state(),
+            AccountResourceBindingState::Detached
+        );
+        assert!(slot
+            .current_bind_success_receipt(claim_identity, binding_ref)
+            .is_none());
+    }
+
     fn snapshot(
         available: bool,
         show: Option<Show>,
@@ -1839,7 +2024,7 @@ mod tests {
         carbons_enabled: bool,
         roster_interested: bool,
         blocklist_interested: bool,
-        stream_management_ref: Option<SmSessionId>,
+        stream_management_ref: Option<SmBinding>,
     ) -> AccountResourceSnapshot {
         AccountResourceSnapshot {
             presence_available: available,
@@ -1868,7 +2053,7 @@ mod tests {
             true,
             true,
             false,
-            Some(SmSessionId::new("sm-resource-1")),
+            Some(sm_binding(1, 1)),
         )
     }
 
@@ -2199,7 +2384,7 @@ mod tests {
             false,
             false,
             true,
-            Some(SmSessionId::new("sm-resource-1")),
+            Some(sm_binding(1, 1)),
         );
         commit(
             AccountResourceMutation::UpdateSnapshot {
@@ -2224,6 +2409,8 @@ mod tests {
         assert_ne!(failed_resume, fresh_bind);
 
         bind_prepared(&mut slot, &claim_identity, &failed_resume);
+        let old_lifetime = slot.binding_receipt().unwrap().lifetime();
+        let old_install = slot.binding_receipt().unwrap().install_generation();
         begin_retirement(
             &mut slot,
             &claim_identity,
@@ -2244,6 +2431,14 @@ mod tests {
         );
 
         bind_active(&mut slot, &claim_identity, &fresh_bind);
+        let fresh = slot.binding_receipt().unwrap();
+        assert_ne!(fresh.lifetime().logical, old_lifetime.logical);
+        assert_ne!(fresh.lifetime().occupancy, old_lifetime.occupancy);
+        assert_eq!(
+            fresh.install_generation(),
+            old_install.checked_next().unwrap()
+        );
+        assert_eq!(fresh.snapshot(), &AccountResourceSnapshot::default());
         let fresh_snapshot = sample_snapshot();
         commit(
             AccountResourceMutation::UpdateSnapshot {
@@ -2314,7 +2509,7 @@ mod tests {
             true,
             true,
             false,
-            Some(SmSessionId::new("sm-resource-1")),
+            Some(sm_binding(1, 1)),
         );
         let equivalent_replay = AccountResourceOperation::new(
             update.id,
@@ -2348,7 +2543,7 @@ mod tests {
                     true,
                     true,
                     false,
-                    original.stream_management_ref.clone(),
+                    original.stream_management_ref,
                 ),
             },
         );
@@ -2381,7 +2576,7 @@ mod tests {
             true,
             true,
             false,
-            Some(SmSessionId::new("replacement-sm-id")),
+            Some(sm_binding(3, 1)),
         );
         reject(
             AccountResourceMutation::UpdateSnapshot {
@@ -2906,7 +3101,7 @@ mod tests {
             false,
             false,
             false,
-            Some(SmSessionId::new("sm-deep")),
+            Some(sm_binding(2, 1)),
         );
         commit(
             AccountResourceMutation::UpdateSnapshot {
@@ -2917,11 +3112,15 @@ mod tests {
             },
             &mut accepted_slot,
         );
+        detach_active(&mut accepted_slot, &accepted_claim, &accepted_previous);
+        let accepted_lifetime = accepted_slot.binding_receipt().unwrap().lifetime();
         let accepted_resume_binding = binding(local_connection());
         let accepted_receipt = SuccessfulResumeReceipt::observed(
             BindingEvidence::for_binding(&accepted_previous),
             BindingEvidence::for_binding(&accepted_resume_binding),
-            SmSessionId::new("sm-deep"),
+            sm_binding(2, 1),
+            sm_binding(2, 2),
+            accepted_lifetime,
             BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
         );
 
@@ -2939,14 +3138,20 @@ mod tests {
             },
             &mut rejected_slot,
         );
+        detach_active(&mut rejected_slot, &rejected_claim, &rejected_previous);
+        let rejected_lifetime = rejected_slot.binding_receipt().unwrap().lifetime();
         let rejected_resume_binding = binding(shared_connection);
         let rejected_receipt = SuccessfulResumeReceipt::observed(
             BindingEvidence::for_binding(&rejected_previous),
             BindingEvidence::for_binding(&rejected_resume_binding),
-            SmSessionId::new("sm-deep"),
+            sm_binding(2, 1),
+            sm_binding(2, 2),
+            rejected_lifetime,
             BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
         );
 
+        let mut resumed_snapshot = retained_snapshot.clone();
+        resumed_snapshot.stream_management_ref = Some(sm_binding(2, 2));
         let (
             accepted_result,
             accepted_snapshot_matches,
@@ -2967,8 +3172,7 @@ mod tests {
                     receipt: accepted_receipt,
                 });
                 let accepted = accepted_slot.execute(accepted_operation);
-                let accepted_snapshot_matches =
-                    accepted_slot.snapshot() == Some(&retained_snapshot);
+                let accepted_snapshot_matches = accepted_slot.snapshot() == Some(&resumed_snapshot);
                 let rejected_revision = rejected_slot.revision();
                 let rejected =
                     rejected_slot.execute(operation(AccountResourceMutation::SuccessfulResume {
@@ -2983,6 +3187,7 @@ mod tests {
                 drop(accepted_slot);
                 drop(rejected_slot);
                 drop(retained_snapshot);
+                drop(resumed_snapshot);
                 (
                     accepted,
                     accepted_snapshot_matches,
@@ -3032,6 +3237,9 @@ mod tests {
             .binding_receipt()
             .expect("active binding")
             .snapshot_revision();
+        let lifetime = slot.binding_receipt().unwrap().lifetime();
+        let old_install = slot.binding_receipt().unwrap().install_generation();
+        detach_active(&mut slot, &claim_identity, &old_binding);
         let resumed_binding = binding(local_connection());
         assert_ne!(
             old_binding.connection_ref(),
@@ -3041,7 +3249,9 @@ mod tests {
         let bad_receipt = SuccessfulResumeReceipt::observed(
             BindingEvidence::for_binding(&old_binding),
             BindingEvidence::for_binding(&resumed_binding),
-            SmSessionId::new("wrong-sm-session"),
+            sm_binding(4, 1),
+            sm_binding(4, 2),
+            lifetime,
             BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
         );
         reject(
@@ -3059,7 +3269,9 @@ mod tests {
         let resume_receipt = SuccessfulResumeReceipt::observed(
             BindingEvidence::for_binding(&old_binding),
             BindingEvidence::for_binding(&resumed_binding),
-            SmSessionId::new("sm-resource-1"),
+            sm_binding(1, 1),
+            sm_binding(1, 2),
+            lifetime,
             BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
         );
         commit(
@@ -3076,10 +3288,24 @@ mod tests {
         assert_eq!(prepared.binding_ref(), &resumed_binding);
         assert_eq!(prepared.connection_ref(), resumed_binding.connection_ref());
         assert_eq!(prepared.state(), AccountResourceBindingState::Prepared);
-        assert_eq!(prepared.snapshot(), &resource_snapshot);
+        let mut resumed_snapshot = resource_snapshot.clone();
+        resumed_snapshot.stream_management_ref = Some(sm_binding(1, 2));
+        assert_eq!(prepared.snapshot(), &resumed_snapshot);
         assert_eq!(prepared.snapshot_revision(), snapshot_revision);
+        assert_eq!(prepared.lifetime(), lifetime);
+        assert_eq!(
+            prepared.install_generation(),
+            old_install.checked_next().unwrap()
+        );
         assert_eq!(prepared.resumed_from(), Some(&resume_receipt));
         assert_eq!(slot.successful_resume_receipts(), &[resume_receipt]);
+        assert_eq!(slot.resumed_predecessors().len(), 1);
+        let predecessor = &slot.resumed_predecessors()[0];
+        assert_eq!(predecessor.binding_ref(), &old_binding);
+        assert_eq!(predecessor.state(), AccountResourceBindingState::Detached);
+        assert_eq!(predecessor.lifetime(), lifetime);
+        assert!(predecessor.detachment().is_some());
+        assert!(predecessor.registration().is_some());
 
         reject(
             AccountResourceMutation::UpdateSnapshot {
@@ -3093,7 +3319,7 @@ mod tests {
         );
         publish_endpoint(&mut slot, &claim_identity, &resumed_binding);
         register_actor(&mut slot, &claim_identity, &resumed_binding);
-        assert_eq!(slot.snapshot(), Some(&resource_snapshot));
+        assert_eq!(slot.snapshot(), Some(&resumed_snapshot));
     }
 
     #[test]
@@ -3485,6 +3711,7 @@ mod tests {
                 claim_identity: original_claim.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: old_binding.clone(),
+                lifetime: ResourceLifetime::fresh(),
             },
             &mut slot,
             AccountResourceTransitionError::BindingRefReused,
@@ -3523,6 +3750,7 @@ mod tests {
             claim_identity: claim_identity.clone(),
             expected_revision: slot.revision(),
             binding_ref: binding_ref.clone(),
+            lifetime: ResourceLifetime::fresh(),
         });
         assert_eq!(slot.lookup(&bind), AccountResourceOperationLookup::Unknown);
         let committed = slot.execute(bind.clone()).expect("bind resource");
@@ -3551,6 +3779,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: AccountResourceRevision::INITIAL,
                 binding_ref: binding(local_connection()),
+                lifetime: ResourceLifetime::fresh(),
             },
         );
         assert_eq!(
@@ -3584,6 +3813,7 @@ mod tests {
             claim_identity,
             expected_revision: at_capacity,
             binding_ref: binding(local_connection()),
+            lifetime: ResourceLifetime::fresh(),
         });
         assert_eq!(
             slot.execute(refused.clone()),
@@ -3628,7 +3858,7 @@ mod tests {
             false,
             false,
             false,
-            previous.stream_management_ref.clone(),
+            previous.stream_management_ref,
         );
         reject(
             AccountResourceMutation::UpdateSnapshot {
