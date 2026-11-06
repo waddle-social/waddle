@@ -87,6 +87,15 @@ impl DatabasePubSubStorage {
         super::runtime_attach::verify_restricted_v1(db, profile).await
     }
 
+    /// Diagnose the partial v2 role graph and V1009 epoch grant. This does
+    /// not attach a store or select a serving profile.
+    pub async fn verify_restricted_profile_v2(
+        db: &Database,
+        profile: &super::RestrictedServingProfileV2,
+    ) -> Result<(), super::PubSubRuntimeAttachError> {
+        super::runtime_attach::verify_restricted_v2(db, profile).await
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }

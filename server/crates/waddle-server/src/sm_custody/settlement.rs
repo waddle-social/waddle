@@ -2,7 +2,7 @@ use sqlx::Row;
 use waddle_xmpp::ingress::MessageKey;
 
 use super::repository::{commit, pg};
-use super::types::db;
+use super::types::{db, ACK_HALF_RANGE};
 use super::{
     CommittedAdmission, CustodyError, CustodyRecoveryAuthority, CustodyTerminal, SealedSession,
     SmCustodyRepository,
@@ -30,7 +30,7 @@ impl SmCustodyRepository {
             let (acked, exposed) = frontier;
             let window = exposed - acked;
             let advance = i64::from(h.wrapping_sub(acked as u32));
-            let in_window = window < (1_i64 << 32) && advance <= window;
+            let in_window = window < ACK_HALF_RANGE && advance <= window;
             let excessive = advance > 1024;
             let through = if in_window && !excessive {
                 Some(acked.checked_add(advance).ok_or(CustodyError::Overflow)?)
@@ -72,7 +72,7 @@ impl SmCustodyRepository {
                     continue;
                 }
             }
-            if window >= (1_i64 << 32) || (in_window && excessive) {
+            if window >= ACK_HALF_RANGE || (in_window && excessive) {
                 return Err(CustodyError::Conflict);
             }
             let through = through.ok_or(CustodyError::Rejected)?;

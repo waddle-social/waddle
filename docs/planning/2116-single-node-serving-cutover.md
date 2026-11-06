@@ -92,8 +92,8 @@ against V1030.
    set before the gate, then revalidate the entire contiguous prefix.
    Convert the existing gate-first Rust paths and SQL admission/handoff
    triggers together so no gate-to-canonical inversion survives.
-   Preserve contiguous ordered exposure/replay and a durable exposed window
-   smaller than 2^32 before validating a wrapping XEP-0198 ACK. Quiesce the
+   Preserve contiguous ordered exposure/replay and a durable outstanding window
+   smaller than 2^31 before validating a wrapping XEP-0198 ACK. Quiesce the
    exact published pump and in-flight socket output outside the DB transaction,
    then re-enter and revalidate sibling inventory before pending acceptance.
    ACK, transfer, tombstone, late counted drains, pending and canonical GC
@@ -162,3 +162,72 @@ durable claim must stay gated until every package composes on the actual
 clustering-compiled single-node path. The durable exposed-window limit must
 match the XEP-0198 ACK validator's current half-range rule before replay is
 selected.
+
+## Grouped selected-boundary work after #2244
+
+#2244 merged opt-in A/H store diagnostics, a test-support cooperative catalog
+fence, and a test-support SM recipient-route laboratory. None is selected by
+startup or a production writer. The next grouped branch targets the functional
+single-node boundary; its draft state is a work ledger, not activation proof.
+
+1. **Privileged catalog and role boundary.** Inventory every privileged DDL,
+   ACL, function, index and migration mutator, including concurrent index
+   maintenance and pre-attestor pool hooks. Require a nonblocking shared-reader
+   protocol that cannot hold a stale transaction snapshot while maintenance
+   waits. Deny or durably quiesce any old login, backend, prepared transaction
+   or mutator that cannot participate. Pin the complete bounded attestor graph
+   before its first privileged read. Refuse restricted startup unless the
+   external ownership and mutation premise is independently established.
+2. **Whole-store runtime role and transaction boundary.** Reconcile the
+   S/R/A/H/T/I/M/migrator role and function graph, the V1009 A-owned
+   `UPDATE(id)` path, schema/table/column/default ACLs and every enabled
+   store. Attach only owner-prepared stores to the attested main pool in one
+   READ COMMITTED transaction authority. Preserve positive-only recovery for
+   an uncertain COMMIT and forbid raw R DML on guarded tables.
+3. **Complete recipient and SM custody boundary.** Replace every live, relay,
+   batch, detached, drained and snapshot producer and every ACK, transfer,
+   tombstone, pending and GC consumer with a single complete-source,
+   recipient-wide lock order. Persist the frame occurrence and sibling set;
+   conservatively refuse unknown provenance. Quiesce the published socket
+   pump before accepting pending. Prove both winner orders with different
+   canonical sources, retained counted payload on refusal and a durable
+   terminal after consumption. Reconcile the replay window with the ACK
+   validator's half-range rule.
+4. **Selected single-node startup and qualification.** Keep both existing
+   refusal gates closed until the preceding components compose on the actual
+   clustering-compiled single-node path. Gate cold and inherited listeners,
+   port-file publication and effectful workers behind the durable claim,
+   complete store attachments, reconciliation and recovery. Then exercise
+   real PostgreSQL/WebSocket/XEP-0198, failed transition, restart and fault
+   schedules before selecting serving.
+
+An independent architecture review must challenge this plan before selected
+implementation. Every merged intermediate commit must either remain dark or
+prove the full selected path; a partial store or writer conversion cannot
+relax either startup refusal. GitHub Actions and workflow files stay disabled
+until the whole #2046 implementation is finished, then `cuenv sync -A` and
+exact-release CI are required.
+
+## Dark #2245 boundary limits
+
+The v2 A/H/MAM/effect profile is an opt-in partial diagnostic. It neither
+registers a serving profile nor reconciles every enabled store and definer
+chain. Its MAM inspection uses a separate transaction and is not one atomic
+all-store receipt; privileged mutators and MAM writers must be quiescent.
+The same-session catalog-fence observation holds its shared advisory
+lock from before the pinned attestor's reads through acknowledged rollback;
+it does not enter the pool hook. The attestor also takes a blocking lineage
+lock, so a mutator with an incompatible catalog/lineage lock order can still
+create a cycle or force a bounded failure, even if it uses the fence. Every
+privileged mutator and old backend must participate with a consistent order or
+be independently quiesced before a selected startup can rely on this fence.
+
+The SM snapshot laboratory owns its transaction through a complete apply,
+but its caller must supply an authoritative captured occurrence or generation
+before a stale input can replace a newer durable frame. Borrowed append and
+promotion interfaces require the caller to roll back on cancellation; an
+interrupted partial write can leave untracked state that conservatively
+blocks pending acceptance. The candidate is not wired to the production
+writer, socket, pending selector, or GC. The durable custody candidate now
+limits `appended - peer_acked` to less than 2^31, matching the live validator,
+but replay selection and restart qualification remain open.

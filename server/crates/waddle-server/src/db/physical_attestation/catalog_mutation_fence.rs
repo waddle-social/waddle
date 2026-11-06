@@ -26,6 +26,15 @@
 //! acquisition interval starts after setup and includes post-acquisition
 //! verification. Individual operations are bounded, but lock ownership has no
 //! TTL and is bounded only by explicit release or confirmed backend termination.
+//!
+//! The separate fenced-attestor observation uses the acquired reader's own
+//! physical connection; a lock on some other connection cannot protect its
+//! reads. It is a laboratory witness, not pool-hook integration or serving
+//! authority. The current pinned hook rolls back and clears session advisory
+//! locks, so passing a guard through that hook would not preserve this proof.
+//! The lock is cooperative: unmodified old backends and any privileged DDL,
+//! ACL, role, function, or index mutator that ignores it remain outside the
+//! boundary. All must be independently excluded or fenced before use.
 
 use std::time::Duration;
 
@@ -33,7 +42,10 @@ use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection};
 use thiserror::Error;
 
-use super::{quote_identifier, validate_identifier};
+use super::{
+    attest_dark_catalog_pinned, quote_identifier, validate_identifier,
+    DarkPhysicalAttestationError, DarkPhysicalAttestationPins, PhysicalAttestationConfig,
+};
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 const STATEMENT_DEADLINE: Duration = Duration::from_secs(25);
@@ -65,6 +77,134 @@ pub enum CatalogMutationFenceError {
     MaintenanceUnconfirmed { backend_pid: i32 },
     #[error("catalog fence release is unconfirmed; reconcile backend {backend_pid}")]
     ReleaseUnconfirmed { backend_pid: i32 },
+}
+
+#[derive(Debug, Error)]
+pub enum DarkFencedAttestorError {
+    #[error(transparent)]
+    Fence(#[from] CatalogMutationFenceError),
+    #[error(transparent)]
+    Attestation(#[from] DarkPhysicalAttestationError),
+    #[error("fenced attestor transaction could not be started on backend {backend_pid}")]
+    BeginUnconfirmed { backend_pid: i32 },
+    #[error("fenced attestor rollback was not acknowledged on backend {backend_pid}")]
+    RollbackUnconfirmed { backend_pid: i32 },
+    #[error("fenced attestor observation timed out on backend {backend_pid}; reconcile it")]
+    ObservationUnconfirmed { backend_pid: i32 },
+    #[error("fenced attestor pause was cancelled")]
+    PauseCancelled,
+    #[error("fenced attestor PostgreSQL operation failed")]
+    Postgres(#[from] sqlx::Error),
+}
+
+/// Test-only pause at an exact stage; the observer receives the fenced PID.
+pub struct DarkFencedAttestorPause {
+    pub ready: tokio::sync::oneshot::Sender<i32>,
+    pub resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Pauses cannot run SQL or return the observed connection to the caller.
+#[derive(Default)]
+pub struct DarkFencedAttestorPauses {
+    pub before_attestor: Option<DarkFencedAttestorPause>,
+    pub after_attestor: Option<DarkFencedAttestorPause>,
+    pub after_rollback: Option<DarkFencedAttestorPause>,
+}
+
+/// Observe the pinned attestor on the same dedicated PG17 session holding the
+/// shared fence, from before its first protected read through acknowledged
+/// rollback. No connection, transaction, or serving capability escapes.
+///
+/// Direct, session-preserving access to the authoritative primary and an
+/// independently enforced all-mutator protocol are caller premises. This
+/// cannot fence nonparticipants or older backends. The independent pins must
+/// not be sourced from the session under inspection. An error or cancellation
+/// can leave the original backend active: reconcile that backend on the fenced
+/// primary before treating its transaction or lock as ended. In particular,
+/// cancellation before acquisition returns no PID to its caller.
+pub async fn inspect_dark_fenced_attestor(
+    options: &PgConnectOptions,
+    key: i64,
+    wait: Duration,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    pauses: DarkFencedAttestorPauses,
+) -> Result<(), DarkFencedAttestorError> {
+    let session = acquire(options, key, wait, Mode::Shared).await?;
+    let backend_pid = session.backend_pid;
+    tokio::time::timeout(
+        STATEMENT_DEADLINE,
+        inspect_fenced_session(session, config, pins, pauses),
+    )
+    .await
+    .map_err(|_| DarkFencedAttestorError::ObservationUnconfirmed { backend_pid })?
+}
+
+async fn inspect_fenced_session(
+    mut session: HeldSession,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    pauses: DarkFencedAttestorPauses,
+) -> Result<(), DarkFencedAttestorError> {
+    let backend_pid = session.backend_pid;
+    let mut tx = session
+        .connection
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .await
+        .map_err(|_| DarkFencedAttestorError::BeginUnconfirmed { backend_pid })?;
+    let observed = async {
+        for statement in [
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '10s'",
+            "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+            "SET LOCAL transaction_timeout = '20s'",
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        verify_held_connection(&mut tx, backend_pid, session.key, session.mode).await?;
+        pause(pauses.before_attestor, backend_pid).await?;
+        let restore_path = format!(
+            "{}, pg_temp",
+            quote_identifier(&config.postgres().schema.name.0)
+        );
+        attest_dark_catalog_pinned(&mut tx, config, pins, &restore_path).await?;
+        verify_held_connection(&mut tx, backend_pid, session.key, session.mode).await?;
+        pause(pauses.after_attestor, backend_pid).await?;
+        Ok::<(), DarkFencedAttestorError>(())
+    }
+    .await;
+    tx.rollback()
+        .await
+        .map_err(|_| DarkFencedAttestorError::RollbackUnconfirmed { backend_pid })?;
+    let after_rollback = if observed.is_ok() {
+        pause(pauses.after_rollback, backend_pid).await
+    } else {
+        Ok(())
+    };
+    verify_held_connection(
+        &mut session.connection,
+        backend_pid,
+        session.key,
+        session.mode,
+    )
+    .await?;
+    release(Some(session)).await?;
+    observed?;
+    after_rollback
+}
+
+async fn pause(
+    pause: Option<DarkFencedAttestorPause>,
+    backend_pid: i32,
+) -> Result<(), DarkFencedAttestorError> {
+    if let Some(pause) = pause {
+        let _ = pause.ready.send(backend_pid);
+        pause
+            .resume
+            .await
+            .map_err(|_| DarkFencedAttestorError::PauseCancelled)?;
+    }
+    Ok(())
 }
 
 /// A qualified index name supplied by the trusted lab caller.
@@ -327,6 +467,34 @@ async fn acquire(
 }
 
 async fn session_is_held(session: &mut HeldSession) -> Option<bool> {
+    connection_holds_fence(
+        &mut session.connection,
+        session.backend_pid,
+        session.key,
+        session.mode,
+    )
+    .await
+}
+
+async fn verify_held_connection(
+    connection: &mut PgConnection,
+    backend_pid: i32,
+    key: i64,
+    mode: Mode,
+) -> Result<(), CatalogMutationFenceError> {
+    match connection_holds_fence(connection, backend_pid, key, mode).await {
+        Some(true) => Ok(()),
+        Some(false) => Err(CatalogMutationFenceError::FenceLost),
+        None => Err(CatalogMutationFenceError::FenceUnconfirmed { backend_pid }),
+    }
+}
+
+async fn connection_holds_fence(
+    connection: &mut PgConnection,
+    backend_pid: i32,
+    key: i64,
+    mode: Mode,
+) -> Option<bool> {
     let observed = sqlx::query_scalar::<_, bool>(
         "SELECT pg_catalog.pg_backend_pid() = $1 AND NOT pg_catalog.pg_is_in_recovery() \
          AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
@@ -335,10 +503,10 @@ async fn session_is_held(session: &mut HeldSession) -> Option<bool> {
              AND objid = ($2::pg_catalog.int8 & 4294967295)::pg_catalog.oid \
              AND objsubid = 1 AND mode = $3 AND granted)",
     )
-    .bind(session.backend_pid)
-    .bind(session.key)
-    .bind(session.mode.lock_mode())
-    .fetch_one(&mut session.connection);
+    .bind(backend_pid)
+    .bind(key)
+    .bind(mode.lock_mode())
+    .fetch_one(connection);
     tokio::time::timeout(STATEMENT_DEADLINE, observed)
         .await
         .ok()?

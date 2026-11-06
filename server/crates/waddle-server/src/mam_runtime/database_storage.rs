@@ -84,6 +84,109 @@ enum MamAuthority {
 }
 
 impl DatabaseMamStorage {
+    /// Inspect the partial v2 role profile and the owner-prepared MAM schema.
+    /// This returns no storage handle or claim authority and is not selected by
+    /// startup. Privileged mutators and archive writers must remain quiescent.
+    pub async fn verify_restricted_profile_v2(
+        database: &Database,
+        mam_owner: &PgRoleName,
+        profile: &crate::pubsub::RestrictedServingProfileV2,
+    ) -> Result<(), DatabaseMamStorageError> {
+        if database.driver() != DatabaseDriver::Postgres || !database.is_main_lane() {
+            return Err(DatabaseMamStorageError::AttestedMainDatabaseRequired);
+        }
+        let capability = database
+            .attested_pg_writer_capability()
+            .ok_or(DatabaseMamStorageError::AttestedMainDatabaseRequired)?;
+        database
+            .verify_attested_pg_writer_capability(&capability)
+            .map_err(DatabaseError::from)?;
+        let identity = capability.identity();
+        let schema = &identity.schema.name.0;
+        validate_identifier(schema, "MAM schema")
+            .map_err(|_| DatabaseMamStorageError::InvalidSchema)?;
+
+        // MAM's existing full verifier requires REPEATABLE READ. Preflight
+        // the named heaps in READ COMMITTED before locking them in that fresh
+        // transaction; quiescent privileged mutators remain a prerequisite.
+        let mut preflight = database.begin().await?;
+        preflight
+            .execute(
+                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+                (),
+            )
+            .await?;
+        crate::db::read_only_timeout::bound_postgres_waits(&mut preflight)
+            .await
+            .map_err(|_| DatabaseMamStorageError::ReadBounds)?;
+        capability.attest_transaction(&mut preflight).await?;
+        let mut active = preflight
+            .query(
+                "SELECT n.oid::bigint=? AND n.nspname=pg_catalog.current_schema() \
+             AND COALESCE((pg_catalog.current_schemas(false))[1]::text,'')=n.nspname \
+             AND pg_catalog.cardinality(pg_catalog.current_schemas(false))<=2 \
+             AND (pg_catalog.cardinality(pg_catalog.current_schemas(false))=1 \
+               OR pg_catalog.left((pg_catalog.current_schemas(false))[2]::text,8)='pg_temp_') \
+             FROM pg_catalog.pg_namespace n WHERE n.nspname=?",
+                crate::db_params![i64::from(identity.schema.oid), schema],
+            )
+            .await?;
+        if !matches!(active.next().await?, Some(row) if row.get::<bool>(0)?) {
+            return Err(DatabaseMamStorageError::InvalidSchema);
+        }
+        drop(active);
+        preflight
+            .execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await?;
+        verify_v2_mam_graph(&mut preflight, identity, capability.definer_role(), profile).await?;
+        preflight.rollback().await?;
+
+        let mut tx = database.begin().await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            (),
+        )
+        .await?;
+        crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+            .await
+            .map_err(|_| DatabaseMamStorageError::ReadBounds)?;
+        let quoted = quote_identifier(schema);
+        for table in MAM_TABLES {
+            tx.execute(
+                &format!("LOCK TABLE ONLY {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
+                (),
+            )
+            .await?;
+        }
+        capability.attest_transaction(&mut tx).await?;
+        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await?;
+        verify_v2_mam_graph(&mut tx, identity, capability.definer_role(), profile).await?;
+        crate::pubsub::runtime_attach::verify_no_definer_writers_tx(&mut tx, schema, &MAM_TABLES)
+            .await
+            .map_err(|_| DatabaseMamStorageError::UnsafeMamPrivileges)?;
+        let connection = tx
+            .postgres_connection()
+            .ok_or(DatabaseMamStorageError::AttestedMainDatabaseRequired)?;
+        verify_mam_writer_privileges(
+            connection,
+            schema,
+            mam_owner,
+            capability.definer_role(),
+            capability.installer_role(),
+            Some(profile),
+        )
+        .await?;
+        SqlxMamStorage::verify_postgres_schema_on_connection(
+            connection,
+            schema,
+            mam_owner.as_str(),
+        )
+        .await?;
+        tx.rollback().await?;
+        Ok(())
+    }
+
     /// Attach to an already owner-prepared MAM schema on an attested main
     /// PostgreSQL lane. This performs a bounded, read-only snapshot check and
     /// verifies the exact runtime grants needed by all `MamStorage` methods,
@@ -336,6 +439,7 @@ impl DatabaseMamStorage {
                 &self.mam_owner,
                 capability.definer_role(),
                 capability.installer_role(),
+                None,
             )
             .await?;
         }
@@ -364,6 +468,28 @@ impl DatabaseMamStorage {
             }
         }
     }
+}
+
+async fn verify_v2_mam_graph(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+    definer: &PgRoleName,
+    profile: &crate::pubsub::RestrictedServingProfileV2,
+) -> Result<(), DatabaseMamStorageError> {
+    crate::pubsub::runtime_attach::verify_restricted_v2_graph_tx(
+        tx,
+        identity,
+        definer.as_str(),
+        profile,
+    )
+    .await
+    .map_err(|_| DatabaseMamStorageError::UnsafeMamPrivileges)?;
+    for (table, oid) in MAM_TABLES.into_iter().zip(profile.mam_relation_oids) {
+        crate::pubsub::runtime_attach::verify_v2_relation_tx(tx, identity, table, oid)
+            .await
+            .map_err(|_| DatabaseMamStorageError::UnsafeMamPrivileges)?;
+    }
+    Ok(())
 }
 
 macro_rules! run_operation {
@@ -587,6 +713,7 @@ async fn verify_mam_writer_privileges(
     owner: &PgRoleName,
     definer: &PgRoleName,
     installer: &PgRoleName,
+    profile: Option<&crate::pubsub::RestrictedServingProfileV2>,
 ) -> Result<(), DatabaseMamStorageError> {
     let query = format!(
         r#"WITH runtime AS (
@@ -639,7 +766,9 @@ async fn verify_mam_writer_privileges(
                    SELECT 1 FROM pg_catalog.aclexplode(
                      COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a
                    WHERE a.grantee <> n.nspowner
-                     AND (a.grantee NOT IN (r.oid, f.oid)
+                     AND (a.grantee NOT IN (r.oid, f.oid,
+                              COALESCE($5::bigint::oid,r.oid), COALESCE($6::bigint::oid,r.oid),
+                              CASE WHEN $5::bigint IS NULL THEN r.oid ELSE pg_catalog.to_regrole('pg_monitor') END)
                           OR a.is_grantable OR a.privilege_type <> 'USAGE'))
                FROM runtime r CROSS JOIN owner o CROSS JOIN definer f
                CROSS JOIN installer i CROSS JOIN target n
@@ -713,7 +842,9 @@ async fn verify_mam_writer_privileges(
                  COALESCE((SELECT nspacl FROM target),
                           pg_catalog.acldefault('n', (SELECT nspowner FROM target)))
                ) a CROSS JOIN runtime r CROSS JOIN definer f CROSS JOIN target n
-               WHERE a.grantee <> n.nspowner AND a.grantee NOT IN (r.oid, f.oid))
+               WHERE a.grantee <> n.nspowner AND a.grantee NOT IN (r.oid, f.oid,
+                   COALESCE($5::bigint::oid,r.oid), COALESCE($6::bigint::oid,r.oid),
+                   CASE WHEN $5::bigint IS NULL THEN r.oid ELSE pg_catalog.to_regrole('pg_monitor') END))
            "#,
     );
     let safe: bool = sqlx::query_scalar(&query)
@@ -721,6 +852,8 @@ async fn verify_mam_writer_privileges(
         .bind(owner.as_str())
         .bind(definer.as_str())
         .bind(installer.as_str())
+        .bind(profile.map(|p| i64::from(p.v1.api_oid)))
+        .bind(profile.map(|p| i64::from(p.v1.helper_oid)))
         .fetch_one(connection)
         .await
         .map_err(|error| DatabaseMamStorageError::Database(DatabaseError::from(error)))?;

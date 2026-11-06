@@ -644,3 +644,6 @@ async fn portable_append_and_pending_acceptance_share_route_lock_and_preserve_re
     drop(owner);
     fixture.cleanup().await;
 }
+
+#[path = "sm_recipient_route_race/portable_writer.rs"]
+mod portable_writer;

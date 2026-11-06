@@ -329,20 +329,29 @@ const MUC_TABLES: &[&Table] = &[
 ];
 
 pub(super) async fn verify(db: &Database) -> Result<(), RoomEffectRuntimeAttachError> {
-    verify_tables(db, &[&EFFECTS], false, None).await.map(drop)
+    verify_tables(db, &[&EFFECTS], false, None, None)
+        .await
+        .map(drop)
 }
 
 pub(super) async fn verify_muc_room_runtime(
     db: &Database,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
-    verify_tables(db, MUC_TABLES, true, None).await
+    verify_tables(db, MUC_TABLES, true, None, None).await
 }
 
 pub(super) async fn verify_muc_room_runtime_v1(
     db: &Database,
     profile: &crate::pubsub::RestrictedServingProfileV1,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
-    verify_tables(db, MUC_TABLES, true, Some(profile)).await
+    verify_tables(db, MUC_TABLES, true, Some(profile), None).await
+}
+
+pub(super) async fn verify_effect_outbox_v2(
+    db: &Database,
+    profile: &crate::pubsub::RestrictedServingProfileV2,
+) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
+    verify_tables(db, &[&EFFECTS], true, Some(&profile.v1), Some(profile)).await
 }
 
 async fn verify_tables(
@@ -350,6 +359,7 @@ async fn verify_tables(
     tables: &[&Table],
     exact_schema_acl: bool,
     profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
+    v2: Option<&crate::pubsub::RestrictedServingProfileV2>,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(RoomEffectRuntimeAttachError::AttestedPostgresRequired);
@@ -383,17 +393,8 @@ async fn verify_tables(
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| RoomEffectRuntimeAttachError::ReadBounds)?;
-    for table in tables {
-        let relation = crate::db::physical_attestation::quote_identifier(table.name);
-        tx.execute(
-            &format!("LOCK TABLE {quoted}.{relation} IN ACCESS SHARE MODE"),
-            (),
-        )
-        .await
-        .map_err(|source| RoomEffectRuntimeAttachError::Relation {
-            table: table.name,
-            source,
-        })?;
+    if v2.is_none() {
+        lock_tables(&mut tx, &quoted, tables, false).await?;
     }
     capability.attest_transaction(&mut tx).await?;
     let mut active = tx
@@ -424,6 +425,52 @@ async fn verify_tables(
         .map_err(|_| RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
             component: "v1 role graph",
         })?;
+        if let Some(v2) = v2 {
+            crate::pubsub::runtime_attach::verify_restricted_v2_graph_tx(
+                &mut tx,
+                identity,
+                capability.definer_role().as_str(),
+                v2,
+            )
+            .await
+            .map_err(|_| RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+                component: "v2 role graph",
+            })?;
+            // Check the relation kind and inheritance before a name-based
+            // lock, then recheck the catalog after the bounded wait.
+            for table in tables {
+                crate::pubsub::runtime_attach::verify_v2_relation_tx(
+                    &mut tx,
+                    identity,
+                    table.name,
+                    v2.effect_relation_oid,
+                )
+                .await
+                .map_err(|_| RoomEffectRuntimeAttachError::InvalidTable { table: table.name })?;
+                verify_table(&mut tx, schema, table, true).await?;
+            }
+            lock_tables(&mut tx, &quoted, tables, true).await?;
+            for table in tables {
+                crate::pubsub::runtime_attach::verify_v2_relation_tx(
+                    &mut tx,
+                    identity,
+                    table.name,
+                    v2.effect_relation_oid,
+                )
+                .await
+                .map_err(|_| RoomEffectRuntimeAttachError::InvalidTable { table: table.name })?;
+            }
+            crate::pubsub::runtime_attach::verify_restricted_v2_graph_tx(
+                &mut tx,
+                identity,
+                capability.definer_role().as_str(),
+                v2,
+            )
+            .await
+            .map_err(|_| RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+                component: "v2 role graph",
+            })?;
+        }
         let names: Vec<_> = tables.iter().map(|table| table.name).collect();
         crate::pubsub::runtime_attach::verify_no_definer_writers_tx(&mut tx, schema, &names)
             .await
@@ -449,6 +496,28 @@ async fn verify_tables(
     verify_incoming_foreign_keys(&mut tx, schema, tables).await?;
     tx.rollback().await?;
     Ok(capability)
+}
+
+async fn lock_tables(
+    tx: &mut Transaction<'_>,
+    quoted_schema: &str,
+    tables: &[&Table],
+    only: bool,
+) -> Result<(), RoomEffectRuntimeAttachError> {
+    let only = if only { "ONLY " } else { "" };
+    for table in tables {
+        let relation = crate::db::physical_attestation::quote_identifier(table.name);
+        tx.execute(
+            &format!("LOCK TABLE {only}{quoted_schema}.{relation} IN ACCESS SHARE MODE"),
+            (),
+        )
+        .await
+        .map_err(|source| RoomEffectRuntimeAttachError::Relation {
+            table: table.name,
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 async fn verify_table(

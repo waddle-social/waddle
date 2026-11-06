@@ -39,7 +39,8 @@ CREATE TABLE __SCHEMA__.sm_custody_gates (
     exposed BIGINT NOT NULL DEFAULT 0 CHECK (exposed >= 0),
     peer_acked BIGINT NOT NULL DEFAULT 0 CHECK (peer_acked >= 0),
     UNIQUE (session_id, generation),
-    CHECK (peer_acked <= exposed AND exposed <= appended)
+    CHECK (peer_acked <= exposed AND exposed <= appended),
+    CHECK (appended - peer_acked < 2147483648)
 );
 CREATE TABLE __SCHEMA__.sm_custody_operations (
     operation_id UUID PRIMARY KEY,

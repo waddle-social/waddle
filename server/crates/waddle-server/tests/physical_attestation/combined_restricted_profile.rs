@@ -1,9 +1,10 @@
 //! Combined-store qualification for the unselected PG17 restricted profile.
 //!
-//! Only inbox, portable SM, and pending delivery receive runtime round trips.
-//! PubSub and dark room observation have independently verified profile
-//! conflicts. MAM, claims, push, rooms, and outboxes are not qualified here.
-//! This is not an all-store or serving test.
+//! Inbox, portable SM, and pending delivery receive legacy round trips. The
+//! partial v2 diagnostics inspect PubSub, the room-effect outbox, MAM and the
+//! V1009 epoch grants alongside v1 observation and, with clustering, MUC.
+//! Claims, push, notifications and other stores are not qualified here; these
+//! separate diagnostics are not an atomic all-store or serving test.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -26,13 +27,22 @@ use waddle_server::ingress_uow::{
     prepare_dark_room_observation_schema, verify_attested_room_observation_schema,
     verify_attested_room_observation_schema_v1, RoomObservationSchemaError,
 };
+use waddle_server::mam_runtime::DatabaseMamStorage;
+#[cfg(feature = "clustering")]
+use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
+#[cfg(feature = "clustering")]
+use waddle_server::muc_durable::PostgresMucRoomStore;
 use waddle_server::pending_delivery::{
     bootstrap_pending_delivery_owner_schema, DatabasePendingDeliveryStorage,
 };
-use waddle_server::pubsub::{DatabasePubSubStorage, RestrictedServingProfileV1};
+use waddle_server::pubsub::{
+    DatabasePubSubStorage, RestrictedServingProfileV1, RestrictedServingProfileV2,
+};
+use waddle_server::room_effect_outbox::RoomEffectOutboxStore;
 use waddle_server::sm_persistence::{bootstrap_portable_sm_owner_schema, DatabaseSmPersistence};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::mam::SqlxMamStorage;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{
     PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
@@ -395,6 +405,22 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         .await
         .context("acknowledge ingress-lane rollback")?;
 
+    // Preserve the registered V1009 definitions before the separate legacy
+    // relation-guard diagnostic below. The v2 qualification restores them.
+    let mut v1009_definitions = Vec::new();
+    for function in [
+        "waddle_ingress_epoch_guard",
+        "waddle_ingress_protocol_epoch_guard",
+    ] {
+        let definition: String = sqlx::query_scalar(
+            "SELECT pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure($1))",
+        )
+        .bind(format!("guarded.{function}()"))
+        .fetch_one(&admin)
+        .await?;
+        v1009_definitions.push(definition);
+    }
+
     let mut owner_connection = PgConnection::connect_with(
         &PgConnectOptions::from_str(base_url)?
             .database(&database)
@@ -714,6 +740,252 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     sqlx::query("DROP FUNCTION guarded.v1_observation_relay()")
         .execute(&admin)
         .await?;
+
+    // Return the guards to the registered V1009 bodies before qualifying the
+    // partial profile. The legacy relation-guard experiment is not selected.
+    for definition in &v1009_definitions {
+        owner_sql(&owner_db, definition).await?;
+    }
+    owner_sql(
+        &owner_db,
+        &format!("REVOKE UPDATE (id) ON guarded.ingress_protocol_epoch FROM {runtime}"),
+    )
+    .await?;
+    let mut mam_connection = PgConnection::connect_with(
+        &PgConnectOptions::from_str(base_url)?
+            .database(&database)
+            .username(&migrator)
+            .password(&password)
+            .options([("role", owner.as_str()), ("search_path", "guarded")]),
+    )
+    .await?;
+    mam_connection = SqlxMamStorage::bootstrap_postgres_schema_on_owned_connection(
+        mam_connection,
+        "guarded",
+        &owner,
+    )
+    .await?;
+    mam_connection.close().await?;
+    #[cfg(feature = "clustering")]
+    {
+        PostgresMucRoomStore::initialize_owner(&owner_db, &identity).await?;
+        MucDestroyCompletionOutboxStore::try_new(owner_db.clone()).await?;
+    }
+    RoomEffectOutboxStore::initialize_owner(&owner_db, &identity).await?;
+    for statement in [
+        format!("GRANT SELECT, INSERT ON guarded.mam_messages, guarded.mam_archive_sequences TO {runtime}"),
+        format!("GRANT UPDATE (body, stanza_xml, thread_id, parent_thread_id, reply_to_id, reply_to_jid, rich_payload) ON guarded.mam_messages TO {runtime}"),
+        format!("GRANT UPDATE (next_seq) ON guarded.mam_archive_sequences TO {runtime}"),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.clustering_muc_room_effects TO {runtime}"),
+    ] {
+        owner_sql(&owner_db, &statement).await?;
+    }
+    #[cfg(feature = "clustering")]
+    for statement in [
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.clustering_muc_rooms, guarded.clustering_muc_room_affiliations, guarded.clustering_muc_room_lifecycles, guarded.clustering_muc_destroy_outbox TO {runtime}"),
+        format!("GRANT SELECT, INSERT, DELETE ON guarded.clustering_muc_admin_receipts TO {runtime}"),
+    ] {
+        owner_sql(&owner_db, &statement).await?;
+    }
+    let mut pins = Vec::new();
+    for table in [
+        "clustering_muc_room_effects",
+        "mam_messages",
+        "mam_archive_sequences",
+    ] {
+        let oid: Oid = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1)::oid")
+            .bind(format!("guarded.{table}"))
+            .fetch_one(&admin)
+            .await?;
+        pins.push(oid.0);
+    }
+    let v2 = RestrictedServingProfileV2 {
+        v1: serving_profile.clone(),
+        epoch_relation_oid: epoch.0,
+        effect_relation_oid: pins[0],
+        mam_relation_oids: [pins[1], pins[2]],
+    };
+    let owner_role = PgRoleName::new(&owner)?;
+    DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
+    #[cfg(feature = "clustering")]
+    RoomEffectOutboxStore::verify_muc_room_runtime_v1(main.clone(), &serving_profile).await?;
+    RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &v2).await?;
+    DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2)
+        .await
+        .context("initial v2 MAM inspection")?;
+
+    #[cfg(not(feature = "clustering"))]
+    {
+        let schema = PgSchemaName("guarded".to_owned());
+        ensure!(
+            matches!(
+                DatabaseMamStorage::attach(main, owner_role.clone(), schema.clone()).await,
+                Err(waddle_server::mam_runtime::DatabaseMamStorageError::UnsafeMamPrivileges)
+            ),
+            "legacy MAM unexpectedly accepted A/H grants"
+        );
+        owner_sql(
+            &owner_db,
+            &format!("REVOKE USAGE ON SCHEMA guarded FROM {api}, {helper}, pg_monitor"),
+        )
+        .await?;
+        let legacy = DatabaseMamStorage::attach(main, owner_role.clone(), schema)
+            .await
+            .context("legacy MAM after A/H revocation")?;
+        drop(legacy);
+        owner_sql(
+            &owner_db,
+            &format!("GRANT USAGE ON SCHEMA guarded TO {api}, {helper}, pg_monitor"),
+        )
+        .await?;
+    }
+
+    let mut wrong = v2.clone();
+    wrong.epoch_relation_oid = v2.epoch_relation_oid.wrapping_add(1);
+    ensure!(
+        DatabasePubSubStorage::verify_restricted_profile_v2(main, &wrong)
+            .await
+            .is_err(),
+        "wrong epoch pin accepted"
+    );
+    let mut wrong = v2.clone();
+    wrong.effect_relation_oid = v2.mam_relation_oids[0];
+    ensure!(
+        RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &wrong)
+            .await
+            .is_err(),
+        "wrong effect pin accepted"
+    );
+    let mut wrong = v2.clone();
+    wrong.mam_relation_oids.swap(0, 1);
+    ensure!(
+        DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &wrong)
+            .await
+            .is_err(),
+        "swapped MAM pins accepted"
+    );
+
+    // V1009 uses an invoker FOR SHARE: prove A can take that row lock while
+    // R cannot, with the original definitions still installed.
+    for (role, succeeds) in [(&api, true), (&runtime, false)] {
+        let mut role_tx = admin.begin().await?;
+        sqlx::query(&format!("SET LOCAL ROLE {role}"))
+            .execute(&mut *role_tx)
+            .await?;
+        let result =
+            sqlx::query("SELECT epoch FROM guarded.ingress_protocol_epoch WHERE id=1 FOR SHARE")
+                .execute(&mut *role_tx)
+                .await;
+        ensure!(
+            result.is_ok() == succeeds,
+            "V1009 row-lock privilege for {role}"
+        );
+        role_tx.rollback().await?;
+    }
+    for (function, expected) in [
+        "waddle_ingress_epoch_guard",
+        "waddle_ingress_protocol_epoch_guard",
+    ]
+    .into_iter()
+    .zip(&v1009_definitions)
+    {
+        let actual: String = sqlx::query_scalar(
+            "SELECT pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure($1))",
+        )
+        .bind(format!("guarded.{function}()"))
+        .fetch_one(&admin)
+        .await?;
+        ensure!(
+            &actual == expected,
+            "registered V1009 function changed: {function}"
+        );
+    }
+
+    // Each drift is introduced and removed in the same owner-prepared schema;
+    // no verifier may return evidence while the graph is unsafe.
+    for (grant, revoke) in [
+        (format!("GRANT UPDATE(id) ON guarded.ingress_protocol_epoch TO {runtime}"), format!("REVOKE UPDATE(id) ON guarded.ingress_protocol_epoch FROM {runtime}")),
+        (format!("GRANT UPDATE(epoch) ON guarded.ingress_protocol_epoch TO {api}"), format!("REVOKE UPDATE(epoch) ON guarded.ingress_protocol_epoch FROM {api}")),
+        (format!("GRANT UPDATE(id) ON guarded.ingress_protocol_epoch TO {api} WITH GRANT OPTION"), format!("REVOKE GRANT OPTION FOR UPDATE(id) ON guarded.ingress_protocol_epoch FROM {api}")),
+        ("GRANT SELECT ON guarded.ingress_protocol_epoch TO PUBLIC".to_owned(), "REVOKE SELECT ON guarded.ingress_protocol_epoch FROM PUBLIC".to_owned()),
+        (format!("GRANT SELECT ON guarded.mam_messages TO {api}"), format!("REVOKE SELECT ON guarded.mam_messages FROM {api}")),
+        (format!("GRANT SELECT ON guarded.mam_messages TO {helper}"), format!("REVOKE SELECT ON guarded.mam_messages FROM {helper}")),
+        ("GRANT SELECT ON guarded.clustering_muc_room_effects TO PUBLIC".to_owned(), "REVOKE SELECT ON guarded.clustering_muc_room_effects FROM PUBLIC".to_owned()),
+        (format!("GRANT UPDATE ON guarded.clustering_muc_room_effects TO {runtime} WITH GRANT OPTION"), format!("REVOKE GRANT OPTION FOR UPDATE ON guarded.clustering_muc_room_effects FROM {runtime}")),
+        (format!("GRANT pg_read_all_data TO {helper}"), format!("REVOKE pg_read_all_data FROM {helper}")),
+        (format!("GRANT TEMP ON DATABASE {database} TO {api}"), format!("REVOKE TEMP ON DATABASE {database} FROM {api}")),
+        (format!("GRANT USAGE ON SCHEMA public TO {api}"), format!("REVOKE USAGE ON SCHEMA public FROM {api}")),
+        (format!("GRANT CREATE ON SCHEMA public TO {runtime}"), format!("REVOKE CREATE ON SCHEMA public FROM {runtime}")),
+    ] {
+        sqlx::query(&grant).execute(&admin).await?;
+        let pubsub = DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await;
+        let effect = RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &v2).await;
+        let mam = DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2).await;
+        // Store-local ACL drift need not be rejected by an unrelated store.
+        if grant.contains("mam_messages") {
+            ensure!(mam.is_err(), "MAM accepted {grant}");
+        } else if grant.contains("clustering_muc_room_effects") {
+            ensure!(effect.is_err(), "effect outbox accepted {grant}");
+        } else {
+            ensure!(pubsub.is_err() && effect.is_err() && mam.is_err(), "graph accepted {grant}");
+        }
+        sqlx::query(&revoke).execute(&admin).await?;
+    }
+    for table in ["mam_messages", "clustering_muc_room_effects"] {
+        sqlx::query(&format!("CREATE FUNCTION guarded.v2_relay() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'DELETE FROM guarded.{table} WHERE false'"))
+            .execute(&admin).await?;
+        sqlx::query(&format!(
+            "ALTER FUNCTION guarded.v2_relay() OWNER TO {owner}"
+        ))
+        .execute(&admin)
+        .await?;
+        sqlx::query("REVOKE ALL ON FUNCTION guarded.v2_relay() FROM PUBLIC")
+            .execute(&admin)
+            .await?;
+        sqlx::query(&format!(
+            "GRANT EXECUTE ON FUNCTION guarded.v2_relay() TO {api}"
+        ))
+        .execute(&admin)
+        .await?;
+        ensure!(
+            RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &v2)
+                .await
+                .is_err(),
+            "effect accepted owner definer relay"
+        );
+        ensure!(
+            DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2)
+                .await
+                .is_err(),
+            "MAM accepted owner definer relay"
+        );
+        sqlx::query("DROP FUNCTION guarded.v2_relay()")
+            .execute(&admin)
+            .await?;
+    }
+    sqlx::query("CREATE TABLE public.v2_unrelated(id integer)")
+        .execute(&admin)
+        .await?;
+    for role in [&api, &runtime] {
+        sqlx::query(&format!("GRANT SELECT ON public.v2_unrelated TO {role}"))
+            .execute(&admin)
+            .await?;
+        ensure!(
+            DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2)
+                .await
+                .is_err(),
+            "{role} gained another schema's table authority"
+        );
+        sqlx::query(&format!("REVOKE SELECT ON public.v2_unrelated FROM {role}"))
+            .execute(&admin)
+            .await?;
+    }
+    sqlx::query("DROP TABLE public.v2_unrelated")
+        .execute(&admin)
+        .await?;
+    DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
+    RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &v2).await?;
+    DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2).await?;
     drop(probe);
     drop(pending);
     drop(sm);
