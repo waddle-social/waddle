@@ -7418,3 +7418,7 @@ mod observer_quarantine;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/combined_restricted_profile.rs"]
 mod combined_restricted_profile;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/pinned_hook.rs"]
+mod pinned_hook_tests;

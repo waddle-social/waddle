@@ -25,6 +25,8 @@ pub use installer::{
     inspect_installation, install, observe_installation, InstallationObservation,
     InstallationStatus,
 };
+mod pinned_hook;
+pub use pinned_hook::{pinned_attested_pool, PinnedRuntimeAuthority};
 mod preflight;
 pub use preflight::{
     attest_dark_catalog_pinned, DarkPhysicalAttestationError, DarkPhysicalAttestationPins,
@@ -83,6 +85,10 @@ pub enum PhysicalAttestationError {
     WrongPool,
     #[error("cannot bind an attested pool while a raw checkout is still active")]
     ActivePoolLease,
+    #[error("pinned physical attestation transaction entry is not yet converted")]
+    UnconvertedPinnedTransaction,
+    #[error("invalid or inconsistent independently provisioned runtime pins")]
+    InvalidRuntimePins,
     #[error("physical attestation capability requires PostgreSQL")]
     PostgresRequired,
     #[error("physical connection identity differs at {field}")]
@@ -158,6 +164,13 @@ pub struct AttestedPgPool {
 pub(crate) struct AttestedPostgresWriterCapability {
     binding: std::sync::Arc<()>,
     config: PhysicalAttestationConfig,
+    mode: AttestationMode,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum AttestationMode {
+    LegacyDark,
+    Pinned(PinnedRuntimeAuthority),
 }
 
 impl AttestedPostgresWriterCapability {
@@ -190,6 +203,9 @@ impl AttestedPostgresWriterCapability {
         &self,
         transaction: &mut super::Transaction<'_>,
     ) -> Result<(), DatabaseError> {
+        if matches!(&self.mode, AttestationMode::Pinned(_)) {
+            return Err(PhysicalAttestationError::UnconvertedPinnedTransaction.into());
+        }
         let connection = transaction
             .postgres_connection()
             .ok_or(PhysicalAttestationError::PostgresRequired)?;
@@ -244,6 +260,7 @@ impl AttestedPgPool {
 
     pub(crate) fn has_same_attestation_config(&self, other: &Self) -> bool {
         self.writer_capability.config == other.writer_capability.config
+            && self.writer_capability.mode == other.writer_capability.mode
     }
 
     /// Refuse to combine the pool while any test or internal raw checkout is
@@ -680,6 +697,7 @@ pub fn attested_pool(
         writer_capability: AttestedPostgresWriterCapability {
             binding: std::sync::Arc::new(()),
             config,
+            mode: AttestationMode::LegacyDark,
         },
     })
 }
