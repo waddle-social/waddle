@@ -403,7 +403,10 @@ impl CanonicalMessageRepository {
         let (tx, prepared) = transaction.prepared_parts();
         ingress_substrate::lock_message_for_child_in_prepared_transaction(tx, prepared, message_key)
             .await
-            .map_err(Into::into)
+            .map_err(|error| match error {
+                ingress_substrate::IngressSubstrateError::Timeout => IngressUowError::Timeout,
+                other => other.into(),
+            })
     }
 
     /// Check durable terminal state without taking the canonical row lock.
