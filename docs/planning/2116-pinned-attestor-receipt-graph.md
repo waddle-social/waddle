@@ -1,6 +1,6 @@
 # P2.1 pinned attestor and receipt authority
 
-Status: **plan; no serving selector**. This grouped continuation follows the
+Status: **dark candidates; no serving selector**. This grouped continuation follows the
 dark catalog, ledger and SM lock-order preparation merged in #2238. The base
 is main `8452ad37`. The first target remains a PostgreSQL 17 server compiled
 with clustering and configured for one runtime node.
@@ -8,13 +8,14 @@ with clustering and configured for one runtime node.
 ## Boundaries
 
 The current pool hooks invoke the physical attestor before an independent
-catalog proof, and the V1030 dark receipt profile grants the runtime whole
-journal SELECT. Neither path authorizes restricted serving. The source
+catalog proof. The prior dark receipt profile granted runtime whole-journal
+SELECT; the exact-key profile here rejects it and requires a pinned lookup.
+Neither path authorizes restricted serving. The source
 function, catalog provider, operator handoff, role administrators and old
 backends are separate trust boundaries. A cooperative advisory lock cannot
 fence an uncooperative owner or a function replacement by privileged DDL.
 
-The grouped work will retain `UnconvertedStores` until the complete role,
+The grouped work retains `UnconvertedStores` until the complete role,
 epoch, old-backend and all-store startup graph is proven. The opt-in APIs may
 be compiled and tested without wiring them into the pool hooks or listeners.
 

@@ -138,6 +138,12 @@ pub(super) async fn exercise(
     .execute(&mut *default_probe)
     .await
     .expect("create function with hostile named default ACL");
+    sqlx::query(&format!(
+        "REVOKE EXECUTE ON FUNCTION {s}.p21_default_acl_probe() FROM PUBLIC"
+    ))
+    .execute(&mut *default_probe)
+    .await
+    .expect("remove PUBLIC execute from named-default positive control");
     sqlx::query("RESET ROLE")
         .execute(&mut *default_probe)
         .await
@@ -500,13 +506,14 @@ pub(super) async fn exercise(
             format!(
                 "CREATE OR REPLACE FUNCTION {s}.waddle_p21_lookup_receipt_operation(p_operation_id uuid) \
                  RETURNS TABLE (message_key uuid, receipt_kind integer, semantic_identity_hash bytea, inserted boolean) \
-                 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp ROWS 1 \
-                 AS $bad_lookup$ BEGIN \
-                   PERFORM pg_catalog.nextval('{s}.p21_lookup_probe_seq'::pg_catalog.regclass); \
-                   RETURN QUERY SELECT journal.message_key,journal.receipt_kind, \
+                 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pg_temp ROWS 1 \
+                 AS $bad_lookup$ \
+                   SELECT journal.message_key,journal.receipt_kind, \
                        journal.semantic_identity_hash,journal.inserted \
-                     FROM {journal} AS journal WHERE journal.operation_id=p_operation_id; \
-                 END $bad_lookup$"
+                     FROM {journal} AS journal \
+                    WHERE journal.operation_id=p_operation_id \
+                      AND pg_catalog.nextval('{s}.p21_lookup_probe_seq'::pg_catalog.regclass)>0 \
+                 $bad_lookup$"
             ),
             lookup_create_or_replace.clone(),
         ),
@@ -630,6 +637,48 @@ pub(super) async fn exercise(
             ReceiptReadback::Committed { inserted: true }
         );
     }
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "CREATE ACCESS METHOD p21_probe_heap TYPE TABLE HANDLER pg_catalog.heap_tableam_handler; \
+             ALTER TABLE {journal} SET ACCESS METHOD p21_probe_heap"
+        ),
+    )
+    .await;
+    let changed_am: String = sqlx::query_scalar(
+        "SELECT am.amname FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE c.oid=$1",
+    )
+    .bind(Oid(pins.journal_relation_oid))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("journal access method after mutation");
+    assert_eq!(changed_am, "p21_probe_heap");
+    let rejected = authority.readback(&operation).await;
+    assert!(
+        matches!(
+            &rejected,
+            Err(ReceiptAuthorityError::Profile(
+                RestrictedIngressProfileError::Mismatch("journal table/ACL")
+            ))
+        ),
+        "non-heap journal must fail before lookup: {rejected:?}"
+    );
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "ALTER TABLE {journal} SET ACCESS METHOD heap; \
+             DROP ACCESS METHOD p21_probe_heap"
+        ),
+    )
+    .await;
+    assert_eq!(
+        authority
+            .readback(&operation)
+            .await
+            .expect("profile after heap restore"),
+        ReceiptReadback::Committed { inserted: true }
+    );
     for wrong in [
         ReceiptOperationPins {
             schema_owner_role_oid: pins.schema_owner_role_oid + 1,
