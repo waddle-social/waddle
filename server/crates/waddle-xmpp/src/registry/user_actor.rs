@@ -38,6 +38,13 @@ pub mod test_support {
 
     /// Maximum copied child-mutation outcomes retained by one actor fixture.
     pub const RESOURCE_MUTATION_OBSERVATION_CAPACITY: usize = 64;
+    pub use crate::ownership::BINDING_OBSERVATION_FIELD_BYTE_CAP;
+
+    /// Invoke a snapshot factory only while journal space remains. Kept pure
+    /// so tests can verify saturation avoids even constructing copied data.
+    pub fn snapshot_if_capacity<T>(journal_len: usize, make: impl FnOnce() -> T) -> Option<T> {
+        (journal_len < RESOURCE_MUTATION_OBSERVATION_CAPACITY).then(make)
+    }
 
     /// The child actor's observed decision, not a model prediction.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,28 +57,29 @@ pub mod test_support {
         Rejected,
     }
 
-    /// Copied identity evidence for one actual child mutation decision.
-    /// Child messages alone do not prove publication, claim authority,
-    /// custody, or teardown, so this is characterization only.
+    /// Bounded diagnostic binding evidence for one actual child mutation
+    /// decision. Truncated prefixes are never exact identity evidence, and
+    /// child messages alone do not prove publication, claim authority,
+    /// custody, or teardown; this is characterization only.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum ResourceMutationObservation {
         Register {
             previous: Option<LocalConnectionBindingId>,
             candidate: LocalConnectionBindingId,
-            candidate_binding: Option<crate::ownership::BindingRef>,
+            candidate_binding: Option<crate::ownership::BoundedBindingObservation>,
             disposition: ResourceMutationDisposition,
         },
         RegisterIfOwnerOrAbsent {
             previous: Option<LocalConnectionBindingId>,
             candidate: LocalConnectionBindingId,
-            candidate_binding: Option<crate::ownership::BindingRef>,
+            candidate_binding: Option<crate::ownership::BoundedBindingObservation>,
             owner: LocalConnectionBindingId,
             disposition: ResourceMutationDisposition,
         },
         ProvisionalMirror {
             previous: Option<LocalConnectionBindingId>,
             candidate: LocalConnectionBindingId,
-            candidate_binding: Option<crate::ownership::BindingRef>,
+            candidate_binding: Option<crate::ownership::BoundedBindingObservation>,
             expected: Option<LocalConnectionBindingId>,
             disposition: ResourceMutationDisposition,
         },

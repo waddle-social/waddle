@@ -103,6 +103,23 @@ pub struct BindingRef {
     attempt_id: BindingAttemptId,
 }
 
+/// Fixed-size copied identity evidence for inert test observations. Node
+/// strings are truncated on UTF-8 boundaries and marked so callers cannot
+/// mistake the prefix for an exact identity.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedBindingObservation {
+    pub node_id_prefix: Option<String>,
+    pub node_epoch_prefix: Option<String>,
+    pub node_identity_truncated: bool,
+    pub local_process_incarnation: Option<uuid::Uuid>,
+    pub transport_generation: PhysicalTransportGeneration,
+    pub attempt_id: BindingAttemptId,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub const BINDING_OBSERVATION_FIELD_BYTE_CAP: usize = 128;
+
 impl BindingRef {
     pub fn fresh(connection_ref: ConnectionRef) -> Self {
         Self {
@@ -117,6 +134,52 @@ impl BindingRef {
 
     pub fn attempt_id(&self) -> BindingAttemptId {
         self.attempt_id
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn bounded_observation(&self) -> BoundedBindingObservation {
+        let (node_id_prefix, node_epoch_prefix, node_identity_truncated, local_process_incarnation) =
+            self.connection_ref.node_lease.bounded_observation();
+        BoundedBindingObservation {
+            node_id_prefix,
+            node_epoch_prefix,
+            node_identity_truncated,
+            local_process_incarnation,
+            transport_generation: self.connection_ref.transport_generation,
+            attempt_id: self.attempt_id,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl NodeLeaseIdentity {
+    fn bounded_observation(&self) -> (Option<String>, Option<String>, bool, Option<uuid::Uuid>) {
+        fn prefix(value: &str) -> (String, bool) {
+            let mut end = value.len().min(BINDING_OBSERVATION_FIELD_BYTE_CAP);
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            (value[..end].to_owned(), end < value.len())
+        }
+
+        match &self.0 {
+            NodeLeaseIdentityKind::Clustered {
+                node_id,
+                node_epoch,
+            } => {
+                let (node_id, id_truncated) = prefix(node_id);
+                let (node_epoch, epoch_truncated) = prefix(node_epoch);
+                (
+                    Some(node_id),
+                    Some(node_epoch),
+                    id_truncated || epoch_truncated,
+                    None,
+                )
+            }
+            NodeLeaseIdentityKind::LocalProcess {
+                process_incarnation,
+            } => (None, None, false, Some(*process_incarnation)),
+        }
     }
 }
 

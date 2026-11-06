@@ -291,6 +291,14 @@ async fn resource_mutation_observer_records_child_decisions_as_inconclusive() {
             ..
         }
     ));
+    let ResourceMutationObservation::Register {
+        candidate_binding: Some(binding_identity),
+        ..
+    } = &batch.observations[0]
+    else {
+        unreachable!("the first local registration carries bounded identity evidence");
+    };
+    assert!(binding_identity.local_process_incarnation.is_some());
     assert!(matches!(
         &batch.observations[1],
         ResourceMutationObservation::Register {
@@ -324,6 +332,26 @@ async fn resource_mutation_observer_bounds_its_journal() {
             .await
             .expect("registration remains successful when observation journal fills");
     }
+    let jid = full("alice", "overflow");
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::from_node_identity(
+            &crate::ownership::NodeIdentity::new("n".repeat(4096), "e".repeat(4096)),
+        ),
+    );
+    let binding = crate::ownership::BindingRef::fresh(connection.clone());
+    let (endpoint, _receiver, _custody) =
+        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
+    let oversized_entry =
+        ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
+            .expect("binding matches connection")
+            .entry_for_publication();
+    actor
+        .ask(RegisterConnection {
+            jid,
+            entry: oversized_entry,
+        })
+        .await
+        .expect("oversized observation does not affect registration");
 
     let batch = actor
         .ask(TakeResourceMutationObservations)
@@ -333,13 +361,79 @@ async fn resource_mutation_observer_bounds_its_journal() {
         batch.observations.len(),
         super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY
     );
-    assert_eq!(batch.overflow_count, 3);
+    assert_eq!(batch.overflow_count, 4);
     assert_eq!(
         batch.model_comparison,
         ModelComparison::InconclusiveMissingExternalReceipts
     );
     let count: usize = actor.ask(ResourceCount).await.expect("actor still serves");
-    assert_eq!(count, 1);
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn resource_mutation_observer_bounds_binding_identity_and_skips_snapshots_when_full() {
+    use super::test_support::{snapshot_if_capacity, BINDING_OBSERVATION_FIELD_BYTE_CAP};
+    use std::cell::Cell;
+
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    let node_id = format!("{}🦆", "n".repeat(BINDING_OBSERVATION_FIELD_BYTE_CAP - 1));
+    let node_epoch = "e".repeat(BINDING_OBSERVATION_FIELD_BYTE_CAP + 20);
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::from_node_identity(
+            &crate::ownership::NodeIdentity::new(node_id, node_epoch),
+        ),
+    );
+    let binding = crate::ownership::BindingRef::fresh(connection.clone());
+    let (endpoint, _receiver, _custody) =
+        ActorSocketOutboundEndpoint::channel(connection, 2, 4096).expect("endpoint");
+    let entry = ConnectionEntry::new_actor_provisional_for_binding(endpoint, binding, jid.clone())
+        .expect("binding matches connection")
+        .entry_for_publication();
+    actor
+        .ask(RegisterConnection { jid, entry })
+        .await
+        .expect("registration");
+
+    let batch = actor
+        .ask(TakeResourceMutationObservations)
+        .await
+        .expect("observation batch");
+    let ResourceMutationObservation::Register {
+        candidate_binding: Some(identity),
+        ..
+    } = &batch.observations[0]
+    else {
+        panic!("local binding identity evidence should be present");
+    };
+    assert_eq!(
+        identity.node_id_prefix.as_ref().map(String::len),
+        Some(BINDING_OBSERVATION_FIELD_BYTE_CAP - 1),
+        "UTF-8 truncation must stop before a partial codepoint"
+    );
+    assert_eq!(
+        identity.node_epoch_prefix.as_ref().map(String::len),
+        Some(BINDING_OBSERVATION_FIELD_BYTE_CAP)
+    );
+    assert!(identity.node_identity_truncated);
+    assert_eq!(
+        batch.model_comparison,
+        ModelComparison::InconclusiveMissingExternalReceipts
+    );
+
+    let factory_called = Cell::new(false);
+    let snapshot = snapshot_if_capacity(
+        super::test_support::RESOURCE_MUTATION_OBSERVATION_CAPACITY,
+        || {
+            factory_called.set(true);
+            String::from("must not allocate after saturation")
+        },
+    );
+    assert!(snapshot.is_none());
+    assert!(
+        !factory_called.get(),
+        "saturated journals must skip snapshot creation"
+    );
 }
 
 #[tokio::test]
