@@ -347,6 +347,11 @@ async fn postgres_preaccept_hydration_commit_failure_or_cancellation_discards_on
         .preaccept_local_direct(&c.frame, &c.lease)
         .await
         .expect("committed source");
+    let (second_frame, second_lease) = super::multiframe::source(&c, "second retained frame").await;
+    let second_handoff = repo
+        .preaccept_local_direct(&second_frame, &second_lease)
+        .await
+        .expect("second source");
     let mut existing = CandidateSmMemory::new(c.capture.clone());
     repo.hydrate_preaccepted(&mut existing, &handoff)
         .await
@@ -369,6 +374,10 @@ async fn postgres_preaccept_hydration_commit_failure_or_cancellation_discards_on
         .hydrate_preaccepted(&mut existing, &handoff)
         .await
         .is_err());
+    assert!(repo
+        .hydrate_preaccepted(&mut existing, &second_handoff)
+        .await
+        .is_err());
     assert_eq!(
         (existing.queued_count(), existing.accepted_ordinal()),
         (1, Some(1)),
@@ -388,12 +397,10 @@ async fn postgres_preaccept_hydration_commit_failure_or_cancellation_discards_on
         .execute(&mut blocker)
         .await
         .expect("hold hydration COMMIT");
-    let memory = Arc::new(tokio::sync::Mutex::new(CandidateSmMemory::new(
-        c.capture.clone(),
-    )));
+    let memory = Arc::new(tokio::sync::Mutex::new(existing));
     let writer = Arc::clone(&repo);
     let target = Arc::clone(&memory);
-    let pending = handoff.clone();
+    let pending = second_handoff;
     let task = tokio::spawn(async move {
         let mut receiver = target.lock().await;
         writer.hydrate_preaccepted(&mut receiver, &pending).await
@@ -407,8 +414,8 @@ async fn postgres_preaccept_hydration_commit_failure_or_cancellation_discards_on
     assert!(task.await.expect_err("cancelled hydration").is_cancelled());
     assert_eq!(
         memory.lock().await.queued_count(),
-        0,
-        "cancelled COMMIT drops new provisional memory"
+        1,
+        "cancelled COMMIT removes only the new provisional entry"
     );
     sqlx::query("SELECT pg_advisory_unlock(2220002)")
         .execute(&mut blocker)
@@ -419,7 +426,7 @@ async fn postgres_preaccept_hydration_commit_failure_or_cancellation_discards_on
             .fetch_one(&c.fixture.admin)
             .await
             .expect("durable operation survives");
-    assert_eq!(retained, 1);
+    assert_eq!(retained, 2);
     drop(blocker);
     drop(repo);
     c.fixture.cleanup().await;

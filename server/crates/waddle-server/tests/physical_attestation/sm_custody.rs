@@ -19,9 +19,9 @@ use waddle_server::db::physical_attestation::{
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool};
 use waddle_server::ingress_uow::{IngressUnitOfWork, SendLease};
 use waddle_server::sm_custody::{
-    candidate_postgres_ddl, CustodyCapture, CustodyError, CustodyLimits, CustodyRecoveryAuthority,
-    CustodyResolution, CustodyTerminal, PreparedDirectFrame, SessionGeneration,
-    SmCustodyRepository,
+    candidate_postgres_ddl, CandidateSmMemory, CustodyCapture, CustodyError, CustodyLimits,
+    CustodyRecoveryAuthority, CustodyResolution, CustodyTerminal, PreparedDirectFrame,
+    SessionGeneration, SmCustodyRepository,
 };
 use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
@@ -47,6 +47,8 @@ struct Candidate {
     lease: SendLease,
 }
 
+#[path = "sm_custody_multiframe.rs"]
+mod multiframe;
 #[path = "preaccept_handoff.rs"]
 mod preaccept_handoff;
 
@@ -308,12 +310,25 @@ async fn postgres_sm_custody_commits_before_acceptance_and_reclaims_only_after_a
         .expect("memory enqueue only after known bind");
     assert_eq!(receiver.recv().await, Some(slot.clone()));
     assert!(
-        repo.acknowledge(&slot, slot.h()).await.is_err(),
+        repo.acknowledge(slot.h()).await.is_err(),
         "binding is not exposure"
     );
-    repo.expose(&slot).await.expect("committed exposure");
-    assert!(repo.expose(&slot).await.is_err(), "one transport attempt");
-    assert!(repo.acknowledge(&slot, 2).await.is_err());
+    let handoff = repo
+        .resume_preaccept(c.frame.operation_id)
+        .await
+        .expect("source handoff");
+    let mut memory = CandidateSmMemory::new(c.capture.clone());
+    repo.hydrate_preaccepted(&mut memory, &handoff)
+        .await
+        .expect("hydrate");
+    repo.expose(&memory, &slot)
+        .await
+        .expect("committed exposure");
+    assert!(
+        repo.expose(&memory, &slot).await.is_err(),
+        "one transport attempt"
+    );
+    assert!(repo.acknowledge(2).await.is_err());
     let mut delete = pg_seed_transaction(&c.fixture).await;
     assert!(
         sqlx::query(&format!(
@@ -328,9 +343,7 @@ async fn postgres_sm_custody_commits_before_acceptance_and_reclaims_only_after_a
     );
     delete.rollback().await.expect("rollback failed delete");
     c.settle_executor().await;
-    repo.acknowledge(&slot, slot.h())
-        .await
-        .expect("positive ACK");
+    repo.acknowledge(slot.h()).await.expect("positive ACK");
     let seal = repo.seal().await.expect("idempotent seal");
     assert!(!repo
         .collect_terminal(&seal, c.frame.key.message_key)
@@ -908,8 +921,9 @@ async fn postgres_sm_custody_transfer_wrap_and_capacity_are_closed() {
         repo.transfer(&admission)
             .await
             .expect("atomic full payload transfer");
-        assert!(repo.expose(&slot).await.is_err());
-        assert!(repo.acknowledge(&slot, slot.h()).await.is_err());
+        let memory = CandidateSmMemory::new(c.capture.clone());
+        assert!(repo.expose(&memory, &slot).await.is_err());
+        assert!(repo.acknowledge(slot.h()).await.is_err());
         let retained: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(&format!(
             "SELECT payload,received_at FROM {}.sm_custody_transfers",
             c.fixture.target

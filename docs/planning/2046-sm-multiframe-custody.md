@@ -12,6 +12,23 @@ Extend the unselected PostgreSQL custody repository and source handoff from one 
 4. Seal the gate on abandonment/transfer, then transfer pending operations with full payload, original time and resource into the candidate sink. Preserve gaps and ordinals; a partial transfer remains discoverable. Provide an ordered, bounded replay inventory that reuses retained operations and slots without minting new count or send attempts. No live replay send permit is created.
 5. Keep immutable journals charged against the retained admission quota: at most 1024 rows/16 MiB of admission payload plus at most that much copied transfer payload. Lock distinct canonical parents in deterministic order under the reviewed epoch → principal/claim → gate → canonical → attempt → quota order. Preserve late raw candidate writer and GC fences, exact positive unknown-commit reconciliation, and successor claim recovery.
 
+The candidate receiver holds up to 1024 entries and 16 MiB of serialized
+payload. It may hydrate later ordinals first, but exposure requires the exact
+hydrated slot and advances only the durable next ordinal. A failed or cancelled
+hydration removes only its own new entry. This is per receiver, not proof of a
+unique live endpoint. The acknowledged frontier is advanced only after the
+whole wrapping handled-count prefix is validated and its distinct canonical
+parents have been locked in sorted order. An ACK leaves the gate open; the
+first transfer seals it atomically and leaves remaining custody discoverable.
+
+Sealed inventory lists bound operations by ordinal followed by unbound ones,
+with at most 16 returned rows per page. Replay inventory includes pending bound
+operations in ordinal order, preserving gaps and the original operation,
+payload, timestamp, and resource. Neither inventory allocates a send attempt or
+grants permission to replay on a transport. Immutable admissions stay charged
+even after terminal settlement; an exact-copy constraint bounds all transfer
+payloads by the retained admission total.
+
 ## Verification and later gates
 
 Use required PostgreSQL 17 races for concurrent bind, identity conflict, quota/multibyte boundaries, three-slot out-of-order hydration/exposure, partial/repeated/wrapping/excess ACK, gaps, transfer conflict, cancellation/unknown COMMIT, two gates with opposite canonical-key order, late inserts versus collection, sealed multi-page recovery and successor turnover. Check XEP-0198 handled-count behavior, formatting, scoped Clippy and independent final review.

@@ -5,7 +5,8 @@ use waddle_xmpp::ingress::IngressEffectIntent;
 use super::repository::{commit, pg};
 use super::types::db;
 use super::{
-    CommittedAdmission, CommittedSlot, CustodyError, PreparedDirectFrame, SmCustodyRepository,
+    CandidateSmMemory, CommittedAdmission, CommittedSlot, CustodyError, PreparedDirectFrame,
+    SmCustodyRepository,
 };
 use crate::ingress_substrate::{EnvelopeVersion, MessageEnvelope};
 use crate::ingress_uow::{start_fresh_postgres, IngressUowTransaction, SendLease};
@@ -54,16 +55,19 @@ impl SmCustodyRepository {
         let mut tx = self.guarded(false).await?;
         self.canonical(&mut tx, frame.key.message_key).await?;
         let q = &self.schema;
-        let prior = sqlx::query_scalar::<_, uuid::Uuid>(&format!(
-            "SELECT operation_id FROM {q}.sm_custody_operations WHERE gate_id = $1"
+        let prior: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(&format!(
+            "SELECT operation_id, gate_id FROM {q}.sm_custody_operations WHERE operation_id = $1 OR attempt_token = $2 OR (message_key = $3 AND receipt_kind = $4 AND semantic_identity_hash = $5 AND resource = $6)"
         ))
-        .bind(self.capture.gate_id)
-        .fetch_optional(pg(&mut tx)?)
-        .await
-        .map_err(db)?;
-        if let Some(id) = prior {
+        .bind(frame.operation_id).bind(frame.attempt).bind(frame.key.message_key.to_storage())
+        .bind(frame.key.kind.to_storage()).bind(frame.key.semantic_identity_hash.as_slice())
+        .bind(frame.key.resource.to_string()).fetch_all(pg(&mut tx)?).await.map_err(db)?;
+        if !prior.is_empty() {
+            if prior.len() != 1 || prior[0] != (frame.operation_id, self.capture.gate_id) {
+                return Err(CustodyError::Conflict);
+            }
+            let id = prior[0].0;
             let saved = self.operation(&mut tx, id).await?;
-            if saved.frame != *frame {
+            if saved.frame != *frame || saved.terminal.is_some() {
                 return Err(CustodyError::Conflict);
             }
             commit(tx).await?;
@@ -207,15 +211,15 @@ impl SmCustodyRepository {
             return Ok(slot);
         }
         let q = &self.schema;
-        let (appended, exposed, acked): (i64, i64, i64) = sqlx::query_as(&format!(
-            "SELECT appended, exposed, peer_acked FROM {q}.sm_custody_gates WHERE gate_id = $1"
+        let (appended, acked): (i64, i64) = sqlx::query_as(&format!(
+            "SELECT appended, peer_acked FROM {q}.sm_custody_gates WHERE gate_id = $1"
         ))
         .bind(self.capture.gate_id)
         .fetch_one(pg(&mut tx)?)
         .await
         .map_err(db)?;
-        if appended != exposed || exposed != acked {
-            return Err(CustodyError::Rejected);
+        if appended - acked >= i64::from(u32::MAX) {
+            return Err(CustodyError::Capacity);
         }
         let ordinal = appended.checked_add(1).ok_or(CustodyError::Overflow)?;
         sqlx::query(&format!(
@@ -243,17 +247,21 @@ impl SmCustodyRepository {
         })
     }
 
-    /// Commit exposure before an actual transport attempt. One frame is the
-    /// entire candidate session; this function performs no I/O or wire count.
-    pub async fn expose(&self, slot: &CommittedSlot) -> Result<(), CustodyError> {
+    /// Commit only the next hydrated ordinal. This creates no socket send.
+    pub async fn expose(
+        &self,
+        receiver: &CandidateSmMemory,
+        slot: &CommittedSlot,
+    ) -> Result<(), CustodyError> {
         self.check_admission(&slot.admission)?;
+        receiver.check_exposure(&self.capture, slot)?;
         let mut tx = self.guarded(false).await?;
         let saved = self.operation(&mut tx, slot.admission.operation).await?;
         self.canonical(&mut tx, saved.frame.key.message_key).await?;
         if saved.slot.as_ref() != Some(slot) || saved.terminal.is_some() {
             return Err(CustodyError::Rejected);
         }
-        let changed = sqlx::query(&format!("UPDATE {}.sm_custody_gates SET exposed = $2 WHERE gate_id = $1 AND appended = $2 AND exposed = $2 - 1", self.schema))
+        let changed = sqlx::query(&format!("UPDATE {}.sm_custody_gates SET exposed = $2 WHERE gate_id = $1 AND appended >= $2 AND exposed = $2 - 1", self.schema))
             .bind(slot.admission.gate).bind(slot.ordinal).execute(pg(&mut tx)?).await.map_err(db)?.rows_affected();
         if changed != 1 {
             return Err(CustodyError::Rejected);

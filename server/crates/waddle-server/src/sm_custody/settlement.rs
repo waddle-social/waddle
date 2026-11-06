@@ -1,32 +1,95 @@
 use sqlx::Row;
 use waddle_xmpp::ingress::MessageKey;
 
-use super::admission::encode_payload;
 use super::repository::{commit, pg};
 use super::types::db;
 use super::{
-    CommittedAdmission, CommittedSlot, CustodyError, CustodyRecoveryAuthority, CustodyTerminal,
-    SealedSession, SmCustodyRepository,
+    CommittedAdmission, CustodyError, CustodyRecoveryAuthority, CustodyTerminal, SealedSession,
+    SmCustodyRepository,
 };
 use crate::ingress_substrate::ALIAS_RETENTION;
 use crate::ingress_uow::IngressUowTransaction;
 
 impl SmCustodyRepository {
-    /// Positive ACK must name this exact, durably exposed slot. The candidate
-    /// accepts one frame per captured session, not arbitrary cumulative ranges.
-    pub async fn acknowledge(&self, slot: &CommittedSlot, h: u32) -> Result<(), CustodyError> {
-        if h != slot.h() {
+    /// Validate and settle one contiguous exposed prefix in a single commit.
+    /// The gate stays open. No socket or XMPP response is produced here.
+    pub async fn acknowledge(&self, h: u32) -> Result<(), CustodyError> {
+        let mut tx = self.guarded(false).await?;
+        let q = &self.schema;
+        let (acked, exposed): (i64, i64) = sqlx::query_as(&format!(
+            "SELECT peer_acked, exposed FROM {q}.sm_custody_gates WHERE gate_id = $1"
+        ))
+        .bind(self.capture.gate_id)
+        .fetch_one(pg(&mut tx)?)
+        .await
+        .map_err(db)?;
+        let window = exposed - acked;
+        if window >= (1_i64 << 32) {
+            return Err(CustodyError::Conflict);
+        }
+        let advance = i64::from(h.wrapping_sub(acked as u32));
+        if advance > window {
             return Err(CustodyError::Rejected);
         }
-        self.finish(&slot.admission, Some(slot), CustodyTerminal::Ack, None)
+        if advance == 0 {
+            commit(tx).await?;
+            return Ok(());
+        }
+        let through = acked.checked_add(advance).ok_or(CustodyError::Overflow)?;
+        let slots: Vec<(uuid::Uuid, i64, uuid::Uuid, Option<i32>)> = sqlx::query_as(&format!(
+            "SELECT s.operation_id, s.ordinal, o.message_key, t.disposition FROM {q}.sm_custody_slots s JOIN {q}.sm_custody_operations o ON (o.operation_id,o.gate_id) = (s.operation_id,s.gate_id) LEFT JOIN {q}.sm_custody_terminals t ON t.operation_id = s.operation_id WHERE s.gate_id = $1 AND s.ordinal > $2 AND s.ordinal <= $3 ORDER BY s.ordinal"
+        )).bind(self.capture.gate_id).bind(acked).bind(through).fetch_all(pg(&mut tx)?).await.map_err(db)?;
+        if slots.len() as i64 != advance
+            || slots
+                .iter()
+                .enumerate()
+                .any(|(i, row)| row.1 != acked + i as i64 + 1 || row.3.is_some())
+        {
+            return Err(CustodyError::Conflict);
+        }
+        // Multiple gates can settle overlapping parents in different ordinal
+        // orders. Always acquire all distinct canonical locks in UUID order.
+        let mut parents: Vec<_> = slots.iter().map(|row| row.2).collect();
+        parents.sort_unstable();
+        parents.dedup();
+        for key in &parents {
+            self.lock_canonical(&mut tx, MessageKey::from_storage(*key))
+                .await?;
+        }
+        self.fresh_principal(&mut tx).await?;
+        for (operation, _, _, _) in slots {
+            sqlx::query(&format!(
+                "INSERT INTO {q}.sm_custody_terminals (operation_id, disposition) VALUES ($1,$2)"
+            ))
+            .bind(operation)
+            .bind(CustodyTerminal::Ack.code())
+            .execute(pg(&mut tx)?)
             .await
+            .map_err(db)?;
+        }
+        sqlx::query(&format!(
+            "UPDATE {q}.sm_custody_gates SET peer_acked = $2 WHERE gate_id = $1"
+        ))
+        .bind(self.capture.gate_id)
+        .bind(through)
+        .execute(pg(&mut tx)?)
+        .await
+        .map_err(db)?;
+        for key in parents {
+            let key = MessageKey::from_storage(key);
+            if self.no_other_custody(&mut tx, key).await? {
+                sqlx::query(&format!("UPDATE {q}.ingress_messages SET retention_eligible_at = pg_catalog.clock_timestamp() WHERE message_key = $1"))
+                    .bind(key.to_storage()).execute(pg(&mut tx)?).await.map_err(db)?;
+            }
+        }
+        self.fresh_principal(&mut tx).await?;
+        commit(tx).await
     }
 
     /// Full payload/time/resource transfer commits atomically with terminal
     /// custody. This candidate sink is not the selected pending_delivery store.
     pub async fn transfer(&self, admission: &CommittedAdmission) -> Result<(), CustodyError> {
-        self.finish(admission, None, CustodyTerminal::Transfer, None)
-            .await
+        self.finish_transfer(admission, None).await
     }
 
     /// Recovery may transfer retained payload under a fresh exact claim without
@@ -40,15 +103,12 @@ impl SmCustodyRepository {
         if sealed.gate != self.capture.gate_id || sealed.token != self.capture.token {
             return Err(CustodyError::Rejected);
         }
-        self.finish(admission, None, CustodyTerminal::Transfer, Some(authority))
-            .await
+        self.finish_transfer(admission, Some(authority)).await
     }
 
-    async fn finish(
+    async fn finish_transfer(
         &self,
         admission: &CommittedAdmission,
-        slot: Option<&CommittedSlot>,
-        terminal: CustodyTerminal,
         recovery: Option<&CustodyRecoveryAuthority>,
     ) -> Result<(), CustodyError> {
         self.check_admission(admission)?;
@@ -57,9 +117,27 @@ impl SmCustodyRepository {
             None => self.guarded(true).await?,
         };
         let saved = self.operation(&mut tx, admission.operation).await?;
+        let q = &self.schema;
+        // The first transfer seals the entire generation, even when later
+        // transfers have not yet committed. Recovery can inventory the rest.
+        sqlx::query(&format!(
+            "UPDATE {q}.sm_custody_gates SET sealed = TRUE WHERE gate_id = $1"
+        ))
+        .bind(admission.gate)
+        .execute(pg(&mut tx)?)
+        .await
+        .map_err(db)?;
         if let Some(existing) = saved.terminal {
-            if existing != terminal {
+            if existing != CustodyTerminal::Transfer {
                 return Err(CustodyError::Conflict);
+            }
+            let exact: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.sm_custody_transfers t JOIN {q}.sm_custody_operations o USING (operation_id) WHERE o.operation_id = $1 AND (t.resource,t.payload,t.received_at) = (o.resource,o.payload,o.received_at))"))
+                .bind(admission.operation).fetch_one(pg(&mut tx)?).await.map_err(db)?;
+            if !exact {
+                return Err(CustodyError::Conflict);
+            }
+            if recovery.is_none() {
+                self.fresh_principal(&mut tx).await?;
             }
             commit(tx).await?;
             return Ok(());
@@ -69,49 +147,13 @@ impl SmCustodyRepository {
         if recovery.is_none() {
             self.fresh_principal(&mut tx).await?;
         }
-        let q = &self.schema;
-        if terminal == CustodyTerminal::Ack {
-            let slot = slot.ok_or(CustodyError::Rejected)?;
-            if saved.slot.as_ref() != Some(slot) {
-                return Err(CustodyError::Rejected);
-            }
-            let exposed: i64 = sqlx::query_scalar(&format!(
-                "SELECT exposed FROM {q}.sm_custody_gates WHERE gate_id = $1"
-            ))
-            .bind(admission.gate)
-            .fetch_one(pg(&mut tx)?)
-            .await
-            .map_err(db)?;
-            if exposed != slot.ordinal {
-                return Err(CustodyError::Rejected);
-            }
-            sqlx::query(&format!(
-                "UPDATE {q}.sm_custody_gates SET peer_acked = $2 WHERE gate_id = $1"
-            ))
-            .bind(admission.gate)
-            .bind(slot.ordinal)
-            .execute(pg(&mut tx)?)
-            .await
-            .map_err(db)?;
-        }
-        if terminal == CustodyTerminal::Transfer {
-            sqlx::query(&format!("INSERT INTO {q}.sm_custody_transfers (operation_id, resource, payload, received_at) VALUES ($1,$2,$3,$4)"))
-                .bind(admission.operation).bind(saved.frame.key.resource.to_string())
-                .bind(encode_payload(&saved.frame)?).bind(saved.frame.received_at)
-                .execute(pg(&mut tx)?).await.map_err(db)?;
-        }
+        sqlx::query(&format!("INSERT INTO {q}.sm_custody_transfers (operation_id, resource, payload, received_at) SELECT operation_id,resource,payload,received_at FROM {q}.sm_custody_operations WHERE operation_id = $1"))
+            .bind(admission.operation).execute(pg(&mut tx)?).await.map_err(db)?;
         sqlx::query(&format!(
             "INSERT INTO {q}.sm_custody_terminals (operation_id, disposition) VALUES ($1,$2)"
         ))
         .bind(admission.operation)
-        .bind(terminal.code())
-        .execute(pg(&mut tx)?)
-        .await
-        .map_err(db)?;
-        sqlx::query(&format!(
-            "UPDATE {q}.sm_custody_gates SET sealed = TRUE WHERE gate_id = $1"
-        ))
-        .bind(admission.gate)
+        .bind(CustodyTerminal::Transfer.code())
         .execute(pg(&mut tx)?)
         .await
         .map_err(db)?;

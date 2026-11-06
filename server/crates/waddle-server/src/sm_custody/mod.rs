@@ -1,4 +1,4 @@
-//! Dark repository for one prepared local direct frame per captured SM session.
+//! Dark repository for bounded ordered local direct frames per SM session.
 //!
 //! The schema is unregistered and no live writer selects this module. A captured
 //! endpoint is equality evidence supplied by the caller, not proof of publication.
@@ -19,6 +19,6 @@ pub use repository::SmCustodyRepository;
 pub use schema::candidate_postgres_ddl;
 pub use types::{
     CommittedAdmission, CommittedSlot, CustodyCapture, CustodyError, CustodyInventoryPage,
-    CustodyLimits, CustodyOperation, CustodyRecoveryAuthority, CustodyResolution, CustodyTerminal,
-    PreparedDirectFrame, SealedSession, SessionGeneration,
+    CustodyLimits, CustodyOperation, CustodyRecoveryAuthority, CustodyReplayPage,
+    CustodyResolution, CustodyTerminal, PreparedDirectFrame, SealedSession, SessionGeneration,
 };

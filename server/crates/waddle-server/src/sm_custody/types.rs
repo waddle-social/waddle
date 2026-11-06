@@ -194,6 +194,13 @@ pub struct CustodyInventoryPage {
     pub next: Option<Uuid>,
 }
 
+/// Retained, pending slots in ordinal order. This is evidence, not a send permit.
+#[derive(Debug, Clone)]
+pub struct CustodyReplayPage {
+    pub operations: Vec<CustodyOperation>,
+    pub next: Option<u64>,
+}
+
 /// Minted only after a known committed, irreversible gate seal.
 #[derive(Debug, Clone)]
 pub struct SealedSession {
