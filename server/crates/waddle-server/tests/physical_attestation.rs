@@ -3131,7 +3131,7 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         .as_ref()
         .expect("physical identity");
     let mut document = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "operator_asserts_direct_fenced_primary": true,
         "deployment_uuid": fixture.lineage.deployment_uuid.to_string(),
         "lineage_uuid": fixture.lineage.lineage_uuid.to_string(),
@@ -3144,6 +3144,26 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         "runtime_login": fixture.runtime,
         "definer_role": fixture.definer,
         "trusted_schema": fixture.trusted,
+        // Structurally valid synthetic pins exercise document admission only.
+        // Attachment must refuse before any query until the pinned bootstrap
+        // path exists; these are not an operator attestation of this fixture.
+        "pins": {
+            "database_owner_role_oid": 4000000001_u32,
+            "schema_owner_role_oid": 4000000002_u32,
+            "runtime_role_oid": 4000000003_u32,
+            "installer_role_oid": 4000000004_u32,
+            "definer_role_oid": 4000000005_u32,
+            "trusted_schema_oid": 4000000006_u32,
+            "lineage_relation_oid": 4000000007_u32,
+            "lineage_primary_index_oid": 4000000008_u32,
+            "attestor_function_oid": 4000000009_u32,
+            "installation_operation_id": fixture.operation_id.to_string(),
+            "ledger_relation_oid": 4000000010_u32,
+            "ledger_primary_index_oid": 4000000011_u32,
+            "epoch_relation_oid": 4000000012_u32,
+            "epoch_primary_index_oid": 4000000013_u32,
+            "guard_manifest_relation_oid": 4000000014_u32,
+        },
     });
     let lineage = LineageConfig {
         deployment_uuid: Some(fixture.lineage.deployment_uuid),
@@ -3151,6 +3171,26 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
     };
     let identity = RuntimeStartupIdentity::from_json(&document.to_string(), &lineage)
         .expect("operator identity document");
+    document["version"] = 1.into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&document.to_string(), &lineage),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
+    document["version"] = 2.into();
+    let mut missing_pin = document.clone();
+    missing_pin["pins"]
+        .as_object_mut()
+        .expect("pin object")
+        .remove("ledger_relation_oid");
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&missing_pin.to_string(), &lineage),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
+    let oversized = format!("{}{}", document, " ".repeat(8 * 1024));
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&oversized, &lineage),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
     document["operator_asserts_direct_fenced_primary"] = false.into();
     assert!(matches!(
         RuntimeStartupIdentity::from_json(&document.to_string(), &lineage),
@@ -3187,57 +3227,25 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         identity.attach(&insecure, limits, None).await,
         Err(RuntimeStartupError::UnauthenticatedTcp)
     ));
+    let unreachable = format!(
+        "postgres://{}@127.0.0.1:1/{}?sslmode=verify-full",
+        fixture.runtime, fixture.database_name
+    );
+    assert!(matches!(
+        identity.attach(&unreachable, limits, None).await,
+        Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
+    ));
 
-    let mut runtime_url =
-        url::Url::parse(&url_with_schema(&fixture.base_url, &fixture.target)).expect("runtime URL");
-    let retained: Vec<_> = runtime_url
-        .query_pairs()
-        .filter(|(key, _)| key != "user")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    runtime_url
-        .query_pairs_mut()
-        .clear()
-        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
-        .append_pair("user", &fixture.runtime);
     let control = ControlPlanePoolLimits {
         connections: 1,
         acquire_timeout: Duration::from_secs(3),
     };
-    let pool = identity
-        .attach(runtime_url.as_str(), limits, Some(control))
-        .await
-        .expect("verified runtime handoff");
-    assert!(pool.global().has_control_plane_pool());
-    let main = pool.global().begin().await.expect("main checkout");
-    let ingress = pool.ingress();
-    let ingress_tx = ingress.begin().await.expect("reserved ingress checkout");
-    let control = pool
-        .global()
-        .control_plane_guard()
-        .await
-        .expect("control-plane checkout");
-    let mut rows = control
-        .query("SELECT current_user::text", ())
-        .await
-        .expect("identity query");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("row")
-            .expect("identity")
-            .get::<String>(0)
-            .expect("login"),
-        fixture.runtime
-    );
-    drop(rows);
-    drop(control);
-    ingress_tx.rollback().await.expect("close ingress");
-    main.rollback().await.expect("close main");
-    drop(ingress);
-    pool.global_actor().kill();
-    pool.global_actor().wait_for_shutdown().await;
-    drop(pool);
+    let control_result = identity.attach(&unreachable, limits, Some(control)).await;
+    match control_result {
+        Err(RuntimeStartupError::UnconvertedPinnedBootstrap) => {}
+        Err(error) => panic!("unexpected v2 attachment error: {error:?}"),
+        Ok(_) => panic!("unconverted v2 attachment must refuse"),
+    }
 
     let temp = tempfile::tempdir().expect("startup gate directory");
     let port_file = temp.path().join("port");
@@ -3259,7 +3267,7 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
             "integration-test-occupant-id-secret-32-bytes-long",
         )
         .env("WADDLE_DB_DRIVER", "postgres")
-        .env("WADDLE_DATABASE_URL", runtime_url.as_str())
+        .env("WADDLE_DATABASE_URL", &unreachable)
         .env(
             "WADDLE_DEPLOYMENT_UUID",
             fixture.lineage.deployment_uuid.to_string(),
@@ -3278,7 +3286,9 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("restricted runtime cannot serve until all startup stores"),
+        stderr.contains(
+            "restricted runtime bootstrap still has unconverted ledger and transaction entry"
+        ),
         "unexpected startup refusal: {stderr}"
     );
     assert!(
@@ -3286,28 +3296,10 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         "the HTTP listener must not be published"
     );
 
-    sqlx::query(&format!(
-        "GRANT INSERT ON {}._migrations TO {}",
-        fixture.target, fixture.runtime
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("grant unsafe ledger write");
     assert!(matches!(
-        identity.attach(runtime_url.as_str(), limits, None).await,
-        Err(RuntimeStartupError::Attachment(
-            RuntimeAttachmentError::UnsafeGlobalRuntime {
-                component: "_migrations"
-            }
-        ))
+        identity.attach(&unreachable, limits, None).await,
+        Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
     ));
-    sqlx::query(&format!(
-        "REVOKE INSERT ON {}._migrations FROM {}",
-        fixture.target, fixture.runtime
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("restore restricted ledger");
 }
 
 #[cfg(feature = "test-support")]
@@ -7414,3 +7406,10 @@ mod observer_quarantine;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/combined_restricted_profile.rs"]
 mod combined_restricted_profile;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/pinned_hook.rs"]
+mod pinned_hook_tests;
+
+#[path = "physical_attestation/pinned_installer.rs"]
+mod pinned_installer;

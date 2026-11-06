@@ -7,7 +7,7 @@ The following shape uses illustrative values:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "operator_asserts_direct_fenced_primary": true,
   "deployment_uuid": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001",
   "lineage_uuid": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90002",
@@ -19,35 +19,57 @@ The following shape uses illustrative values:
   "installer_login": "waddle_attestor_installer",
   "runtime_login": "waddle_runtime",
   "definer_role": "waddle_attestor",
-  "trusted_schema": "waddle_attestation"
+  "trusted_schema": "waddle_attestation",
+  "pins": {
+    "database_owner_role_oid": 16386,
+    "schema_owner_role_oid": 16387,
+    "runtime_role_oid": 16388,
+    "installer_role_oid": 16389,
+    "definer_role_oid": 16390,
+    "trusted_schema_oid": 16391,
+    "lineage_relation_oid": 16392,
+    "lineage_primary_index_oid": 16393,
+    "attestor_function_oid": 16394,
+    "installation_operation_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90003",
+    "ledger_relation_oid": 16395,
+    "ledger_primary_index_oid": 16396,
+    "epoch_relation_oid": 16397,
+    "epoch_primary_index_oid": 16398,
+    "guard_manifest_relation_oid": 16399
+  }
 }
 ```
 
+These OIDs are illustrative, not an installation recipe. A trusted operator
+must record the actual values independently of the runtime connection, after
+positive attestor installation or same-operation reconciliation on the fenced
+primary. Version 1 and incomplete pin bundles are refused.
+
 `WADDLE_DEPLOYMENT_UUID` must equal the document's deployment UUID; enrollment
 or adoption actions are refused in this mode. The runtime PostgreSQL URL must
-name the expected database and login and select the expected schema when the
-connection opens; the physical hook checks the active schema before normalizing
-the search path. TCP connections require
+name the expected database and login. The opt-in pinned checkout hook proves
+the independently pinned physical and lineage identities, then sets a known
+schema path before lending a connection; it does not require an inherited
+active schema. The v2 production attachment is still closed. TCP connections require
 `sslmode=verify-full`; Unix sockets depend on operator-controlled filesystem
 permissions. A direct, session-preserving endpoint and the operator's fencing
 of the authoritative primary and old sessions remain prerequisites. The
 assertion records that requirement; it does not prove any of those conditions.
 
-Before handing a pool to startup, the attested path checks each physical
-connection, verifies the committed lineage and complete migration ledger,
-checks the runtime role and read-only lineage/ledger privileges, and reserves
-separate main and ingress admission on the same pool. Cluster mode also checks
-a separately budgeted attested control-plane pool. Attachment cannot reopen a
-DSN or fall back to owner bootstrap after a refusal. The checks are snapshots;
-privileged DDL, ownership and grant changes must remain quiescent.
+The v2 production attachment currently refuses before opening a connection.
+Its former name-based, REPEATABLE READ lineage/ledger entry runs before a
+pinned catalog proof, so it cannot safely consume the new pin bundle yet.
+The opt-in dark hook and ledger helpers must be integrated into that bootstrap
+entry and each transaction caller before this path may hand out a pool.
+Attachment cannot reopen a DSN or fall back to owner bootstrap after a
+refusal. Privileged DDL, ownership and grant changes must remain quiescent
+through any future proof and use.
 
-The production attachment checks for unexpected triggers and rewrite rules on
-inbox, portable SM and pending-delivery relations. The only currently allowed
-user trigger is pending delivery's separately verified immutable-ordinal
-trigger. An epoch guard cannot be added to this allowlist until its definition,
-owner and installation are verified. These checks do not establish an exact
-schema, an independently attested relation owner, or a complete other-writer
-ACL policy.
+The prior attachment implementation checks for unexpected triggers and rewrite
+rules on inbox, portable SM and pending-delivery relations. Those checks remain
+available to the legacy test path, but are not a v2 serving authorization. An
+epoch guard cannot be added to its allowlist until its definition, owner and
+installation are verified.
 
 **This is not yet a serving cutover.** The server currently refuses an
 attested pool before binding a listener or running store constructors. MAM,

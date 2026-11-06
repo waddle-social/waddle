@@ -8,15 +8,21 @@ use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use super::{
-    acquire_dark_shared_migration_ledger_v1023, DarkLedgerPreflightError, DarkMigrationLedgerPins,
-    MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+    acquire_dark_shared_migration_ledger_v1023, acquire_dark_shared_migration_ledger_v1030_write,
+    DarkLedgerPreflightError, DarkMigrationLedgerPins, MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
 };
+use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 use crate::db::migrations::{migration_checksum, MigrationRunner};
 use crate::db::{Database, DatabaseDriver, DatabaseError, MigrationLedgerError};
 
+const RESTORE_PATH: &str = "\"$user\", public";
+const CUSTOM_RESTORE_PATH: &str = "public, pg_catalog";
+
 struct Fixture {
     admin: PgPool,
+    bootstrap_admin: Option<PgPool>,
     reader: PgPool,
+    database_name: Option<String>,
     schema: String,
     owner: String,
     runtime: String,
@@ -24,7 +30,48 @@ struct Fixture {
 
 impl Fixture {
     async fn new(url: &str) -> Self {
-        let admin = PgPool::connect(url).await.expect("admin connection");
+        Self::new_in_database(url, None, None).await
+    }
+
+    async fn new_without_temp(url: &str) -> Self {
+        let bootstrap_admin = PgPool::connect(url)
+            .await
+            .expect("bootstrap admin connection");
+        let database_name = format!("ledger_no_temp_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!(
+            "CREATE DATABASE {database_name} TEMPLATE template0"
+        ))
+        .execute(&bootstrap_admin)
+        .await
+        .expect("create isolated no-temp database");
+        sqlx::query(&format!(
+            "REVOKE TEMP ON DATABASE {database_name} FROM PUBLIC"
+        ))
+        .execute(&bootstrap_admin)
+        .await
+        .expect("remove public TEMP privilege");
+        sqlx::query(&format!(
+            "GRANT CONNECT ON DATABASE {database_name} TO PUBLIC"
+        ))
+        .execute(&bootstrap_admin)
+        .await
+        .expect("allow isolated fixture connections");
+        Self::new_in_database(url, Some(database_name), Some(bootstrap_admin)).await
+    }
+
+    async fn new_in_database(
+        url: &str,
+        database_name: Option<String>,
+        bootstrap_admin: Option<PgPool>,
+    ) -> Self {
+        let mut admin_options = PgConnectOptions::from_str(url).expect("connection options");
+        if let Some(database_name) = &database_name {
+            admin_options = admin_options.database(database_name);
+        }
+        let admin = PgPoolOptions::new()
+            .connect_with(admin_options)
+            .await
+            .expect("admin connection");
         let version: i32 =
             sqlx::query_scalar("SELECT pg_catalog.current_setting('server_version_num')::integer")
                 .fetch_one(&admin)
@@ -49,9 +96,12 @@ impl Fixture {
                 .await
                 .expect("setup");
         }
-        let options = PgConnectOptions::from_str(url)
+        let mut options = PgConnectOptions::from_str(url)
             .expect("connection options")
             .username(&runtime);
+        if let Some(database_name) = &database_name {
+            options = options.database(database_name);
+        }
         let reader = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(options)
@@ -59,7 +109,9 @@ impl Fixture {
             .expect("runtime connection");
         let fixture = Self {
             admin,
+            bootstrap_admin,
             reader,
+            database_name,
             schema,
             owner,
             runtime,
@@ -92,6 +144,20 @@ impl Fixture {
         .execute(&mut *conn)
         .await
         .expect("grant reader");
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {}.write_probe (id integer PRIMARY KEY)",
+            self.schema
+        ))
+        .execute(&mut *conn)
+        .await
+        .expect("create durable write probe");
+        sqlx::query(&format!(
+            "GRANT INSERT ON {}.write_probe TO {}",
+            self.schema, self.runtime
+        ))
+        .execute(&mut *conn)
+        .await
+        .expect("grant durable write");
         for migration in MigrationRunner::single()
             .migrations
             .into_iter()
@@ -143,6 +209,37 @@ impl Fixture {
         self.create_ledger().await;
     }
 
+    async fn seed_v1030(&self) {
+        let mut conn = self.admin.acquire().await.expect("owner connection");
+        sqlx::query(&format!("SET ROLE {}", self.owner))
+            .execute(&mut *conn)
+            .await
+            .expect("assume owner");
+        for migration in MigrationRunner::single()
+            .migrations
+            .into_iter()
+            .filter(|migration| (1023..=1030).contains(&migration.version))
+        {
+            if migration.version == 1023 {
+                continue;
+            }
+            sqlx::query(&format!(
+                "INSERT INTO {}._migrations (version, description, checksum) VALUES ($1, $2, $3)",
+                self.schema
+            ))
+            .bind(migration.version)
+            .bind(&migration.description)
+            .bind(migration_checksum(&migration, DatabaseDriver::Postgres))
+            .execute(&mut *conn)
+            .await
+            .expect("seed current registered migration");
+        }
+        sqlx::query("RESET ROLE")
+            .execute(&mut *conn)
+            .await
+            .expect("reset role");
+    }
+
     async fn close(self) {
         self.reader.close().await;
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
@@ -156,6 +253,490 @@ impl Fixture {
                 .expect("drop role");
         }
         self.admin.close().await;
+        if let Some(database_name) = self.database_name {
+            let bootstrap_admin = self
+                .bootstrap_admin
+                .expect("bootstrap admin for isolated DB");
+            sqlx::query(&format!("DROP DATABASE {database_name}"))
+                .execute(&bootstrap_admin)
+                .await
+                .expect("drop isolated no-temp database");
+            bootstrap_admin.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new_without_temp(&url).await;
+    fixture.seed_v1030().await;
+    let runtime_has_temp: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'TEMP')"
+    ).fetch_one(&fixture.reader).await.expect("inspect effective TEMP privilege");
+    assert!(
+        !runtime_has_temp,
+        "durable write fixture must have no effective TEMP privilege"
+    );
+    let db = fixture.database();
+    let pins = fixture.pins().await;
+
+    let mut tx = db.begin().await.expect("write transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("read-write boundary");
+    let mut proof = acquire_dark_shared_migration_ledger_v1030_write(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        RESTORE_PATH,
+    )
+    .await
+    .expect("complete registered V1030 prefix");
+    assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
+    assert!(
+        holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await
+    );
+    proof
+        .transaction()
+        .execute(
+            &format!("INSERT INTO {}.write_probe (id) VALUES (1)", fixture.schema),
+            (),
+        )
+        .await
+        .expect("write durable row after proof");
+    drop(proof);
+    tx.commit().await.expect("commit durable write after proof");
+    let durable: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {}.write_probe WHERE id=1",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("durable row");
+    assert_eq!(durable, 1);
+
+    // The write proof must reject read-only transactions without attempting
+    // to upgrade or read the ledger.
+    let mut tx = db.begin().await.expect("read-only transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_write(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH
+        )
+        .await,
+        Err(DarkLedgerPreflightError::TransactionBoundary)
+    ));
+    tx.rollback().await.expect("rollback rejected transaction");
+
+    // A blocker proves the write proof waits on lineage before acquiring the
+    // ledger gate. Its stricter timeout remains in force.
+    let mut blocker = fixture.admin.begin().await.expect("lineage blocker");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(LINEAGE_ADVISORY_LOCK_KEY)
+        .execute(&mut *blocker)
+        .await
+        .expect("hold exclusive lineage lock");
+    let blocker_holds_lineage: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
+         WHERE pid=pg_catalog.pg_backend_pid() AND locktype='advisory' \
+           AND mode='ExclusiveLock' AND granted AND objsubid=1 \
+           AND classid=(($1::bigint >> 32)::oid) \
+           AND objid=(($1::bigint & 4294967295)::oid))",
+    )
+    .bind(LINEAGE_ADVISORY_LOCK_KEY)
+    .fetch_one(&mut *blocker)
+    .await
+    .expect("verify exclusive lineage lock");
+    assert!(blocker_holds_lineage);
+    let mut tx = db.begin().await.expect("blocked transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("write boundary");
+    tx.execute("SET LOCAL lock_timeout = '200ms'", ())
+        .await
+        .expect("short lineage timeout");
+    let backend_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *tx.postgres_connection().expect("postgres tx"))
+        .await
+        .expect("backend pid");
+    let mut proof_future = Box::pin(acquire_dark_shared_migration_ledger_v1030_write(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        RESTORE_PATH,
+    ));
+    let mut lineage_wait_observed = false;
+    let mut ledger_lock_observed_while_waiting = false;
+    let result = loop {
+        match timeout(Duration::from_millis(10), &mut proof_future).await {
+            Ok(result) => break result,
+            Err(_) => {
+                let (lineage_waiting, ledger_lock): (bool, bool) = sqlx::query_as(
+                    "SELECT \
+                     EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                       AND objsubid=1 AND classid=(($2::bigint >> 32)::oid) \
+                       AND objid=(($2::bigint & 4294967295)::oid) AND mode='ShareLock' AND NOT granted), \
+                     EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 AND locktype='advisory' \
+                       AND objsubid=1 AND classid=(($3::bigint >> 32)::oid) \
+                       AND objid=(($3::bigint & 4294967295)::oid))",
+                )
+                .bind(backend_pid)
+                .bind(LINEAGE_ADVISORY_LOCK_KEY)
+                .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+                .fetch_one(&fixture.admin)
+                .await
+                .expect("inspect blocked lock order");
+                if lineage_waiting {
+                    lineage_wait_observed = true;
+                    ledger_lock_observed_while_waiting |= ledger_lock;
+                }
+            }
+        }
+    };
+    drop(proof_future);
+    let sqlstate = match result {
+        Err(error) => error_sqlstate(&error),
+        Ok(proof) => {
+            drop(proof);
+            None
+        }
+    };
+    assert_eq!(
+        sqlstate.as_deref(),
+        Some("55P03"),
+        "must fail on lock timeout"
+    );
+    assert!(
+        lineage_wait_observed,
+        "must observe the ungranted lineage advisory lock"
+    );
+    assert!(
+        !ledger_lock_observed_while_waiting,
+        "ledger lock must not be acquired while lineage waits"
+    );
+    let ledger_lock: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid=$1 \
+         AND locktype='advisory' AND objsubid=1 \
+         AND classid=(($2::bigint >> 32)::oid) AND objid=(($2::bigint & 4294967295)::oid))",
+    )
+    .bind(backend_pid)
+    .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect ledger lock");
+    assert!(
+        !ledger_lock,
+        "ledger lock must not precede the blocked lineage lock"
+    );
+    tx.rollback().await.expect("rollback blocked transaction");
+    blocker.rollback().await.expect("release lineage blocker");
+
+    sqlx::query(&format!(
+        "UPDATE {}._migrations SET checksum='bad' WHERE version=1030",
+        fixture.schema
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("damage current migration");
+    let mut tx = db.begin().await.expect("stale transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("write boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_write(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH
+        )
+        .await,
+        Err(DarkLedgerPreflightError::Database(_))
+    ));
+    tx.rollback().await.expect("rollback stale ledger");
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_rejects_too_many_acl_items_before_expansion() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url).await;
+    fixture.seed_v1030().await;
+    let mut roles = Vec::new();
+    for index in 0..65 {
+        let role = format!("ledger_acl_{index}_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&fixture.admin)
+            .await
+            .expect("create ACL grantee");
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}._migrations TO {role}",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grow raw ACL");
+        roles.push(role);
+    }
+    let db = fixture.database();
+    let mut tx = db.begin().await.expect("write transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("write boundary");
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1030_write(
+            &mut tx,
+            &fixture.schema,
+            fixture.pins().await,
+            RESTORE_PATH,
+        )
+        .await,
+        Err(DarkLedgerPreflightError::TooManyAclEntries)
+    ));
+    tx.rollback().await.expect("rollback oversized ACL");
+    sqlx::query(&format!(
+        "REVOKE ALL ON {}._migrations FROM {}",
+        fixture.schema,
+        roles.join(", ")
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke test ACL roles");
+    for role in roles {
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&fixture.admin)
+            .await
+            .expect("drop test ACL role");
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_rejects_compressed_or_oversized_raw_acl_first() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url).await;
+    fixture.seed_v1030().await;
+    let mut roles = Vec::new();
+    for index in 0..2_500 {
+        let role = format!("ledger_big_acl_{index}_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&fixture.admin)
+            .await
+            .expect("create ACL grantee");
+        sqlx::query(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {role}",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grow raw ACL");
+        roles.push(role);
+    }
+    let (raw_size, compression): (i32, Option<String>) = sqlx::query_as(
+        "SELECT pg_catalog.pg_column_size(nspacl), pg_catalog.pg_column_compression(nspacl) \
+         FROM pg_catalog.pg_namespace WHERE nspname=$1",
+    )
+    .bind(&fixture.schema)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect raw ACL witness");
+    assert!(raw_size > 0);
+    assert!(
+        compression.as_ref().is_some(),
+        "fixture must produce a PostgreSQL-compressed ACL: {raw_size} bytes"
+    );
+    let db = fixture.database();
+    let mut tx = db.begin().await.expect("write transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await
+    .expect("write boundary");
+    let result = acquire_dark_shared_migration_ledger_v1030_write(
+        &mut tx,
+        &fixture.schema,
+        fixture.pins().await,
+        RESTORE_PATH,
+    )
+    .await;
+    match result {
+        Err(DarkLedgerPreflightError::CompressedAcl) => {}
+        result => {
+            let outcome = result
+                .as_ref()
+                .map(|_| "accepted".to_owned())
+                .map_err(ToString::to_string);
+            panic!("compressed ACL did not fail at the compression guard stage: compression={compression:?}, raw_size={raw_size}, outcome={outcome:?}");
+        }
+    }
+    tx.rollback().await.expect("rollback oversized ACL");
+    sqlx::query(&format!(
+        "REVOKE ALL ON SCHEMA {} FROM {}",
+        fixture.schema,
+        roles.join(", ")
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke test ACL roles");
+    for role in roles {
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&fixture.admin)
+            .await
+            .expect("drop test ACL role");
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres17_ledger_preflight_bounds_restore_input_and_ignores_large_inherited_path() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url).await;
+    let db = fixture.database();
+    let pins = fixture.pins().await;
+
+    let mut tx = db.begin().await.expect("invalid input transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    tx.execute("SET LOCAL lock_timeout = '200ms'", ())
+        .await
+        .expect("set tighter lock wait");
+    tx.execute("SET LOCAL statement_timeout = '1s'", ())
+        .await
+        .expect("set tighter statement wait");
+    let long_schema = "s".repeat(64);
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1023(&mut tx, &long_schema, pins, RESTORE_PATH).await,
+        Err(DarkLedgerPreflightError::InvalidSchema)
+    ));
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1023(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            &"p".repeat(1025)
+        )
+        .await,
+        Err(DarkLedgerPreflightError::InvalidRestorePath)
+    ));
+    assert!(matches!(
+        acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins, "bad\0path")
+            .await,
+        Err(DarkLedgerPreflightError::InvalidRestorePath)
+    ));
+    let lock_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_locks WHERE pid=pg_catalog.pg_backend_pid() \
+         AND locktype='advisory' AND objsubid=1 AND granted",
+    )
+    .fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
+    .await
+    .expect("inspect rejected inputs");
+    assert_eq!(
+        lock_count, 0,
+        "invalid values must reject before advisory locks"
+    );
+    tx.rollback().await.expect("rollback invalid inputs");
+
+    let mut tx = db.begin().await.expect("large inherited path transaction");
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        (),
+    )
+    .await
+    .expect("read-only boundary");
+    tx.execute("SET LOCAL lock_timeout = '200ms'", ())
+        .await
+        .expect("set tighter lock wait");
+    tx.execute("SET LOCAL statement_timeout = '1s'", ())
+        .await
+        .expect("set tighter statement wait");
+    let large_path = "x".repeat(60_000);
+    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
+        .bind(&large_path)
+        .execute(&mut *tx.postgres_connection().expect("postgres transaction"))
+        .await
+        .expect("set large inherited path");
+    let proof = acquire_dark_shared_migration_ledger_v1023(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        CUSTOM_RESTORE_PATH,
+    )
+    .await
+    .expect("bounded caller restore despite huge inherited setting");
+    drop(proof);
+    let restored: String = sqlx::query_scalar("SELECT pg_catalog.current_setting('search_path')")
+        .fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
+        .await
+        .expect("read caller restore path");
+    assert_eq!(restored, CUSTOM_RESTORE_PATH);
+    let waits: (String, String) = sqlx::query_as(
+        "SELECT pg_catalog.current_setting('lock_timeout'), pg_catalog.current_setting('statement_timeout')"
+    ).fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
+        .await.expect("read bounded waits");
+    assert_eq!(waits, ("200ms".to_owned(), "1s".to_owned()));
+    tx.rollback()
+        .await
+        .expect("rollback large-path transaction");
+    fixture.close().await;
+}
+
+async fn holds_shared_advisory_lock(tx: &mut crate::db::Transaction<'_>, key: i64) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
+         WHERE locktype='advisory' AND pid=pg_catalog.pg_backend_pid() \
+           AND granted AND mode='ShareLock' AND objsubid=1 \
+           AND classid=(($1::bigint >> 32)::oid) \
+           AND objid=(($1::bigint & 4294967295)::oid))",
+    )
+    .bind(key)
+    .fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
+    .await
+    .expect("inspect advisory lock")
+}
+
+fn error_sqlstate(error: &DarkLedgerPreflightError) -> Option<String> {
+    match error {
+        DarkLedgerPreflightError::Postgres(sqlx::Error::Database(error)) => {
+            error.code().map(|code| code.into_owned())
+        }
+        DarkLedgerPreflightError::Database(DatabaseError::Internal(sqlx::Error::Database(
+            error,
+        ))) => error.code().map(|code| code.into_owned()),
+        _ => None,
     }
 }
 
@@ -171,7 +752,13 @@ async fn reject_without_relation_lock(fixture: &Fixture, pins: DarkMigrationLedg
     tx.execute("SET LOCAL search_path = public, pg_catalog", ())
         .await
         .expect("set path");
-    let result = acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins).await;
+    let result = acquire_dark_shared_migration_ledger_v1023(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        CUSTOM_RESTORE_PATH,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(DarkLedgerPreflightError::CatalogDrift)
@@ -186,7 +773,7 @@ async fn reject_without_relation_lock(fixture: &Fixture, pins: DarkMigrationLedg
         .await
         .expect("inspect failed proof");
     let row = rows.next().await.expect("lock row").expect("aggregate row");
-    assert_eq!(row.get::<String>(0).expect("path"), "public, pg_catalog");
+    assert_eq!(row.get::<String>(0).expect("path"), CUSTOM_RESTORE_PATH);
     assert_eq!(row.get::<i64>(1).expect("lock count"), 0);
     drop(rows);
     tx.rollback().await.expect("rollback failed proof");
@@ -201,9 +788,13 @@ async fn reject_oversized_ledger(fixture: &Fixture) {
     )
     .await
     .expect("read-only boundary");
-    let result =
-        acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, fixture.pins().await)
-            .await;
+    let result = acquire_dark_shared_migration_ledger_v1023(
+        &mut tx,
+        &fixture.schema,
+        fixture.pins().await,
+        RESTORE_PATH,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(DarkLedgerPreflightError::Database(
@@ -276,9 +867,14 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     tx.execute("SET LOCAL search_path = public, pg_catalog", ())
         .await
         .expect("set path");
-    let mut proof = acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins)
-        .await
-        .expect("valid committed V1023 prefix");
+    let mut proof = acquire_dark_shared_migration_ledger_v1023(
+        &mut tx,
+        &fixture.schema,
+        pins,
+        CUSTOM_RESTORE_PATH,
+    )
+    .await
+    .expect("valid committed V1023 prefix");
     let mut rows = proof
         .transaction()
         .query("SELECT pg_catalog.current_setting('search_path')", ())
@@ -291,7 +887,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
             .expect("path")
             .get::<String>(0)
             .expect("path"),
-        "public, pg_catalog"
+        CUSTOM_RESTORE_PATH
     );
     drop(rows);
     let mut other = fixture.admin.begin().await.expect("competing owner");
@@ -330,7 +926,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
         .await
         .expect("boundary");
         assert!(matches!(
-            acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins).await,
+            acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins, RESTORE_PATH).await,
             Err(DarkLedgerPreflightError::Database(DatabaseError::MigrationLedger(
                 MigrationLedgerError::PendingMigration { version }
             ))) if version == missing
@@ -356,7 +952,8 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     .await
     .expect("boundary");
     assert!(matches!(
-        acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins).await,
+        acquire_dark_shared_migration_ledger_v1023(&mut tx, &fixture.schema, pins, RESTORE_PATH)
+            .await,
         Err(DarkLedgerPreflightError::Database(_))
     ));
     tx.rollback().await.expect("checksum rollback");
@@ -596,10 +1193,11 @@ async fn postgres17_ledger_preflight_rechecks_after_wait_and_pool_rollback() {
         )
         .await
         .expect("boundary");
-        tx.execute("SET LOCAL lock_timeout = '10s'", ())
+        tx.execute("SET LOCAL lock_timeout = '3s'", ())
             .await
             .expect("bounded lock");
-        let result = acquire_dark_shared_migration_ledger_v1023(&mut tx, &schema, pins).await;
+        let result =
+            acquire_dark_shared_migration_ledger_v1023(&mut tx, &schema, pins, RESTORE_PATH).await;
         let rejected = result.is_err();
         drop(result);
         tx.rollback().await.expect("rollback reader");
