@@ -26,8 +26,8 @@ pub struct PinnedRuntimeAuthority {
     pub(super) attestor: DarkPhysicalAttestationPins,
     pub(super) ledger: DarkMigrationLedgerPins,
     pub(super) epoch_relation_oid: u32,
-    epoch_primary_index_oid: u32,
-    guard_manifest_relation_oid: u32,
+    pub(super) epoch_primary_index_oid: u32,
+    pub(super) guard_manifest_relation_oid: u32,
 }
 
 impl PinnedRuntimeAuthority {

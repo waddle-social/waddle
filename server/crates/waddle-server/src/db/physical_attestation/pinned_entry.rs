@@ -6,11 +6,13 @@
 
 use std::time::Duration;
 
-use sqlx::postgres::types::Oid;
 use thiserror::Error;
 
+use super::pinned_catalog::verify_pinned_epoch_manifest_catalog;
 use super::preflight::{attest_dark_catalog_pinned_db_transaction, DarkPhysicalAttestationError};
-use super::{quote_identifier, AttestationMode, AttestedPgPool, PhysicalAttestationError};
+use super::{
+    quote_identifier, AttestationMode, AttestedPgPool, PhysicalAttestationError, PinnedCatalogError,
+};
 use crate::db::migrations::{
     acquire_dark_shared_migration_ledger_v1030_read, DarkLedgerPreflightError,
 };
@@ -27,8 +29,6 @@ pub enum DarkPinnedEntryError {
     Timeout,
     #[error("dark pinned entry could not verify a transaction timeout")]
     InvalidTimeout,
-    #[error("dark pinned entry epoch relation differs from its independent pin")]
-    EpochRelationDrift,
     #[error("dark pinned entry rollback was not acknowledged")]
     RollbackUnconfirmed,
     #[error(transparent)]
@@ -37,6 +37,8 @@ pub enum DarkPinnedEntryError {
     Attestation(#[from] PhysicalAttestationError),
     #[error(transparent)]
     Ledger(#[from] DarkLedgerPreflightError),
+    #[error(transparent)]
+    Catalog(#[from] PinnedCatalogError),
     #[error(transparent)]
     Database(#[from] DatabaseError),
     #[error("dark pinned entry PostgreSQL operation failed")]
@@ -127,7 +129,7 @@ async fn prepare_entry(
             &restore_path,
         )
         .await?;
-        prelock_pinned_epoch(ledger.transaction(), authority).await?;
+        verify_pinned_epoch_manifest_catalog(ledger.transaction(), authority).await?;
     }
     if let Some((ready, release)) = pause {
         let connection = tx
@@ -162,57 +164,6 @@ async fn bound_remaining_timeouts(tx: &mut Transaction<'_>) -> Result<(), DarkPi
                 .execute(&mut *connection)
                 .await?;
         }
-    }
-    Ok(())
-}
-
-async fn prelock_pinned_epoch(
-    tx: &mut Transaction<'_>,
-    authority: &super::PinnedRuntimeAuthority,
-) -> Result<(), DarkPinnedEntryError> {
-    verify_pinned_epoch_heap(tx, authority).await?;
-    let qualified = format!(
-        "{}.ingress_protocol_epoch",
-        quote_identifier(&authority.config.postgres().schema.name.0)
-    );
-    let connection = tx
-        .postgres_connection()
-        .ok_or(PhysicalAttestationError::PostgresRequired)?;
-    sqlx::query(&format!("LOCK TABLE ONLY {qualified} IN ACCESS SHARE MODE"))
-        .execute(connection)
-        .await?;
-    // A name-based lock can wait through replacement. The fresh READ
-    // COMMITTED catalog statement must still identify the independent OID.
-    verify_pinned_epoch_heap(tx, authority).await
-}
-
-async fn verify_pinned_epoch_heap(
-    tx: &mut Transaction<'_>,
-    authority: &super::PinnedRuntimeAuthority,
-) -> Result<(), DarkPinnedEntryError> {
-    let connection = tx
-        .postgres_connection()
-        .ok_or(PhysicalAttestationError::PostgresRequired)?;
-    let valid: bool = sqlx::query_scalar(
-        "SELECT c.relnamespace = $2 AND n.nspname = $3 \
-         AND c.relname = 'ingress_protocol_epoch' \
-         AND c.relkind = 'r' AND c.relpersistence = 'p' \
-         AND am.amname = 'heap' \
-         AND c.relowner = $4 \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         JOIN pg_catalog.pg_am am ON am.oid = c.relam \
-         WHERE c.oid = $1",
-    )
-    .bind(Oid(authority.epoch_relation_oid))
-    .bind(Oid(authority.config.postgres().schema.oid))
-    .bind(&authority.config.postgres().schema.name.0)
-    .bind(Oid(authority.attestor.schema_owner_role_oid))
-    .fetch_optional(connection)
-    .await?
-    .unwrap_or(false);
-    if !valid {
-        return Err(DarkPinnedEntryError::EpochRelationDrift);
     }
     Ok(())
 }

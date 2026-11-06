@@ -248,6 +248,26 @@ async fn verify_catalog(
     config: &PhysicalAttestationConfig,
     pins: DarkPhysicalAttestationPins,
 ) -> Result<(), DarkPhysicalAttestationError> {
+    // Bound the lineage object's catalog inventory before any per-object
+    // metadata or dependency consumer. Keep this separate from later catalog
+    // statements: SQL predicates within one statement have no evaluation order.
+    let inventory: bool = sqlx::query_scalar(LINEAGE_INVENTORY_QUERY)
+        .bind(Oid(pins.lineage_relation_oid))
+        .bind(Oid(config.postgres().schema.oid))
+        .bind(Oid(pins.trusted_schema_oid))
+        .fetch_optional(&mut *connection)
+        .await?
+        .unwrap_or(false);
+    if !inventory {
+        return Err(DarkPhysicalAttestationError::EarlyCatalogDrift);
+    }
+    let dependencies_bounded: bool = sqlx::query_scalar(LINEAGE_DEPENDENCY_INVENTORY_QUERY)
+        .bind(Oid(pins.lineage_relation_oid))
+        .fetch_one(&mut *connection)
+        .await?;
+    if !dependencies_bounded {
+        return Err(DarkPhysicalAttestationError::EarlyCatalogDrift);
+    }
     // Privilege helpers and array comparisons may otherwise detoast an
     // attacker-provisioned catalog array. Restrict their input sizes, and
     // establish the role-membership graph, before calling those helpers.
@@ -302,10 +322,9 @@ async fn verify_catalog(
     if !exact {
         return Err(DarkPhysicalAttestationError::CatalogDrift);
     }
-    // Check the uncompressed node-tree lengths in a separate statement before
-    // deparsing, so optimizer predicate reordering cannot bypass the bound.
-    // pg_node_tree is binary-compatible with text; octet_length reads its raw
-    // datum size without decompressing a large value.
+    // Check node-tree storage before deparsing in a separate statement so
+    // optimizer predicate reordering cannot bypass the bound. Reject compressed
+    // catalog values before any expression decoder can expand them.
     let bounded_expressions: bool = sqlx::query_scalar(EXPRESSION_SIZE_QUERY)
         .bind(Oid(pins.lineage_relation_oid))
         .fetch_one(&mut *connection)
@@ -334,6 +353,47 @@ async fn verify_catalog(
         Err(_) => Err(DarkPhysicalAttestationError::CatalogDrift),
     }
 }
+
+// These counts stop at one over each limit and do not inspect variable-size
+// catalog fields. The dependency count is a second statement so its source
+// object set is already bounded before PostgreSQL can plan that join.
+const LINEAGE_INVENTORY_QUERY: &str = r#"
+SELECT c.relnamespace = $2 AND c.relname = '_lineage'
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_attribute a
+       WHERE a.attrelid = $1 LIMIT 33) bounded) <= 32
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_constraint x
+       WHERE x.conrelid = $1 LIMIT 5) bounded) <= 4
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_attrdef d
+       WHERE d.adrelid = $1 LIMIT 3) bounded) <= 2
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_index i
+       WHERE i.indrelid = $1 LIMIT 3) bounded) <= 2
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_trigger t
+       WHERE t.tgrelid = $1 LIMIT 3) bounded) <= 2
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_proc p
+       WHERE p.pronamespace = $3 AND p.proname = 'read_physical_identity'
+       LIMIT 3) bounded) <= 2
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_amop o
+       WHERE o.amopfamily = 1976::pg_catalog.oid LIMIT 129) bounded) <= 128
+  AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM pg_catalog.pg_amproc p
+       WHERE p.amprocfamily = 1976::pg_catalog.oid LIMIT 129) bounded) <= 128
+FROM pg_catalog.pg_class c WHERE c.oid = $1
+"#;
+
+const LINEAGE_DEPENDENCY_INVENTORY_QUERY: &str = r#"
+SELECT (SELECT pg_catalog.count(*) FROM (
+  SELECT 1 FROM (
+    SELECT 'pg_catalog.pg_constraint'::pg_catalog.regclass AS classid, x.oid AS objid
+    FROM pg_catalog.pg_constraint x WHERE x.conrelid = $1
+    UNION ALL
+    SELECT 'pg_catalog.pg_attrdef'::pg_catalog.regclass, d.oid
+    FROM pg_catalog.pg_attrdef d WHERE d.adrelid = $1
+  ) objects
+  CROSS JOIN LATERAL (
+    SELECT 1 FROM pg_catalog.pg_depend dep
+    WHERE dep.classid = objects.classid AND dep.objid = objects.objid LIMIT 129
+  ) dependency LIMIT 129
+) bounded) <= 128
+"#;
 
 // Both helpers inspect varlena storage metadata without detoasting. Rejecting
 // compression is necessary because pg_column_size reports compressed size.
@@ -377,7 +437,8 @@ SELECT db.oid = $2 AND n.oid = $4 AND trusted.oid = $6
                                  AND pg_catalog.pg_column_size(p.proargnames) <= 4096))
   AND (p.protrftypes IS NULL OR (pg_catalog.pg_column_compression(p.protrftypes) IS NULL
                                  AND pg_catalog.pg_column_size(p.protrftypes) <= 4096))
-  AND pg_catalog.octet_length(p.prosrc) <= 8192
+  AND pg_catalog.pg_column_compression(p.prosrc) IS NULL
+  AND pg_catalog.pg_column_size(p.prosrc) <= 8192
   AND pg_catalog.pg_column_compression(mark.description) IS NULL
   AND pg_catalog.pg_column_size(mark.description) <= 4096
   AND (control.proacl IS NULL OR (pg_catalog.pg_column_compression(control.proacl) IS NULL
@@ -421,6 +482,8 @@ SELECT db.oid = $2 AND db.datdba = $3 AND NOT pg_catalog.pg_is_in_recovery()
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite w WHERE w.ev_class = c.oid)
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid)
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_statistic_ext s WHERE s.stxrelid = c.oid)
+  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                  WHERE a.attrelid = c.oid AND a.attacl IS NOT NULL)
   AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute a
        WHERE a.attrelid = c.oid AND a.attnum > 0) = 10
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
@@ -505,10 +568,14 @@ WHERE db.datname = $1 AND db.datname = pg_catalog.current_database()
 const EXPRESSION_SIZE_QUERY: &str = r#"
 SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint x
                    WHERE x.conrelid = $1 AND x.contype = 'c'
-                     AND COALESCE(pg_catalog.octet_length(x.conbin::pg_catalog.text) > 4096, true))
+                     AND (x.conbin IS NULL
+                          OR pg_catalog.pg_column_compression(x.conbin) IS NOT NULL
+                          OR pg_catalog.pg_column_size(x.conbin) > 4096))
    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef a
                    WHERE a.adrelid = $1
-                     AND COALESCE(pg_catalog.octet_length(a.adbin::pg_catalog.text) > 4096, true))
+                     AND (a.adbin IS NULL
+                          OR pg_catalog.pg_column_compression(a.adbin) IS NOT NULL
+                          OR pg_catalog.pg_column_size(a.adbin) > 4096))
 "#;
 
 const EXPRESSION_QUERY: &str = r#"
