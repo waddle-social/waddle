@@ -5,21 +5,20 @@ use std::str::FromStr;
 use serde::Deserialize;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::config::LineageConfig;
 
-use super::bootstrap::{
-    attach_verified_global_runtime, attach_verified_global_runtime_with_control_plane,
-    ControlPlanePoolLimits, RuntimeAttachmentError, RuntimePoolLimits,
-};
+use super::bootstrap::{ControlPlanePoolLimits, RuntimeAttachmentError, RuntimePoolLimits};
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName, PgSystemIdentifier,
 };
 use super::physical_attestation::{
-    PgRoleName, PhysicalAttestationConfig, PhysicalAttestationError,
+    DarkPhysicalAttestationPins, PgRoleName, PhysicalAttestationConfig, PhysicalAttestationError,
+    PinnedRuntimeAuthority,
 };
-use super::DatabasePool;
+use super::{DarkMigrationLedgerPins, DatabasePool};
 
 /// Operator identity handoff and restricted runtime startup errors.
 #[derive(Debug, Error)]
@@ -38,6 +37,8 @@ pub enum RuntimeStartupError {
     DatabaseNameMismatch,
     #[error("restricted runtime TCP connections require PostgreSQL sslmode=verify-full")]
     UnauthenticatedTcp,
+    #[error("restricted runtime bootstrap still has unconverted ledger and transaction entry")]
+    UnconvertedPinnedBootstrap,
     #[error(transparent)]
     PhysicalAttestation(#[from] PhysicalAttestationError),
     #[error(transparent)]
@@ -63,19 +64,46 @@ struct IdentityDocument {
     runtime_login: String,
     definer_role: String,
     trusted_schema: String,
+    pins: OperatorPinsDocument,
+}
+
+/// The operator records these values outside the runtime connection. The
+/// installer function OID is added only after positive installation or a
+/// same-operation reconciliation on the fenced primary.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorPinsDocument {
+    database_owner_role_oid: u32,
+    schema_owner_role_oid: u32,
+    runtime_role_oid: u32,
+    installer_role_oid: u32,
+    definer_role_oid: u32,
+    trusted_schema_oid: u32,
+    lineage_relation_oid: u32,
+    lineage_primary_index_oid: u32,
+    attestor_function_oid: u32,
+    installation_operation_id: String,
+    ledger_relation_oid: u32,
+    ledger_primary_index_oid: u32,
+    epoch_relation_oid: u32,
+    epoch_primary_index_oid: u32,
+    guard_manifest_relation_oid: u32,
 }
 
 /// Validated operator input used for an attested runtime attachment.
 pub struct RuntimeStartupIdentity {
     expected: AttestedLineage,
-    attestation: PhysicalAttestationConfig,
+    _pins: PinnedRuntimeAuthority,
 }
 
 impl RuntimeStartupIdentity {
     pub fn from_json(document: &str, lineage: &LineageConfig) -> Result<Self, RuntimeStartupError> {
+        if document.len() > 8 * 1024 {
+            return Err(RuntimeStartupError::InvalidDocument);
+        }
         let doc: IdentityDocument =
             serde_json::from_str(document).map_err(|_| RuntimeStartupError::InvalidDocument)?;
-        if doc.version != 1 || doc.database_oid == 0 || doc.schema_oid == 0 {
+        if doc.version != 2 || doc.database_oid == 0 || doc.schema_oid == 0 {
             return Err(RuntimeStartupError::InvalidDocument);
         }
         if !doc.operator_asserts_direct_fenced_primary {
@@ -130,19 +158,51 @@ impl RuntimeStartupIdentity {
             PgRoleName::new(doc.definer_role)?,
             PgSchemaName(doc.trusted_schema),
         )?;
+        let pin_doc = doc.pins;
+        let installation_operation_id = Uuid::parse_str(&pin_doc.installation_operation_id)
+            .map_err(|_| RuntimeStartupError::InvalidDocument)?;
+        let attestor = DarkPhysicalAttestationPins {
+            database_owner_role_oid: pin_doc.database_owner_role_oid,
+            schema_owner_role_oid: pin_doc.schema_owner_role_oid,
+            runtime_role_oid: pin_doc.runtime_role_oid,
+            installer_role_oid: pin_doc.installer_role_oid,
+            definer_role_oid: pin_doc.definer_role_oid,
+            trusted_schema_oid: pin_doc.trusted_schema_oid,
+            lineage_relation_oid: pin_doc.lineage_relation_oid,
+            lineage_primary_index_oid: pin_doc.lineage_primary_index_oid,
+            attestor_function_oid: pin_doc.attestor_function_oid,
+            installation_operation_id,
+        };
+        let ledger = DarkMigrationLedgerPins {
+            schema_oid: doc.schema_oid,
+            schema_owner_role_oid: pin_doc.schema_owner_role_oid,
+            runtime_role_oid: pin_doc.runtime_role_oid,
+            ledger_relation_oid: pin_doc.ledger_relation_oid,
+            ledger_primary_index_oid: pin_doc.ledger_primary_index_oid,
+        };
+        let pins = PinnedRuntimeAuthority::new(
+            &attestation,
+            attestor,
+            ledger,
+            pin_doc.epoch_relation_oid,
+            pin_doc.epoch_primary_index_oid,
+            pin_doc.guard_manifest_relation_oid,
+        )?;
         Ok(Self {
             expected,
-            attestation,
+            _pins: pins,
         })
     }
 
-    /// Attach using the exact hook-bearing pool. `database_url` is never
-    /// retained as a reconnect URL by the returned `DatabasePool`.
+    /// Refuse attachment until the pinned ledger and transaction-entry proof
+    /// is wired into the bootstrap path. The legacy attachment enters a
+    /// name-based REPEATABLE READ ledger check before this proof, so opening
+    /// even a dark pool here would cross an unsafe catalog boundary.
     pub async fn attach(
         &self,
         database_url: &str,
-        limits: RuntimePoolLimits,
-        control_plane_limits: Option<ControlPlanePoolLimits>,
+        _limits: RuntimePoolLimits,
+        _control_plane_limits: Option<ControlPlanePoolLimits>,
     ) -> Result<DatabasePool, RuntimeStartupError> {
         let options = PgConnectOptions::from_str(database_url)
             .map_err(|_| RuntimeStartupError::InvalidDatabaseUrl)?;
@@ -163,28 +223,6 @@ impl RuntimeStartupIdentity {
         if !unix_socket && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
             return Err(RuntimeStartupError::UnauthenticatedTcp);
         }
-        let attachment = match control_plane_limits {
-            Some(control_plane_limits) => {
-                attach_verified_global_runtime_with_control_plane(
-                    options.clone(),
-                    options,
-                    self.attestation.clone(),
-                    &self.expected,
-                    limits,
-                    control_plane_limits,
-                )
-                .await?
-            }
-            None => {
-                attach_verified_global_runtime(
-                    options,
-                    self.attestation.clone(),
-                    &self.expected,
-                    limits,
-                )
-                .await?
-            }
-        };
-        Ok(attachment.into_pool())
+        Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
     }
 }

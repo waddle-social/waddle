@@ -58,17 +58,20 @@ original backend/primary fence survive until positive reconciliation.
    commit or same-operation reconciliation on the fenced primary. Migrate
    both installation and locked observation; absence alone never proves
    rollback.
-3. **Pinned connection hooks.** On the exact SQLx physical connection, clean
-   any inherited transaction, bound lock/statement/idle/total lifetime, and
-   start one READ COMMITTED read-only transaction before the first dependent
+3. **Pinned connection hooks.** On the exact SQLx physical connection, refuse
+   nonzero SQLx transaction depth, roll back any raw inherited transaction,
+   cap session lock/statement waits, clear leaked session advisory locks and
+   TEMP objects, then start one READ COMMITTED read-only transaction before the first dependent
    read. Set a safe catalog-first path, acquire shared lineage, run the pinned
    function-present preflight, `LOCK TABLE ONLY` the proven heap, recheck after
    the wait, then invoke the attestor. Confirm rollback before lending the
-   connection; hard-close on failed rollback, timeout or cancellation. Clear
-   retained TEMP state and set a known application path without reading an
-   unbounded inherited path. Preserve stricter existing limits and reject
-   a non-session-preserving endpoint. Apply the same proof to `after_connect`
-   and `before_acquire` on both pools.
+   connection; hard-close on failed rollback, timeout or cancellation. Set a
+   known application path without reading an unbounded inherited path, then
+   restore the caller's tighter session wait settings. Preserve stricter
+   existing limits and reject a non-session-preserving endpoint. A client
+   deadline alone cannot prove that a pre-existing backend query has stopped;
+   require server-side bounds and session fencing for that earlier work.
+   Apply the same proof to `after_connect` and `before_acquire` on both pools.
 4. **Transaction entry and caller migration.** Audit the 24 current production
    `attest_transaction` call sites plus every direct `attest_connection` call.
    Many store attachments already hold later-order relation locks or use
@@ -98,7 +101,8 @@ original backend/primary fence survive until positive reconciliation.
   stale pins, wrong main/control bundle, R missing lineage lock grant,
   hostile views/casts/operators/functions, compressed and oversized catalog
   values, replacement waits, poisoned role/path/TEMP/RR sessions, timeout,
-  cancellation, failed rollback, reconnect and pool reuse. A hostile sentinel
+  cancellation, failed rollback, leaked session advisory locks, retained TEMP,
+  reconnect and pool reuse. A hostile sentinel
   must prove rejection before execution. Installer tests cover concurrent
   same/conflicting operation IDs and a lost actual COMMIT response.
 - Verify the exact transaction-entry lock order for every migrated caller,
