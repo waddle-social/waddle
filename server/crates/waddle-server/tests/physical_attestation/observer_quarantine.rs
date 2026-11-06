@@ -1,6 +1,8 @@
 //! Isolated start-quarantine schedules. No serving or provider is selected.
 
+use std::cell::Cell;
 use std::path::Path;
+use std::task::Poll;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -13,7 +15,7 @@ use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunne
 use waddle_server::ingress_uow::{DbRetryClass, IngressUnitOfWork, ObservationError};
 use waddle_server::test_support::observer_quarantine::{
     claim_observer_pilot, observer_pilot_seed, prepare_observer_pilot_start, seed_observer_pilot,
-    ObserverPilotSeed,
+    ObserverPilotClaim, ObserverPilotCustody, ObserverPilotSeed,
 };
 use waddle_xmpp::ingress::MessageKey;
 
@@ -397,15 +399,20 @@ async fn exercise_exact_start(pilot: &Pilot) {
     .is_err());
     drop(early_starter);
     for field in [
+        "work",
         "token",
         "body",
         "attempt",
         "config",
         "generation",
+        "subscription_generation",
         "identity",
         "source",
         "digest",
         "hash",
+        "receipt_message",
+        "receipt_kind",
+        "receipt_hash",
         "kind",
         "payload",
         "message",
@@ -601,15 +608,18 @@ async fn exercise_exact_start(pilot: &Pilot) {
             .is_none()
     );
     let table = format!("{}.observer_fixture_effects", pilot.fixture.target);
-    grant
-        .invoke(|| async {
+    let mut custody = grant.into_custody();
+    custody
+        .invoke(&claim, || async {
             sqlx::query(&format!("INSERT INTO {table} (work_id) VALUES ($1)"))
                 .bind(claim.work_id().to_string())
                 .execute(&mut starter)
                 .await
                 .expect("fixture callback");
+            uuid::Uuid::new_v4()
         })
-        .await;
+        .await
+        .expect("fixture callback entered");
     assert_eq!(pilot.effects().await, 1);
     drop(claimant);
     drop(starter);
@@ -685,6 +695,201 @@ async fn postgres_observer_quarantine_rollback_and_competing_start() {
     if let Err(failure) = outcome {
         std::panic::resume_unwind(failure);
     }
+}
+
+#[tokio::test]
+async fn postgres_observer_quarantine_result_custody() {
+    let Some(_) = test_url() else {
+        return;
+    };
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    for scenario in ["identity_and_retry", "cancel_during", "panic_during"] {
+        let pilot = Pilot::new().await;
+        let outcome = std::panic::AssertUnwindSafe(exercise_result_custody(&pilot, scenario))
+            .catch_unwind()
+            .await;
+        pilot.cleanup().await;
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    }
+}
+
+async fn exercise_result_custody(pilot: &Pilot, scenario: &str) {
+    let claim = claim_observer_pilot(&pilot.claimer, &pilot.seed, pilot.now)
+        .await
+        .expect("claim")
+        .expect("work");
+    let grant = prepare_observer_pilot_start(&pilot.starter, &claim, pilot.now)
+        .await
+        .expect("prepare")
+        .expect("start")
+        .commit()
+        .await
+        .expect("acknowledged start");
+    assert!(
+        prepare_observer_pilot_start(&pilot.starter, &claim, pilot.now)
+            .await
+            .expect("duplicate start")
+            .is_none()
+    );
+    let mut custody = grant.into_custody();
+    match scenario {
+        "identity_and_retry" => exercise_identity_and_retry(&claim, &mut custody).await,
+        "cancel_during" => exercise_cancel_during(&claim, &mut custody).await,
+        "panic_during" => exercise_panic_during(&claim, &mut custody).await,
+        _ => panic!("unknown fixture scenario"),
+    }
+    assert_eq!(pilot.status().await, "dark_started");
+    assert_eq!(pilot.effects().await, 0);
+}
+
+async fn exercise_identity_and_retry(
+    claim: &ObserverPilotClaim,
+    custody: &mut ObserverPilotCustody,
+) {
+    let calls = Cell::new(0);
+    let token = uuid::Uuid::new_v4();
+    let fields = [
+        "work",
+        "token",
+        "body",
+        "attempt",
+        "config",
+        "generation",
+        "subscription_generation",
+        "identity",
+        "source",
+        "digest",
+        "hash",
+        "receipt_message",
+        "receipt_kind",
+        "receipt_hash",
+        "kind",
+        "payload",
+        "message",
+    ];
+    for field in fields {
+        let mut wrong = claim.clone();
+        wrong.corrupt_for_test(field).expect("corrupt identity");
+        assert!(
+            custody
+                .invoke(&wrong, || async {
+                    calls.set(calls.get() + 1);
+                    token
+                })
+                .await
+                .is_err(),
+            "wrong {field} entered the callback"
+        );
+    }
+    assert_eq!(calls.get(), 0);
+
+    // Creating and dropping a future without polling does not enter its body.
+    let unpolled = custody.invoke(claim, || async {
+        calls.set(calls.get() + 1);
+        token
+    });
+    drop(unpolled);
+    assert_eq!(calls.get(), 0);
+    assert!(custody.retry(claim, |_| ()).is_err());
+    let invocation = custody.invoke(claim, || async {
+        calls.set(calls.get() + 1);
+        token
+    });
+    let mut invocation = Box::pin(invocation);
+    assert!(matches!(
+        futures::poll!(invocation.as_mut()),
+        Poll::Ready(Ok(()))
+    ));
+    // Dropping the completed future cannot discard the returned value.
+    drop(invocation);
+    assert_eq!(calls.get(), 1);
+
+    for field in fields {
+        let mut wrong = claim.clone();
+        wrong.corrupt_for_test(field).expect("corrupt identity");
+        assert!(
+            custody.retry(&wrong, |_| ()).is_err(),
+            "wrong {field} used the result"
+        );
+    }
+    let original = custody
+        .retry(claim, std::convert::identity)
+        .expect("original returned value");
+    assert_eq!(original, token);
+    let attempts = Cell::new(0);
+    let attempts_ref = &attempts;
+    let retry = custody
+        .retry(claim, |result| async move {
+            attempts_ref.set(attempts_ref.get() + 1);
+            assert_eq!(result, token);
+            // Altering the retry's own copy cannot alter the value in custody.
+            let mut altered_bytes = result.into_bytes();
+            altered_bytes[0] ^= 0xff;
+            assert_ne!(uuid::Uuid::from_bytes(altered_bytes), result);
+            std::future::pending::<()>().await;
+        })
+        .expect("fixture retry");
+    let mut retry = Box::pin(retry);
+    assert!(matches!(futures::poll!(retry.as_mut()), Poll::Pending));
+    drop(retry);
+    assert_eq!(attempts.get(), 1);
+    let actual = custody
+        .retry(claim, std::convert::identity)
+        .expect("retry after cancellation");
+    assert_eq!(actual, original);
+    assert_eq!(actual, token);
+    assert!(custody
+        .invoke(claim, || async {
+            calls.set(calls.get() + 1);
+            token
+        })
+        .await
+        .is_err());
+    assert_eq!(calls.get(), 1, "retry never invoked the callback again");
+}
+
+async fn exercise_cancel_during(claim: &ObserverPilotClaim, custody: &mut ObserverPilotCustody) {
+    let calls = Cell::new(0);
+    let invocation = custody.invoke(claim, || async {
+        calls.set(calls.get() + 1);
+        std::future::pending::<uuid::Uuid>().await
+    });
+    let mut invocation = Box::pin(invocation);
+    assert!(matches!(futures::poll!(invocation.as_mut()), Poll::Pending));
+    assert_eq!(calls.get(), 1, "the callback was entered");
+    drop(invocation);
+    assert!(custody.retry(claim, |_| ()).is_err());
+    assert!(custody
+        .invoke(claim, || async {
+            calls.set(calls.get() + 1);
+            uuid::Uuid::new_v4()
+        })
+        .await
+        .is_err());
+    assert_eq!(calls.get(), 1, "a cancelled invocation stays uncertain");
+}
+
+async fn exercise_panic_during(claim: &ObserverPilotClaim, custody: &mut ObserverPilotCustody) {
+    let calls = Cell::new(0);
+    let invocation = custody.invoke(claim, || async {
+        calls.set(calls.get() + 1);
+        panic!("fixture callback panic");
+    });
+    assert!(std::panic::AssertUnwindSafe(invocation)
+        .catch_unwind()
+        .await
+        .is_err());
+    assert!(custody.retry(claim, |_| ()).is_err());
+    assert!(custody
+        .invoke(claim, || async {
+            calls.set(calls.get() + 1);
+            uuid::Uuid::new_v4()
+        })
+        .await
+        .is_err());
+    assert_eq!(calls.get(), 1, "a panicked invocation stays uncertain");
 }
 
 async fn wait_file(path: &Path) {
@@ -783,8 +988,9 @@ async fn observer_child() {
     if !expect_error {
         wait_file(Path::new(text("invoke"))).await;
     }
-    grant
-        .invoke(|| async {
+    let mut custody = grant.into_custody();
+    custody
+        .invoke(&claim, || async {
             std::fs::write(text("callback"), "callback").expect("signal callback");
             let mut conn = PgConnection::connect(text("effect_url"))
                 .await
@@ -797,8 +1003,10 @@ async fn observer_child() {
             .execute(&mut conn)
             .await
             .expect("independent effect");
+            uuid::Uuid::new_v4()
         })
-        .await;
+        .await
+        .expect("fixture callback entered");
 }
 
 #[tokio::test]
