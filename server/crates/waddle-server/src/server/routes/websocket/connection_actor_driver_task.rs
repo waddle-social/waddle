@@ -24,6 +24,18 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::ConnectionRef;
 
+#[cfg(feature = "test-support")]
+#[path = "connection_actor_driver_task/physical.rs"]
+pub(super) mod physical;
+#[cfg(feature = "test-support")]
+pub use physical::{
+    PhysicalControlRecovery, PhysicalEnrollment, PhysicalLimits, PhysicalProducerRecovery,
+    PhysicalRecovery, PhysicalReplayPayload, PhysicalReplayRecovery, PhysicalSnapshot,
+    PhysicalWriteKind, PhysicalWriteRecovery,
+};
+#[cfg(feature = "test-support")]
+use physical::{PhysicalParts, PhysicalProducer, PhysicalShared};
+
 const MAX_PENDING_OPERATIONS: usize = 256;
 const DEFAULT_CONTROL_CAPACITY: usize = 8;
 const DEFAULT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
@@ -107,6 +119,8 @@ pub(super) enum ConnectionActorDriverTaskResultValue {
             ConnectionActorDriverError,
         >,
     ),
+    #[cfg(feature = "test-support")]
+    PhysicalProducer,
     #[cfg(any(test, feature = "test-support"))]
     Paused(&'static str),
     #[cfg(any(test, feature = "test-support"))]
@@ -185,6 +199,10 @@ struct DriverShared {
     settlement_callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     joined: Mutex<bool>,
     joined_changed: Notify,
+    #[cfg(feature = "test-support")]
+    physical: Option<Arc<PhysicalShared>>,
+    #[cfg(test)]
+    worker_parked: Notify,
 }
 
 struct DriverLedger {
@@ -257,6 +275,8 @@ pub(super) enum ConnectionActorDriverTaskInput {
         #[cfg(test)]
         after_checkpoint: Option<super::frame::SmCheckpointTestGate>,
     },
+    #[cfg(feature = "test-support")]
+    PhysicalProducer(Arc<PhysicalProducer>),
     #[cfg(any(test, feature = "test-support"))]
     Paused {
         entered: Arc<Notify>,
@@ -293,6 +313,8 @@ impl ConnectionActorDriverTaskInput {
     fn input_bytes(&self) -> usize {
         match self {
             Self::SmRequest { input, .. } => input.wire_bytes(),
+            #[cfg(feature = "test-support")]
+            Self::PhysicalProducer(producer) => producer.input_bytes(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Paused { .. } => 0,
             #[cfg(any(test, feature = "test-support"))]
@@ -313,6 +335,10 @@ impl ConnectionActorDriverTaskInput {
         let _ = limits;
         match self {
             Self::SmRequest { .. } => DriverOutputBound::SmAck,
+            #[cfg(feature = "test-support")]
+            Self::PhysicalProducer(producer) => {
+                DriverOutputBound::Fixture(producer.max_frame_bytes())
+            }
             #[cfg(any(test, feature = "test-support"))]
             _ => DriverOutputBound::Fixture(limits.result_reservation_bytes),
         }
@@ -331,6 +357,8 @@ impl ConnectionActorDriverTaskResult {
                 },
             )) => MAX_SM_ACK_OUTPUT_BYTES,
             ConnectionActorDriverTaskResultValue::SmRequest(_) => 0,
+            #[cfg(feature = "test-support")]
+            ConnectionActorDriverTaskResultValue::PhysicalProducer => 0,
             #[cfg(any(test, feature = "test-support"))]
             _ => accounted_debug_bytes(&self.value),
         }
@@ -365,6 +393,7 @@ pub(super) struct ConnectionActorDriverTicket {
 impl ConnectionActorDriverTask {
     /// Spawn a production-compiled owner task. The worker owns `core` for its
     /// full lifetime; the separate supervisor retains and joins its handle.
+    #[cfg(test)]
     pub(super) fn spawn(
         state: super::state::WsConnState,
         websocket: Arc<WebSocketState>,
@@ -380,6 +409,7 @@ impl ConnectionActorDriverTask {
         )
     }
 
+    #[cfg(test)]
     fn spawn_with_limits(
         state: super::state::WsConnState,
         websocket: Arc<WebSocketState>,
@@ -387,10 +417,88 @@ impl ConnectionActorDriverTask {
         shutdown: CancellationToken,
         limits: ConnectionActorDriverTaskLimits,
     ) -> Result<Self, ConnectionActorDriverTaskAdmissionError> {
+        Self::spawn_with_start_gate(
+            state,
+            websocket,
+            permit,
+            shutdown,
+            limits,
+            None,
+            #[cfg(feature = "test-support")]
+            None,
+        )
+    }
+
+    /// Keep the worker parked until its exact endpoint cleanup record owns it.
+    pub(super) fn spawn_parked(
+        state: super::state::WsConnState,
+        websocket: Arc<WebSocketState>,
+        permit: NodeAdmissionPermit,
+        shutdown: CancellationToken,
+    ) -> Result<(Self, oneshot::Sender<()>), ConnectionActorDriverTaskAdmissionError> {
+        let (release, start) = oneshot::channel();
+        let task = Self::spawn_with_start_gate(
+            state,
+            websocket,
+            permit,
+            shutdown,
+            ConnectionActorDriverTaskLimits::default(),
+            Some(start),
+            #[cfg(feature = "test-support")]
+            None,
+        )?;
+        Ok((task, release))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn spawn_physical_parked(
+        state: super::state::WsConnState,
+        websocket: Arc<WebSocketState>,
+        permit: NodeAdmissionPermit,
+        shutdown: CancellationToken,
+        parts: PhysicalParts,
+    ) -> Result<(Self, oneshot::Sender<()>), ConnectionActorDriverTaskAdmissionError> {
+        let (release, start) = oneshot::channel();
+        let task = Self::spawn_with_start_gate(
+            state,
+            websocket,
+            permit,
+            shutdown,
+            ConnectionActorDriverTaskLimits::default(),
+            Some(start),
+            Some(parts),
+        )?;
+        Ok((task, release))
+    }
+
+    fn spawn_with_start_gate(
+        state: super::state::WsConnState,
+        websocket: Arc<WebSocketState>,
+        permit: NodeAdmissionPermit,
+        shutdown: CancellationToken,
+        limits: ConnectionActorDriverTaskLimits,
+        start: Option<oneshot::Receiver<()>>,
+        #[cfg(feature = "test-support")] physical: Option<PhysicalParts>,
+    ) -> Result<Self, ConnectionActorDriverTaskAdmissionError> {
         let limits = limits.validate()?;
         let core = ConnectionActorCore::new(state);
         let connection_ref = core.connection_ref().clone();
         let lifecycle = Arc::clone(&core.lifecycle);
+        #[cfg(feature = "test-support")]
+        let (core, physical) = match physical {
+            Some(parts) => {
+                let physical = PhysicalShared::new(
+                    connection_ref.clone(),
+                    core,
+                    parts,
+                    Arc::clone(&websocket.deps.protocol.ingress),
+                );
+                (None, Some(physical))
+            }
+            None => (Some(core), None),
+        };
+        #[cfg(not(feature = "test-support"))]
+        let core = Some(core);
         let stop = CancellationToken::new();
         let worker_done = CancellationToken::new();
         let shared = Arc::new(DriverShared {
@@ -413,13 +521,17 @@ impl ConnectionActorDriverTask {
             settlement_callback: Mutex::new(None),
             joined: Mutex::new(false),
             joined_changed: Notify::new(),
+            #[cfg(feature = "test-support")]
+            physical: physical.as_ref().map(|(shared, _)| Arc::clone(shared)),
+            #[cfg(test)]
+            worker_parked: Notify::new(),
         });
         let (data, receiver) = mpsc::channel(limits.data_capacity);
         let (control, control_receiver) = mpsc::channel(limits.control_capacity);
         let worker_shared = Arc::clone(&shared);
         let worker_permit = permit.clone();
         let worker_shutdown = shutdown.clone();
-        let worker = tokio::spawn(run_driver(DriverWorker {
+        let worker = DriverWorker {
             core,
             websocket,
             permit: worker_permit,
@@ -428,7 +540,24 @@ impl ConnectionActorDriverTask {
             shared: worker_shared,
             receiver,
             control_receiver,
-        }));
+            #[cfg(feature = "test-support")]
+            physical: physical.map(|(_, parts)| parts),
+        };
+        let worker = tokio::spawn(async move {
+            if let Some(start) = start {
+                #[cfg(test)]
+                worker.shared.worker_parked.notify_one();
+                let released = tokio::select! {
+                    biased;
+                    _ = worker.stop.cancelled() => false,
+                    result = start => result.is_ok(),
+                };
+                if !released {
+                    return;
+                }
+            }
+            run_driver(worker).await;
+        });
         let abort = worker.abort_handle();
         let supervisor = tokio::spawn(supervise_driver(worker, Arc::clone(&shared)));
         let cleanup = ConnectionActorDriverTaskCleanup {
@@ -469,6 +598,10 @@ impl ConnectionActorDriverTask {
         &self,
         input: &ClassifiedInboundFrame,
     ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
+        #[cfg(feature = "test-support")]
+        if self.shared.physical.is_some() {
+            return Err(ConnectionActorDriverTaskAdmissionError::UnsupportedOperation);
+        }
         if input.wire_bytes() > waddle_xmpp::protocol::frame::MAX_FRAME_SIZE {
             return Err(ConnectionActorDriverTaskAdmissionError::Overloaded);
         }
@@ -531,6 +664,10 @@ impl ConnectionActorDriverTask {
         &self,
         input: ConnectionActorDriverTaskInput,
     ) -> Result<ConnectionActorDriverTicket, ConnectionActorDriverTaskAdmissionError> {
+        #[cfg(feature = "test-support")]
+        if self.shared.physical.is_some() && !matches!(&input, DriverInput::PhysicalProducer(_)) {
+            return Err(ConnectionActorDriverTaskAdmissionError::UnsupportedOperation);
+        }
         let input_bytes = input.input_bytes();
         let output_bound = input.output_bound(self.shared.limits);
         let charged_bytes = input_bytes
@@ -817,6 +954,24 @@ impl ConnectionActorDriverTestTicket {
             )
     }
 
+    /// The fixed typed input remains with the exact operation through joined
+    /// physical recovery, even when its effect never returned.
+    pub fn physical_producer_input(&self) -> Option<(waddle_xmpp::Stanza, u64)> {
+        match &self.ticket.operation.input {
+            DriverInput::PhysicalProducer(producer) => Some(producer.recovery_input()),
+            _ => None,
+        }
+    }
+
+    /// Count and byte credits held by this exact admitted operation.
+    pub fn reserved_credits(&self) -> (usize, usize) {
+        (
+            1,
+            self.ticket.operation._reservation.input_bytes
+                + self.ticket.operation._reservation.output_bound.bytes(),
+        )
+    }
+
     pub fn acknowledge(self) -> bool {
         self.ticket.acknowledge().is_ok()
     }
@@ -893,6 +1048,46 @@ impl ConnectionActorDriverTestHandle {
             .submit_peer_stanza(&peer)
             .map(ConnectionActorDriverTestTicket::from_ticket)
             .map_err(map_test_admission_error)
+    }
+
+    /// Submit the sole fixed, size-proven producer to the physical fixture.
+    pub fn submit_physical_producer(
+        &self,
+        stanza: waddle_xmpp::Stanza,
+        frame_count: u64,
+        max_frame_bytes: usize,
+        effect_gate: &ConnectionActorDriverTestGate,
+    ) -> Result<ConnectionActorDriverTestTicket, ConnectionActorDriverTestAdmissionError> {
+        let physical = self
+            .task
+            .shared
+            .physical
+            .as_ref()
+            .ok_or(ConnectionActorDriverTestAdmissionError::UnsupportedOperation)?;
+        let producer = PhysicalProducer::new(
+            &self.task.shared.connection_ref,
+            stanza,
+            frame_count,
+            max_frame_bytes,
+            Arc::clone(&effect_gate.entered),
+            Arc::clone(&effect_gate.release),
+            physical,
+        )
+        .ok_or(ConnectionActorDriverTestAdmissionError::Overloaded)?;
+        self.task
+            .submit(ConnectionActorDriverTaskInput::PhysicalProducer(Arc::new(
+                producer,
+            )))
+            .map(ConnectionActorDriverTestTicket::from_ticket)
+            .map_err(map_test_admission_error)
+    }
+
+    pub fn physical_snapshot(&self) -> Option<PhysicalSnapshot> {
+        self.task
+            .shared
+            .physical
+            .as_ref()
+            .map(|state| state.snapshot())
     }
 
     pub fn submit_paused(
@@ -1026,6 +1221,10 @@ impl ConnectionActorDriverTicket {
     /// work to its next custody owner. Admission permits remain held by any
     /// surviving ticket or result handles.
     pub(super) fn acknowledge(self) -> Result<(), ConnectionActorDriverTaskAckError> {
+        #[cfg(feature = "test-support")]
+        if matches!(&self.operation.input, DriverInput::PhysicalProducer(_)) {
+            return Err(ConnectionActorDriverTaskAckError::NotTerminal);
+        }
         if matches!(
             self.snapshot(),
             ConnectionActorDriverTaskSnapshot::Accepted
@@ -1295,7 +1494,54 @@ impl ConnectionActorDriverTaskCleanup {
             .joined
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        joined && ledger.operations.is_empty()
+        let settled = joined && ledger.operations.is_empty();
+        drop(ledger);
+        #[cfg(feature = "test-support")]
+        {
+            settled
+                && self
+                    .inner
+                    .shared
+                    .physical
+                    .as_ref()
+                    .is_none_or(|physical| physical.is_settled())
+        }
+        #[cfg(not(feature = "test-support"))]
+        settled
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn take_joined_physical_recovery(
+        &self,
+        connection: &ConnectionRef,
+    ) -> Option<PhysicalRecovery> {
+        if connection != self.connection_ref() || !self.is_joined() {
+            return None;
+        }
+        let physical = self.inner.shared.physical.as_ref()?;
+        let operations = {
+            let ledger = self.inner.shared.lock_state();
+            ledger
+                .operations
+                .values()
+                .filter(|operation| matches!(&operation.input, DriverInput::PhysicalProducer(_)))
+                .map(|operation| ConnectionActorDriverTestTicket {
+                    ticket: ConnectionActorDriverTicket {
+                        operation: Arc::clone(operation),
+                        shared: Arc::clone(&self.inner.shared),
+                    },
+                })
+                .collect()
+        };
+        let mut recovery = physical.take_joined_recovery(connection)?;
+        recovery.operations = operations;
+        let mut ledger = self.inner.shared.lock_state();
+        ledger
+            .operations
+            .retain(|_, operation| !matches!(&operation.input, DriverInput::PhysicalProducer(_)));
+        drop(ledger);
+        self.inner.shared.operation_acknowledged();
+        Some(recovery)
     }
 
     pub(super) fn is_joined(&self) -> bool {
@@ -1305,6 +1551,11 @@ impl ConnectionActorDriverTaskCleanup {
             .joined
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn owns_physical(&self) -> bool {
+        self.inner.shared.physical.is_some()
     }
 
     /// Arm the one grace timer for this driver. Its deadline is based on the
@@ -1380,7 +1631,7 @@ impl DriverOperation {
 }
 
 struct DriverWorker {
-    core: ConnectionActorCore,
+    core: Option<ConnectionActorCore>,
     websocket: Arc<WebSocketState>,
     permit: NodeAdmissionPermit,
     shutdown: CancellationToken,
@@ -1388,11 +1639,20 @@ struct DriverWorker {
     shared: Arc<DriverShared>,
     receiver: mpsc::Receiver<DriverCommand>,
     control_receiver: mpsc::Receiver<DriverControl>,
+    #[cfg(feature = "test-support")]
+    physical: Option<PhysicalParts>,
 }
 
 async fn run_driver(worker: DriverWorker) {
+    #[cfg(feature = "test-support")]
+    let mut worker = worker;
+    #[cfg(feature = "test-support")]
+    if let Some(parts) = worker.physical.take() {
+        physical::run(worker, parts).await;
+        return;
+    }
     let DriverWorker {
-        mut core,
+        core,
         websocket,
         permit,
         shutdown,
@@ -1400,7 +1660,13 @@ async fn run_driver(worker: DriverWorker) {
         shared,
         mut receiver,
         mut control_receiver,
+        #[cfg(feature = "test-support")]
+            physical: _,
     } = worker;
+    let Some(mut core) = core else {
+        shared.request_stop(StopReason::Requested);
+        return;
+    };
     loop {
         let event = tokio::select! {
             biased;
@@ -1488,6 +1754,10 @@ async fn run_driver(worker: DriverWorker) {
                     }
                     None => Err(ConnectionActorDriverError::OutputReservationMissing),
                 })
+            }
+            #[cfg(feature = "test-support")]
+            DriverInput::PhysicalProducer(_) => {
+                unreachable!("physical work is admitted only to a physical owner")
             }
             #[cfg(any(test, feature = "test-support"))]
             DriverInput::Paused {
@@ -1629,6 +1899,64 @@ mod tests {
     use crate::clustering::NodeLifecycle;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn parked_worker_cannot_start_work_before_attachment_release() {
+        let websocket = create_test_websocket_state().await;
+        let lifecycle = NodeLifecycle::new();
+        let (task, release) = ConnectionActorDriverTask::spawn_parked(
+            super::super::state::WsConnState::new(),
+            websocket,
+            lifecycle.admit().expect("serving permit"),
+            CancellationToken::new(),
+        )
+        .expect("parked worker starts");
+        tokio::time::timeout(Duration::from_secs(5), task.shared.worker_parked.notified())
+            .await
+            .expect("worker reaches start gate");
+        let ticket = task.submit_immediate(0).expect("operation admitted");
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::Accepted
+        ));
+        assert_eq!(ticket.run_count(), 0);
+        release.send(()).expect("attachment releases worker");
+        assert!(matches!(
+            ticket.wait().await,
+            ConnectionActorDriverTaskSnapshot::Completed(_)
+        ));
+        assert_eq!(ticket.run_count(), 1);
+        ticket.acknowledge().expect("completed operation settled");
+        task.request_stop(StopReason::Requested);
+        task.wait_joined().await;
+    }
+
+    #[tokio::test]
+    async fn stopped_parked_worker_never_runs_admitted_work() {
+        let websocket = create_test_websocket_state().await;
+        let lifecycle = NodeLifecycle::new();
+        let (task, release) = ConnectionActorDriverTask::spawn_parked(
+            super::super::state::WsConnState::new(),
+            websocket,
+            lifecycle.admit().expect("serving permit"),
+            CancellationToken::new(),
+        )
+        .expect("parked worker starts");
+        tokio::time::timeout(Duration::from_secs(5), task.shared.worker_parked.notified())
+            .await
+            .expect("worker reaches start gate");
+        let ticket = task.submit_immediate(0).expect("operation admitted");
+        task.request_stop(StopReason::Requested);
+        let _ = release.send(());
+        task.wait_joined().await;
+        assert!(matches!(
+            ticket.snapshot(),
+            ConnectionActorDriverTaskSnapshot::NotStarted
+        ));
+        assert_eq!(ticket.run_count(), 0);
+        ticket.acknowledge().expect("not-started operation settled");
+    }
 
     async fn test_task() -> ConnectionActorDriverTask {
         test_task_with_limits(ConnectionActorDriverTaskLimits::default()).await

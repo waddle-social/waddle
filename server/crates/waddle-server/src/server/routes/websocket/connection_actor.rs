@@ -51,6 +51,13 @@ use waddle_xmpp::stream_management::SmAck;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Lang;
 
+#[path = "connection_actor/output_continuation.rs"]
+mod output_continuation;
+pub use output_continuation::{
+    ContinuationArbiter, ContinuationError, ContinuationLimits, ContinuationOwnerClaim,
+    ContinuationPhase, ContinuationTicket, OutputContinuation,
+};
+
 const MAX_HANDLED_INBOUND_OPERATIONS: usize = 256;
 
 /// Typed input and output carried by the isolated connection transport.

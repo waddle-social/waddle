@@ -696,6 +696,8 @@ async fn app_cleanup_index_recovers_driver_after_caller_and_task_handles_drop() 
         .expect("owner start deadline")
         .expect("owner event");
     let (owner, input, output) = started.expect("endpoint owner starts");
+    assert_eq!(input.connection_ref(), &connection);
+    assert_eq!(output.connection_ref(), &connection);
     let driver = owner
         .attach_driver_task_for_test(
             websocket_state().await,

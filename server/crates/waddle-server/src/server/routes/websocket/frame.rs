@@ -534,6 +534,14 @@ impl ClassifiedInboundFrame {
             wire_bytes: self.wire_bytes,
         })
     }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn sm_ack(&self) -> Option<waddle_xmpp::stream_management::SmAck> {
+        match &self.input {
+            ClassifiedInboundInput::StreamManagement(SmStanza::Ack(ack)) => Some(*ack),
+            _ => None,
+        }
+    }
 }
 
 /// Handle an XMPP frame per RFC 7395

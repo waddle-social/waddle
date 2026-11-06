@@ -10,7 +10,8 @@ use super::connection_actor_driver_task::{
 };
 #[cfg(feature = "test-support")]
 use super::connection_actor_driver_task::{
-    ConnectionActorDriverTestHandle, ConnectionActorDriverTestTicket,
+    ConnectionActorDriverTestHandle, ConnectionActorDriverTestTicket, PhysicalLimits,
+    PhysicalRecovery,
 };
 use super::supervised_io::{CustodianState, IoCustodianHandle, StopReason, TransportLimits};
 use crate::websocket_transport::{
@@ -320,6 +321,22 @@ impl CleanupRecord {
         if lifecycle.driver.is_some() {
             return Err(ActorLocalEndpointError::DriverAlreadyAttached);
         }
+        #[cfg(feature = "test-support")]
+        if driver.owns_physical() {
+            // This fixture has no exclusive claim over actor custody. Keep
+            // endpoint-owned actor channels and the physical writer mutually
+            // exclusive under the lifecycle → custodies lock order.
+            let custodies = self
+                .custodies
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+            if !custodies.is_empty() {
+                return Err(ActorLocalEndpointError::PriorBindingActive);
+            }
+            if !self.custodian.enable_physical_stop_handoff() {
+                return Err(ActorLocalEndpointError::DriverCleanupStarted);
+            }
+        }
         driver.set_settlement_callback(settlement_callback);
         driver.arm_shutdown_deadline(self.driver_shutdown_grace);
         lifecycle.driver = Some(driver);
@@ -517,6 +534,28 @@ impl ActorEndpointCleanupIndex {
     #[cfg(feature = "test-support")]
     pub fn acknowledge_driver_for_test(&self, connection: &ConnectionRef, id: u64) -> bool {
         self.acknowledge_driver(connection, id).is_ok()
+    }
+
+    /// Transfer physical fixture custody only after the exact record has
+    /// observed both pumps and its driver join.
+    #[cfg(feature = "test-support")]
+    pub fn take_joined_physical_for_test(
+        &self,
+        connection: &ConnectionRef,
+    ) -> Option<PhysicalRecovery> {
+        let record = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .records
+            .get(connection)?
+            .clone();
+        if !record.is_joined() {
+            return None;
+        }
+        let recovery = record.driver()?.take_joined_physical_recovery(connection)?;
+        self.prune_if_settled(connection);
+        Some(recovery)
     }
 
     /// An attempt still running or unjoined pumps cannot be settled by this
@@ -728,13 +767,21 @@ impl ActorLocalEndpointOwner {
         if state.connection_ref != *self.connection_ref() {
             return Err(ActorLocalEndpointError::DriverConnectionMismatch);
         }
-        let mut task = ConnectionActorDriverTask::spawn(
+        let (task, release) = ConnectionActorDriverTask::spawn_parked(
             state,
             websocket,
             self.authority.admission_permit(),
             shutdown,
         )
         .map_err(|_| ActorLocalEndpointError::DriverTaskUnavailable)?;
+        self.attach_parked_driver(task, release)
+    }
+
+    fn attach_parked_driver(
+        &self,
+        mut task: ConnectionActorDriverTask,
+        release: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<ConnectionActorDriverTask, ActorLocalEndpointError> {
         let index_state = Arc::downgrade(&self.index.state);
         let connection = self.connection_ref().clone();
         let settlement_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -748,7 +795,59 @@ impl ActorLocalEndpointOwner {
             settlement_callback,
         )?;
         task.mark_app_owned();
+        if release.send(()).is_err() {
+            self.request_stop(StopReason::Requested);
+            return Err(ActorLocalEndpointError::DriverTaskUnavailable);
+        }
         Ok(task)
+    }
+
+    /// Attach one test-only physical arbiter to this exact cleanup owner.
+    #[cfg(feature = "test-support")]
+    pub fn attach_physical_driver_for_test(
+        &self,
+        websocket: Arc<super::WebSocketState>,
+        shutdown: tokio_util::sync::CancellationToken,
+        input: WebSocketInput<axum::Error>,
+        output: WebSocketOutput<axum::Error>,
+        limits: PhysicalLimits,
+    ) -> Result<ConnectionActorDriverTestHandle, ActorLocalEndpointError> {
+        if input.connection_ref() != self.connection_ref()
+            || output.connection_ref() != self.connection_ref()
+        {
+            return Err(ActorLocalEndpointError::DriverConnectionMismatch);
+        }
+        let mut state =
+            super::state::WsConnState::new_for_connection_ref(self.connection_ref().clone());
+        let stream = waddle_xmpp::pending_delivery::SmSessionId::new(format!(
+            "dark-continuation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        state.sm_state.enable(stream.to_string(), true, Some(300));
+        let first = state.sm_inbound_completion.reserve(&state.sm_state);
+        let second = state.sm_inbound_completion.reserve(&state.sm_state);
+        state
+            .sm_inbound_completion
+            .complete(second, &mut state.sm_state);
+        let parts = super::connection_actor_driver_task::physical::PhysicalParts::new(
+            input,
+            output,
+            self.cleanup.custodian.clone(),
+            limits,
+            first,
+            stream,
+        )
+        .ok_or(ActorLocalEndpointError::InvalidBounds)?;
+        let (task, release) = ConnectionActorDriverTask::spawn_physical_parked(
+            state,
+            websocket,
+            self.authority.admission_permit(),
+            shutdown,
+            parts,
+        )
+        .map_err(|_| ActorLocalEndpointError::DriverTaskUnavailable)?;
+        self.attach_parked_driver(task, release)
+            .map(ConnectionActorDriverTestHandle::from_attached)
     }
 
     #[cfg(feature = "test-support")]
@@ -826,6 +925,22 @@ impl ActorLocalEndpointOwner {
     pub fn new_binding_channel(
         &mut self,
     ) -> Result<(ActorSocketOutboundEndpoint, ActorOutboundReceiver), ActorLocalEndpointError> {
+        let lifecycle = self
+            .cleanup
+            .lifecycle
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        #[cfg(feature = "test-support")]
+        if lifecycle
+            .driver
+            .as_ref()
+            .is_some_and(ConnectionActorDriverTaskCleanup::owns_physical)
+        {
+            return Err(ActorLocalEndpointError::PriorBindingActive);
+        }
+        if lifecycle.phase != CleanupPhase::Accepting {
+            return Err(ActorLocalEndpointError::PriorBindingActive);
+        }
         if self.cleanup.publication_stopped() || self.cleanup.has_publications() {
             return Err(ActorLocalEndpointError::PriorBindingActive);
         }
@@ -854,6 +969,8 @@ impl ActorLocalEndpointOwner {
         )
         .ok_or(ActorLocalEndpointError::InvalidBounds)?;
         custodies.push(custody);
+        drop(custodies);
+        drop(lifecycle);
         Ok((endpoint, receiver))
     }
 

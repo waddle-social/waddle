@@ -85,9 +85,17 @@ pub enum OutputError<E> {
 
 /// Input preserves all raw WebSocket frames and their original read error.
 pub struct WebSocketInput<E> {
+    connection_ref: ConnectionRef,
     frames: mpsc::Receiver<QueueItem<Message>>,
     terminal: oneshot::Receiver<OrderedInboundTerminal<Message, E>>,
     finished: bool,
+}
+
+impl<E> WebSocketInput<E> {
+    /// Exact physical connection whose reader owns these frames.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
 }
 
 /// One raw transport item retained under its original pump budget. Terminal
@@ -996,6 +1004,9 @@ pub struct ActorWriteProbe {
     after_attempt_armed: std::sync::atomic::AtomicBool,
     after_attempt_entered: tokio::sync::watch::Sender<bool>,
     after_attempt_release: tokio::sync::Semaphore,
+    after_start_state: Mutex<ActorWriteProbeState>,
+    after_start_release: std::sync::Condvar,
+    after_start_entered: tokio::sync::watch::Sender<u64>,
 }
 
 #[cfg(feature = "test-support")]
@@ -1012,6 +1023,7 @@ impl Default for ActorWriteProbe {
         let (entered, _) = tokio::sync::watch::channel(0);
         let (close_entered, _) = tokio::sync::watch::channel(false);
         let (after_attempt_entered, _) = tokio::sync::watch::channel(false);
+        let (after_start_entered, _) = tokio::sync::watch::channel(0);
         Self {
             state: Mutex::new(ActorWriteProbeState::default()),
             release: std::sync::Condvar::new(),
@@ -1023,6 +1035,9 @@ impl Default for ActorWriteProbe {
             after_attempt_armed: std::sync::atomic::AtomicBool::new(false),
             after_attempt_entered,
             after_attempt_release: tokio::sync::Semaphore::new(0),
+            after_start_state: Mutex::new(ActorWriteProbeState::default()),
+            after_start_release: std::sync::Condvar::new(),
+            after_start_entered,
         }
     }
 }
@@ -1094,6 +1109,50 @@ impl ActorWriteProbe {
 
     pub fn release_after_attempt(&self) {
         self.after_attempt_release.add_permits(1);
+    }
+
+    /// Pause after `start_send` returns but before its receipt is marked
+    /// attempted. This exposes the otherwise narrow fast-ACK race in tests.
+    pub fn pause_after_start_send(&self) {
+        let mut state = self
+            .after_start_state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        state.armed = true;
+        state.released = false;
+    }
+
+    pub async fn wait_for_after_start_send(&self) {
+        let mut entered = self.after_start_entered.subscribe();
+        let _ = entered.wait_for(|entries| *entries > 0).await;
+    }
+
+    pub fn release_after_start_send(&self) {
+        let mut state = self
+            .after_start_state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        state.released = true;
+        self.after_start_release.notify_all();
+    }
+
+    fn after_start_send(&self) {
+        let mut state = self
+            .after_start_state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if !state.armed {
+            return;
+        }
+        state.armed = false;
+        state.entries += 1;
+        self.after_start_entered.send_replace(state.entries);
+        while !state.released {
+            state = self
+                .after_start_release
+                .wait(state)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        }
     }
 
     async fn after_attempt(&self) {
@@ -1281,6 +1340,10 @@ impl WriteAuthority for FrameAuthority {
                                             probe.record_attempt();
                                         }
                                         attempt();
+                                        #[cfg(feature = "test-support")]
+                                        if let Some(probe) = &probe {
+                                            probe.after_start_send();
+                                        }
                                     })
                                     .map_or(Err(()), |_| Ok(()))
                             } else {
@@ -1289,6 +1352,10 @@ impl WriteAuthority for FrameAuthority {
                                     probe.record_attempt();
                                 }
                                 attempt();
+                                #[cfg(feature = "test-support")]
+                                if let Some(probe) = &probe {
+                                    probe.after_start_send();
+                                }
                                 Ok(())
                             }
                         })
@@ -2008,6 +2075,7 @@ impl SocketAdmission {
             let _ = watch.await;
         });
         let input = WebSocketInput {
+            connection_ref: authority.connection_ref.clone(),
             frames,
             terminal: terminal_rx,
             finished: false,

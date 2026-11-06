@@ -100,6 +100,16 @@ impl ConnectionActorCore {
         &self.state.connection_ref
     }
 
+    #[cfg(feature = "test-support")]
+    pub(super) fn complete_fixture_handled(
+        &mut self,
+        sequence: crate::server::routes::interpret::OrderedRelayInboundSequence,
+    ) {
+        self.state
+            .sm_inbound_completion
+            .complete(sequence, &mut self.state.sm_state);
+    }
+
     /// Stop admitting new driver work after the current handler returns.
     pub(super) fn request_stop(&self, reason: StopReason) -> bool {
         self.lifecycle.request_stop(reason)

@@ -1022,6 +1022,88 @@ struct CustodianClient {
     auxiliary_registered: Arc<AtomicBool>,
     auxiliary_join_started: Arc<AtomicBool>,
     auxiliary_task_registered: Arc<Notify>,
+    #[cfg(feature = "test-support")]
+    physical_stop: Arc<PhysicalStopHandoff>,
+}
+
+// A dark physical driver may request retirement without acquiring the fence
+// held by the writer's synchronous start_send. The reaper owns the receiving
+// side and keeps this request through worker cancellation and retirement.
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct PhysicalStopHandoff {
+    state: Mutex<PhysicalStopState>,
+    changed: Notify,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct PhysicalStopState {
+    enabled: bool,
+    retiring: bool,
+    closed: bool,
+    pending: Option<StopReason>,
+}
+
+#[cfg(feature = "test-support")]
+impl PhysicalStopHandoff {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PhysicalStopState> {
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    }
+
+    fn enable(&self) -> bool {
+        let mut state = self.lock();
+        if state.enabled || state.retiring || state.closed {
+            return false;
+        }
+        state.enabled = true;
+        true
+    }
+
+    fn request(&self, reason: StopReason) -> bool {
+        let mut state = self.lock();
+        if !state.enabled || state.closed {
+            return false;
+        }
+        if state.pending.is_none() {
+            state.pending = Some(reason);
+        }
+        drop(state);
+        self.changed.notify_one();
+        true
+    }
+
+    fn begin_retirement(&self) -> bool {
+        let mut state = self.lock();
+        state.retiring = true;
+        state.enabled
+    }
+
+    fn take_request(&self) -> Option<StopReason> {
+        self.lock().pending.take()
+    }
+
+    fn close_if_empty(&self) -> bool {
+        let mut state = self.lock();
+        if state.pending.is_some() {
+            return false;
+        }
+        state.closed = true;
+        true
+    }
+}
+
+// The sender must not report a live receiver if the reaper is lost.
+#[cfg(feature = "test-support")]
+struct PhysicalStopReceiver(Arc<PhysicalStopHandoff>);
+
+#[cfg(feature = "test-support")]
+impl Drop for PhysicalStopReceiver {
+    fn drop(&mut self) {
+        self.0.lock().closed = true;
+    }
 }
 
 /// Observation-only view of custodian state that does not keep control alive.
@@ -1699,6 +1781,26 @@ impl IoCustodianHandle {
         self.client.force_stop.cancel();
     }
 
+    /// Enable the parked dark driver's handoff only while the committed
+    /// reaper is still running. Its lifecycle lock arbitrates concurrent exit.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn enable_physical_stop_handoff(&self) -> bool {
+        self.state() == CustodianState::Running
+            && self
+                .client
+                .startup_completion_finished
+                .load(Ordering::Acquire)
+            && !self.client.auxiliary_required
+            && self.client.physical_stop.enable()
+    }
+
+    /// Queue a request to the reaper without waiting for the sink stop fence.
+    /// Acceptance is not evidence that this reason won the physical fence.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn request_physical_stop(&self, reason: StopReason) -> bool {
+        self.client.physical_stop.request(reason)
+    }
+
     #[cfg(feature = "test-support")]
     pub(crate) fn set_stop_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_listener(listener);
@@ -1881,6 +1983,7 @@ where
     let auxiliary_finished = Arc::new(AtomicBool::new(true));
     let auxiliary_join_started = Arc::new(AtomicBool::new(false));
     let auxiliary_task_registered = Arc::new(Notify::new());
+    let physical_stop = Arc::new(PhysicalStopHandoff::default());
 
     tokio::spawn(run_io_custodian(
         supervisor,
@@ -1896,6 +1999,7 @@ where
             auxiliary_finished: auxiliary_finished.clone(),
             auxiliary_join_started: auxiliary_join_started.clone(),
             auxiliary_task_registered: auxiliary_task_registered.clone(),
+            physical_stop: PhysicalStopReceiver(physical_stop.clone()),
         },
     ));
 
@@ -1918,6 +2022,7 @@ where
             auxiliary_registered: Arc::new(AtomicBool::new(false)),
             auxiliary_join_started,
             auxiliary_task_registered,
+            physical_stop,
         }),
     }
 }
@@ -1934,6 +2039,120 @@ struct IoCustodianRunContext {
     auxiliary_finished: Arc<AtomicBool>,
     auxiliary_join_started: Arc<AtomicBool>,
     auxiliary_task_registered: Arc<Notify>,
+    #[cfg(feature = "test-support")]
+    physical_stop: PhysicalStopReceiver,
+}
+
+#[derive(Clone, Copy)]
+enum InitialRetirement {
+    Stop,
+    Graceful,
+    PumpExited,
+    #[cfg(feature = "test-support")]
+    PhysicalRequest,
+}
+
+#[cfg(feature = "test-support")]
+type PendingPumpJoins<ReadError, WriteError> = (
+    Option<Result<InboundExit<ReadError>, JoinError>>,
+    Option<Result<OutboundExit<WriteError>, JoinError>>,
+);
+
+// Only the attached dark physical fixture enables this path. A sink may be
+// inside start_send while holding StopSignal's synchronous fence; joining a
+// blocking stop child leaves the reaper free to enforce its own deadline.
+#[cfg(feature = "test-support")]
+async fn retire_physical_pumps<ReadError, WriteError>(
+    supervisor: &mut IoSupervisor<ReadError, WriteError>,
+    handoff: &PhysicalStopHandoff,
+    state_tx: &watch::Sender<CustodianState>,
+    cleanup_pending_published: &AtomicBool,
+    retirement_deadline: Duration,
+    initial: InitialRetirement,
+    joined: PendingPumpJoins<ReadError, WriteError>,
+) -> (
+    Result<InboundExit<ReadError>, JoinError>,
+    Result<OutboundExit<WriteError>, JoinError>,
+)
+where
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+{
+    let (mut inbound, mut outbound) = joined;
+    let mut stop_done = matches!(initial, InitialRetirement::Stop);
+    let mut stop_reason =
+        matches!(initial, InitialRetirement::PumpExited).then_some(StopReason::PumpExited);
+    let mut stop_child: Option<JoinHandle<()>> = None;
+    let mut child_failed = false;
+    let mut force_requested = false;
+    let mut deadline_elapsed = false;
+    let deadline = tokio::time::sleep(retirement_deadline);
+    tokio::pin!(deadline);
+
+    loop {
+        if let Some(reason) = handoff.take_request() {
+            force_requested = true;
+            stop_reason.get_or_insert(reason);
+        }
+        if !stop_done && stop_child.is_none() && !child_failed {
+            if let Some(reason) = stop_reason.take() {
+                let stop = supervisor.stop.clone();
+                let admission_open = Arc::clone(&supervisor.admission_open);
+                stop_child = Some(tokio::task::spawn_blocking(move || {
+                    let mut open = admission_open
+                        .lock()
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+                    *open = false;
+                    drop(open);
+                    stop.cancel(reason);
+                }));
+            }
+        }
+        if stop_done && force_requested {
+            supervisor.force_stop.cancel();
+        }
+        if stop_child.is_none() && !child_failed {
+            match (inbound.take(), outbound.take()) {
+                (Some(inbound), Some(outbound)) if handoff.close_if_empty() => {
+                    return (inbound, outbound);
+                }
+                (retained_inbound, retained_outbound) => {
+                    inbound = retained_inbound;
+                    outbound = retained_outbound;
+                }
+            }
+        }
+
+        tokio::select! {
+            _ = handoff.changed.notified() => {},
+            _ = supervisor.stop.cancelled(), if !stop_done => stop_done = true,
+            result = async { stop_child.as_mut().expect("stop child").await }, if stop_child.is_some() => {
+                stop_child = None;
+                if result.is_ok() {
+                    stop_done = true;
+                } else {
+                    child_failed = true;
+                    cleanup_pending_published.store(true, Ordering::Release);
+                    state_tx.send_replace(CustodianState::CleanupPending);
+                }
+            },
+            result = supervisor.inbound.join(), if inbound.is_none() => inbound = Some(result),
+            result = supervisor.outbound.join(), if outbound.is_none() => outbound = Some(result),
+            _ = &mut deadline, if !deadline_elapsed => {
+                deadline_elapsed = true;
+                cleanup_pending_published.store(true, Ordering::Release);
+                state_tx.send_replace(CustodianState::CleanupPending);
+                force_requested = true;
+                stop_reason.get_or_insert(StopReason::ShutdownDeadline);
+                if inbound.is_none() {
+                    supervisor.inbound.abort();
+                }
+                if outbound.is_none() {
+                    supervisor.outbound.abort();
+                }
+            },
+        }
+    }
 }
 
 async fn run_io_custodian<ReadError, WriteError>(
@@ -1955,52 +2174,95 @@ async fn run_io_custodian<ReadError, WriteError>(
         auxiliary_finished,
         auxiliary_join_started,
         auxiliary_task_registered,
+        #[cfg(feature = "test-support")]
+        physical_stop,
     } = context;
     let mut inbound = None;
     let mut outbound = None;
 
-    let graceful = tokio::select! {
-        biased;
-        _ = supervisor.stop.cancelled() => false,
-        _ = supervisor.shutdown.cancelled() => true,
-        result = supervisor.inbound.join() => { inbound = Some(result); false },
-        result = supervisor.outbound.join() => { outbound = Some(result); false },
-    };
-
-    state_tx.send_replace(CustodianState::Stopping);
-    if !graceful {
-        supervisor.stop.cancel(StopReason::PumpExited);
-    }
-
-    let deadline = tokio::time::sleep(retirement_deadline);
-    tokio::pin!(deadline);
-    while inbound.is_none() || outbound.is_none() {
+    let initial = {
+        #[cfg(feature = "test-support")]
+        let physical_request = physical_stop.0.changed.notified();
+        #[cfg(not(feature = "test-support"))]
+        let physical_request = std::future::pending::<()>();
+        tokio::pin!(physical_request);
         tokio::select! {
-            result = supervisor.inbound.join(), if inbound.is_none() => inbound = Some(result),
-            result = supervisor.outbound.join(), if outbound.is_none() => outbound = Some(result),
-            _ = &mut deadline => break,
+            biased;
+            _ = supervisor.stop.cancelled() => InitialRetirement::Stop,
+            _ = supervisor.shutdown.cancelled() => InitialRetirement::Graceful,
+            result = supervisor.inbound.join() => { inbound = Some(result); InitialRetirement::PumpExited },
+            result = supervisor.outbound.join() => { outbound = Some(result); InitialRetirement::PumpExited },
+            _ = &mut physical_request => {
+                #[cfg(feature = "test-support")]
+                { InitialRetirement::PhysicalRequest }
+                #[cfg(not(feature = "test-support"))]
+                { unreachable!("disabled physical handoff") }
+            },
         }
-    }
-
-    if inbound.is_none() || outbound.is_none() {
-        cleanup_pending_published.store(true, Ordering::Release);
-        state_tx.send_replace(CustodianState::CleanupPending);
-        supervisor.stop.cancel(StopReason::ShutdownDeadline);
-        supervisor.force_stop.cancel();
-    }
-    if inbound.is_none() {
-        supervisor.inbound.abort();
-    }
-    if outbound.is_none() {
-        supervisor.outbound.abort();
-    }
-    let inbound = match inbound {
-        Some(result) => result,
-        None => supervisor.inbound.join().await,
     };
-    let outbound = match outbound {
-        Some(result) => result,
-        None => supervisor.outbound.join().await,
+
+    #[cfg(feature = "test-support")]
+    let physical_enabled = physical_stop.0.begin_retirement();
+    state_tx.send_replace(CustodianState::Stopping);
+    #[cfg(feature = "test-support")]
+    let physical_joined = if physical_enabled {
+        Some(
+            retire_physical_pumps(
+                &mut supervisor,
+                &physical_stop.0,
+                &state_tx,
+                &cleanup_pending_published,
+                retirement_deadline,
+                initial,
+                (inbound.take(), outbound.take()),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(feature = "test-support"))]
+    let physical_joined: Option<(
+        Result<InboundExit<ReadError>, JoinError>,
+        Result<OutboundExit<WriteError>, JoinError>,
+    )> = None;
+    let (inbound, outbound) = if let Some(joined) = physical_joined {
+        joined
+    } else {
+        if !matches!(initial, InitialRetirement::Graceful) {
+            supervisor.stop.cancel(StopReason::PumpExited);
+        }
+
+        let deadline = tokio::time::sleep(retirement_deadline);
+        tokio::pin!(deadline);
+        while inbound.is_none() || outbound.is_none() {
+            tokio::select! {
+                result = supervisor.inbound.join(), if inbound.is_none() => inbound = Some(result),
+                result = supervisor.outbound.join(), if outbound.is_none() => outbound = Some(result),
+                _ = &mut deadline => break,
+            }
+        }
+        if inbound.is_none() || outbound.is_none() {
+            cleanup_pending_published.store(true, Ordering::Release);
+            state_tx.send_replace(CustodianState::CleanupPending);
+            supervisor.stop.cancel(StopReason::ShutdownDeadline);
+            supervisor.force_stop.cancel();
+        }
+        if inbound.is_none() {
+            supervisor.inbound.abort();
+        }
+        if outbound.is_none() {
+            supervisor.outbound.abort();
+        }
+        let inbound = match inbound {
+            Some(result) => result,
+            None => supervisor.inbound.join().await,
+        };
+        let outbound = match outbound {
+            Some(result) => result,
+            None => supervisor.outbound.join().await,
+        };
+        (inbound, outbound)
     };
     if let Some(mut startup_finished) = startup_finished {
         wait_for_startup_completion(&mut startup_finished).await;
@@ -2063,6 +2325,8 @@ struct ReservedReaperSetup<ReadError, WriteError> {
     auxiliary_finished: Arc<AtomicBool>,
     auxiliary_join_started: Arc<AtomicBool>,
     auxiliary_task_registered: Arc<Notify>,
+    #[cfg(feature = "test-support")]
+    physical_stop: PhysicalStopReceiver,
 }
 
 /// Completes startup only after the prepared reader and writer futures have
@@ -2331,6 +2595,8 @@ async fn run_reserved_start<ReadError, WriteError>(
         auxiliary_finished,
         auxiliary_join_started,
         auxiliary_task_registered,
+        #[cfg(feature = "test-support")]
+        physical_stop,
     } = setup;
     #[cfg(not(feature = "test-support"))]
     let _ = (&skip_shutdown_frame, &admission_open);
@@ -2379,6 +2645,8 @@ async fn run_reserved_start<ReadError, WriteError>(
                         auxiliary_finished,
                         auxiliary_join_started,
                         auxiliary_task_registered,
+                        #[cfg(feature = "test-support")]
+                        physical_stop,
                     },
                 )
                 .await;
@@ -3014,6 +3282,8 @@ where
         startup_completion_finished.clone(),
     ));
     let started_pump_count = Arc::new(AtomicU8::new(0));
+    #[cfg(feature = "test-support")]
+    let physical_stop = Arc::new(PhysicalStopHandoff::default());
 
     // The reservation remains armed until the reaper exists and has the
     // channels needed to recover every later startup cancellation or panic.
@@ -3054,6 +3324,8 @@ where
         auxiliary_finished: reservation.auxiliary_finished.clone(),
         auxiliary_join_started: reservation.auxiliary_join_started.clone(),
         auxiliary_task_registered: reservation.auxiliary_task_registered.clone(),
+        #[cfg(feature = "test-support")]
+        physical_stop: PhysicalStopReceiver(physical_stop.clone()),
     }));
     tokio::spawn(monitor_reserved_reaper(ReaperMonitorSetup {
         reaper,
@@ -3099,6 +3371,8 @@ where
             auxiliary_registered: reservation.auxiliary_registered.clone(),
             auxiliary_join_started: reservation.auxiliary_join_started.clone(),
             auxiliary_task_registered: reservation.auxiliary_task_registered.clone(),
+            #[cfg(feature = "test-support")]
+            physical_stop,
         }),
     };
     let cancellation_watch =
@@ -3683,5 +3957,106 @@ impl Drop for InFlightWrite {
         if self.attempted && !self.completed {
             self.receipt.set(WRITE_UNCERTAIN);
         }
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod physical_stop_tests {
+    use super::*;
+    use waddle_xmpp::ownership::NodeLeaseIdentity;
+
+    fn reaper(
+        stop: StopSignal,
+        inbound: JoinHandle<InboundExit<()>>,
+        outbound: JoinHandle<OutboundExit<()>>,
+    ) -> IoCustodianHandle {
+        let (_, relinquishment) = watch::channel(false);
+        spawn_io_custodian(
+            IoSupervisor {
+                connection_ref: ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+                relinquishment,
+                stop,
+                force_stop: CancellationToken::new(),
+                shutdown: CancellationToken::new(),
+                skip_shutdown_frame: Arc::new(AtomicBool::new(false)),
+                admission_open: Arc::new(Mutex::new(true)),
+                inbound: TaskOwner::new(inbound),
+                outbound: TaskOwner::new(outbound),
+            },
+            Duration::from_millis(50),
+        )
+    }
+
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !condition() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reaper state deadline");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn physical_stop_handoff_is_serviced_after_competing_pump_exit() {
+        let stop = StopSignal::new();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let held_stop = stop.clone();
+        let held = std::thread::spawn(move || {
+            held_stop.start_send_if_running(|| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        entered_rx.recv().expect("stop fence held");
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let inbound = tokio::spawn(async move {
+            let _ = exit_rx.await;
+            InboundExit::Stopped
+        });
+        let outbound = tokio::spawn(std::future::pending::<OutboundExit<()>>());
+        let owner = reaper(stop, inbound, outbound);
+        assert!(owner.enable_physical_stop_handoff());
+        let observer = owner.observer();
+        exit_tx.send(()).expect("inbound exits");
+        wait_until(|| observer.state() == CustodianState::Stopping).await;
+        assert!(owner.request_physical_stop(StopReason::LeaseLost));
+        wait_until(|| owner.client.physical_stop.lock().pending.is_none()).await;
+        wait_until(|| observer.state() == CustodianState::CleanupPending).await;
+        assert!(observer.terminal_summary().is_none());
+        release_tx.send(()).expect("release fence");
+        held.join().expect("sink thread joined");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), observer.wait_until_joined())
+                .await
+                .expect("joined reaper"),
+            CustodianState::Joined
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn failed_physical_stop_child_never_reports_joined() {
+        let stop = StopSignal::new();
+        let panic_once = Arc::new(AtomicBool::new(true));
+        let callback_panic = Arc::clone(&panic_once);
+        stop.set_listener(Arc::new(move |_| {
+            if callback_panic.swap(false, Ordering::AcqRel) {
+                panic!("test stop-child failure");
+            }
+        }));
+        let inbound = tokio::spawn(std::future::pending::<InboundExit<()>>());
+        let outbound = tokio::spawn(std::future::pending::<OutboundExit<()>>());
+        let owner = reaper(stop, inbound, outbound);
+        assert!(owner.enable_physical_stop_handoff());
+        let observer = owner.observer();
+        assert!(owner.request_physical_stop(StopReason::Requested));
+        wait_until(|| observer.state() == CustodianState::CleanupPending).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), observer.wait_until_joined())
+                .await
+                .is_err()
+        );
+        assert!(observer.terminal_summary().is_none());
     }
 }

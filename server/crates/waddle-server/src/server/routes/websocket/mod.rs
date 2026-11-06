@@ -101,6 +101,9 @@ pub use connection_actor_driver_task::{
     ConnectionActorDriverTestAdmissionError, ConnectionActorDriverTestGate,
     ConnectionActorDriverTestHandle, ConnectionActorDriverTestSnapshot,
     ConnectionActorDriverTestTicket, ConnectionActorDriverTestUnknownReason,
+    PhysicalControlRecovery, PhysicalEnrollment, PhysicalLimits, PhysicalProducerRecovery,
+    PhysicalRecovery, PhysicalReplayPayload, PhysicalReplayRecovery, PhysicalSnapshot,
+    PhysicalWriteKind, PhysicalWriteRecovery,
 };
 #[cfg(feature = "clustering")]
 mod remote_muc_retry;
