@@ -163,6 +163,41 @@ async fn postgres_preaccept_waits_for_payload_slot_and_source_commits_before_hyd
 }
 
 #[tokio::test]
+async fn postgres_preaccept_wrong_repository_retains_handoff_recovery_identity() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let c = Candidate::new().await;
+    let repo = c.repository();
+    let handoff = repo
+        .preaccept_local_direct(&c.frame, &c.lease)
+        .await
+        .expect("committed A handoff");
+    let mut other_capture = c.capture.clone();
+    other_capture.gate_id = Uuid::new_v4();
+    other_capture.session = waddle_xmpp::pending_delivery::SmSessionId::new("session-b");
+    other_capture.resource = "bob@example.test/other".parse().expect("resource B");
+    other_capture.generation = SessionGeneration::new(8).expect("generation B");
+    let other = SmCustodyRepository::new(
+        c.uow.clone(),
+        &c.config,
+        other_capture,
+        CustodyLimits::new(16, 65536).expect("limits"),
+    )
+    .expect("repository B");
+    let mut receiver = CandidateSmMemory::new(c.capture.clone());
+    let failed = other
+        .hydrate_preaccepted(&mut receiver, &handoff)
+        .await
+        .expect_err("repository B cannot hydrate A");
+    assert_eq!(failed.stage(), HandoffStage::Hydration);
+    assert_eq!(failed.recovery(), &handoff.recovery());
+    assert_eq!(receiver.queued_count(), 0);
+    assert_eq!(snapshot(&c).await, (2, 1, 1, 1));
+    drop(other);
+    drop(repo);
+    c.fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_preaccept_rejects_stale_receiver_and_retains_committed_custody() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let c = Candidate::new().await;

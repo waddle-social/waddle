@@ -294,9 +294,11 @@ impl SmCustodyRepository {
             commit(tx).await?;
             Ok(pending.confirm())
         };
-        hydrate
-            .await
-            .map_err(|cause| self.handoff_failure(operation, HandoffStage::Hydration, cause))
+        hydrate.await.map_err(|cause| HandoffFailure {
+            recovery: handoff.recovery(),
+            stage: HandoffStage::Hydration,
+            cause: Box::new(cause),
+        })
     }
 
     fn check_handoff(

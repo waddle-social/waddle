@@ -34,7 +34,9 @@ future cancellation drops only a new provisional entry; a previously committed
 idempotent entry remains intact.
 
 Failures retain a typed operation/session/resource/generation lookup identity;
-that identity alone is not proof of commit. Same-authority exact-ID retry uses
+hydration errors always retain the committed handoff's identity, including when
+a mismatched repository rejects it before effects.
+That identity alone is not proof of commit. Same-authority exact-ID retry uses
 the durable admitted payload and slot, not another allocation. After revocation
 or origin death, #2218 recovery can rediscover, inventory and transfer the old
 operation under a successor claim; the successor cannot hydrate the old binding.
@@ -55,6 +57,8 @@ completion. They check source state, slot/marker visibility and zero memory befo
 the corresponding commits. Other cases exercise repeated handoff/hydration,
 unsupported source contracts, stale receiver identity, successor recovery after
 principal retirement, and post-commit revocation.
+The wrong-repository regression checks the original handoff's complete recovery
+identity, zero queued frames, and unchanged committed custody.
 
 A native origin process stops inside the source marker's COMMIT; the parent
 observes source completion and marker becoming visible together, then kills the
