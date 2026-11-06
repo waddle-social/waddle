@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use sqlx::{Connection, PgConnection};
 use waddle_server::db::physical_attestation::{
-    attested_pool, pinned_attested_pool, AttestedPgPool, DarkPhysicalAttestationPins,
+    attested_pool, pinned_attested_pool, AttestedPgPool, DarkPhysicalAttestationPins, PgRoleName,
     PhysicalAttestationConfig, PhysicalAttestationError, PinnedRuntimeAuthority,
+    RestrictedIngressProfileError,
 };
 use waddle_server::db::{DarkMigrationLedgerPins, DatabaseError};
 
@@ -240,6 +241,21 @@ async fn pinned_bundle_rejects_inconsistent_or_different_pairs() {
             PhysicalAttestationError::UnconvertedPinnedTransaction
         ))
     ));
+    let dark = pool(
+        &fixture,
+        &config,
+        authority(&fixture, &config, attestor, 4),
+        Duration::from_secs(3),
+    );
+    let api_owner = PgRoleName::new(&fixture.definer).expect("valid API owner name");
+    assert!(matches!(
+        dark.inspect_restricted_ingress_profile(&api_owner, 4_000_000_000)
+            .await,
+        Err(RestrictedIngressProfileError::Physical(
+            PhysicalAttestationError::UnconvertedPinnedTransaction
+        ))
+    ));
+    dark.close().await;
     fixture.cleanup().await;
 }
 

@@ -16,7 +16,8 @@ use sqlx::{Connection, PgConnection, Row};
 use thiserror::Error;
 
 use super::{
-    attest_connection, quote_identifier, AttestedPgPool, PgRoleName, PhysicalAttestationError,
+    attest_connection, quote_identifier, AttestationMode, AttestedPgPool, PgRoleName,
+    PhysicalAttestationError,
 };
 
 mod catalog;
@@ -78,6 +79,9 @@ impl AttestedPgPool {
         api_owner: &PgRoleName,
         epoch_relation_oid: u32,
     ) -> Result<RestrictedIngressProfileObservation> {
+        if matches!(&self.writer_capability.mode, AttestationMode::Pinned(_)) {
+            return Err(PhysicalAttestationError::UnconvertedPinnedTransaction.into());
+        }
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut connection = self.acquire().await?;
             let config = &self.writer_capability.config;
