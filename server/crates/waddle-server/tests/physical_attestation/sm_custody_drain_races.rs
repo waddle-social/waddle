@@ -301,7 +301,7 @@ async fn exercise(
     }
 
     let handoff = repo
-        .resume_preaccept(c.frame.operation_id)
+        .resume_preaccept(&repo.handoff_recovery(&c.frame))
         .await
         .expect("source handoff commits while old writer is paused");
     let mut source = c.uow.begin().await.expect("source completion transaction");

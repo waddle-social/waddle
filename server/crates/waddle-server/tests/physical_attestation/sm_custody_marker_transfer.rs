@@ -1,7 +1,7 @@
 //! Source handoff is required for the dark candidate transfer journal.
 
 use uuid::Uuid;
-use waddle_server::sm_custody::{CandidateSmMemory, CustodyError, CustodyTerminal};
+use waddle_server::sm_custody::{CandidateSmMemory, CustodyError, CustodyTerminal, HandoffStage};
 
 use super::{multiframe, pg_seed_transaction, Candidate, CATALOG_GRANT_LOCK};
 
@@ -48,7 +48,7 @@ async fn postgres_transfer_requires_its_own_marker_and_retains_unmarked_recovery
     repo.admit(&third.0, &third.1)
         .await
         .expect("third admission");
-    repo.resume_preaccept(second.0.operation_id)
+    repo.resume_preaccept(&repo.handoff_recovery(&second.0))
         .await
         .expect("exact second marker");
     repo.transfer(&second_admission)
@@ -128,7 +128,14 @@ async fn postgres_reclaimed_attempt_cannot_create_marker_or_transfer() {
     .await
     .expect("replace exact attempt token");
     replace.commit().await.expect("commit replacement");
-    assert!(repo.resume_preaccept(c.frame.operation_id).await.is_err());
+    let failed = repo
+        .resume_preaccept(&repo.handoff_recovery(&c.frame))
+        .await
+        .expect_err("replacement attempt cannot complete the original handoff");
+    assert_eq!(failed.stage(), HandoffStage::SourceCompletion);
+    assert_eq!(failed.recovery().ordinal(), Some(1));
+    assert_eq!(failed.recovery().source(), &c.frame.key);
+    assert_eq!(failed.recovery().capture(), &c.capture);
     assert!(sqlx::query(&format!(
         "INSERT INTO {q}.sm_custody_handoffs (operation_id) VALUES ($1)"
     ))
@@ -168,7 +175,7 @@ async fn postgres_ack_and_marked_transfer_have_one_gate_winner() {
         .await
         .expect("marker");
     let admission = repo
-        .committed_admission(c.frame.operation_id)
+        .committed_admission(&handoff.recovery())
         .await
         .expect("admission");
     let slot = repo.bind(&admission).await.expect("slot");

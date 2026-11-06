@@ -7,6 +7,7 @@ use jid::FullJid;
 use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::SmIngressAppendKey;
 
 use super::admission::encode_payload;
 use super::repository::{commit, pg};
@@ -28,31 +29,82 @@ pub enum HandoffStage {
 /// Lookup identity, not proof that an uncertain transaction committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoffRecovery {
+    capture: CustodyCapture,
     operation: Uuid,
-    session: SmSessionId,
-    resource: FullJid,
-    generation: SessionGeneration,
+    source: SmIngressAppendKey,
+    attempt: Uuid,
+    ordinal: Option<u64>,
 }
 
 impl HandoffRecovery {
+    /// Reconstruct caller-retained lookup evidence. It grants no custody or
+    /// send authority; the complete identity must match durable state.
+    pub fn new(
+        capture: CustodyCapture,
+        operation: Uuid,
+        source: SmIngressAppendKey,
+        attempt: Uuid,
+        ordinal: Option<u64>,
+    ) -> Result<Self, CustodyError> {
+        if operation.is_nil()
+            || attempt.is_nil()
+            || source.resource != capture.resource
+            || ordinal.is_some_and(|ordinal| ordinal == 0 || i64::try_from(ordinal).is_err())
+        {
+            return Err(CustodyError::Rejected);
+        }
+        Ok(Self {
+            capture,
+            operation,
+            source,
+            attempt,
+            ordinal,
+        })
+    }
+
     pub fn operation_id(&self) -> Uuid {
         self.operation
     }
     pub fn session(&self) -> &SmSessionId {
-        &self.session
+        &self.capture.session
     }
     pub fn resource(&self) -> &FullJid {
-        &self.resource
+        &self.capture.resource
     }
     pub fn generation(&self) -> SessionGeneration {
-        self.generation
+        self.capture.generation
+    }
+    pub fn capture(&self) -> &CustodyCapture {
+        &self.capture
+    }
+    pub fn source(&self) -> &SmIngressAppendKey {
+        &self.source
+    }
+    pub fn attempt(&self) -> Uuid {
+        self.attempt
+    }
+    /// The absolute ordinal only if binding was positively acknowledged.
+    pub fn ordinal(&self) -> Option<u64> {
+        self.ordinal
+    }
+
+    pub(super) fn matches_frame(&self, frame: &PreparedDirectFrame) -> bool {
+        self.operation == frame.operation_id
+            && self.source == frame.key
+            && self.attempt == frame.attempt
+    }
+
+    fn with_slot(&self, slot: &CommittedSlot) -> Self {
+        let mut identity = self.clone();
+        identity.ordinal = Some(slot.ordinal());
+        identity
     }
 }
 
 #[derive(Debug, Error)]
 #[error("candidate handoff failed; retained custody may require recovery")]
 pub struct HandoffFailure {
-    recovery: HandoffRecovery,
+    recovery: Box<HandoffRecovery>,
     stage: HandoffStage,
     #[source]
     cause: Box<CustodyError>,
@@ -81,7 +133,7 @@ pub struct CommittedPreacceptHandoff {
 
 impl CommittedPreacceptHandoff {
     pub fn recovery(&self) -> HandoffRecovery {
-        recovery(&self.capture, self.frame.operation_id)
+        recovery(&self.capture, &self.frame).with_slot(&self.slot)
     }
     pub fn ordinal(&self) -> u64 {
         self.slot.ordinal()
@@ -245,6 +297,12 @@ impl Drop for ProvisionalHydration<'_> {
 }
 
 impl SmCustodyRepository {
+    /// Capture lookup identity before starting a handoff that may be cancelled
+    /// or return an unknown COMMIT outcome. This is not proof of admission.
+    pub fn handoff_recovery(&self, frame: &PreparedDirectFrame) -> HandoffRecovery {
+        recovery(&self.capture, frame)
+    }
+
     /// Dark alternative BEFORE production start. Earlier auth transactions must
     /// already be closed. Each custody transaction ends before the next starts.
     pub async fn preaccept_local_direct(
@@ -252,18 +310,24 @@ impl SmCustodyRepository {
         frame: &PreparedDirectFrame,
         lease: &SendLease,
     ) -> Result<CommittedPreacceptHandoff, HandoffFailure> {
-        let id = frame.operation_id;
+        let recovery = self.handoff_recovery(frame);
         let admission = self
             .admit(frame, lease)
             .await
-            .map_err(|cause| self.handoff_failure(id, HandoffStage::Admission, cause))?;
+            .map_err(|cause| handoff_failure(&recovery, HandoffStage::Admission, cause))?;
         let slot = self
             .bind(&admission)
             .await
-            .map_err(|cause| self.handoff_failure(id, HandoffStage::Slot, cause))?;
+            .map_err(|cause| handoff_failure(&recovery, HandoffStage::Slot, cause))?;
         self.complete_source_handoff(&admission, &slot)
             .await
-            .map_err(|cause| self.handoff_failure(id, HandoffStage::SourceCompletion, cause))
+            .map_err(|cause| {
+                handoff_failure(
+                    &recovery.with_slot(&slot),
+                    HandoffStage::SourceCompletion,
+                    cause,
+                )
+            })
     }
 
     /// Exact-ID retry under the original current capture. Admission/slot proof
@@ -271,19 +335,25 @@ impl SmCustodyRepository {
     /// use sealed inventory/transfer, never old-binding memory hydration.
     pub async fn resume_preaccept(
         &self,
-        operation: Uuid,
+        recovery: &HandoffRecovery,
     ) -> Result<CommittedPreacceptHandoff, HandoffFailure> {
         let admission = self
-            .committed_admission(operation)
+            .committed_admission(recovery)
             .await
-            .map_err(|cause| self.handoff_failure(operation, HandoffStage::Admission, cause))?;
+            .map_err(|cause| handoff_failure(recovery, HandoffStage::Admission, cause))?;
         let slot = self
             .bind(&admission)
             .await
-            .map_err(|cause| self.handoff_failure(operation, HandoffStage::Slot, cause))?;
+            .map_err(|cause| handoff_failure(recovery, HandoffStage::Slot, cause))?;
         self.complete_source_handoff(&admission, &slot)
             .await
-            .map_err(|cause| self.handoff_failure(operation, HandoffStage::SourceCompletion, cause))
+            .map_err(|cause| {
+                handoff_failure(
+                    &recovery.with_slot(&slot),
+                    HandoffStage::SourceCompletion,
+                    cause,
+                )
+            })
     }
 
     async fn complete_source_handoff(
@@ -359,7 +429,7 @@ impl SmCustodyRepository {
             Ok(pending.confirm())
         };
         hydrate.await.map_err(|cause| HandoffFailure {
-            recovery: handoff.recovery(),
+            recovery: Box::new(handoff.recovery()),
             stage: HandoffStage::Hydration,
             cause: Box::new(cause),
         })
@@ -393,26 +463,26 @@ impl SmCustodyRepository {
         .await
         .map_err(db)
     }
+}
 
-    fn handoff_failure(
-        &self,
-        operation: Uuid,
-        stage: HandoffStage,
-        cause: CustodyError,
-    ) -> HandoffFailure {
-        HandoffFailure {
-            recovery: recovery(&self.capture, operation),
-            stage,
-            cause: Box::new(cause),
-        }
+fn handoff_failure(
+    recovery: &HandoffRecovery,
+    stage: HandoffStage,
+    cause: CustodyError,
+) -> HandoffFailure {
+    HandoffFailure {
+        recovery: Box::new(recovery.clone()),
+        stage,
+        cause: Box::new(cause),
     }
 }
 
-fn recovery(capture: &CustodyCapture, operation: Uuid) -> HandoffRecovery {
+fn recovery(capture: &CustodyCapture, frame: &PreparedDirectFrame) -> HandoffRecovery {
     HandoffRecovery {
-        operation,
-        session: capture.session.clone(),
-        resource: capture.resource.clone(),
-        generation: capture.generation,
+        capture: capture.clone(),
+        operation: frame.operation_id,
+        source: frame.key.clone(),
+        attempt: frame.attempt,
+        ordinal: None,
     }
 }

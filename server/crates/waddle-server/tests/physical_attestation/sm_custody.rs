@@ -20,8 +20,8 @@ use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool};
 use waddle_server::ingress_uow::{IngressUnitOfWork, SendLease};
 use waddle_server::sm_custody::{
     candidate_postgres_ddl, CandidateSmMemory, CustodyCapture, CustodyError, CustodyLimits,
-    CustodyRecoveryAuthority, CustodyResolution, CustodyTerminal, PreparedDirectFrame,
-    SessionGeneration, SmCustodyRepository,
+    CustodyRecoveryAuthority, CustodyResolution, CustodyTerminal, HandoffRecovery,
+    PreparedDirectFrame, SessionGeneration, SmCustodyRepository,
 };
 use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
@@ -320,7 +320,7 @@ async fn postgres_sm_custody_commits_before_acceptance_and_reclaims_only_after_a
         "binding is not exposure"
     );
     let handoff = repo
-        .resume_preaccept(c.frame.operation_id)
+        .resume_preaccept(&repo.handoff_recovery(&c.frame))
         .await
         .expect("source handoff");
     let mut memory = CandidateSmMemory::new(c.capture.clone());
@@ -443,7 +443,7 @@ async fn postgres_sm_custody_recovery_cannot_substitute_another_sessions_claim()
     let repo_a = c.repository();
     let admission_a = repo_a.admit(&c.frame, &c.lease).await.expect("A admission");
     repo_a
-        .resume_preaccept(c.frame.operation_id)
+        .resume_preaccept(&repo_a.handoff_recovery(&c.frame))
         .await
         .expect("A source marker");
     let owner_b = NodeIdentity::new("node-b", "incarnation-b");
@@ -661,6 +661,10 @@ fn child_input(c: &Candidate) -> serde_json::Value {
         "generation":c.capture.generation.get(),"node":c.capture.owner.node_id,
         "incarnation":c.capture.owner.node_epoch,"claim":c.capture.claim.0,
         "operation":c.frame.operation_id,
+        "source_message":c.frame.key.message_key.to_storage(),
+        "source_kind":c.frame.key.kind.to_storage(),
+        "source_hash":c.frame.key.semantic_identity_hash,
+        "attempt":c.repository().handoff_recovery(&c.frame).attempt(),
     })
 }
 
@@ -672,7 +676,7 @@ fn uuid_field(input: &serde_json::Value, key: &str) -> Uuid {
     text_field(input, key).parse().expect("child UUID")
 }
 
-async fn child_repository() -> (SmCustodyRepository, Uuid) {
+async fn child_repository() -> (SmCustodyRepository, HandoffRecovery) {
     let input: serde_json::Value = serde_json::from_str(
         &std::env::var("WADDLE_SM_CUSTODY_CHILD").expect("parent descriptor required"),
     )
@@ -722,6 +726,26 @@ async fn child_repository() -> (SmCustodyRepository, Uuid) {
         claim: ClaimEpoch(input["claim"].as_i64().expect("claim")),
     };
     let uow = uow(&options, &config, uuid_field(&input, "deployment"), &owner).await;
+    let source = waddle_xmpp::stream_management::SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::from_storage(uuid_field(
+            &input,
+            "source_message",
+        )),
+        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+            input["source_kind"].as_i64().expect("source kind") as i32,
+        ),
+        semantic_identity_hash: serde_json::from_value(input["source_hash"].clone())
+            .expect("source hash"),
+        resource: capture.resource.clone(),
+    };
+    let recovery = HandoffRecovery::new(
+        capture.clone(),
+        uuid_field(&input, "operation"),
+        source,
+        uuid_field(&input, "attempt"),
+        None,
+    )
+    .expect("child recovery identity");
     let repo = SmCustodyRepository::new(
         uow,
         &config,
@@ -729,16 +753,16 @@ async fn child_repository() -> (SmCustodyRepository, Uuid) {
         CustodyLimits::new(16, 65536).expect("limits"),
     )
     .expect("repository");
-    (repo, uuid_field(&input, "operation"))
+    (repo, recovery)
 }
 
 /// Native subprocess entry, explicitly invoked by the parent concurrency case.
 #[tokio::test]
 #[ignore = "native subprocess entry for postgres_sm_custody_delayed_commit_survives_origin_death"]
 async fn sm_custody_process_child() {
-    let (repo, operation) = child_repository().await;
+    let (repo, recovery) = child_repository().await;
     let admission = repo
-        .committed_admission(operation)
+        .committed_admission(&recovery)
         .await
         .expect("positive readback");
     repo.bind(&admission).await.expect("child durable bind");
@@ -872,7 +896,7 @@ async fn delayed_commit_schedule(committed: bool) {
         .expect("exact operation read");
     assert!(matches!(result, CustodyResolution::Committed(_)));
     assert!(
-        repo.committed_admission(c.frame.operation_id)
+        repo.committed_admission(&repo.handoff_recovery(&c.frame))
             .await
             .is_err(),
         "sealed original cannot re-enter"
@@ -930,7 +954,7 @@ async fn postgres_sm_custody_transfer_wrap_and_capacity_are_closed() {
         let admission = repo.admit(&c.frame, &c.lease).await.expect("admit");
         let slot = repo.bind(&admission).await.expect("wrap slot");
         assert_eq!((slot.ordinal(), slot.h()), (4294967296, 0));
-        repo.resume_preaccept(c.frame.operation_id)
+        repo.resume_preaccept(&repo.handoff_recovery(&c.frame))
             .await
             .expect("source marker");
         c.settle_executor().await;
