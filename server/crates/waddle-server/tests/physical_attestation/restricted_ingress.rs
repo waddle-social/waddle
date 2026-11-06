@@ -5,7 +5,9 @@ use std::time::Duration;
 use sqlx::postgres::types::Oid;
 use sqlx::postgres::PgPool;
 use sqlx::{Connection, PgConnection};
-use waddle_server::db::physical_attestation::{attested_pool, PgRoleName};
+use waddle_server::db::physical_attestation::{
+    attested_pool, AttestedPgPool, PgRoleName, RestrictedIngressProfileError,
+};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
 use waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema;
@@ -205,6 +207,10 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         ("row security",format!("ALTER TABLE {t} ENABLE ROW LEVEL SECURITY"),format!("ALTER TABLE {t} DISABLE ROW LEVEL SECURITY")),
         ("dormant policy",format!("CREATE POLICY hostile ON {t} USING (true)"),format!("DROP POLICY hostile ON {t}")),
         ("guard manifest row",format!("INSERT INTO {s}.ingress_epoch_guard_manifest(table_name) VALUES ('hostile')"),format!("ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; DELETE FROM {s}.ingress_epoch_guard_manifest WHERE table_name='hostile'; ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row")),
+        ("ungranted hidden view",format!("CREATE SCHEMA private_view; CREATE VIEW private_view.hidden AS SELECT message_key FROM {t}"),"DROP SCHEMA private_view CASCADE".to_owned()),
+        ("column-granted view",format!("CREATE SCHEMA column_view; CREATE VIEW column_view.exposed AS SELECT message_key FROM {t}; GRANT USAGE ON SCHEMA column_view TO {r}; GRANT SELECT(message_key), UPDATE(message_key) ON column_view.exposed TO {r}"),"DROP SCHEMA column_view CASCADE".to_owned()),
+        ("foreign table",format!("CREATE FOREIGN DATA WRAPPER hostile_fdw; CREATE SERVER hostile_server FOREIGN DATA WRAPPER hostile_fdw; CREATE SCHEMA foreign_probe; CREATE FOREIGN TABLE foreign_probe.exposed(id integer) SERVER hostile_server; GRANT USAGE ON SCHEMA foreign_probe TO {r}; GRANT SELECT ON foreign_probe.exposed TO {r}"),"DROP SCHEMA foreign_probe CASCADE; DROP SERVER hostile_server; DROP FOREIGN DATA WRAPPER hostile_fdw".to_owned()),
+        ("ordinary rewrite rule",format!("CREATE SCHEMA rewrite_probe; CREATE TABLE rewrite_probe.input(id integer); CREATE RULE discard AS ON INSERT TO rewrite_probe.input DO INSTEAD NOTHING; GRANT USAGE ON SCHEMA rewrite_probe TO {r}; GRANT INSERT ON rewrite_probe.input TO {r}"),"DROP SCHEMA rewrite_probe CASCADE".to_owned()),
         ("extra table",format!("CREATE TABLE {s}.ingress_hostile(id integer)"),format!("DROP TABLE {s}.ingress_hostile")),
         ("replacement epoch",format!("ALTER TABLE {s}.ingress_protocol_epoch RENAME TO old_epoch; CREATE TABLE {s}.ingress_protocol_epoch(LIKE {s}.old_epoch INCLUDING ALL); GRANT SELECT ON {s}.ingress_protocol_epoch TO {r}"),format!("DROP TABLE {s}.ingress_protocol_epoch; ALTER TABLE {s}.old_epoch RENAME TO ingress_protocol_epoch")),
     ];
@@ -219,6 +225,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
             .await
             .unwrap_or_else(|error| panic!("restore after {label}: {error:?}"));
     }
+    prove_view_lock_bypasses(&fixture, &pool, &api_role, epoch_oid).await;
     let mut lease = pool.acquire_for_test().await.expect("retained session");
     sqlx::query("SET search_path=public,pg_catalog")
         .execute(&mut *lease)
@@ -261,4 +268,119 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
     )
     .await;
     fixture.cleanup().await;
+}
+
+async fn prove_view_lock_bypasses(
+    fixture: &Fixture,
+    pool: &AttestedPgPool,
+    api: &PgRoleName,
+    epoch_oid: u32,
+) {
+    let s = &fixture.target;
+    let r = &fixture.runtime;
+    // Seed through the fixed API with its required epoch prelock. Every attack
+    // below uses a separate fresh transaction with no epoch lock or proof.
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime proof connection");
+    let mut seed = runtime.begin().await.expect("seed fixed API transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {s}.ingress_protocol_epoch IN ACCESS SHARE MODE"
+    ))
+    .execute(&mut *seed)
+    .await
+    .expect("seed epoch prelock");
+    let inserted: bool = sqlx::query_scalar(&format!(
+        "SELECT {s}.waddle_ingress_insert_message(pg_catalog.gen_random_uuid(),1, \
+         pg_catalog.decode(pg_catalog.repeat('5a',32),'hex'),NULL::smallint,NULL::bytea, \
+         NULL::text,NULL::uuid,NULL::numeric,NULL::numeric,NULL::uuid,NULL::numeric)"
+    ))
+    .fetch_one(&mut *seed)
+    .await
+    .expect("seed through exact definer API");
+    assert!(inserted);
+    seed.commit().await.expect("commit fixture canonical row");
+    let direct: (bool, bool) = sqlx::query_as(
+        "SELECT pg_catalog.has_table_privilege($1,$2,'SELECT,UPDATE'), \
+         pg_catalog.has_any_column_privilege($1,$2,'SELECT,UPDATE')",
+    )
+    .bind(r)
+    .bind(format!("{s}.ingress_messages"))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("direct runtime privilege denial");
+    assert_eq!(direct, (false, false));
+    for nested in [false, true] {
+        let setup = if nested {
+            format!(
+                "CREATE SCHEMA hidden_view AUTHORIZATION {api}; \
+                 CREATE SCHEMA exposed_view AUTHORIZATION {outsider}; \
+                 CREATE VIEW hidden_view.inner_messages AS SELECT message_key FROM {s}.ingress_messages; \
+                 ALTER VIEW hidden_view.inner_messages OWNER TO {api}; \
+                 GRANT USAGE ON SCHEMA hidden_view TO {outsider}; \
+                 GRANT SELECT,UPDATE ON hidden_view.inner_messages TO {outsider}; \
+                 CREATE VIEW exposed_view.messages AS SELECT message_key FROM hidden_view.inner_messages; \
+                 ALTER VIEW exposed_view.messages OWNER TO {outsider}; \
+                 GRANT USAGE ON SCHEMA exposed_view TO {r}; \
+                 GRANT SELECT,UPDATE ON exposed_view.messages TO {r}",
+                api=api.as_str(),outsider=fixture.outsider,
+            )
+        } else {
+            format!(
+                "CREATE SCHEMA exposed_view AUTHORIZATION {api}; \
+                 CREATE VIEW exposed_view.messages AS SELECT message_key FROM {s}.ingress_messages; \
+                 ALTER VIEW exposed_view.messages OWNER TO {api}; \
+                 GRANT USAGE ON SCHEMA exposed_view TO {r}; \
+                 GRANT SELECT,UPDATE ON exposed_view.messages TO {r}",api=api.as_str(),
+            )
+        };
+        execute(&fixture.admin, &setup).await;
+        if nested {
+            let can_use_hidden: bool = sqlx::query_scalar(
+                "SELECT pg_catalog.has_schema_privilege($1,'hidden_view','USAGE')",
+            )
+            .bind(r)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("hidden namespace privilege");
+            assert!(
+                !can_use_hidden,
+                "nested view hides its inner owner-rights authority"
+            );
+        }
+        let mut attack = runtime.begin().await.expect("rollback-only view attack");
+        let rows: Vec<uuid::Uuid> =
+            sqlx::query_scalar("SELECT message_key FROM exposed_view.messages FOR UPDATE")
+                .fetch_all(&mut *attack)
+                .await
+                .expect("view can lock guarded canonical row");
+        assert_eq!(rows.len(), 1, "direct={}", !nested);
+        let locks: (bool,bool) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid=pg_catalog.pg_backend_pid() \
+               AND relation=$1::regclass AND mode='RowShareLock' AND granted), \
+             EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid=pg_catalog.pg_backend_pid() \
+               AND relation=$2::regclass AND granted)",
+        ).bind(format!("{s}.ingress_messages")).bind(format!("{s}.ingress_protocol_epoch"))
+            .fetch_one(&mut *attack).await.expect("observe actual row-lock bypass");
+        assert_eq!(
+            locks,
+            (true, false),
+            "guarded RowShareLock without epoch barrier"
+        );
+        attack.rollback().await.expect("release attack locks");
+        assert!(matches!(
+            pool.inspect_restricted_ingress_profile(api, epoch_oid)
+                .await,
+            Err(RestrictedIngressProfileError::Mismatch(
+                "unexpected non-system view/rule/foreign relation"
+            ))
+        ));
+        execute(&fixture.admin, "DROP SCHEMA exposed_view CASCADE").await;
+        if nested {
+            execute(&fixture.admin, "DROP SCHEMA hidden_view CASCADE").await;
+        }
+        pool.inspect_restricted_ingress_profile(api, epoch_oid)
+            .await
+            .expect("restored view-free profile");
+    }
 }

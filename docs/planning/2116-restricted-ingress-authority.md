@@ -98,7 +98,15 @@ partitions/inheritance, additional API-owner functions anywhere in the
 database, and alternate security-definer functions owned by roles with guarded
 write authority. The last exclusion is conservative even when the runtime
 cannot directly execute the alternate function: differently owned wrappers
-could otherwise chain execution grants. The pending owner schema is required;
+could otherwise chain execution grants. The profile also refuses the presence
+of any ordinary view, materialized view, foreign table or rewrite rule outside
+`pg_catalog` and `information_schema`, regardless of ownership, runtime grants
+or namespace USAGE. The canonical application DDL has none. This deliberately
+strict diagnostic prerequisite also refuses unrelated extension or private
+views, closing hidden nested-view and low-owner SECURITY DEFINER relays without
+claiming a complete recursive privilege audit. The two system schemas remain
+an independent PostgreSQL trust boundary. The pending owner
+schema is required;
 absence is not treated as a serving-compatible profile.
 
 Independent quiescence of catalog, role and ACL mutation remains a precondition

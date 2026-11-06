@@ -44,6 +44,27 @@ pub(super) async fn verify_roles_and_tables(
             "role privileges/identity",
         ));
     }
+    // This profile has no application views, foreign tables or rewrite rules.
+    // Deny their presence across the database, even without runtime grants:
+    // nested views and low-owner definers can relay hidden owner-rights access.
+    // The two PostgreSQL system schemas are an independent trust boundary.
+    let view_or_rule_authority: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+            AND (c.relkind IN ('v','m','f') OR EXISTS (
+              SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class=c.oid)))
+    "#,
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if view_or_rule_authority {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "unexpected non-system view/rule/foreign relation",
+        ));
+    }
     let runtime_oid = row.try_get::<Oid, _>("runtime_oid")?.0;
     let api_oid = row.try_get::<Oid, _>("api_oid")?.0;
     let mut expected: Vec<String> = EPOCH_GUARDED_TABLES
