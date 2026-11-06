@@ -191,7 +191,7 @@ fn lock_error(error: sqlx::Error) -> PhysicalAttestationError {
     }
 }
 
-async fn verify_prerequisites(
+pub(super) async fn verify_prerequisites(
     connection: &mut PgConnection,
     config: &PhysicalAttestationConfig,
 ) -> Result<(), PhysicalAttestationError> {
@@ -314,7 +314,7 @@ async fn inspect_locked(
     Ok(InstallationStatus::Committed)
 }
 
-fn marker(config: &PhysicalAttestationConfig, operation_id: Uuid) -> String {
+pub(super) fn marker(config: &PhysicalAttestationConfig, operation_id: Uuid) -> String {
     let mut digest = Sha256::new();
     for part in [
         "waddle-physical-attestation-v1".to_owned(),
@@ -382,7 +382,7 @@ AS $waddle_attestation${}$waddle_attestation$"#,
     Ok(())
 }
 
-async fn verify_function(
+pub(super) async fn verify_function(
     connection: &mut PgConnection,
     config: &PhysicalAttestationConfig,
     marker: &str,
