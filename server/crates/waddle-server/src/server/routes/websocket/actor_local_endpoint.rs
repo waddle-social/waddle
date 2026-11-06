@@ -324,8 +324,8 @@ impl CleanupRecord {
         #[cfg(feature = "test-support")]
         if driver.owns_physical() {
             // This fixture has no exclusive claim over actor custody. Keep
-            // actor channels and the physical writer mutually exclusive under
-            // the same lifecycle → custodies order used by channel creation.
+            // endpoint-owned actor channels and the physical writer mutually
+            // exclusive under the lifecycle → custodies lock order.
             let custodies = self
                 .custodies
                 .lock()

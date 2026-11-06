@@ -8,9 +8,11 @@ ordered writer. Keep generic inbound/peer handlers rejected and the serving
 selector unchanged. This is a local scheduling and custody proof, not a
 production control-latency or durable-resume claim.
 
-The physical fixture supports the fixed producer and SM control only. Actor
-direct channels and physical attachment are mutually exclusive until direct
-custody has an exclusive writer and terminal-reconciliation capability.
+The physical fixture supports the fixed producer and SM control only.
+Endpoint-owned actor direct channels and physical attachment are mutually
+exclusive until direct custody has an exclusive writer and
+terminal-reconciliation capability. A separately constructed channel is not
+registered with this endpoint and cannot be published through it.
 
 The direct path needs its own architecture and implementation gate. A holder
 of an actor custody handle can currently invoke attempt, flush and terminal
@@ -83,7 +85,8 @@ conditions:
 1. A worker taking physical I/O stays parked until the exact endpoint cleanup
    record accepts it. Validate input, output and state against the same complete
    `ConnectionRef` before release. Until a direct custody claim exists, reject
-   attachment if an actor channel exists and reject new channels after attachment.
+   attachment while endpoint-owned actor custody is registered, and reject new
+   endpoint-owned actor channels after attachment.
 2. Keep the typed frame, cursor, reserved credits and actual write receipt
    discoverable through the exact cleanup record after a worker exits. An
    unresolved output cannot be acknowledged or pruned until the receipt is
