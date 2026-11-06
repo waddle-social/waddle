@@ -168,8 +168,8 @@ pub(super) async fn exercise(
     cancelled_wrapper(fixture, &db, api, &expected).await;
     cancelled_and_timed_out_waiters(fixture, &db, api, &expected).await;
 
-    // A retained session cannot smuggle a prior snapshot or search path into
-    // the next checkout. Hooks roll back and normalize before the clean BEGIN.
+    // A public-first retained search path is refused by the pool hook; a
+    // subsequent checkout must still produce a clean probe.
     let mut retained_one = db
         .begin()
         .await
@@ -183,13 +183,6 @@ pub(super) async fn exercise(
             .execute("SET search_path=public,pg_catalog", ())
             .await
             .expect("retained path");
-        retained
-            .execute(
-                "SET SESSION default_transaction_isolation='repeatable read'",
-                (),
-            )
-            .await
-            .expect("hostile isolation default");
     }
     retained_one
         .commit()
@@ -202,7 +195,45 @@ pub(super) async fn exercise(
     probe(&db, api, &expected)
         .inspect()
         .await
-        .expect("fresh RC despite retained session defaults");
+        .expect("fresh RC after poisoned search path");
+
+    // Keep the application path intact to exercise a reused backend whose
+    // session default is RR. One connection makes the backend identity exact.
+    let single_pool = attested_pool(
+        fixture
+            .runtime_options
+            .clone()
+            .application_name("retained-rr-probe"),
+        config.clone(),
+        1,
+        Duration::from_secs(1),
+    )
+    .expect("single-connection attested pool");
+    let single = database_from_attested_postgres_pool("retained-rr-probe", single_pool);
+    let mut retained_rr = single.begin().await.expect("retained RR setup");
+    let retained_pid: i64 = retained_rr
+        .query("SELECT pg_catalog.pg_backend_pid()", ())
+        .await
+        .expect("retained backend PID")
+        .next()
+        .await
+        .expect("PID row")
+        .expect("PID value")
+        .get(0)
+        .expect("integer PID");
+    retained_rr
+        .execute(
+            "SET SESSION default_transaction_isolation='repeatable read'",
+            (),
+        )
+        .await
+        .expect("retained RR default");
+    retained_rr.commit().await.expect("persist RR default");
+    let same_backend = probe(&single, api, &expected)
+        .inspect()
+        .await
+        .expect("fresh RC despite retained RR default");
+    assert_eq!(i64::from(same_backend.backend_pid), retained_pid);
 
     // Unsupported epoch is rejected without manufacturing a proof GUC.
     let qualified = format!("{}.ingress_protocol_epoch", fixture.target);
@@ -240,6 +271,8 @@ pub(super) async fn exercise(
         .inspect()
         .await
         .expect("new physical connection/profile");
+
+    replacement_epoch_view(fixture, &db, api, &expected).await;
 }
 
 async fn concurrent_wrappers(
@@ -344,6 +377,71 @@ async fn waited_drift(
         super::execute(&fixture.admin, &restore).await;
         probe(db, api, expected).inspect().await.expect("restored complete profile");
     }
+}
+
+async fn replacement_epoch_view(
+    fixture: &Fixture,
+    db: &Database,
+    api: &PgRoleName,
+    expected: &RestrictedIngressProfileObservation,
+) {
+    let s = &fixture.target;
+    let mut owner = fixture.admin.begin().await.expect("held epoch AX");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {s}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE"
+    ))
+    .execute(&mut *owner)
+    .await
+    .expect("block probe at epoch AS");
+    let candidate = probe(db, api, expected);
+    let waiting = tokio::spawn(async move { candidate.inspect().await });
+    epoch_waiter(&fixture.admin, expected.epoch_relation_oid).await;
+
+    // A READ ONLY transaction can still run pg_advisory_lock from a view.
+    // The replacement retains the name but changes the trusted relation OID
+    // and kind; a pre-verification epoch SELECT would leave a session lock.
+    sqlx::raw_sql(&format!(
+        "ALTER TABLE {s}.ingress_protocol_epoch RENAME TO ingress_protocol_epoch_original; \
+         CREATE VIEW {s}.ingress_protocol_epoch AS \
+           SELECT id, epoch + CASE WHEN pg_catalog.pg_advisory_lock(987654321) IS NULL \
+             THEN 0 ELSE 1 END AS epoch \
+           FROM {s}.ingress_protocol_epoch_original; \
+         GRANT SELECT ON {s}.ingress_protocol_epoch TO {}",
+        fixture.runtime,
+    ))
+    .execute(&mut *owner)
+    .await
+    .expect("replace epoch name with volatile view");
+    owner
+        .commit()
+        .await
+        .expect("publish replacement after AS wait");
+    assert!(
+        waiting.await.expect("view replacement waiter").is_err(),
+        "the pinned epoch relation was replaced"
+    );
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_locks l \
+         JOIN pg_catalog.pg_stat_activity a ON a.pid=l.pid \
+         WHERE a.datname=$1 AND a.application_name='restricted-transaction-probe' \
+           AND l.locktype='advisory' AND l.mode='ExclusiveLock' AND l.granted",
+    )
+    .bind(&fixture.database_name)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect session advisory locks");
+    assert_eq!(leaked, 0, "rejected view must never invoke its function");
+    sqlx::raw_sql(&format!(
+        "DROP VIEW {s}.ingress_protocol_epoch; \
+         ALTER TABLE {s}.ingress_protocol_epoch_original RENAME TO ingress_protocol_epoch",
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore pinned epoch relation");
+    probe(db, api, expected)
+        .inspect()
+        .await
+        .expect("restored exact epoch relation");
 }
 
 async fn cancelled_wrapper(

@@ -155,6 +155,23 @@ impl Factory {
         // Fresh RC statements after LOCK: do not reuse checkout observations
         // or any previous diagnostic receipt to approve the transaction.
         attest_connection(connection, config).await?;
+        // Resolve the epoch name only after the complete catalog verifier has
+        // pinned its OID and relation kind. A replacement view could otherwise
+        // execute a volatile function during the epoch read before rejection.
+        let profile = inspect_profile_on_connection(
+            connection,
+            schema,
+            self.expected.schema_oid,
+            config.runtime_login.as_str(),
+            self.api_owner.as_str(),
+            self.expected.epoch_relation_oid,
+        )
+        .await?;
+        if profile != self.expected {
+            return Err(RestrictedIngressProfileError::Mismatch(
+                "probe pinned identities",
+            ));
+        }
         let row = sqlx::query(&format!(
             "SELECT epoch, pg_catalog.pg_backend_pid(), \
              pg_catalog.current_setting('transaction_isolation'), \
@@ -180,20 +197,6 @@ impl Factory {
             ));
         }
         let backend_pid = row.try_get(1)?;
-        let profile = inspect_profile_on_connection(
-            connection,
-            schema,
-            self.expected.schema_oid,
-            config.runtime_login.as_str(),
-            self.api_owner.as_str(),
-            self.expected.epoch_relation_oid,
-        )
-        .await?;
-        if profile != self.expected {
-            return Err(RestrictedIngressProfileError::Mismatch(
-                "probe pinned identities",
-            ));
-        }
         // Full verifier restored and checked application search_path. Recheck
         // physical/session identity on that same connection before rollback.
         attest_connection(connection, config).await?;
