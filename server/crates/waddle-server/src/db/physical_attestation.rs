@@ -392,8 +392,18 @@ pub(crate) fn validate_identifier(
 }
 
 pub(crate) fn quote_identifier(value: &str) -> String {
-    // Every caller validates the narrow identifier grammar before this point.
-    format!("\"{value}\"")
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::quote_identifier;
+
+    #[test]
+    fn quotes_embedded_postgres_identifier_quotes() {
+        assert_eq!(quote_identifier("Tenant-\"A"), "\"Tenant-\"\"A\"");
+        assert_eq!(quote_identifier("trusted_schema"), "\"trusted_schema\"");
+    }
 }
 
 fn identity_select(config: &PhysicalAttestationConfig) -> String {

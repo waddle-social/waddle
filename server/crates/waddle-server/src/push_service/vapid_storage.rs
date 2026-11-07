@@ -265,8 +265,9 @@ impl VapidStorage {
             return Err(VapidLoadError::InvalidStorageState);
         }
         drop(rows);
-        crate::db::physical_attestation::validate_identifier(&schema, "VAPID schema")
-            .map_err(|_| VapidLoadError::InvalidStorageState)?;
+        if schema.is_empty() {
+            return Err(VapidLoadError::InvalidStorageState);
+        }
         super::owner::verify_no_temp_push_relations_tx(&mut tx)
             .await
             .map_err(|_| VapidLoadError::InvalidStorageState)?;

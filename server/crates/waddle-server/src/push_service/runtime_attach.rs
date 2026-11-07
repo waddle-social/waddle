@@ -1505,7 +1505,7 @@ async fn verify_table_with_options(
             "SELECT relation.relkind = 'r' AND relation.relpersistence = 'p' \
                AND NOT relation.relispartition \
                AND (relation.relowner = namespace.nspowner \
-                 OR (? AND relation.relowner = (SELECT oid FROM pg_catalog.pg_roles \
+                 OR (? = 1 AND relation.relowner = (SELECT oid FROM pg_catalog.pg_roles \
                                                 WHERE rolname = current_user))) \
                AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity \
                AND relation.reloftype = 0 \
