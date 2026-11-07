@@ -211,7 +211,7 @@ fn append_proof(
         accepting_stream: session.stream_id.clone(),
         sequence: stanza.sequence,
         appended_at: fixed_time(),
-        payload: *stanza.stanza.clone(),
+        payload: stanza.stanza.as_ref().clone(),
         original_receipt_at: stanza.original_receipt_at,
         disposition: IngressCustodyDisposition::Pending,
     }
@@ -264,7 +264,9 @@ async fn duplicate_incremental_custody_rolls_back_counters_and_evictions() {
     retry.replay_gap_through = Some(2);
     let mut duplicate_proof = proof.clone();
     duplicate_proof.sequence = 4;
-    duplicate_proof.payload = *fixture_unacked(session.stream_id.as_str(), 4).stanza;
+    duplicate_proof.payload = fixture_unacked(session.stream_id.as_str(), 4)
+        .stanza
+        .into_stanza();
     assert_eq!(
         storage
             .append_detached_stanza_atomic(

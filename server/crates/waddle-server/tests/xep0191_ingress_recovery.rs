@@ -393,7 +393,7 @@ async fn extension_sender_receives_terminal_cancel_bounce(fixture: IngressFixtur
         .frame_obligations
         .iter()
         .flat_map(|obligation| &obligation.frames)
-        .filter_map(|frame| match frame {
+        .filter_map(|frame| match &**frame {
             waddle_xmpp::Stanza::Message(message) if message.type_ == MessageType::Error => {
                 Some(message)
             }

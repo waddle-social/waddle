@@ -490,6 +490,19 @@ async fn record_drained_xml(
         }
         return;
     };
+    // The second drain must persist the same frame that the connection's
+    // replay queue counts, rather than reserializing the typed stanza again.
+    let replay_payload =
+        match waddle_xmpp::stream_management::persistence::SmReplayPayload::from_wire_matching(
+            xml.clone(),
+            &stanza,
+        ) {
+            Ok(payload) => Some(payload),
+            Err(error) => {
+                warn!(%error, "drained frame is not identical to its typed stanza; using legacy detached append");
+                None
+            }
+        };
     // Drain path: we're recording into the unacked queue for replay
     // on the next resume, NOT writing to a live wire. The SM cadence
     // signal is moot — there is no socket to follow up with `<r/>`.
@@ -518,6 +531,7 @@ async fn record_drained_xml(
                 super::drain_append::DrainedAppendIdentity {
                     key,
                     provenance: &provenance,
+                    replay: replay_payload.as_ref(),
                 },
                 drained_appends,
             )
@@ -590,18 +604,27 @@ async fn record_drained_xml(
         | None => {}
     }
     if let Some(stream_id) = detached_stream_id {
-        if let Err(error) = state
-            .deps
-            .protocol
-            .sm_session_registry
-            .record_outbound_for_detached_stream_at(
-                stream_id,
-                sequence,
-                &stanza,
-                original_receipt_at,
-            )
-            .await
-        {
+        let registry = &state.deps.protocol.sm_session_registry;
+        let result = if let Some(replay) = replay_payload.as_ref() {
+            registry
+                .record_replay_for_detached_stream_at(
+                    stream_id,
+                    sequence,
+                    replay,
+                    original_receipt_at,
+                )
+                .await
+        } else {
+            registry
+                .record_outbound_for_detached_stream_at(
+                    stream_id,
+                    sequence,
+                    &stanza,
+                    original_receipt_at,
+                )
+                .await
+        };
+        if let Err(error) = result {
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
         }
     }

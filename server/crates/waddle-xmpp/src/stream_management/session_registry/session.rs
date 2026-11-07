@@ -333,6 +333,28 @@ impl DetachedSession {
         original_receipt_at: DateTime<Utc>,
         provenance: super::super::SmFrameProvenance,
     ) -> DetachedUnackedStanza {
+        self.record_detached_xml(
+            stanza_to_replay_xml(stanza),
+            original_receipt_at,
+            provenance,
+        )
+    }
+
+    pub(super) fn record_detached_replay_with_provenance(
+        &mut self,
+        payload: &super::super::persistence::SmReplayPayload,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::super::SmFrameProvenance,
+    ) -> DetachedUnackedStanza {
+        self.record_detached_xml(payload.wire().to_owned(), original_receipt_at, provenance)
+    }
+
+    fn record_detached_xml(
+        &mut self,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::super::SmFrameProvenance,
+    ) -> DetachedUnackedStanza {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         if self.unacked_stanzas.len() >= DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
@@ -343,7 +365,7 @@ impl DetachedSession {
             provenance,
             ingress_receipts: Vec::new(),
             sequence: self.outbound_count,
-            stanza_xml: stanza_to_replay_xml(stanza),
+            stanza_xml,
             original_receipt_at,
         };
         self.unacked_stanzas.push(entry.clone());
@@ -375,6 +397,36 @@ impl DetachedSession {
         original_receipt_at: DateTime<Utc>,
         provenance: super::super::SmFrameProvenance,
     ) -> Option<DetachedUnackedStanza> {
+        self.record_detached_xml_at(
+            sequence,
+            stanza_to_replay_xml(stanza),
+            original_receipt_at,
+            provenance,
+        )
+    }
+
+    pub(super) fn record_detached_replay_at_with_provenance(
+        &mut self,
+        sequence: u32,
+        payload: &super::super::persistence::SmReplayPayload,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::super::SmFrameProvenance,
+    ) -> Option<DetachedUnackedStanza> {
+        self.record_detached_xml_at(
+            sequence,
+            payload.wire().to_owned(),
+            original_receipt_at,
+            provenance,
+        )
+    }
+
+    fn record_detached_xml_at(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        provenance: super::super::SmFrameProvenance,
+    ) -> Option<DetachedUnackedStanza> {
         if !sequence_gt(sequence, self.last_acked)
             || self
                 .unacked_stanzas
@@ -390,7 +442,7 @@ impl DetachedSession {
             provenance,
             ingress_receipts: Vec::new(),
             sequence,
-            stanza_xml: stanza_to_replay_xml(stanza),
+            stanza_xml,
             original_receipt_at,
         };
         self.unacked_stanzas.push(entry.clone());

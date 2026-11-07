@@ -250,6 +250,7 @@ pub(super) enum Claim {
 pub(super) struct DrainedAppendIdentity<'a> {
     pub(super) key: SmIngressAppendKey,
     pub(super) provenance: &'a SmFrameProvenance,
+    pub(super) replay: Option<&'a waddle_xmpp::stream_management::persistence::SmReplayPayload>,
 }
 
 pub(super) async fn claim(
@@ -261,7 +262,11 @@ pub(super) async fn claim(
     identity: DrainedAppendIdentity<'_>,
     drained_appends: &[DrainedAppend],
 ) -> Claim {
-    let DrainedAppendIdentity { key, provenance } = identity;
+    let DrainedAppendIdentity {
+        key,
+        provenance,
+        replay,
+    } = identity;
     let registry = &state.deps.protocol.sm_session_registry;
     let Some(stream_id) = detached_stream_id else {
         // A re-execution can queue the same obligation twice before the detach;
@@ -281,17 +286,30 @@ pub(super) async fn claim(
             }
         };
     };
-    match registry
-        .record_keyed_outbound_for_detached_stream_at(
-            stream_id,
-            sequence,
-            stanza,
-            original_receipt_at,
-            key,
-            provenance.clone(),
-        )
-        .await
-    {
+    let result = if let Some(replay) = replay {
+        registry
+            .record_keyed_replay_for_detached_stream_at(
+                stream_id,
+                sequence,
+                replay,
+                original_receipt_at,
+                key,
+                provenance.clone(),
+            )
+            .await
+    } else {
+        registry
+            .record_keyed_outbound_for_detached_stream_at(
+                stream_id,
+                sequence,
+                stanza,
+                original_receipt_at,
+                key,
+                provenance.clone(),
+            )
+            .await
+    };
+    match result {
         Ok(SmKeyedAppendOutcome::Appended { .. }) => Claim::RecordedInDetachedStream,
         Ok(SmKeyedAppendOutcome::AlreadyAppended { .. } | SmKeyedAppendOutcome::Suppressed) => {
             Claim::AlreadyAllocated

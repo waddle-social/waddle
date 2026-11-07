@@ -46,7 +46,8 @@ async fn startup_quarantines_corrupt_sqlite_headers_and_preserves_healthy_neighb
                     sequence: 1,
                     stanza: Box::new(Stanza::Message(xmpp_parsers::message::Message::new(
                         None::<jid::Jid>,
-                    ))),
+                    )))
+                    .into(),
                     original_receipt_at: Utc::now(),
                 })
                 .await
@@ -126,7 +127,7 @@ async fn startup_quarantines_partially_corrupt_queues_without_publishing_replay_
                         sequence,
                         stanza: Box::new(Stanza::Message(xmpp_parsers::message::Message::new(
                             None::<jid::Jid>,
-                        ))),
+                        ))).into(),
                         original_receipt_at: Utc::now(),
                     }).await.unwrap();
                 }

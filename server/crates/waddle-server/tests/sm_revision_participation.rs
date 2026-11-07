@@ -66,7 +66,7 @@ fn frame(stream: &SmSessionId, sequence: u32) -> PersistedUnackedStanza {
     PersistedUnackedStanza {
         stream_id: stream.clone(),
         sequence,
-        stanza: Box::new(Stanza::Message(message)),
+        stanza: Box::new(Stanza::Message(message)).into(),
         original_receipt_at: chrono::Utc::now(),
         ingress_receipts: Vec::new(),
         provenance: Default::default(),

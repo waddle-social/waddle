@@ -424,7 +424,7 @@ where
         let replayed_receipts = frame.ingress_receipts().to_vec();
         if let Err(outcome) = send_window_message(
             sender,
-            Message::Text(frame.into_serialized_xml().into()),
+            Message::Text(frame_xml.into()),
             "Failed to send WebSocket message",
             authority,
         )

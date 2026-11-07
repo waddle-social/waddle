@@ -86,7 +86,7 @@ fn frame(
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(stream),
         sequence,
-        stanza: Box::new(Stanza::Message(message)),
+        stanza: Box::new(Stanza::Message(message)).into(),
         original_receipt_at: chrono::Utc::now(),
     }
 }

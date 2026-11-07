@@ -287,9 +287,10 @@ async fn late_frames_are_keyed_into_the_detached_stream(fixture: IngressFixture)
     let restored = reloaded_session(&socket).await;
     assert_eq!(restored.unacked_stanzas.len(), 1);
     assert_eq!(restored.unacked_stanzas[0].provenance, expected);
-    assert_same_replay_stanza(
-        &detached.unacked_stanzas[0].stanza_xml,
-        &restored.unacked_stanzas[0].stanza_xml,
+    assert_eq!(
+        restored.unacked_stanzas[0].stanza_xml,
+        socket.conn.sm_state.stanzas_to_resend(0)[0].stanza_xml,
+        "the second drain persists the exact frame counted by the connection"
     );
     assert_eq!(detached.outbound_count, 1);
     assert_eq!(

@@ -78,7 +78,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(stream_id),
         sequence,
-        stanza: Box::new(Stanza::Message(message)),
+        stanza: Box::new(Stanza::Message(message)).into(),
         original_receipt_at: fixed_time(),
     }
 }
@@ -1728,7 +1728,7 @@ fn expiry_ingress_append(entry: &PersistedUnackedStanza) -> PersistedIngressAppe
         accepting_stream: entry.stream_id.clone(),
         sequence: entry.sequence,
         appended_at: entry.original_receipt_at,
-        payload: *entry.stanza.clone(),
+        payload: entry.stanza.as_ref().clone(),
         original_receipt_at: entry.original_receipt_at,
         disposition: IngressCustodyDisposition::Pending,
     }

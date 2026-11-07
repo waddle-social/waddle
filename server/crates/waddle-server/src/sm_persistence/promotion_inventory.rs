@@ -212,7 +212,7 @@ pub(crate) async fn append(
             return Ok(PromotionAppendOutcome::Retired);
         };
         let existing = super::codec::decode_unacked(&row)?;
-        if existing.stanza.to_element() != stanza.stanza.to_element()
+        if existing.stanza.wire() != stanza.stanza.wire()
             || existing.original_receipt_at.timestamp_millis()
                 != stanza.original_receipt_at.timestamp_millis()
             || existing.ingress_receipts != stanza.ingress_receipts
@@ -225,7 +225,7 @@ pub(crate) async fn append(
         }
         return Ok(PromotionAppendOutcome::AlreadyRecorded);
     }
-    let xml = super::codec::serialize_stanza(&stanza.stanza)?;
+    let xml = stanza.stanza.wire();
     let inserted = tx.execute(
         "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (stream_id, sequence) DO NOTHING",

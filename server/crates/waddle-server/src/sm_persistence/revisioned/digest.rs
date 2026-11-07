@@ -163,7 +163,7 @@ fn frame_value(frame: &PersistedUnackedStanza) -> Result<Value, RevisionError> {
     Ok(json!([
         frame.stream_id.as_str(),
         frame.sequence,
-        codec::serialize_stanza(&frame.stanza).map_err(storage)?,
+        frame.stanza.wire(),
         frame.original_receipt_at.timestamp(),
         frame.original_receipt_at.timestamp_subsec_nanos(),
         codec::encode_ingress_receipts(&frame.ingress_receipts),

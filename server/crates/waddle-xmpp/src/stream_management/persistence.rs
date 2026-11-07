@@ -207,13 +207,99 @@ pub struct PersistedSession {
     pub presence_payloads: Vec<minidom::Element>,
 }
 
+/// A typed stanza and the immutable wire representation of this replay entry.
+///
+/// SM persistence is part of the retransmission log: reserializing the typed
+/// value can change the frame. Both fields are private so a caller cannot pair
+/// arbitrary bytes with a different stanza. Parsing a stored frame retains its
+/// original bytes alongside the typed value used by protocol logic.
+#[derive(Debug, Clone)]
+pub struct SmReplayPayload {
+    stanza: Box<Stanza>,
+    wire: String,
+}
+
+impl SmReplayPayload {
+    /// Parse at the replay/storage boundary while preserving the original frame.
+    pub fn from_wire(wire: String) -> Result<Self, SmPersistenceError> {
+        Self::parse_wire(wire, None)
+    }
+
+    /// Also require the captured XML to describe the supplied producer stanza.
+    /// This is a structural comparison before typed parsing can discard fields.
+    pub fn from_wire_matching(wire: String, expected: &Stanza) -> Result<Self, SmPersistenceError> {
+        Self::parse_wire(wire, Some(expected))
+    }
+
+    fn parse_wire(wire: String, expected: Option<&Stanza>) -> Result<Self, SmPersistenceError> {
+        let element: minidom::Element = wire
+            .parse()
+            .map_err(|error: minidom::Error| SmPersistenceError::Other(error.to_string()))?;
+        if expected.is_some_and(|expected| element != expected.to_element()) {
+            return Err(SmPersistenceError::Other(
+                "replay frame differs from its producer stanza".to_owned(),
+            ));
+        }
+        let stanza = match element.name() {
+            "message" => xmpp_parsers::message::Message::try_from(element)
+                .map(Stanza::Message)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+            "iq" => xmpp_parsers::iq::Iq::try_from(element)
+                .map(|iq| Stanza::Iq(Box::new(iq)))
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+            "presence" => xmpp_parsers::presence::Presence::try_from(element)
+                .map(Stanza::Presence)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+            other => {
+                return Err(SmPersistenceError::Other(format!(
+                    "unknown stanza element '{other}'"
+                )))
+            }
+        };
+        Ok(Self {
+            stanza: Box::new(stanza),
+            wire,
+        })
+    }
+
+    /// Captured frame bytes, for retransmission or a storage I/O boundary.
+    pub fn wire(&self) -> &str {
+        &self.wire
+    }
+
+    pub fn into_stanza(self) -> Stanza {
+        *self.stanza
+    }
+}
+
+impl From<Box<Stanza>> for SmReplayPayload {
+    fn from(stanza: Box<Stanza>) -> Self {
+        let mut bytes = Vec::new();
+        stanza
+            .to_element()
+            .write_to(&mut bytes)
+            .expect("serializing a stanza to a byte buffer cannot fail");
+        let wire = String::from_utf8(bytes).expect("serialized stanza is UTF-8");
+        Self { stanza, wire }
+    }
+}
+
+impl AsRef<Stanza> for SmReplayPayload {
+    fn as_ref(&self) -> &Stanza {
+        &self.stanza
+    }
+}
+
+impl std::ops::Deref for SmReplayPayload {
+    type Target = Stanza;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
 /// One row in the `sm_unacked` table — a stanza sent to a session
 /// that has not yet been acknowledged.
-///
-/// The stanza is carried as a typed [`Stanza`] (not wire XML) so this
-/// trait sits in front of any I/O serialization boundary; the
-/// libSQL/Postgres impl serializes to wire XML internally on write
-/// and parses back to typed on read.
 #[derive(Debug, Clone)]
 pub struct PersistedUnackedStanza {
     /// Origin claims for this exact frame; they do not grant settlement authority.
@@ -224,9 +310,8 @@ pub struct PersistedUnackedStanza {
     pub stream_id: SmSessionId,
     /// Server-side outbound sequence number; ordered ascending.
     pub sequence: u32,
-    /// Typed stanza payload — the original outbound stanza so SM
-    /// resumption replays bit-identically.
-    pub stanza: Box<Stanza>,
+    /// Typed payload and the original bytes for SM retransmission.
+    pub stanza: SmReplayPayload,
     /// Original receipt time at the server. Carried so that the Q6
     /// promotion path can stamp the `<delay/>` per XEP-0203 §4.1 +
     /// XEP-0198 §5 line 364 with the correct timestamp.
@@ -1107,7 +1192,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         let queue = guard.unacked.entry(stream.clone()).or_default();
         if let Some(existing) = queue.iter().find(|entry| entry.sequence == sequence) {
             if is_new
-                || existing.stanza.to_element() != stanza.stanza.to_element()
+                || existing.stanza.wire() != stanza.stanza.wire()
                 || existing.original_receipt_at.timestamp_millis()
                     != stanza.original_receipt_at.timestamp_millis()
                 || existing.ingress_receipts != stanza.ingress_receipts

@@ -56,3 +56,22 @@ indeterminate. Assert that refused counted payload and terminal evidence stay
 recoverable. Run SQLite detach/snapshot/wrapping-ACK and cancellation
 regressions. No fixture-only marker or synthesized already-counted predecessor
 proves the real producer-to-sink interlock.
+
+## Replay-byte preparation
+
+The batch writer now uses one serialized frame for both its SM entry and
+transport write. Replay rows retain that frame alongside the parsed stanza,
+including across portable and claim-fenced snapshot, incremental and promotion
+storage. The second detach drain passes its captured frame into both keyed and
+unkeyed detached appends when its XML structurally matches the typed producer
+stanza. A malformed or mismatched drain frame takes the existing typed append
+path with a warning; it is not covered by the exact-byte claim.
+
+This preserves the existing serializer's output, not the spelling originally
+submitted by a client. It does not establish durable custody before counting.
+The live writer and batch tail still count in memory before persistence, while
+detached and drained paths can await before a supervised immutable occurrence
+is committed. Per-frame operation identity, durable nonwrapping ordinal, exact
+claim and session binding, complete canonical source and fanout verification,
+positive commit reconciliation and supervised failure retention remain required.
+No pending, GC, resume or serving authority is selected by this preparation.

@@ -9,6 +9,29 @@ use crate::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
 
+#[test]
+fn replay_payload_rejects_a_different_or_malformed_producer_frame() {
+    use super::SmReplayPayload;
+    let original = SmReplayPayload::from_wire(
+        "<message xmlns='jabber:client' id='m'><body>one</body></message>".to_owned(),
+    )
+    .expect("valid replay frame");
+    let equivalent = "<message xmlns=\"jabber:client\" id=\"m\"><body>one</body></message>";
+    let matched = SmReplayPayload::from_wire_matching(equivalent.to_owned(), original.as_ref())
+        .expect("equivalent XML spelling");
+    assert_eq!(matched.wire(), equivalent);
+    for mismatch in [
+        "<message xmlns='jabber:client' id='m'><body>two</body></message>",
+        "<message xmlns='urn:other' id='m'><body>one</body></message>",
+        "<message xmlns='jabber:client' id='m' extra='unclaimed'><body>one</body></message>",
+        "<message",
+    ] {
+        assert!(
+            SmReplayPayload::from_wire_matching(mismatch.to_owned(), original.as_ref()).is_err()
+        );
+    }
+}
+
 fn full(s: &str) -> FullJid {
     s.parse().unwrap()
 }
@@ -56,7 +79,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         ingress_receipts: Vec::new(),
         stream_id: sid(stream_id),
         sequence,
-        stanza: Box::new(Stanza::Message(message)),
+        stanza: Box::new(Stanza::Message(message)).into(),
         original_receipt_at: Utc::now(),
     }
 }
@@ -328,7 +351,7 @@ fn expiry_ingress_append(entry: &PersistedUnackedStanza) -> PersistedIngressAppe
         accepting_stream: entry.stream_id.clone(),
         sequence: entry.sequence,
         appended_at: entry.original_receipt_at,
-        payload: *entry.stanza.clone(),
+        payload: entry.stanza.as_ref().clone(),
         original_receipt_at: entry.original_receipt_at,
         disposition: IngressCustodyDisposition::Pending,
     }

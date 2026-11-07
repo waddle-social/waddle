@@ -1,8 +1,7 @@
 //! Bounded detached queue writes; no snapshot replacement on the append path.
 
 use super::{
-    serialize_stanza, DatabaseSmPersistence, KeyedSnapshotOutcome, PersistedDetachedAppend,
-    SmPersistenceError,
+    DatabaseSmPersistence, KeyedSnapshotOutcome, PersistedDetachedAppend, SmPersistenceError,
 };
 use crate::sm_persistence::ingress_append::NewDeliveryAuthorization;
 
@@ -81,7 +80,7 @@ pub(super) async fn append(
             crate::db_params![
                 stream_id.as_str().to_string(),
                 i64::from(append.stanza.sequence),
-                serialize_stanza(&append.stanza.stanza)?,
+                append.stanza.stanza.wire(),
                 append.stanza.original_receipt_at.timestamp_millis(),
                 crate::sm_persistence::codec::encode_ingress_receipts(&append.stanza.ingress_receipts),
                 append.stanza.provenance.encode(),

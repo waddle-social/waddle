@@ -698,8 +698,7 @@ fn validate_snapshot_extension(
         let new = proposed_frames
             .remove(&old.sequence)
             .ok_or(RevisionError::InvalidInput)?;
-        if codec::serialize_stanza(&new.stanza).map_err(storage)?
-            != codec::serialize_stanza(&old.stanza).map_err(storage)?
+        if new.stanza.wire() != old.stanza.wire()
             || new.original_receipt_at.timestamp_millis()
                 != old.original_receipt_at.timestamp_millis()
             || new.ingress_receipts != old.ingress_receipts
@@ -805,7 +804,7 @@ async fn append_detached(
     }
     tx.execute(
         "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) VALUES (?, ?, ?, ?, ?, ?)",
-        crate::db_params![revision.stream.as_str(), i64::from(append.stanza.sequence), codec::serialize_stanza(&append.stanza.stanza).map_err(storage)?, append.stanza.original_receipt_at.timestamp_millis(), codec::encode_ingress_receipts(&append.stanza.ingress_receipts), append.stanza.provenance.encode()],
+        crate::db_params![revision.stream.as_str(), i64::from(append.stanza.sequence), append.stanza.stanza.wire(), append.stanza.original_receipt_at.timestamp_millis(), codec::encode_ingress_receipts(&append.stanza.ingress_receipts), append.stanza.provenance.encode()],
     ).await.map_err(storage)?;
     for sequence in &append.evicted_sequences {
         tx.execute(

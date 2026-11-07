@@ -1,8 +1,8 @@
 //! Incremental queue writes retain the caller's exact ownership fence.
 
 use super::{
-    serialize_stanza, KeyedSnapshotOutcome, PersistedDetachedAppend, PostgresFencedSmPersistence,
-    SmClaimFence, SmPersistenceError,
+    KeyedSnapshotOutcome, PersistedDetachedAppend, PostgresFencedSmPersistence, SmClaimFence,
+    SmPersistenceError,
 };
 use crate::sm_persistence::ingress_append::NewDeliveryAuthorization;
 
@@ -83,7 +83,7 @@ impl PostgresFencedSmPersistence {
             crate::db_params![
                 stream_id.as_str().to_string(),
                 i64::from(append.stanza.sequence),
-                serialize_stanza(&append.stanza.stanza)?,
+                append.stanza.stanza.wire(),
                 append.stanza.original_receipt_at.timestamp_millis(),
                 crate::sm_persistence::codec::encode_ingress_receipts(&append.stanza.ingress_receipts),
                 append.stanza.provenance.encode(),

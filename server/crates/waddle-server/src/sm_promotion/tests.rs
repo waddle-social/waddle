@@ -1228,7 +1228,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             ingress_receipts: Vec::new(),
             stream_id: SmSessionId::new("stream-dead"),
             sequence: 1,
-            stanza: Box::new(Stanza::Message(queued)),
+            stanza: Box::new(Stanza::Message(queued)).into(),
             original_receipt_at: now - chrono::Duration::seconds(610),
         })
         .await
@@ -3176,7 +3176,7 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(STREAM),
         sequence: 1,
-        stanza: Box::new(queued("captured before promotion")),
+        stanza: Box::new(queued("captured before promotion")).into(),
         original_receipt_at: now - chrono::Duration::seconds(610),
     };
     sm_storage
@@ -3209,7 +3209,7 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(STREAM),
         sequence: 2,
-        stanza: Box::new(queued("appended during promotion")),
+        stanza: Box::new(queued("appended during promotion")).into(),
         original_receipt_at: now,
     };
     let outcome = sm_storage

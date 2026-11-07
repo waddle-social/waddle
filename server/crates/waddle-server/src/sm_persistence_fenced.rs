@@ -151,7 +151,7 @@ use waddle_xmpp::stream_management::persistence::{
 use crate::db::{Database, DatabaseDriver, Transaction};
 use crate::sm_persistence::codec::{
     decode_session, decode_session_principal, decode_unacked, encode_session_principal,
-    serialize_presence_payloads, serialize_stanza, show_wire_str,
+    serialize_presence_payloads, show_wire_str,
 };
 
 mod atomic_store;

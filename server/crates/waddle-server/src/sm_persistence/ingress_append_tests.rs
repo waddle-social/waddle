@@ -20,7 +20,9 @@ fn append_for(session: &PersistedSession) -> PersistedIngressAppend {
         },
         accepting_stream: session.stream_id.clone(),
         sequence: 12,
-        payload: *fixture_unacked(session.stream_id.as_str(), 12).stanza,
+        payload: fixture_unacked(session.stream_id.as_str(), 12)
+            .stanza
+            .into_stanza(),
         original_receipt_at: fixed_time(),
         disposition: IngressCustodyDisposition::Pending,
         appended_at: fixed_time(),
@@ -892,7 +894,7 @@ async fn tombstone_deletion_catches_allocation_after_initial_scrub(
         .await
         .expect("initial scrub precedes allocation");
     let mut queued = fixture_unacked(session.stream_id.as_str(), proof.sequence);
-    queued.stanza = Box::new(proof.payload.clone());
+    queued.stanza = Box::new(proof.payload.clone()).into();
     storage
         .store_session_atomic_with_ingress_append(session.clone(), vec![queued], proof.clone())
         .await

@@ -58,7 +58,7 @@ pub use schema::bootstrap_schema_owner as bootstrap_portable_sm_owner_schema;
 
 use codec::{
     decode_session, decode_session_principal, decode_unacked, decode_unacked_join_row,
-    serialize_presence_payloads, serialize_stanza, show_wire_str,
+    serialize_presence_payloads, show_wire_str,
 };
 
 #[cfg(test)]
