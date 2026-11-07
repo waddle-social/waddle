@@ -143,6 +143,7 @@ impl PendingPgAcquire {
             permit: Some(permit),
             transaction_open: false,
             discard_on_drop: false,
+            discard_after_end: false,
             runtime: tokio::runtime::Handle::current(),
         })
     }
@@ -192,6 +193,7 @@ struct PgLease {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     transaction_open: bool,
     discard_on_drop: bool,
+    discard_after_end: bool,
     runtime: tokio::runtime::Handle,
 }
 
@@ -215,7 +217,7 @@ impl PgLease {
         self.transaction_open = false;
         // An acknowledged COMMIT ends the transaction. A failed or cancelled
         // COMMIT leaves this flag set, so an uncertain session is closed.
-        self.discard_on_drop = false;
+        self.discard_on_drop = self.discard_after_end;
         Ok(())
     }
 }
@@ -916,6 +918,62 @@ impl<'a> Transaction<'a> {
         Self::begin_with_discard(backend, admission_permit, acquisition_deadline, true).await
     }
 
+    #[cfg(feature = "test-support")]
+    pub(super) async fn begin_pinned_receipt(
+        backend: &'a DatabaseBackend,
+        admission_permit: tokio::sync::OwnedSemaphorePermit,
+        acquisition_deadline: tokio::time::Instant,
+    ) -> Result<Self, DatabaseError> {
+        let DatabaseBackend::Postgres(pool) = backend else {
+            return Err(DatabaseError::QueryFailed(
+                "pinned receipt requires PostgreSQL".to_owned(),
+            ));
+        };
+        let mut lease = PendingPgAcquire::new(pool.clone(), admission_permit, acquisition_deadline)
+            .acquire()
+            .await?;
+        // Install the close mark before any cancellable setup or BEGIN. The
+        // session settings are intentionally never returned to another user.
+        lease.discard_on_drop = true;
+        lease.discard_after_end = true;
+        tokio::time::timeout_at(acquisition_deadline, async {
+            for (name, cap) in [
+                ("lock_timeout", 3_000_u64),
+                ("statement_timeout", 5_000),
+                ("idle_in_transaction_session_timeout", 10_000),
+                ("transaction_timeout", 20_000),
+            ] {
+                let value: String = sqlx::query_scalar("SELECT pg_catalog.current_setting($1)")
+                    .bind(name)
+                    .fetch_one(&mut *lease)
+                    .await?;
+                let millis = super::read_only_timeout::timeout_millis(&value).ok_or_else(|| {
+                    DatabaseError::QueryFailed("invalid PostgreSQL timeout".to_owned())
+                })?;
+                if millis == 0 || millis > cap {
+                    sqlx::query("SELECT pg_catalog.set_config($1,$2,false)")
+                        .bind(name)
+                        .bind(format!("{cap}ms"))
+                        .execute(&mut *lease)
+                        .await?;
+                }
+            }
+            PgTransactionManager::begin(
+                &mut lease,
+                Some("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE".into()),
+            )
+            .await?;
+            lease.transaction_open = true;
+            Ok::<(), DatabaseError>(())
+        })
+        .await
+        .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
+        Ok(Self {
+            inner: TransactionInner::Postgres(lease),
+            _sqlite_admission_permit: None,
+        })
+    }
+
     async fn begin_with_discard(
         backend: &'a DatabaseBackend,
         admission_permit: tokio::sync::OwnedSemaphorePermit,
@@ -1116,7 +1174,7 @@ impl<'a> Transaction<'a> {
             tokio::time::timeout(timeout, lease.rollback()).await,
             Ok(Ok(()))
         ) {
-            lease.discard_on_drop = false;
+            lease.discard_on_drop = lease.discard_after_end;
             true
         } else {
             false

@@ -30,6 +30,15 @@ use crate::db::read_only_timeout::timeout_millis;
 use crate::db::{Database, DatabaseDriver, Transaction, MIGRATION_LEDGER_ADVISORY_LOCK_KEY};
 use crate::ingress_substrate::{supported_protocol_epoch, EffectReceiptKind};
 
+#[cfg(feature = "test-support")]
+use crate::db::migrations::acquire_dark_shared_migration_ledger_v1030_write;
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::{
+    pinned_catalog::verify_pinned_epoch_manifest_catalog,
+    preflight::attest_dark_catalog_pinned_db_transaction, read_epoch_after_prelock,
+    AttestationMode, AttestedPgPool, PinnedRuntimeAuthority,
+};
+
 const DEADLINE: Duration = Duration::from_secs(15);
 
 /// Independent provisioning identities, not values learned from an observer.
@@ -154,7 +163,46 @@ struct ReceiptTransaction<'a> {
     backend: &'a Backend,
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy)]
+enum PinnedAction {
+    Record,
+    Readback,
+}
+
+#[cfg(feature = "test-support")]
+enum PinnedOutcome {
+    Recorded(bool),
+    Readback(Option<bool>),
+    CommitUnknown,
+}
+
+#[cfg(feature = "test-support")]
+type PinnedPause = Option<(
+    tokio::sync::oneshot::Sender<((i32, i64), (i32, i64))>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+
 impl ReceiptOperationAuthority {
+    /// Consume the exact pinned pool into a private main-lane adapter. This
+    /// test-only selector exposes only the fixed receipt operations.
+    #[cfg(feature = "test-support")]
+    pub fn postgres_pinned_for_test(
+        pool: AttestedPgPool,
+        api_owner: PgRoleName,
+        pins: ReceiptOperationPins,
+    ) -> Result<Self, ReceiptAuthorityError> {
+        let AttestationMode::Pinned(authority) = &pool.writer_capability.mode else {
+            return Err(ReceiptAuthorityError::Binding);
+        };
+        if !pinned_receipt_pins_match(authority, &pins) {
+            return Err(ReceiptAuthorityError::Binding);
+        }
+        let database =
+            Database::from_pinned_receipt_pool(pool).map_err(|_| ReceiptAuthorityError::Binding)?;
+        Self::postgres(database, api_owner, pins)
+    }
+
     pub fn postgres(
         database: Database,
         api_owner: PgRoleName,
@@ -200,6 +248,10 @@ impl ReceiptOperationAuthority {
         operation: &ReceiptOperation,
     ) -> Result<ReceiptCommit, ReceiptAuthorityError> {
         validate_operation(operation)?;
+        #[cfg(feature = "test-support")]
+        if self.is_pinned() {
+            return self.record_pinned(operation, DEADLINE, None).await;
+        }
         match tokio::time::timeout(DEADLINE, async {
             let mut transaction = self.begin().await?;
             let inserted = transaction.record(operation).await?;
@@ -230,6 +282,24 @@ impl ReceiptOperationAuthority {
         operation: &ReceiptOperation,
     ) -> Result<ReceiptReadback, ReceiptAuthorityError> {
         validate_operation(operation)?;
+        #[cfg(feature = "test-support")]
+        if self.is_pinned() {
+            return match tokio::time::timeout(
+                DEADLINE,
+                self.run_pinned(operation, PinnedAction::Readback, None),
+            )
+            .await
+            {
+                Ok(Ok(PinnedOutcome::Readback(Some(inserted)))) => {
+                    Ok(ReceiptReadback::Committed { inserted })
+                }
+                Ok(Ok(PinnedOutcome::Readback(None))) | Err(_) => {
+                    Ok(ReceiptReadback::Indeterminate)
+                }
+                Ok(Err(error)) => Err(error),
+                _ => Err(ReceiptAuthorityError::Binding),
+            };
+        }
         match tokio::time::timeout(DEADLINE, async {
             let mut transaction = self.begin().await?;
             let result = transaction.find(operation).await?;
@@ -251,6 +321,166 @@ impl ReceiptOperationAuthority {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    fn is_pinned(&self) -> bool {
+        matches!(
+            &self.backend,
+            Backend::Postgres { capability, .. }
+                if matches!(&capability.mode, AttestationMode::Pinned(_))
+        )
+    }
+
+    /// Pause the real fixed operation before COMMIT and expose only the PID
+    /// and transaction ID observed around that operation for lock assertions.
+    #[cfg(feature = "test-support")]
+    pub async fn record_pinned_paused_for_test(
+        &self,
+        operation: &ReceiptOperation,
+        timeout: Duration,
+        ready: tokio::sync::oneshot::Sender<((i32, i64), (i32, i64))>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<ReceiptCommit, ReceiptAuthorityError> {
+        validate_operation(operation)?;
+        self.record_pinned(operation, timeout, Some((ready, resume)))
+            .await
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn record_pinned(
+        &self,
+        operation: &ReceiptOperation,
+        timeout: Duration,
+        pause: PinnedPause,
+    ) -> Result<ReceiptCommit, ReceiptAuthorityError> {
+        match tokio::time::timeout(
+            timeout,
+            self.run_pinned(operation, PinnedAction::Record, pause),
+        )
+        .await
+        {
+            Ok(Ok(PinnedOutcome::Recorded(inserted))) => Ok(ReceiptCommit::Committed {
+                operation_id: operation.operation_id,
+                inserted,
+            }),
+            Ok(Ok(PinnedOutcome::CommitUnknown)) | Err(_) => Ok(ReceiptCommit::Indeterminate {
+                operation_id: operation.operation_id,
+            }),
+            Ok(Err(error)) => Err(error),
+            _ => Err(ReceiptAuthorityError::Binding),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn run_pinned(
+        &self,
+        operation: &ReceiptOperation,
+        action: PinnedAction,
+        pause: PinnedPause,
+    ) -> Result<PinnedOutcome, ReceiptAuthorityError> {
+        let Backend::Postgres {
+            database,
+            capability,
+            api_owner,
+            pins,
+        } = &self.backend
+        else {
+            return Err(ReceiptAuthorityError::Binding);
+        };
+        let AttestationMode::Pinned(authority) = &capability.mode else {
+            return Err(ReceiptAuthorityError::Binding);
+        };
+        database
+            .verify_attested_pg_writer_capability(capability)
+            .map_err(|_| ReceiptAuthorityError::Binding)?;
+        let mut tx = database
+            .begin_pinned_receipt()
+            .await
+            .map_err(|_| ReceiptAuthorityError::Database)?;
+        // This is the first statement after BEGIN. A failed try does not wait
+        // while holding a snapshot; dropping tx discards the physical session.
+        let connection = tx
+            .postgres_connection()
+            .ok_or(ReceiptAuthorityError::Binding)?;
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .fetch_one(connection)
+                .await
+                .map_err(RestrictedIngressProfileError::from)?;
+        if !acquired {
+            return Err(ReceiptAuthorityError::CatalogFenceBusy);
+        }
+        let schema = &authority.config.postgres().schema.name.0;
+        let path = format!("{}, pg_temp", quote_identifier(schema));
+        attest_dark_catalog_pinned_db_transaction(
+            &mut tx,
+            &authority.config,
+            authority.attestor,
+            &path,
+        )
+        .await
+        .map_err(|_| ReceiptAuthorityError::Binding)?;
+        let outcome = {
+            let mut ledger = acquire_dark_shared_migration_ledger_v1030_write(
+                &mut tx,
+                schema,
+                authority.ledger,
+                &path,
+            )
+            .await
+            .map_err(|_| ReceiptAuthorityError::Binding)?;
+            verify_pinned_epoch_manifest_catalog(ledger.transaction(), authority)
+                .await
+                .map_err(|_| ReceiptAuthorityError::Binding)?;
+            let connection = ledger
+                .transaction()
+                .postgres_connection()
+                .ok_or(ReceiptAuthorityError::Binding)?;
+            read_epoch_after_prelock(connection, schema, pins.schema_oid)
+                .await
+                .map_err(|_| ReceiptAuthorityError::Binding)?;
+            verify_receipt_profile(ledger.transaction(), capability, api_owner, pins).await?;
+
+            // Keep the ledger proof's exclusive borrow of the same transaction
+            // through the fixed operation, with all barriers held until completion.
+            let before = if pause.is_some() {
+                Some(observe_transaction(ledger.transaction()).await?)
+            } else {
+                None
+            };
+            let outcome = match action {
+                PinnedAction::Record => PinnedOutcome::Recorded(
+                    ReceiptTransaction::record_on(ledger.transaction(), &self.backend, operation)
+                        .await?,
+                ),
+                PinnedAction::Readback => PinnedOutcome::Readback(
+                    ReceiptTransaction::find_on(ledger.transaction(), &self.backend, operation)
+                        .await?,
+                ),
+            };
+            if let Some((ready, resume)) = pause {
+                let after = observe_transaction(ledger.transaction()).await?;
+                ready
+                    .send((before.ok_or(ReceiptAuthorityError::Binding)?, after))
+                    .map_err(|_| ReceiptAuthorityError::Database)?;
+                resume.await.map_err(|_| ReceiptAuthorityError::Database)?;
+            }
+            outcome
+        };
+        match action {
+            PinnedAction::Record => match tx.commit().await {
+                Ok(()) => Ok(outcome),
+                Err(_) => Ok(PinnedOutcome::CommitUnknown),
+            },
+            PinnedAction::Readback => {
+                tx.rollback()
+                    .await
+                    .map_err(|_| ReceiptAuthorityError::Database)?;
+                Ok(outcome)
+            }
+        }
+    }
+
     async fn begin(&self) -> Result<ReceiptTransaction<'_>, ReceiptAuthorityError> {
         let mut tx = match &self.backend {
             Backend::Postgres {
@@ -259,6 +489,14 @@ impl ReceiptOperationAuthority {
                 api_owner,
                 pins,
             } => {
+                // The pinned mode is selected only by run_pinned below; do
+                // not allow it to fall through any legacy attestor call.
+                if matches!(
+                    &capability.mode,
+                    crate::db::physical_attestation::AttestationMode::Pinned(_)
+                ) {
+                    return Err(ReceiptAuthorityError::Binding);
+                }
                 database
                     .verify_attested_pg_writer_capability(capability)
                     .map_err(|_| ReceiptAuthorityError::Binding)?;
@@ -343,63 +581,7 @@ impl ReceiptOperationAuthority {
                 attest_connection(connection, config)
                     .await
                     .map_err(RestrictedIngressProfileError::from)?;
-                let observed = inspect_profile_with_receipt_journal(
-                    connection,
-                    schema,
-                    pins.schema_oid,
-                    config.runtime_login.as_str(),
-                    api_owner.as_str(),
-                    pins.epoch_relation_oid,
-                    super::ProfileMode::ReceiptJournal,
-                )
-                .await?;
-                let expected = RestrictedIngressProfileObservation {
-                    manifest_version: super::MANIFEST_VERSION,
-                    schema_oid: pins.schema_oid,
-                    epoch_relation_oid: pins.epoch_relation_oid,
-                    runtime_role_oid: pins.runtime_role_oid,
-                    api_owner_oid: pins.api_owner_role_oid,
-                };
-                if observed != expected {
-                    return Err(ReceiptAuthorityError::Binding);
-                }
-                receipt_catalog::verify(
-                    connection,
-                    schema,
-                    config.runtime_login.as_str(),
-                    api_owner.as_str(),
-                    pins,
-                    false,
-                )
-                .await?;
-                let row = sqlx::query(&format!(
-                    "SELECT epoch, pg_catalog.current_setting('transaction_isolation'), \
-                     pg_catalog.current_setting('transaction_read_only'), pg_catalog.pg_is_in_recovery() \
-                     FROM {}.ingress_protocol_epoch WHERE id=1",
-                    quote_identifier(schema)
-                ))
-                .fetch_optional(&mut *connection)
-                .await
-                .map_err(RestrictedIngressProfileError::from)?
-                .ok_or(ReceiptAuthorityError::Database)?;
-                let epoch = row
-                    .try_get::<i64, _>(0)
-                    .map_err(RestrictedIngressProfileError::from)?;
-                validate_epoch(epoch)?;
-                if row
-                    .try_get::<String, _>(1)
-                    .map_err(RestrictedIngressProfileError::from)?
-                    != "read committed"
-                    || row
-                        .try_get::<String, _>(2)
-                        .map_err(RestrictedIngressProfileError::from)?
-                        != "off"
-                    || row
-                        .try_get::<bool, _>(3)
-                        .map_err(RestrictedIngressProfileError::from)?
-                {
-                    return Err(ReceiptAuthorityError::Binding);
-                }
+                verify_receipt_profile(&mut tx, capability, api_owner, pins).await?;
                 tx
             }
             Backend::Sqlite(database) => {
@@ -459,15 +641,22 @@ impl ReceiptTransaction<'_> {
         &mut self,
         operation: &ReceiptOperation,
     ) -> Result<bool, ReceiptAuthorityError> {
-        match self.backend {
+        Self::record_on(&mut self.transaction, self.backend, operation).await
+    }
+
+    async fn record_on(
+        transaction: &mut Transaction<'_>,
+        backend: &Backend,
+        operation: &ReceiptOperation,
+    ) -> Result<bool, ReceiptAuthorityError> {
+        match backend {
             Backend::Postgres { capability, .. } => {
                 let schema = &capability.config.postgres().schema.name.0;
                 let query = format!(
                     "SELECT {}.waddle_p21_record_effect_receipt($1,$2,$3,$4)",
                     quote_identifier(schema)
                 );
-                let connection = self
-                    .transaction
+                let connection = transaction
                     .postgres_connection()
                     .ok_or(ReceiptAuthorityError::Binding)?;
                 sqlx::query_scalar(&query)
@@ -489,15 +678,15 @@ impl ReceiptTransaction<'_> {
                     })
             }
             Backend::Sqlite(_) => {
-                if let Some(inserted) = self.find(operation).await? {
+                if let Some(inserted) = Self::find_on(transaction, backend, operation).await? {
                     return Ok(inserted);
                 }
-                let inserted = self.transaction.execute(
+                let inserted = transaction.execute(
                     "INSERT INTO main.ingress_effect_receipts (message_key,kind,semantic_identity_hash) VALUES (?,?,?) \
                      ON CONFLICT (message_key,kind,semantic_identity_hash) DO NOTHING",
                     crate::db_params![operation.message.to_storage().to_string(), operation.kind.to_storage(), operation.semantic_identity_hash.to_vec()],
                 ).await.map_err(|_| ReceiptAuthorityError::Database)? == 1;
-                self.transaction.execute(
+                transaction.execute(
                     "INSERT INTO main.p21_receipt_operation_results \
                      (operation_id,message_key,receipt_kind,semantic_identity_hash,inserted) VALUES (?,?,?,?,?)",
                     crate::db_params![operation.operation_id.to_string(), operation.message.to_storage().to_string(), operation.kind.to_storage(), operation.semantic_identity_hash.to_vec(), i32::from(inserted)],
@@ -511,7 +700,15 @@ impl ReceiptTransaction<'_> {
         &mut self,
         operation: &ReceiptOperation,
     ) -> Result<Option<bool>, ReceiptAuthorityError> {
-        match self.backend {
+        Self::find_on(&mut self.transaction, self.backend, operation).await
+    }
+
+    async fn find_on(
+        transaction: &mut Transaction<'_>,
+        backend: &Backend,
+        operation: &ReceiptOperation,
+    ) -> Result<Option<bool>, ReceiptAuthorityError> {
+        match backend {
             Backend::Postgres { capability, .. } => {
                 let schema = &capability.config.postgres().schema.name.0;
                 let query = format!(
@@ -519,8 +716,7 @@ impl ReceiptTransaction<'_> {
                      FROM {}.waddle_p21_lookup_receipt_operation($1)",
                     quote_identifier(schema)
                 );
-                let connection = self
-                    .transaction
+                let connection = transaction
                     .postgres_connection()
                     .ok_or(ReceiptAuthorityError::Binding)?;
                 let row = sqlx::query(&query)
@@ -552,7 +748,7 @@ impl ReceiptTransaction<'_> {
                 ))
             }
             Backend::Sqlite(_) => {
-                let mut rows = self.transaction.query(
+                let mut rows = transaction.query(
                     "SELECT message_key,receipt_kind,semantic_identity_hash,inserted FROM main.p21_receipt_operation_results WHERE operation_id=?",
                     crate::db_params![operation.operation_id.to_string()],
                 ).await.map_err(|_| ReceiptAuthorityError::Database)?;
@@ -581,6 +777,135 @@ impl ReceiptTransaction<'_> {
             }
         }
     }
+}
+
+async fn verify_receipt_profile(
+    tx: &mut Transaction<'_>,
+    capability: &AttestedPostgresWriterCapability,
+    api_owner: &PgRoleName,
+    pins: &ReceiptOperationPins,
+) -> Result<(), ReceiptAuthorityError> {
+    let connection = tx
+        .postgres_connection()
+        .ok_or(ReceiptAuthorityError::Binding)?;
+    let config = &capability.config;
+    let schema = &config.postgres().schema.name.0;
+    let observed = inspect_profile_with_receipt_journal(
+        connection,
+        schema,
+        pins.schema_oid,
+        config.runtime_login.as_str(),
+        api_owner.as_str(),
+        pins.epoch_relation_oid,
+        super::ProfileMode::ReceiptJournal,
+    )
+    .await?;
+    let expected = RestrictedIngressProfileObservation {
+        manifest_version: super::MANIFEST_VERSION,
+        schema_oid: pins.schema_oid,
+        epoch_relation_oid: pins.epoch_relation_oid,
+        runtime_role_oid: pins.runtime_role_oid,
+        api_owner_oid: pins.api_owner_role_oid,
+    };
+    if observed != expected {
+        return Err(ReceiptAuthorityError::Binding);
+    }
+    receipt_catalog::verify(
+        connection,
+        schema,
+        config.runtime_login.as_str(),
+        api_owner.as_str(),
+        pins,
+        false,
+    )
+    .await?;
+    let row = sqlx::query(&format!(
+        "SELECT epoch, pg_catalog.current_setting('transaction_isolation'), \
+         pg_catalog.current_setting('transaction_read_only'), pg_catalog.pg_is_in_recovery() \
+         FROM {}.ingress_protocol_epoch WHERE id=1",
+        quote_identifier(schema)
+    ))
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(RestrictedIngressProfileError::from)?
+    .ok_or(ReceiptAuthorityError::Database)?;
+    let epoch = row
+        .try_get::<i64, _>(0)
+        .map_err(RestrictedIngressProfileError::from)?;
+    validate_epoch(epoch)?;
+    if row
+        .try_get::<String, _>(1)
+        .map_err(RestrictedIngressProfileError::from)?
+        != "read committed"
+        || row
+            .try_get::<String, _>(2)
+            .map_err(RestrictedIngressProfileError::from)?
+            != "off"
+        || row
+            .try_get::<bool, _>(3)
+            .map_err(RestrictedIngressProfileError::from)?
+    {
+        return Err(ReceiptAuthorityError::Binding);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+async fn observe_transaction(
+    tx: &mut Transaction<'_>,
+) -> Result<(i32, i64), ReceiptAuthorityError> {
+    let connection = tx
+        .postgres_connection()
+        .ok_or(ReceiptAuthorityError::Binding)?;
+    sqlx::query_as("SELECT pg_catalog.pg_backend_pid(), pg_catalog.txid_current()::bigint")
+        .fetch_one(connection)
+        .await
+        .map_err(RestrictedIngressProfileError::from)
+        .map_err(ReceiptAuthorityError::from)
+}
+
+#[cfg(feature = "test-support")]
+fn pinned_receipt_pins_match(
+    authority: &PinnedRuntimeAuthority,
+    pins: &ReceiptOperationPins,
+) -> bool {
+    let distinct = |values: &[u32]| {
+        values
+            .iter()
+            .enumerate()
+            .all(|(index, oid)| *oid != 0 && !values[..index].contains(oid))
+    };
+    pins.valid()
+        && pins.schema_oid == authority.config.postgres().schema.oid
+        && pins.schema_owner_role_oid == authority.attestor.schema_owner_role_oid
+        && pins.runtime_role_oid == authority.attestor.runtime_role_oid
+        && pins.epoch_relation_oid == authority.epoch_relation_oid
+        && ![
+            authority.attestor.database_owner_role_oid,
+            authority.attestor.schema_owner_role_oid,
+            authority.attestor.runtime_role_oid,
+            authority.attestor.installer_role_oid,
+            authority.attestor.definer_role_oid,
+        ]
+        .contains(&pins.api_owner_role_oid)
+        && distinct(&[
+            authority.attestor.lineage_relation_oid,
+            authority.attestor.lineage_primary_index_oid,
+            authority.ledger.ledger_relation_oid,
+            authority.ledger.ledger_primary_index_oid,
+            authority.epoch_relation_oid,
+            authority.epoch_primary_index_oid,
+            authority.guard_manifest_relation_oid,
+            pins.journal_relation_oid,
+        ])
+        && distinct(&[
+            authority.attestor.attestor_function_oid,
+            pins.prepare_function_oid,
+            pins.effect_receipt_function_oid,
+            pins.policy_discard_function_oid,
+            pins.journal_function_oid,
+            pins.journal_lookup_function_oid,
+        ])
 }
 
 fn validate_operation(operation: &ReceiptOperation) -> Result<(), ReceiptAuthorityError> {

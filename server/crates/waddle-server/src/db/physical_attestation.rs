@@ -317,6 +317,20 @@ impl AttestedPgPool {
         self.ensure_no_active_leases()?;
         Ok((self.pool, self.writer_capability))
     }
+
+    // Only the closed, test-selected receipt authority may consume a pinned
+    // pool into a private Database. Normal Database construction still refuses
+    // pinned pools, including at startup.
+    #[cfg(feature = "test-support")]
+    pub(super) fn into_pinned_receipt_parts(
+        self,
+    ) -> Result<(PgPool, AttestedPostgresWriterCapability), PhysicalAttestationError> {
+        if !matches!(&self.writer_capability.mode, AttestationMode::Pinned(_)) {
+            return Err(PhysicalAttestationError::UnconvertedPinnedTransaction);
+        }
+        self.ensure_no_active_leases()?;
+        Ok((self.pool, self.writer_capability))
+    }
 }
 
 impl PhysicalAttestationConfig {

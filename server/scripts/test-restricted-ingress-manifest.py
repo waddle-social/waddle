@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import unittest
@@ -25,6 +26,23 @@ MANIFEST = DB / "physical_attestation/restricted_ingress_manifest_v2.json"
 
 
 class RestrictedIngressManifestTest(unittest.TestCase):
+    def test_literal_migration_include_and_invalid_catalog(self):
+        generator = runpy.run_path(str(SERVER / "scripts/generate-restricted-ingress-manifest.py"))
+        migrations = generator["migrations"]
+        asset = "owner/p21_receipt_journal_postgres.sql"
+        source = f'pub const V_EXAMPLE: &str = include_str!("{asset}");\n'
+        source += "sql_postgres: V_EXAMPLE,\n"
+        self.assertEqual(migrations(source), (DB / "migrations" / asset).read_text())
+        with self.assertRaises(ValueError):
+            migrations(
+                'pub const V_EXAMPLE: &str = include_str!("../outside.sql");\n'
+                "sql_postgres: V_EXAMPLE,"
+            )
+        with self.assertRaises(ValueError):
+            migrations("sql_postgres: V_MISSING,")
+        with self.assertRaises(ValueError):
+            migrations(source + "sql_postgres: V_EXAMPLE,")
+
     def test_source_digests_and_every_candidate_body(self):
         manifest = json.loads(MANIFEST.read_text())
         self.assertEqual(manifest["version"], 2)

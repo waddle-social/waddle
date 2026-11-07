@@ -353,6 +353,27 @@ impl Database {
             .expect("the attested pool's default main budget matches its own capacity")
     }
 
+    /// Build the private main-lane adapter consumed by the test-selected
+    /// receipt authority. It is never returned through test support.
+    #[cfg(feature = "test-support")]
+    pub(in crate::db) fn from_pinned_receipt_pool(
+        pool: AttestedPgPool,
+    ) -> Result<Self, PhysicalAttestationError> {
+        let budget = pool.max_connections();
+        if budget == 0 {
+            return Err(PhysicalAttestationError::UnconvertedPinnedTransaction);
+        }
+        let (pool, capability) = pool.into_pinned_receipt_parts()?;
+        let mut database = Self::from_postgres_pool("pinned receipt authority", pool);
+        let timeout = match &database.backend {
+            DatabaseBackend::Postgres(pool) => pool.options().get_acquire_timeout(),
+            DatabaseBackend::Sqlite(_) => unreachable!("PostgreSQL adapter"),
+        };
+        database.admission = PoolAdmission::new(budget, timeout, PoolLane::Main);
+        database.attested_pg_writer = Some(capability);
+        Ok(database)
+    }
+
     pub(crate) async fn from_attested_postgres_pool_with_ingress(
         name: &str,
         pool: AttestedPgPool,
@@ -833,6 +854,17 @@ impl Database {
         let permit = self.admission.acquire_until(acquisition_deadline).await?;
         Transaction::begin_discard_postgres_on_drop(&self.backend, permit, acquisition_deadline)
             .await
+    }
+
+    /// Start the closed pinned receipt transaction with session wait bounds
+    /// and a discard mark installed before the cancellable BEGIN.
+    #[cfg(feature = "test-support")]
+    pub(in crate::db) async fn begin_pinned_receipt(
+        &self,
+    ) -> Result<Transaction<'_>, DatabaseError> {
+        let deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(deadline).await?;
+        Transaction::begin_pinned_receipt(&self.backend, permit, deadline).await
     }
 
     /// Begin a transaction that acquires the database write lock

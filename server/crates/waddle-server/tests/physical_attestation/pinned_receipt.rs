@@ -148,7 +148,7 @@ async fn wait_for_blocked_registration(fixture: &Fixture, blocker_pid: i32, rela
     .expect("registration waits on the expected blocker");
 }
 
-async fn setup(
+pub(super) async fn setup(
     fixture: &Fixture,
 ) -> (
     PinnedReceiptAuthority,
@@ -1431,7 +1431,7 @@ async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
     fixture.cleanup().await;
 }
 
-async fn lose_commit_reply(
+pub(super) async fn lose_commit_reply(
     listener: tokio::net::TcpListener,
     upstream: sqlx::postgres::PgConnectOptions,
     held: tokio::sync::oneshot::Sender<()>,

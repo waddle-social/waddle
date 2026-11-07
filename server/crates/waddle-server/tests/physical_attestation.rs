@@ -7540,6 +7540,10 @@ mod pinned_selected_entry_tests;
 mod pinned_receipt_tests;
 
 #[cfg(feature = "test-support")]
+#[path = "physical_attestation/pinned_receipt_caller.rs"]
+mod pinned_receipt_caller_tests;
+
+#[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_mam_lookup.rs"]
 mod pinned_mam_lookup_tests;
 
