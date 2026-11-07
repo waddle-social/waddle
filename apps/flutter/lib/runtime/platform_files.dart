@@ -8,14 +8,49 @@ import 'package:cryptography/cryptography.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
-import 'package:pasteboard/pasteboard.dart';
 
 import 'context.dart';
 import 'platform_file_access.dart';
+import 'platform_file_channel.dart';
 
 const aes256GcmCipher = 'urn:xmpp:ciphers:aes-256-gcm-nopadding:0';
 const aes128GcmCipher = 'urn:xmpp:ciphers:aes-128-gcm-nopadding:0';
 const maxAttachmentBytes = 100 * 1024 * 1024;
+// The discovery RPC currently returns the upload JID, not its size limit.
+// This matches the Waddle server's default limit on the transmitted body.
+const maxUploadBytes = 10 * 1024 * 1024;
+const _gcmTagBytes = 16;
+
+Future<void> _pickerTail = Future.value();
+
+Future<T> _serializePicker<T>(Future<T> Function() operation) async {
+  final previous = _pickerTail;
+  final done = Completer<void>();
+  _pickerTail = done.future;
+  try {
+    await previous;
+    return await operation();
+  } finally {
+    done.complete();
+  }
+}
+
+Future<T> _withPickedCopies<T>(
+  List<PlatformFile> files,
+  Future<T> Function() operation,
+) async {
+  T result;
+  try {
+    result = await operation();
+  } catch (error, stack) {
+    await removePickedCopies(files);
+    Error.throwWithStackTrace(error, stack);
+  }
+  if (!await removePickedCopies(files)) {
+    throw StateError('Could not remove temporary selected files.');
+  }
+  return result;
+}
 
 /// XEP-0448 uses ciphertext followed by the 16-byte GCM authentication tag.
 Future<Uint8List> decryptAttachment(
@@ -103,13 +138,18 @@ Uri secureAttachmentUrl(dynamic value) {
 }
 
 class PlatformFileService {
-  PlatformFileService(this.context, {http.Client? client})
-    : _client = client ?? http.Client() {
+  PlatformFileService(
+    this.context, {
+    http.Client? client,
+    this.downloadTimeout = const Duration(seconds: 45),
+  }) : _client = client ?? http.Client() {
     unawaited(preparePrivateFiles().catchError((Object _) {}));
   }
   final RuntimeContext context;
   final http.Client _client;
+  final Duration downloadTimeout;
   final _downloads = <String, Future<Uint8List>>{};
+  final _activeDownloads = <_DownloadAttempt>{};
   bool _disposed = false;
 
   Future<dynamic> invoke(String method, Map<String, dynamic> args) async {
@@ -124,20 +164,29 @@ class PlatformFileService {
         return upload(args);
       case 'file.uploadUri':
         final generation = context.generation;
-        final bytes = await readLocalFileUri(args['uri'] as String);
+        final bytes = await readLocalFileUri(
+          args['uri'] as String,
+          maxBytes: maxUploadBytes - _gcmTagBytes,
+          validate: () => requireGeneration(context, generation),
+        );
         requireGeneration(context, generation);
         return upload({...args, 'bytes': bytes});
       case 'file.pasteAndUpload':
         final generation = context.generation;
-        final bytes = await Pasteboard.image;
+        final image = await readClipboardImage();
         requireGeneration(context, generation);
-        if (bytes == null) {
+        if (image == null) {
           return null;
         }
+        final mediaType = _mime(
+          'image',
+          image.bytes,
+          providerType: image.mimeType,
+        );
         return upload({
-          'bytes': bytes,
-          'name': 'image.png',
-          'media_type': 'image/png',
+          'bytes': image.bytes,
+          'name': _clipboardName(mediaType),
+          'media_type': mediaType,
         });
       case 'file.bytes':
         return bytes(runtimeMap(args['file']));
@@ -175,54 +224,98 @@ class PlatformFileService {
     }
   }
 
-  Future<Map<String, dynamic>?> _pick({bool images = false}) async {
+  Future<Map<String, dynamic>?> _pick({bool images = false}) {
     final generation = context.generation;
-    final file = await FilePicker.pickFile(
-      type: images ? FileType.image : FileType.any,
-    );
-    requireGeneration(context, generation);
-    if (file == null) {
-      return null;
-    }
-    return _readPicked(file, generation);
+    return _serializePicker(() async {
+      requireGeneration(context, generation);
+      final file = await FilePicker.pickFile(
+        type: images ? FileType.image : FileType.any,
+        androidOptions: pickedFileAndroidOptions,
+      );
+      final picked = await _withPickedCopies(
+        file == null ? [] : [file],
+        () async {
+          requireGeneration(context, generation);
+          if (file == null) return null;
+          final providerType = (await pickedFileProviderTypes([file])).single;
+          requireGeneration(context, generation);
+          return _readPicked(
+            file,
+            generation,
+            providerType: providerType,
+            maxBytes: images
+                ? maxAttachmentBytes
+                : maxUploadBytes - _gcmTagBytes,
+          );
+        },
+      );
+      requireGeneration(context, generation);
+      return picked;
+    });
   }
 
   Future<Map<String, dynamic>> _readPicked(
     PlatformFile file,
-    int generation,
-  ) async {
-    if ((await file.length() ?? 0) > maxAttachmentBytes) {
+    int generation, {
+    int maxBytes = maxAttachmentBytes,
+    String? providerType,
+  }) async {
+    if ((await file.length() ?? 0) > maxBytes) {
       throw StateError('The selected attachment is too large.');
     }
     requireGeneration(context, generation);
     final builder = BytesBuilder(copy: false);
     await for (final chunk in file.readAsByteStream()) {
       requireGeneration(context, generation);
-      if (builder.length + chunk.length > maxAttachmentBytes) {
+      if (builder.length + chunk.length > maxBytes) {
         throw StateError('The selected attachment is too large.');
       }
       builder.add(chunk);
     }
+    final bytes = builder.takeBytes();
+    requireGeneration(context, generation);
     return {
-      'bytes': builder.takeBytes(),
+      'bytes': bytes,
       'name': file.name,
-      'media_type': _mime(file.name),
+      'media_type': _mime(
+        file.name,
+        bytes,
+        providerType: _validProviderType(providerType) ?? file.xFile.mimeType,
+      ),
     };
   }
 
-  Future<List<Map<String, dynamic>>> _pickImages() async {
+  Future<List<Map<String, dynamic>>> _pickImages() {
     final generation = context.generation;
-    final selection = await FilePicker.pickFiles(type: FileType.image);
-    requireGeneration(context, generation);
-    if (selection.length > 100) {
-      throw StateError('Choose at most 100 sticker images at a time.');
-    }
-    final result = <Map<String, dynamic>>[];
-    for (final file in selection) {
-      result.add(await _readPicked(file, generation));
-    }
-    requireGeneration(context, generation);
-    return result;
+    return _serializePicker(() async {
+      requireGeneration(context, generation);
+      final selection = await FilePicker.pickFiles(
+        type: FileType.image,
+        androidOptions: pickedFileAndroidOptions,
+      );
+      final result = await _withPickedCopies(selection, () async {
+        requireGeneration(context, generation);
+        if (selection.length > 100) {
+          throw StateError('Choose at most 100 sticker images at a time.');
+        }
+        final providerTypes = await pickedFileProviderTypes(selection);
+        requireGeneration(context, generation);
+        final result = <Map<String, dynamic>>[];
+        for (var i = 0; i < selection.length; i++) {
+          result.add(
+            await _readPicked(
+              selection[i],
+              generation,
+              providerType: providerTypes[i],
+            ),
+          );
+        }
+        requireGeneration(context, generation);
+        return result;
+      });
+      requireGeneration(context, generation);
+      return result;
+    });
   }
 
   Future<Map<String, dynamic>> upload(
@@ -234,11 +327,15 @@ class PlatformFileService {
     }
     final generation = context.generation;
     final plain = _asBytes(input['bytes'] ?? input['data']);
-    if (plain.length > maxAttachmentBytes) {
-      throw StateError('The attachment exceeds the 100 MB limit.');
+    if (plain.length + (encrypt ? _gcmTagBytes : 0) > maxUploadBytes) {
+      throw StateError('The attachment exceeds the 10 MiB upload limit.');
     }
     final name = input['name']?.toString() ?? 'attachment';
-    final mediaType = input['media_type']?.toString() ?? _mime(name);
+    final mediaType = _mime(
+      name,
+      plain,
+      providerType: input['media_type']?.toString(),
+    );
     final service = await context.rpc('discover_upload_service');
     requireGeneration(context, generation);
     if (service is! String || service.isEmpty) {
@@ -348,26 +445,21 @@ class PlatformFileService {
         : (encryption['sources'] as List?) ?? [file['url']];
     for (final source in sources) {
       try {
-        final request = http.Request('GET', secureAttachmentUrl(source))
-          ..followRedirects = false;
-        final response = await _client
-            .send(request)
-            .timeout(const Duration(seconds: 45));
-        if (response.statusCode != 200 ||
-            (response.contentLength ?? 0) > maxAttachmentBytes + 16) {
-          await response.stream.drain<void>();
-          continue;
-        }
-        final builder = BytesBuilder(copy: false);
-        await for (final chunk in response.stream) {
-          requireGeneration(context, generation);
-          if (builder.length + chunk.length > maxAttachmentBytes + 16) {
-            throw StateError('The attachment is too large.');
-          }
-          builder.add(chunk);
+        requireGeneration(context, generation);
+        final attempt = _DownloadAttempt(generation);
+        _activeDownloads.add(attempt);
+        Uint8List value;
+        try {
+          value = await attempt.run(
+            _client,
+            secureAttachmentUrl(source),
+            downloadTimeout,
+            () => requireGeneration(context, generation),
+          );
+        } finally {
+          _activeDownloads.remove(attempt);
         }
         requireGeneration(context, generation);
-        var value = builder.takeBytes();
         if (encryption.isNotEmpty) {
           value = await decryptAttachment(
             value,
@@ -381,6 +473,7 @@ class PlatformFileService {
       } on AccountChanged {
         rethrow;
       } catch (_) {
+        requireGeneration(context, generation);
         /* Each XEP-0448 source is an independent verified fallback. */
       }
     }
@@ -430,6 +523,11 @@ class PlatformFileService {
 
   Future<void> onAccountChanged() async {
     _downloads.clear();
+    for (final attempt in _activeDownloads.toList()) {
+      if (attempt.generation != context.generation || _disposed) {
+        attempt.cancel(AccountChanged());
+      }
+    }
     await clearPrivateFiles();
   }
 
@@ -437,6 +535,97 @@ class PlatformFileService {
     _disposed = true;
     _client.close();
     await onAccountChanged();
+  }
+}
+
+class _DownloadAttempt {
+  _DownloadAttempt(this.generation);
+
+  final int generation;
+  final _abort = Completer<void>();
+  final _result = Completer<Uint8List>();
+  StreamSubscription<List<int>>? _subscription;
+
+  void cancel(Object error, [StackTrace? stackTrace]) {
+    if (!_result.isCompleted) {
+      _result.completeError(error, stackTrace);
+    }
+    if (!_abort.isCompleted) {
+      _abort.complete();
+    }
+    final subscription = _subscription;
+    if (subscription != null) {
+      unawaited(subscription.cancel().catchError((Object _) {}));
+    }
+  }
+
+  Future<Uint8List> run(
+    http.Client client,
+    Uri url,
+    Duration timeout,
+    void Function() validate,
+  ) async {
+    final timer = Timer(
+      timeout,
+      () => cancel(TimeoutException('Attachment download timed out.', timeout)),
+    );
+    final request = http.AbortableRequest(
+      'GET',
+      url,
+      abortTrigger: _abort.future,
+    )..followRedirects = false;
+    unawaited(() async {
+      try {
+        final response = await client.send(request);
+        if (_result.isCompleted ||
+            response.statusCode != 200 ||
+            (response.contentLength ?? 0) > maxAttachmentBytes + _gcmTagBytes) {
+          final subscription = response.stream.listen(
+            (_) {},
+            onError: (Object _, StackTrace _) {},
+          );
+          unawaited(subscription.cancel().catchError((Object _) {}));
+          cancel(StateError('The attachment source could not be read.'));
+          return;
+        }
+        final builder = BytesBuilder(copy: false);
+        _subscription = response.stream.listen(
+          (chunk) {
+            try {
+              validate();
+              if (builder.length + chunk.length >
+                  maxAttachmentBytes + _gcmTagBytes) {
+                throw StateError('The attachment is too large.');
+              }
+              builder.add(chunk);
+            } catch (error, stackTrace) {
+              cancel(error, stackTrace);
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            cancel(error, stackTrace);
+          },
+          onDone: () {
+            try {
+              validate();
+              if (!_result.isCompleted) _result.complete(builder.takeBytes());
+            } catch (error, stackTrace) {
+              cancel(error, stackTrace);
+            }
+          },
+        );
+        if (_result.isCompleted) {
+          unawaited(_subscription!.cancel().catchError((Object _) {}));
+        }
+      } catch (error, stackTrace) {
+        cancel(error, stackTrace);
+      }
+    }());
+    try {
+      return await _result.future;
+    } finally {
+      timer.cancel();
+    }
   }
 }
 
@@ -510,14 +699,104 @@ String _nonce() => List.generate(
   16,
   (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0'),
 ).join();
-String _mime(String name) => switch (name.toLowerCase().split('.').last) {
-  'png' => 'image/png',
-  'jpg' || 'jpeg' => 'image/jpeg',
-  'webp' => 'image/webp',
-  'gif' => 'image/gif',
-  'pdf' => 'application/pdf',
-  'txt' => 'text/plain',
-  'mp4' => 'video/mp4',
-  'mp3' => 'audio/mpeg',
-  _ => 'application/octet-stream',
+final _mimePattern = RegExp(
+  r'^[a-z0-9][a-z0-9!#$&^_.+\-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+\-]{0,126}$',
+);
+
+String? _validProviderType(String? value) {
+  final type = value?.trim().toLowerCase();
+  if (type == null ||
+      type == 'application/octet-stream' ||
+      !_mimePattern.hasMatch(type)) {
+    return null;
+  }
+  return type;
+}
+
+String _mime(String name, Uint8List bytes, {String? providerType}) {
+  final provided = _validProviderType(providerType);
+  if (provided != null) return provided;
+  bool startsWith(List<int> signature, [int offset = 0]) =>
+      bytes.length >= offset + signature.length &&
+      signature.asMap().entries.every(
+        (entry) => bytes[offset + entry.key] == entry.value,
+      );
+  if (startsWith([0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'image/png';
+  }
+  if (startsWith(ascii.encode('GIF87a')) ||
+      startsWith(ascii.encode('GIF89a'))) {
+    return 'image/gif';
+  }
+  if (startsWith(ascii.encode('RIFF')) && startsWith(ascii.encode('WEBP'), 8)) {
+    return 'image/webp';
+  }
+  if (startsWith(ascii.encode('ftyp'), 4) && bytes.length >= 12) {
+    final boxSize = ByteData.sublistView(bytes, 0, 4).getUint32(0);
+    final end = min(bytes.length, min(boxSize, 256));
+    final brands = <String>{
+      ascii.decode(bytes.sublist(8, 12), allowInvalid: true),
+    };
+    for (var offset = 16; offset + 4 <= end; offset += 4) {
+      brands.add(
+        ascii.decode(bytes.sublist(offset, offset + 4), allowInvalid: true),
+      );
+    }
+    if (brands.any({'avif', 'avis'}.contains)) return 'image/avif';
+    if (brands.any({'heic', 'heix', 'hevc', 'hevx'}.contains)) {
+      return 'image/heic';
+    }
+    if (brands.any({'mif1', 'msf1', 'heim', 'heis', 'hevm', 'hevs'}.contains)) {
+      return 'image/heif';
+    }
+  }
+  return switch (name.toLowerCase().split('.').last) {
+    'png' => 'image/png',
+    'jpg' || 'jpeg' => 'image/jpeg',
+    'webp' => 'image/webp',
+    'gif' => 'image/gif',
+    'heic' => 'image/heic',
+    'heif' => 'image/heif',
+    'avif' => 'image/avif',
+    'bmp' => 'image/bmp',
+    'tif' || 'tiff' => 'image/tiff',
+    'svg' => 'image/svg+xml',
+    'pdf' => 'application/pdf',
+    'txt' || 'log' => 'text/plain',
+    'csv' => 'text/csv',
+    'html' || 'htm' => 'text/html',
+    'json' => 'application/json',
+    'zip' => 'application/zip',
+    'doc' => 'application/msword',
+    'docx' =>
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls' => 'application/vnd.ms-excel',
+    'xlsx' =>
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'ppt' => 'application/vnd.ms-powerpoint',
+    'pptx' =>
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'mp4' => 'video/mp4',
+    'mov' => 'video/quicktime',
+    'webm' => 'video/webm',
+    'mp3' => 'audio/mpeg',
+    'm4a' => 'audio/mp4',
+    'wav' => 'audio/wav',
+    'ogg' || 'oga' => 'audio/ogg',
+    'opus' => 'audio/opus',
+    'flac' => 'audio/flac',
+    _ => 'application/octet-stream',
+  };
+}
+
+String _clipboardName(String mediaType) => switch (mediaType) {
+  'image/jpeg' => 'image.jpg',
+  'image/png' => 'image.png',
+  'image/gif' => 'image.gif',
+  'image/webp' => 'image.webp',
+  'image/heic' => 'image.heic',
+  'image/heif' => 'image.heif',
+  'image/avif' => 'image.avif',
+  _ => 'image',
 };
