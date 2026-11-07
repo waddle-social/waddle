@@ -13,6 +13,7 @@ use waddle_server::clustering::singleton_lease::{
     prepare_owner_schema, GuardBackend, LeaseGrant, LeaseOutcome, LeaseReadback, LeaseRequest,
     ProcessIdentity, SingletonLeaseError, SingletonLeaseStore,
 };
+use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 
 const TTL: Duration = Duration::from_secs(30);
@@ -153,6 +154,106 @@ impl Fixture {
 
 fn identity(node_id: &str) -> ProcessIdentity {
     ProcessIdentity::new(node_id, Uuid::new_v4()).expect("valid process identity")
+}
+
+#[tokio::test]
+async fn owner_provisioning_waits_for_catalog_readers_but_lease_operations_do_not() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("postgres admin");
+    let schema = format!("singleton_fence_{}", Uuid::new_v4().simple());
+    let application = format!("waddle_singleton_fence_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create isolated schema");
+
+    let mut scoped_url = url::Url::parse(&url).expect("parse postgres URL");
+    let retained: Vec<_> = scoped_url
+        .query_pairs()
+        .filter(|(key, _)| key != "application_name")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    scoped_url
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("application_name", &application);
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.to_string());
+    config.pool_size = 1;
+    let db = Database::from_config("singleton owner fence", &config)
+        .await
+        .expect("one-slot owner pool");
+
+    let mut reader = admin.begin().await.expect("catalog reader");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *reader)
+        .await
+        .expect("hold shared catalog fence");
+    let mut worker = Box::pin(prepare_owner_schema(&db, &schema));
+
+    // Observe a completed rollback from a real failed try, rather than
+    // assuming the spawned task has reached the fence after a fixed delay.
+    let retry_observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let retried: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name = $1 AND state = 'idle' AND query = 'ROLLBACK')",
+            )
+            .bind(&application)
+            .fetch_one(&admin)
+            .await
+            .expect("inspect owner transaction retry");
+            if retried {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    tokio::select! {
+        result = &mut worker => panic!("owner completed while catalog was held: {result:?}"),
+        observed = retry_observed => observed.expect("owner retries after catalog conflict"),
+    }
+    let relation: Option<String> = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1)::text")
+        .bind(format!("{schema}.singleton_candidate_leases"))
+        .fetch_one(&admin)
+        .await
+        .expect("inspect provisioning visibility");
+    assert!(relation.is_none(), "no owner DDL before catalog-X");
+    reader.commit().await.expect("release catalog reader");
+    tokio::time::timeout(Duration::from_secs(5), &mut worker)
+        .await
+        .expect("owner provisioning completes")
+        .expect("owner provisioning succeeds");
+    drop(worker);
+    let store = SingletonLeaseStore::new_unverified(db, &schema).expect("candidate store");
+
+    let mut catalog_writer = admin.begin().await.expect("catalog writer");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog_writer)
+        .await
+        .expect("hold exclusive catalog fence");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(3),
+        store.register(Uuid::new_v4(), identity("catalog-independent"), TTL),
+    )
+    .await
+    .expect("ordinary lease operation does not wait on catalog-X")
+    .expect("lease registration succeeds");
+    assert!(matches!(outcome, LeaseOutcome::Acquired { .. }));
+    catalog_writer
+        .commit()
+        .await
+        .expect("release catalog writer");
+    drop(store);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop isolated schema");
+    admin.close().await;
 }
 
 #[tokio::test]

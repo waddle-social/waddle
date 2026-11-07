@@ -236,7 +236,8 @@ pub async fn prepare_owner_schema(db: &Database, schema: &str) -> Result<(), Sin
         return Err(SingletonLeaseError::OwnerRequired);
     }
     let schema = quoted_schema(schema)?;
-    let mut tx = bounded_transaction(db).await?;
+    let mut tx = db.begin_catalog_fenced(&[]).await?;
+    set_transaction_bounds(&mut tx).await?;
     let owner: bool = sqlx::query_scalar(
         "SELECT n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user) \
          FROM pg_catalog.pg_namespace n WHERE n.nspname = $1",
@@ -699,10 +700,15 @@ async fn bounded_transaction(db: &Database) -> Result<Transaction<'_>, Singleton
         (),
     )
     .await?;
+    set_transaction_bounds(&mut tx).await?;
+    Ok(tx)
+}
+
+async fn set_transaction_bounds(tx: &mut Transaction<'_>) -> Result<(), SingletonLeaseError> {
     tx.execute("SET LOCAL search_path = pg_catalog", ()).await?;
     tx.execute("SET LOCAL lock_timeout = '3s'", ()).await?;
     tx.execute("SET LOCAL statement_timeout = '5s'", ()).await?;
-    Ok(tx)
+    Ok(())
 }
 
 fn pg<'a>(tx: &'a mut Transaction<'_>) -> Result<&'a mut PgConnection, SingletonLeaseError> {
