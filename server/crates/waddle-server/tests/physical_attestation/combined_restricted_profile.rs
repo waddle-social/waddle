@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use futures::FutureExt;
-use sqlx::postgres::{types::Oid, PgConnectOptions, PgPool};
+use sqlx::postgres::types::Oid;
+use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 use waddle_server::config::LineageConfig;
@@ -50,6 +51,10 @@ use waddle_xmpp::pending_delivery::{
 use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenceStorage};
 
 use super::{test_url, CATALOG_GRANT_LOCK};
+use pinned_pubsub_inventory::{exercise_pinned_pubsub, pinned_pubsub_inventory};
+
+#[path = "pinned_pubsub_inventory.rs"]
+mod pinned_pubsub_inventory;
 
 const RELATION_GUARD: &str =
     include_str!("../../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
@@ -327,13 +332,19 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         definer_role,
         PgSchemaName("attestor".to_owned()),
     )?;
-    let config = install(&installer_options, config, Uuid::new_v4()).await?;
+    let installation_operation = Uuid::new_v4();
+    let config = install(&installer_options, config, installation_operation).await?;
     let runtime_options = base
         .database(&database)
         .username(&runtime)
         .password(&password)
         .options([("search_path", "guarded")]);
-    let attested = attested_pool(runtime_options, config, 2, Duration::from_secs(5))?;
+    let attested = attested_pool(
+        runtime_options.clone(),
+        config.clone(),
+        2,
+        Duration::from_secs(5),
+    )?;
     let pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
         "combined profile",
         attested,
@@ -805,6 +816,16 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         effect_relation_oid: pins[0],
         mam_relation_oids: [pins[1], pins[2]],
     };
+    let pinned = pinned_pubsub_inventory(
+        &admin,
+        &runtime_options,
+        &config,
+        installation_operation,
+        (&runtime, &installer, &definer),
+        serving_profile.helper_relation_oids,
+    )
+    .await?;
+    exercise_pinned_pubsub(&admin, &runtime, &owner, &definer, &pinned).await?;
     let owner_role = PgRoleName::new(&owner)?;
     DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
     #[cfg(feature = "clustering")]
@@ -986,6 +1007,18 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
     RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &v2).await?;
     DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2).await?;
+    // A complete V1030 ledger is checked again for every pinned diagnostic.
+    sqlx::query("DELETE FROM guarded._migrations WHERE version = 1030")
+        .execute(&admin)
+        .await?;
+    ensure!(
+        DatabasePubSubStorage::start_pinned_relation_inventory(&pinned.inventory)?
+            .finish()
+            .await
+            .is_err(),
+        "pinned diagnostic accepted an incomplete migration ledger"
+    );
+    drop(pinned);
     drop(probe);
     drop(pending);
     drop(sm);

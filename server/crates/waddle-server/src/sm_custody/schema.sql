@@ -62,6 +62,26 @@ CREATE TABLE __SCHEMA__.sm_custody_slots (
     UNIQUE (gate_id, ordinal),
     FOREIGN KEY (operation_id, gate_id) REFERENCES __SCHEMA__.sm_custody_operations (operation_id, gate_id)
 );
+-- A separate experimental frontier: the existing slot identifies an
+-- obligation, while each row below identifies one actual serialized frame.
+-- It is not the selected SM counter and has no exposure or ACK path. The
+-- fixture role retains raw DML; arbitrary transactions can invert lock order
+-- and are not a restricted writer boundary.
+CREATE TABLE __SCHEMA__.sm_custody_frame_frontiers (
+    gate_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_gates (gate_id),
+    appended BIGINT NOT NULL CHECK (appended >= 0)
+);
+CREATE TABLE __SCHEMA__.sm_custody_frame_occurrences (
+    occurrence_id UUID PRIMARY KEY,
+    operation_id UUID NOT NULL,
+    gate_id UUID NOT NULL,
+    ordinal BIGINT NOT NULL CHECK (ordinal > 0),
+    payload BYTEA NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
+    provenance BYTEA NOT NULL CHECK (octet_length(provenance) BETWEEN 1 AND 16384),
+    received_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (gate_id, ordinal),
+    FOREIGN KEY (operation_id, gate_id) REFERENCES __SCHEMA__.sm_custody_operations (operation_id, gate_id)
+);
 CREATE TABLE __SCHEMA__.sm_custody_terminals (
     operation_id UUID PRIMARY KEY REFERENCES __SCHEMA__.sm_custody_operations (operation_id),
     disposition INTEGER NOT NULL CHECK (disposition IN (1, 2))
@@ -104,6 +124,20 @@ CREATE TRIGGER sm_custody_operations_immutable BEFORE UPDATE OR DELETE OR TRUNCA
 ON __SCHEMA__.sm_custody_operations FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE TRIGGER sm_custody_slots_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_slots FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE TRIGGER sm_custody_frame_occurrences_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_frame_occurrences FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE TRIGGER sm_custody_frame_frontiers_no_delete BEFORE DELETE OR TRUNCATE
+ON __SCHEMA__.sm_custody_frame_frontiers FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
+CREATE FUNCTION __SCHEMA__.sm_custody_frame_frontier_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF NEW.gate_id IS DISTINCT FROM OLD.gate_id OR NEW.appended <> OLD.appended + 1 THEN
+        RAISE EXCEPTION 'SM frame frontier must advance exactly once';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_frame_frontier_guard BEFORE UPDATE ON __SCHEMA__.sm_custody_frame_frontiers
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_frame_frontier_guard();
 CREATE TRIGGER sm_custody_terminals_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
 ON __SCHEMA__.sm_custody_terminals FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.sm_custody_immutable();
 CREATE TRIGGER sm_custody_handoffs_immutable BEFORE UPDATE OR DELETE OR TRUNCATE
@@ -182,6 +216,43 @@ BEGIN
 END $$;
 CREATE TRIGGER sm_custody_admission_guard BEFORE INSERT ON __SCHEMA__.sm_custody_operations
 FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_admission_guard();
+-- The candidate has no occurrence settlement yet. Prevent the older
+-- obligation-only terminal path from settling or releasing a source with
+-- retained occurrence evidence. These guards do not fence legacy writers.
+CREATE FUNCTION __SCHEMA__.sm_custody_frame_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE source_key UUID; source_resource TEXT; closed BOOLEAN; retained_rows BIGINT; retained_bytes BIGINT;
+BEGIN
+    SELECT message_key, resource INTO source_key, source_resource FROM __SCHEMA__.sm_custody_operations
+      WHERE operation_id = NEW.operation_id AND gate_id = NEW.gate_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM frame obligation is absent'; END IF;
+    PERFORM __SCHEMA__.sm_custody_lock_source(source_key, source_resource, TRUE);
+    SELECT sealed INTO closed FROM __SCHEMA__.sm_custody_gates
+      WHERE gate_id = NEW.gate_id AND resource = source_resource FOR UPDATE;
+    IF closed IS DISTINCT FROM FALSE OR EXISTS (
+        SELECT 1 FROM __SCHEMA__.sm_custody_terminals WHERE operation_id = NEW.operation_id
+    ) OR NOT EXISTS (
+        SELECT 1 FROM __SCHEMA__.sm_custody_frame_frontiers
+        WHERE gate_id = NEW.gate_id AND appended = NEW.ordinal
+    ) OR EXISTS (
+        SELECT 1 FROM __SCHEMA__.sm_custody_slots WHERE gate_id = NEW.gate_id
+    ) THEN RAISE EXCEPTION 'SM frame gate, obligation or ordinal is invalid'; END IF;
+    -- A stale REPEATABLE READ contender for an old-style slot must abort
+    -- instead of reading a pre-occurrence snapshot after waiting for the gate.
+    UPDATE __SCHEMA__.sm_custody_gates SET appended = appended WHERE gate_id = NEW.gate_id;
+    UPDATE __SCHEMA__.ingress_messages SET retention_eligible_at = NULL WHERE message_key = source_key;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM frame source is absent'; END IF;
+    UPDATE __SCHEMA__.sm_custody_quota SET revision = revision + 1 WHERE id = 1;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SM frame quota is absent'; END IF;
+    SELECT count(*), coalesce(sum(octet_length(payload)), 0) INTO retained_rows, retained_bytes
+      FROM __SCHEMA__.sm_custody_frame_occurrences;
+    IF retained_rows >= 1024 OR retained_bytes + octet_length(NEW.payload) > 16777216 THEN
+        RAISE EXCEPTION 'SM frame retained quota exceeded';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER sm_custody_frame_guard BEFORE INSERT ON __SCHEMA__.sm_custody_frame_occurrences
+FOR EACH ROW EXECUTE FUNCTION __SCHEMA__.sm_custody_frame_guard();
 CREATE FUNCTION __SCHEMA__.sm_custody_slot_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE closed BOOLEAN; source_key UUID; source_resource TEXT;
@@ -194,9 +265,12 @@ BEGIN
     IF closed IS DISTINCT FROM FALSE OR NOT EXISTS (
         SELECT 1 FROM __SCHEMA__.sm_custody_operations o WHERE o.operation_id = NEW.operation_id
         AND o.gate_id = NEW.gate_id AND o.message_key = source_key AND o.resource = source_resource AND NOT EXISTS (
-            SELECT 1 FROM __SCHEMA__.sm_custody_terminals t WHERE t.operation_id = o.operation_id)) THEN
+            SELECT 1 FROM __SCHEMA__.sm_custody_terminals t WHERE t.operation_id = o.operation_id)) OR EXISTS (
+        SELECT 1 FROM __SCHEMA__.sm_custody_frame_frontiers WHERE gate_id = NEW.gate_id
+    ) THEN
         RAISE EXCEPTION 'SM custody slot is no longer admissible';
     END IF;
+    UPDATE __SCHEMA__.sm_custody_gates SET appended = appended WHERE gate_id = NEW.gate_id;
     RETURN NEW;
 END $$;
 CREATE TRIGGER sm_custody_slot_guard BEFORE INSERT ON __SCHEMA__.sm_custody_slots
@@ -274,6 +348,10 @@ BEGIN
       ON o.gate_id = g.gate_id WHERE o.operation_id = NEW.operation_id
         AND o.message_key = source_key AND o.resource = source_resource FOR UPDATE OF g;
     IF NOT FOUND THEN RAISE EXCEPTION 'SM custody terminal gate is absent'; END IF;
+    IF EXISTS (SELECT 1 FROM __SCHEMA__.sm_custody_frame_occurrences
+               WHERE operation_id = NEW.operation_id) THEN
+        RAISE EXCEPTION 'SM frame occurrence remains unsettled';
+    END IF;
     IF NEW.disposition = 2 AND NOT EXISTS (
         SELECT 1 FROM __SCHEMA__.sm_custody_transfers x
         JOIN __SCHEMA__.sm_custody_handoffs h ON h.operation_id = x.operation_id
@@ -282,6 +360,12 @@ BEGIN
         WHERE x.operation_id = NEW.operation_id
           AND (x.resource, x.payload, x.received_at) = (o.resource, o.payload, o.received_at)
     ) THEN RAISE EXCEPTION 'SM custody transfer terminal has no marked copy'; END IF;
+    -- Terminal and frame occurrence contend on the same tuple version. A
+    -- stale REPEATABLE READ inserter must abort after waiting, not miss a
+    -- committed terminal in its older snapshot.
+    UPDATE __SCHEMA__.sm_custody_gates SET appended = appended WHERE gate_id = (
+        SELECT gate_id FROM __SCHEMA__.sm_custody_operations WHERE operation_id = NEW.operation_id
+    );
     RETURN NEW;
 END $$;
 CREATE TRIGGER sm_custody_terminal_guard BEFORE INSERT ON __SCHEMA__.sm_custody_terminals

@@ -37,6 +37,37 @@ const V1_HELPER_TABLES: [&str; 12] = [
 ];
 
 #[tokio::test]
+async fn sqlite_pubsub_legacy_path_still_round_trips() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("open SQLite PubSub store");
+    let owner = "alice@example.test".parse().expect("owner JID");
+    storage
+        .get_or_create_node(&owner, "urn:xmpp:bookmarks:1")
+        .await
+        .expect("create node");
+    let item = PubSubItem {
+        id: Some("room@example.test".to_owned()),
+        publisher: None,
+        payload: Some(
+            "<conference xmlns='urn:xmpp:bookmarks:1'/>"
+                .parse()
+                .expect("payload"),
+        ),
+    };
+    storage
+        .publish_item(&owner, "urn:xmpp:bookmarks:1", &item, Some(&owner), false)
+        .await
+        .expect("publish item");
+    let items = storage
+        .get_items(&owner, "urn:xmpp:bookmarks:1", None, &[])
+        .await
+        .expect("read items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "room@example.test");
+}
+
+#[tokio::test]
 async fn pg17_v1_helper_attaches_real_owner_prepared_pubsub_and_rejects_drift() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;

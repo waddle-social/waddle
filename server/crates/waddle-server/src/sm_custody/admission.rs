@@ -88,7 +88,7 @@ impl SmCustodyRepository {
                 operation: id,
             });
         }
-        self.validate_canonical(&mut tx, frame).await?;
+        self.validate_canonical(&mut tx, frame, true).await?;
         sqlx::query(&format!("SELECT 1 FROM {q}.ingress_send_attempts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4 FOR UPDATE"))
             .bind(frame.key.message_key.to_storage()).bind(frame.key.kind.to_storage())
             .bind(frame.key.semantic_identity_hash.as_slice()).bind(frame.key.resource.to_string())
@@ -134,10 +134,11 @@ impl SmCustodyRepository {
         })
     }
 
-    async fn validate_canonical(
+    pub(super) async fn validate_canonical(
         &self,
         tx: &mut IngressUowTransaction<'_>,
         frame: &PreparedDirectFrame,
+        require_unresolved: bool,
     ) -> Result<(), CustodyError> {
         let q = &self.schema;
         let row = sqlx::query(&format!("SELECT m.envelope_version::bigint, m.envelope, m.created_at, i.kind, i.payload_version::bigint, i.payload FROM {q}.ingress_messages m JOIN {q}.ingress_effect_intents i ON i.message_key = m.message_key WHERE m.message_key = $1 AND i.kind = $2 AND i.semantic_identity_hash = $3"))
@@ -195,12 +196,14 @@ impl SmCustodyRepository {
         {
             return Err(CustodyError::Rejected);
         }
-        let resolved: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.ingress_effect_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3) OR EXISTS (SELECT 1 FROM {q}.ingress_delivery_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND resource = $4) OR EXISTS (SELECT 1 FROM {q}.ingress_carbon_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4) OR EXISTS (SELECT 1 FROM {q}.sm_ingress_appends WHERE message_key = $1::text AND receipt_kind = $2 AND semantic_identity_hash = $3 AND resource = $4)"))
-            .bind(frame.key.message_key.to_storage()).bind(frame.key.kind.to_storage())
-            .bind(frame.key.semantic_identity_hash.as_slice()).bind(frame.key.resource.to_string())
-            .fetch_one(pg(tx)?).await.map_err(db)?;
-        if resolved {
-            return Err(CustodyError::Rejected);
+        if require_unresolved {
+            let resolved: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {q}.ingress_effect_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3) OR EXISTS (SELECT 1 FROM {q}.ingress_delivery_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND resource = $4) OR EXISTS (SELECT 1 FROM {q}.ingress_carbon_receipts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4) OR EXISTS (SELECT 1 FROM {q}.sm_ingress_appends WHERE message_key = $1::text AND receipt_kind = $2 AND semantic_identity_hash = $3 AND resource = $4)"))
+                .bind(frame.key.message_key.to_storage()).bind(frame.key.kind.to_storage())
+                .bind(frame.key.semantic_identity_hash.as_slice()).bind(frame.key.resource.to_string())
+                .fetch_one(pg(tx)?).await.map_err(db)?;
+            if resolved {
+                return Err(CustodyError::Rejected);
+            }
         }
         Ok(())
     }

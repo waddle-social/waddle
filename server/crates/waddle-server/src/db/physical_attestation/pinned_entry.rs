@@ -109,6 +109,19 @@ pub(super) async fn prepare_entry(
         (),
     )
     .await?;
+    prepare_read_only_entry(tx, authority, pause).await
+}
+
+/// Finish the entry after the caller has set the transaction mode and, when
+/// needed, acquired its earlier-order catalog fence.
+pub(super) async fn prepare_read_only_entry(
+    tx: &mut Transaction<'_>,
+    authority: &super::PinnedRuntimeAuthority,
+    pause: Option<(
+        tokio::sync::oneshot::Sender<i32>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+) -> Result<(), DarkPinnedEntryError> {
     bound_postgres_waits(tx)
         .await
         .map_err(|_| DarkPinnedEntryError::InvalidTimeout)?;

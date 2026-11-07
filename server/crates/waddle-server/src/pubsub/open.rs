@@ -7,6 +7,9 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 use crate::db::lineage::PgIdentity;
+use crate::db::physical_attestation::{
+    PinnedPubSubInventoryError, PinnedPubSubInventoryJob, PinnedPubSubRelationInventory,
+};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
 impl DatabasePubSubStorage {
@@ -94,6 +97,58 @@ impl DatabasePubSubStorage {
         profile: &super::RestrictedServingProfileV2,
     ) -> Result<(), super::PubSubRuntimeAttachError> {
         super::runtime_attach::verify_restricted_v2(db, profile).await
+    }
+
+    /// Start a pinned, read-only relation inventory without attaching a store.
+    /// The owned job continues its bounded cleanup if its receiver is dropped.
+    pub fn start_pinned_relation_inventory(
+        inventory: &PinnedPubSubRelationInventory,
+    ) -> Result<PinnedPubSubInventoryJob, PinnedPubSubInventoryError> {
+        inventory.start()
+    }
+
+    /// Expose the runtime attachment table names for inventory-drift tests.
+    #[cfg(feature = "test-support")]
+    pub fn runtime_attach_relation_names_for_test() -> Vec<&'static str> {
+        super::runtime_attach::relation_names_for_test()
+    }
+
+    /// Pause the same diagnostic after its checks for backend observation.
+    #[cfg(feature = "test-support")]
+    pub fn start_pinned_relation_inventory_paused_for_test(
+        inventory: &PinnedPubSubRelationInventory,
+        ready: tokio::sync::oneshot::Sender<(i32, bool, bool)>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<PinnedPubSubInventoryJob, PinnedPubSubInventoryError> {
+        inventory.start_paused_for_test(ready, release)
+    }
+
+    /// Pause immediately before the transactional fence and after a failed
+    /// try has been rolled back, for independent retry-order observation.
+    #[cfg(feature = "test-support")]
+    pub fn start_pinned_inventory_fence_paused_for_test(
+        inventory: &PinnedPubSubRelationInventory,
+        before_ready: tokio::sync::oneshot::Sender<()>,
+        before_release: tokio::sync::oneshot::Receiver<()>,
+        retry_ready: tokio::sync::oneshot::Sender<()>,
+        retry_release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<PinnedPubSubInventoryJob, PinnedPubSubInventoryError> {
+        inventory.start_fence_paused_for_test(
+            before_ready,
+            before_release,
+            retry_ready,
+            retry_release,
+        )
+    }
+
+    /// Leave a test query in flight to exercise bounded rollback cleanup.
+    #[cfg(feature = "test-support")]
+    pub fn start_pinned_inventory_rollback_stall_for_test(
+        inventory: &PinnedPubSubRelationInventory,
+        timeout: std::time::Duration,
+        ready: tokio::sync::oneshot::Sender<i32>,
+    ) -> Result<PinnedPubSubInventoryJob, PinnedPubSubInventoryError> {
+        inventory.start_rollback_stall_for_test(timeout, ready)
     }
 
     pub fn database(&self) -> Database {
