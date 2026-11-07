@@ -737,7 +737,9 @@ async fn withhold_commit_reply(
         server_read.read_exact(&mut body).await?;
         if tag == b'C' && body == b"COMMIT\0" {
             held.notify_one();
+            let keepalive = (client_write, server_read);
             release.notified().await;
+            drop(keepalive);
             break;
         }
         client_write.write_u8(tag).await?;
@@ -855,17 +857,23 @@ async fn hold_catalog_lock_reply(
         let mut tail = Vec::new();
         loop {
             if upstream_held.load(Ordering::SeqCst) {
+                let keepalive = server_write;
                 let _ = upstream_release.changed().await;
+                drop(keepalive);
                 return Ok::<(), std::io::Error>(());
             }
             let count = client_read.read(&mut buffer).await?;
             if count == 0 {
                 // Keep the server side open even after client cancellation.
+                let keepalive = server_write;
                 let _ = upstream_release.changed().await;
+                drop(keepalive);
                 return Ok(());
             }
             if upstream_held.load(Ordering::SeqCst) {
+                let keepalive = server_write;
                 let _ = upstream_release.changed().await;
+                drop(keepalive);
                 return Ok(());
             }
             let mut scan = tail;
@@ -896,7 +904,9 @@ async fn hold_catalog_lock_reply(
             if downstream_seen.load(Ordering::SeqCst) && tag == b'D' && acquired {
                 response_held.store(true, Ordering::SeqCst);
                 held.notify_one();
+                let keepalive = (client_write, server_read);
                 let _ = downstream_release.changed().await;
+                drop(keepalive);
                 return Ok(());
             }
             client_write.write_u8(tag).await?;
