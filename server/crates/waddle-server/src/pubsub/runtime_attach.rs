@@ -540,7 +540,9 @@ async fn verify_with_profile(
         )
         .await?;
     }
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(CATALOG_ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(())
 }
 

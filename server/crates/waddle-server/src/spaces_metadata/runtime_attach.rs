@@ -1,6 +1,7 @@
 //! Read-only validation shared by the durable space-store attachments.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -13,6 +14,7 @@ use crate::db::lineage::{
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 const OWNER_GATE_KEY: i64 = 0x5753_4442_4f57_4e52;
+const ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 const OWNER_MARKER: &str = "_waddle_space_store_owner";
 // Bump the marker version when its row shape changes and each store's
 // contract version whenever its prepared PostgreSQL shape changes.
@@ -847,7 +849,9 @@ pub(crate) async fn verify_attested_store(
 
     // No mutation is performed. Roll back so the operation's read-only
     // boundary is explicit and no session state can be committed accidentally.
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(())
 }
 
