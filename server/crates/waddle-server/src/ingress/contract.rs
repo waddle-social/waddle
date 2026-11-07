@@ -130,6 +130,14 @@ impl IngressAuthority {
         if self.clustered || self.database.driver() != DatabaseDriver::Postgres {
             return false;
         }
+        // Selection must not race a live execution that already chose the
+        // ordinary receipt path before this test-only binding is installed.
+        let Ok(executing) = self.executing.try_write() else {
+            return false;
+        };
+        if !*executing || self.cancellation.is_cancelled() || self.force_stop.is_cancelled() {
+            return false;
+        }
         let Ok(transaction) = self.uow.begin().await else {
             return false;
         };
