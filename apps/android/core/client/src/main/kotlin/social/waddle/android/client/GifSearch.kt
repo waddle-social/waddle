@@ -6,19 +6,16 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import social.waddle.android.client.auth.await
 
 /**
- * GIF search over the same-origin `/api/giphy` proxy contract the web
- * client uses (`chat/src/lib/giphy-proxy.ts`). This is an out-of-band
- * HTTP call to the SAME origin that already serves the auth REST
- * endpoints — it carries no XMPP semantics and replaces no XMPP API
- * (no XMPP wire shape for GIF search exists anywhere in Waddle). A
- * deployment whose server origin does not expose the proxy degrades to
- * [GifSearchResult.NotConfigured], the web's exact missing-key state.
+ * GIF search uses the web client's `/api/giphy` proxy contract. The
+ * production proxy is hosted by the chat app; custom deployments use their
+ * server URL unless they configure a separate proxy. This HTTP request carries
+ * no XMPP semantics or authentication credentials.
  */
 
 /** One GIF search hit (web `GiphyGif` subset). */
@@ -88,15 +85,17 @@ internal fun parseGifSearchPayload(body: String): GifSearchResult? = runCatching
     GifSearchResult.Results(gifs)
 }.getOrNull()
 
-/** Production gateway: `GET {serverOrigin}/api/giphy?limit=24[&q=…]`. */
+/** Fetches `GET {proxyBase}/api/giphy?limit=24[&q=…]`. */
 class GiphyProxyGateway(
-    baseUrl: String,
+    serverUrl: String,
     private val httpClient: OkHttpClient,
+    proxyUrl: String? = null,
 ) : GifSearchGateway {
-    private val baseUrl: HttpUrl = baseUrl.trimEnd('/').toHttpUrl()
+    private val baseUrl: HttpUrl? = gifProxyBaseUrl(serverUrl, proxyUrl)
 
     override suspend fun search(query: String): GifSearchResult {
-        val url = this.baseUrl.newBuilder()
+        val base = baseUrl ?: return GifSearchResult.NotConfigured
+        val url = base.newBuilder()
             .addPathSegments("api/giphy")
             .addQueryParameter("limit", GIF_SEARCH_LIMIT.toString())
             .apply { query.trim().takeIf { it.isNotEmpty() }?.let { addQueryParameter("q", it) } }
@@ -111,6 +110,20 @@ class GiphyProxyGateway(
             GifSearchResult.Unavailable
         }
     }
+}
+
+private fun gifProxyBaseUrl(serverUrl: String, proxyUrl: String?): HttpUrl? {
+    val override = proxyUrl?.trim().orEmpty()
+    val base = (override.ifEmpty { serverUrl.trim() }).trimEnd('/').toHttpUrlOrNull() ?: return null
+    if (base.username.isNotEmpty() || base.password.isNotEmpty() || base.query != null || base.fragment != null) {
+        return null
+    }
+    if (override.isEmpty() && base.scheme == "https" && base.host == "xmpp.waddle.social" &&
+        base.port == 443 && base.encodedPath == "/"
+    ) {
+        return "https://waddle.chat".toHttpUrlOrNull()
+    }
+    return base
 }
 
 private const val STATUS_NOT_CONFIGURED = 503
