@@ -558,8 +558,9 @@ impl Fixture {
         // Exercise the preserved raw constructor after owner preparation. It
         // invalidates completion before its own DDL/data migration and leaves
         // the explicit owner ancestry phase to restore readiness.
-        let _legacy =
-            DatabasePushServiceStore::new_with_secret_key(owner_database.clone(), &secret).await?;
+        let _legacy = self
+            .new_legacy_store_with_catalog_blocker(&owner_database, &secret)
+            .await?;
         if marker_phase(&self.admin, &self.target).await? != 0 {
             bail!("legacy raw initialization left the owner marker complete");
         }
@@ -585,7 +586,7 @@ impl Fixture {
             bail!("reattached store could not use the same one-slot runtime pool");
         }
 
-        verify_legacy_adoption_waits_for_push_gate(
+        verify_legacy_adoption_retries_after_push_gate_contention(
             _legacy.clone(),
             &owner_database,
             &self.admin,
@@ -628,17 +629,26 @@ impl Fixture {
         let mut catalog = owner_database.begin().await?;
         catalog
             .query(
-                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+                "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
                 crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
             )
             .await?;
 
         let database = owner_database.clone();
         let identity = identity.clone();
+        let started_at = activity_checkpoint(&self.admin).await?;
         let adoption = tokio::spawn(async move {
             DatabasePushServiceStore::adopt_notification_ancestry_owner(&database, &identity).await
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let backend_pid = wait_for_catalog_try_and_rollback(&self.admin, &started_at).await?;
+        let adoption_pending = !adoption.is_finished();
+        let phase_before = marker_phase(&self.admin, &self.target).await?;
+        let phase_while_blocked = marker_phase(&self.admin, &self.target).await?;
+        let catalog_x_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
         let outbox_gate = crate::notification_outbox::outbox_schema_gate();
         let outbox_gate_available: bool =
             sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)")
@@ -651,11 +661,17 @@ impl Fixture {
                 .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
                 .fetch_one(&self.admin)
                 .await?;
-        if !outbox_gate_available || !push_gate_available {
+        if !adoption_pending
+            || phase_before != phase_while_blocked
+            || phase_while_blocked != 0
+            || catalog_x_available
+            || !outbox_gate_available
+            || !push_gate_available
+        {
             adoption.abort();
             let _ = adoption.await;
             catalog.rollback().await?;
-            bail!("Push ancestry owner gate was acquired before catalog-X");
+            bail!("Push ancestry catalog fence probe failed for backend {backend_pid}");
         }
         catalog.rollback().await?;
         adoption.await??;
@@ -671,7 +687,7 @@ impl Fixture {
         let mut catalog = owner_database.begin().await?;
         catalog
             .query(
-                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+                "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
                 crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
             )
             .await?;
@@ -679,24 +695,89 @@ impl Fixture {
         let database = owner_database.clone();
         let identity = identity.clone();
         let root_key = root_key.to_vec();
+        let started_at = activity_checkpoint(&self.admin).await?;
         let preparation = tokio::spawn(async move {
             VapidStorage::prepare_owner(&database, &identity, &root_key).await
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let backend_pid = wait_for_catalog_try_and_rollback(&self.admin, &started_at).await?;
+        let preparation_pending = !preparation.is_finished();
+        let vapid_marker_exists: bool = sqlx::query_scalar(
+            "SELECT pg_catalog.to_regclass(format('%I.push_service_vapid_schema_marker', $1)) IS NOT NULL",
+        )
+        .bind(&self.target)
+        .fetch_one(&self.admin)
+        .await?;
+        let catalog_x_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
         let push_gate_available: bool =
             sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
                 .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
                 .fetch_one(&self.admin)
                 .await?;
-        if !push_gate_available {
+        if !preparation_pending
+            || vapid_marker_exists
+            || catalog_x_available
+            || !push_gate_available
+        {
             preparation.abort();
             let _ = preparation.await;
             catalog.rollback().await?;
-            bail!("VAPID owner gate was acquired before catalog-X");
+            bail!("VAPID catalog fence probe failed for backend {backend_pid}");
         }
         catalog.rollback().await?;
         preparation.await??;
         Ok(())
+    }
+
+    async fn new_legacy_store_with_catalog_blocker(
+        &self,
+        owner_database: &Database,
+        secret: &[u8],
+    ) -> Result<DatabasePushServiceStore> {
+        let mut catalog = owner_database.begin().await?;
+        catalog
+            .query(
+                "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+                crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
+            )
+            .await?;
+
+        let database = owner_database.clone();
+        let secret = secret.to_vec();
+        let started_at = activity_checkpoint(&self.admin).await?;
+        let initialization = tokio::spawn(async move {
+            DatabasePushServiceStore::new_with_secret_key(database, &secret).await
+        });
+        let backend_pid = wait_for_catalog_try_and_rollback(&self.admin, &started_at).await?;
+        let initialization_pending = !initialization.is_finished();
+        let marker_phase_before = marker_phase(&self.admin, &self.target).await?;
+        let marker_phase_while_blocked = marker_phase(&self.admin, &self.target).await?;
+        let catalog_x_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
+        let push_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
+        if !initialization_pending
+            || marker_phase_before != marker_phase_while_blocked
+            || marker_phase_while_blocked != 1
+            || catalog_x_available
+            || !push_gate_available
+        {
+            initialization.abort();
+            let _ = initialization.await;
+            catalog.rollback().await?;
+            bail!("raw Push catalog fence probe failed for backend {backend_pid}");
+        }
+        catalog.rollback().await?;
+        Ok(initialization.await??)
     }
 
     async fn cleanup(self) {
@@ -760,6 +841,38 @@ async fn marker_phase(admin: &PgPool, schema: &str) -> Result<i64> {
     ))
     .fetch_one(admin)
     .await?)
+}
+
+async fn activity_checkpoint(admin: &PgPool) -> Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT pg_catalog.clock_timestamp()::text")
+            .fetch_one(admin)
+            .await?,
+    )
+}
+
+async fn wait_for_catalog_try_and_rollback(admin: &PgPool, started_at: &str) -> Result<i32> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let backend_pid = sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_catalog.pg_stat_activity \
+                 WHERE datname = pg_catalog.current_database() \
+                   AND pid <> pg_catalog.pg_backend_pid() AND state = 'idle' \
+                   AND xact_start IS NULL AND query = 'ROLLBACK' \
+                   AND query_start > $1::timestamptz \
+                 ORDER BY query_start DESC LIMIT 1",
+            )
+            .bind(started_at)
+            .fetch_optional(admin)
+            .await?;
+            if let Some(backend_pid) = backend_pid {
+                return Ok::<i32, sqlx::Error>(backend_pid);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+    .map_err(Into::into)
 }
 
 async fn verify_marker_temp_shadow_is_rejected_and_qualified(
@@ -828,28 +941,41 @@ async fn verify_owner_preparation_cancellation(
 ) -> Result<()> {
     let mut gate = owner_database.begin().await?;
     gate.query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
         crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
     )
     .await?;
 
     let preparation_database = owner_database.clone();
     let preparation_identity = identity.clone();
+    let started_at = activity_checkpoint(admin).await?;
     let preparation = tokio::spawn(async move {
         DatabasePushServiceStore::initialize_owner(&preparation_database, &preparation_identity)
             .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let backend_pid = wait_for_catalog_try_and_rollback(admin, &started_at).await?;
+    let preparation_pending = !preparation.is_finished();
+    let marker_exists: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.to_regclass(format('%I.push_service_schema_marker', $1)) IS NOT NULL",
+    )
+    .bind(schema)
+    .fetch_one(admin)
+    .await?;
+    let catalog_x_available: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(admin)
+            .await?;
     let push_gate_available: bool =
         sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
             .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
             .fetch_one(admin)
             .await?;
-    if !push_gate_available {
+    if !preparation_pending || marker_exists || catalog_x_available || !push_gate_available {
         preparation.abort();
         gate.rollback().await?;
         let _ = preparation.await;
-        bail!("Push owner gate was acquired before catalog-X");
+        bail!("Push catalog fence probe failed for backend {backend_pid}");
     }
     preparation.abort();
     match preparation.await {
@@ -871,7 +997,7 @@ async fn verify_owner_preparation_cancellation(
     Ok(())
 }
 
-async fn verify_legacy_adoption_waits_for_push_gate(
+async fn verify_legacy_adoption_retries_after_push_gate_contention(
     raw_store: DatabasePushServiceStore,
     owner_database: &Database,
     admin: &PgPool,
@@ -886,37 +1012,20 @@ async fn verify_legacy_adoption_waits_for_push_gate(
     )
     .await?;
 
+    let started_at = activity_checkpoint(admin).await?;
     let adoption = tokio::spawn(async move { raw_store.adopt_notification_ancestry().await });
-    let waiting = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
-                   AND wait_event = 'advisory' \
-                   AND query LIKE '%pg_advisory_xact_lock%')",
-            )
-            .fetch_one(admin)
-            .await?;
-            if waiting {
-                return Ok::<(), sqlx::Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await;
-    if !matches!(waiting, Ok(Ok(()))) {
+    let backend_pid = wait_for_catalog_try_and_rollback(admin, &started_at).await?;
+    let adoption_pending = !adoption.is_finished();
+    let phase_while_blocked = marker_phase(admin, schema).await?;
+    if !adoption_pending || phase_while_blocked != 1 {
         adoption.abort();
         gate.rollback().await?;
         let _ = adoption.await;
-        return Err(anyhow::anyhow!(
-            "legacy ancestry adoption did not wait on the Push Service gate"
-        ));
+        bail!("legacy ancestry gate probe failed for backend {backend_pid}");
     }
 
-    let phase_while_blocked = marker_phase(admin, schema).await;
     gate.rollback().await?;
     adoption.await??;
-    let phase_while_blocked = phase_while_blocked?;
     let phase_after_adoption = marker_phase(admin, schema).await?;
     if phase_while_blocked != 1 || phase_after_adoption != 0 {
         bail!(

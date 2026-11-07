@@ -2,6 +2,7 @@
 //! recovery, retry bookkeeping, retention pruning, and row decoding for
 //! jobs and delivery attempts.
 
+use crate::db::CatalogFenceLock;
 use crate::db::DatabaseDriver;
 use crate::db::DatabaseError;
 use crate::db::Row;
@@ -1097,18 +1098,27 @@ impl DatabasePushServiceStore {
                 "attested Push Service databases cannot adopt notification ancestry",
             ));
         }
-        let mut tx = self
-            .db
-            .begin_immediate()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-        if tx.driver() == DatabaseDriver::Postgres {
-            tx.query(
-                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-                crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let driver = self.db.driver();
+        let outbox_gate = crate::notification_outbox::outbox_schema_gate();
+        let mut tx = match driver {
+            DatabaseDriver::Sqlite => self.db.begin_immediate().await,
+            DatabaseDriver::Postgres => {
+                self.db
+                    .begin_catalog_fenced(&[
+                        CatalogFenceLock::SharedPair(outbox_gate.0, outbox_gate.1),
+                        CatalogFenceLock::Exclusive(super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY),
+                    ])
+                    .await
+            }
+        }
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        if driver == DatabaseDriver::Postgres {
+            tx.execute("SET LOCAL lock_timeout = '3s'", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.execute("SET LOCAL statement_timeout = '30000ms'", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
             let mut rows = tx
                 .query("SELECT pg_catalog.current_schema()::text", ())
                 .await

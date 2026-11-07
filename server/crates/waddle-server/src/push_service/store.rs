@@ -17,7 +17,7 @@ use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
 use waddle_xmpp::XmppError;
 
-use crate::db::{Database, IntoParams};
+use crate::db::{CatalogFenceLock, Database, IntoParams};
 
 use super::apns_dispatch::ApnsProvider;
 use super::fcm_dispatch::FcmProvider;
@@ -294,18 +294,25 @@ impl DatabasePushServiceStore {
                 "attested Push Service databases must use attach_existing",
             ));
         }
-        let mut tx = self
-            .db
-            .begin_immediate()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-        if tx.driver() == DatabaseDriver::Postgres {
-            tx.query(
-                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-                crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let driver = self.db.driver();
+        let mut tx = match driver {
+            DatabaseDriver::Sqlite => self.db.begin_immediate().await,
+            DatabaseDriver::Postgres => {
+                self.db
+                    .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+                        PUSH_SCHEMA_ADVISORY_LOCK_KEY,
+                    )])
+                    .await
+            }
+        }
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+        if driver == DatabaseDriver::Postgres {
+            tx.execute("SET LOCAL lock_timeout = '3s'", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.execute("SET LOCAL statement_timeout = '30000ms'", ())
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
             let mut rows = tx
                 .query("SELECT pg_catalog.current_schema()::text", ())
                 .await
@@ -332,7 +339,7 @@ impl DatabasePushServiceStore {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
         }
-        Self::initialize_schema_tx(self.db.driver(), &mut tx).await?;
+        Self::initialize_schema_tx(driver, &mut tx).await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;

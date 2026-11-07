@@ -1,25 +1,27 @@
 # P2.1 control and owner catalog-fence group
 
-Status: draft implementation plan. Restricted startup continues to refuse with
-`UnconvertedStores` before listeners and effectful workers. This work cannot
-enable serving or claim a complete privileged-mutator cutoff.
+Status: scoped implementation. Restricted startup continues to refuse with
+`UnconvertedStores` before listeners and effectful workers. This work does not
+enable serving or establish a complete privileged-mutator cutoff.
 
 ## Objective and scope
 
-Make reachable first-party, single-backend PostgreSQL control-plane and owner
-mutations participate in one catalog-first transaction protocol. The candidate
-group is attestor installation and its observer, alternate migration owner and
-its scoped rejection grants, and the transactional raw/owner constructors for
-room observation, PubSub, Push, paired spaces, room effects, MUC, call
-teardown, keypool and singleton ownership. Inventory every callable raw and
-guarded entry before claiming a family converted. Keep SQLite behavior and
-legacy owner startup intact.
+The converted entries are `run_dark_postgres_owner`, singleton schema
+provisioning, physical-attestor installation and its observer, room-observation
+raw and owner schema preparation, and Push raw and owner schema preparation,
+VAPID owner preparation, and raw and owner notification-ancestry adoption.
+These paths use catalog-first custody on the backend that executes their
+PostgreSQL mutation. SQLite retains its previous transaction entry behavior.
 
-The independent architecture gate may narrow this group when a constructor
-uses another checkout, an autocommit statement, a session lock, or a detached
-coordinator. Detached MAM and notification activity/outbox multi-session
-initializers are excluded: a catalog lock on their coordinator would not
-protect SQL executed on another backend and could deadlock a pinned pool hook.
+The owner-rejection grant helper is not fenced by this group. Raw VAPID
+initialization still uses separate autocommit checkouts. The
+room-observation attested verifier still lacks a catalog-shared read fence.
+PubSub, paired spaces, room effects, MUC, call teardown, keypool, inbox,
+pending delivery, MAM, and notification activity/outbox are outside this
+group. The multi-session initializers require a backend-wide or session
+protocol; a catalog lock on their coordinator would not protect SQL executed
+on another backend and could deadlock a pinned pool hook. Inventory all raw
+and guarded entries before claiming any whole family converted.
 
 ## Transaction protocol
 
@@ -41,14 +43,19 @@ trusted reconciliation before retrying where it is absent.
 
 ## Verification and non-goals
 
-Use PostgreSQL 17 tests on actual public entries: a held catalog reader must
-prevent lower locks, DDL and grants; lower-lock contention must release
-catalog-X with no stranded snapshot; actual commit/rollback visibility and
-fresh post-wait observations must match the chosen order. Cover cancellation,
-pool size one, hook interaction, and a session-fenced concurrent-index/old-
-snapshot witness for the participating path. Run focused SQLite owner
-regressions, formatting, strict scoped Clippy and independent exact-head
-review. Record every unverified witness explicitly.
+Focused PostgreSQL 17 witnesses exercise the public converted entries and
+observe actual catalog-lock attempts, rollback before retries, lower-gate
+exclusion, cancellation, one-slot pools, and commit visibility. Installer
+and observer fixtures exercise their dedicated-connection lock custody;
+they do not establish hooked-pool behavior. The session-fenced
+concurrent-index/old-snapshot witness remains unverified for this group.
+Run focused SQLite regressions, formatting, strict scoped Clippy, and an
+independent exact-head review before merging; record test results in the PR.
+
+Push schema relations can wait up to 30 seconds after catalog-X acquisition.
+This bounded interval can delay catalog readers and exhaust their pool checkout
+deadline. It is not a substitute for a global exclusion proof against a
+concurrent index build or old snapshot. Unknown COMMIT remains indeterminate.
 
 Old binaries and login backends, prepared transactions, external
 owner/superuser/role administrators, failover, and unconverted multi-session
