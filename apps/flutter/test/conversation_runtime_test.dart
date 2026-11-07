@@ -274,6 +274,44 @@ void main() {
   );
 
   test(
+    'room typing ignores our own reflected chat states but shows occupants',
+    () async {
+      final context = _Context();
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      for (final presence in [
+        {
+          'from': '$room/Me Renamed',
+          'muc_jid': own,
+          'muc_status_codes': [110],
+        },
+        {'from': '$room/me-laptop', 'muc_jid': '$own/laptop'},
+        {'from': '$room/alex', 'muc_jid': 'alex@example.org'},
+      ]) {
+        await runtime.onEvent({'type': 'presence', 'data': presence});
+      }
+      Future<void> composing(String nick) => runtime.onEvent({
+        'type': 'message',
+        'data': {
+          'from': '$room/$nick',
+          'message_type': 'groupchat',
+          'is_muc': true,
+          'chat_state': 'composing',
+        },
+      });
+      // XEP-0045 reflects our own state from our (room-assigned) nick; our
+      // other device is identified by its disclosed real JID.
+      await composing('Me Renamed');
+      await composing('me-laptop');
+      expect(context.conversation['typing'], isEmpty);
+      await composing('alex');
+      expect(context.conversation['typing'], ['alex']);
+    },
+  );
+
+  test(
     'a replacement transport replays while the old ready handler still awaits a send',
     () async {
       final context = _Context();

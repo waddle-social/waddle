@@ -6,6 +6,7 @@ import 'package:waddle_flutter/app.dart';
 import 'package:waddle_flutter/bridge.dart';
 import 'package:waddle_flutter/features/conversation.dart';
 import 'package:waddle_flutter/features/surfaces.dart';
+import 'package:waddle_flutter/main.dart';
 
 void main() {
   testWidgets('incoming calls appear over settings and present once per call', (
@@ -354,4 +355,38 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+
+  testWidgets('the app error banner renders above routes and dismisses', (
+    tester,
+  ) async {
+    final bridge = WaddleBridge(
+      events: const Stream<dynamic>.empty(),
+      commandInvoker: (method, args) async => null,
+    );
+    bridge.acceptEvent({
+      'topic': 'session',
+      'data': {'state': 'signedOut'},
+    });
+    // The signed-out screen animates indefinitely, so pump fixed frames.
+    await tester.pumpWidget(WaddleApp(bridge: bridge));
+    await tester.pump(const Duration(seconds: 1));
+    bridge.acceptEvent({
+      'topic': 'error',
+      'data': {'message': 'Reconnecting failed'},
+    });
+    await tester.pump(const Duration(seconds: 1));
+    // The banner sits in MaterialApp.builder, above the Navigator's Overlay;
+    // its dismiss tooltip must still find one.
+    expect(tester.takeException(), isNull);
+    expect(find.text('Reconnecting failed'), findsOneWidget);
+    await tester.longPress(find.byTooltip('Dismiss error'));
+    await tester.pump(const Duration(seconds: 1));
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.byTooltip('Dismiss error'));
+    await tester.pump(const Duration(seconds: 1));
+    expect(bridge.error, isNull);
+    expect(find.text('Reconnecting failed'), findsNothing);
+    // WaddleApp owns and disposes the bridge.
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
