@@ -146,7 +146,12 @@ pub(super) async fn verify_functions_and_triggers(
             && !matches!(
                 expected.name.as_str(),
                 "waddle_ingress_definer_prepare" | "waddle_ingress_definer_epoch_guard"
-            );
+            )
+            && !(receipt_journal
+                && matches!(
+                    expected.name.as_str(),
+                    "waddle_ingress_record_effect_receipt" | "waddle_ingress_record_policy_discard"
+                ));
         let observed = sqlx::query(function_sql)
             .bind(schema)
             .bind(runtime)

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use waddle_server::db::physical_attestation::{
     attested_pool, PgRoleName, PhysicalAttestationConfig, ReceiptAuthorityError, ReceiptCommit,
     ReceiptOperation, ReceiptOperationAuthority, ReceiptOperationPins, ReceiptReadback,
-    RestrictedIngressProfileError,
+    RestrictedIngressProfileError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_server::test_support::database_from_attested_postgres_pool;
@@ -19,6 +19,10 @@ use super::receipt_transaction;
 
 const LOOKUP_CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/p21_receipt_journal_lookup_candidate.sql");
+const INGRESS_API_CANDIDATE: &str =
+    include_str!("../../src/db/migrations/owner/ingress_definer_api_candidate.sql");
+const RECEIPT_WRITER_CANDIDATE: &str =
+    include_str!("../../src/db/migrations/owner/p21_receipt_journal_postgres.sql");
 
 pub(super) async fn exercise(
     fixture: &Fixture,
@@ -26,15 +30,25 @@ pub(super) async fn exercise(
     api: &PgRoleName,
     epoch_oid: u32,
 ) {
-    let receipts = receipt_transaction::seed(fixture, 6).await;
+    let fence_call =
+        format!("pg_try_advisory_xact_lock_shared({CATALOG_MUTATION_ADVISORY_LOCK_KEY})");
+    assert!(INGRESS_API_CANDIDATE.contains(&fence_call));
+    assert!(INGRESS_API_CANDIDATE.contains("waddle_ingress_definer_prepare()"));
+    assert!(RECEIPT_WRITER_CANDIDATE.contains("waddle_ingress_definer_prepare()"));
+    assert!(LOOKUP_CANDIDATE.contains("waddle_ingress_definer_prepare()"));
+    let receipts = receipt_transaction::seed(fixture, 8).await;
     let s = &fixture.target;
     let r = &fixture.runtime;
     let api_name = api.as_str();
     let journal = format!("{s}.p21_receipt_operation_results");
     let function = format!("{s}.waddle_p21_record_effect_receipt(uuid,uuid,integer,bytea)");
+    let effect_receipt_function =
+        format!("{s}.waddle_ingress_record_effect_receipt(uuid,integer,bytea)");
+    let policy_discard_function =
+        format!("{s}.waddle_ingress_record_policy_discard(uuid,integer,bytea,text)");
     let lookup_function = format!("{s}.waddle_p21_lookup_receipt_operation(uuid)");
     let lookup_sql = LOOKUP_CANDIDATE
-        .replace("__SCHEMA__", s)
+        .replace("__SCHEMA__", &format!("\"{s}\""))
         .replace("__SCHEMA_LITERAL__", &format!("'{s}'"))
         .replace("__RUNTIME_ROLE__", r);
     let lookup_create_or_replace = lookup_sql
@@ -229,6 +243,18 @@ pub(super) async fn exercise(
         .execute(&mut *provision)
         .await
         .expect("grant API journal access");
+    sqlx::query(&format!(
+        "REVOKE ALL ON FUNCTION {effect_receipt_function} FROM PUBLIC, {r}"
+    ))
+    .execute(&mut *provision)
+    .await
+    .expect("route low-level receipt only through fixed journal API");
+    sqlx::query(&format!(
+        "REVOKE ALL ON FUNCTION {policy_discard_function} FROM PUBLIC, {r}"
+    ))
+    .execute(&mut *provision)
+    .await
+    .expect("remove unjournaled policy-discard entry from P21 role profile");
     sqlx::query(&format!("SET LOCAL ROLE {api_name}"))
         .execute(&mut *provision)
         .await
@@ -278,6 +304,27 @@ pub(super) async fn exercise(
     .fetch_one(&fixture.admin)
     .await
     .expect("function OID");
+    let prepare_function_oid: Oid = sqlx::query_scalar(
+        "SELECT oid FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(format!("{s}.waddle_ingress_definer_prepare()"))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("common ingress helper OID");
+    let effect_receipt_function_oid: Oid = sqlx::query_scalar(
+        "SELECT oid FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(&effect_receipt_function)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("low-level receipt function OID");
+    let policy_discard_function_oid: Oid = sqlx::query_scalar(
+        "SELECT oid FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(&policy_discard_function)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("policy-discard function OID");
     let lookup_function_oid: Oid = sqlx::query_scalar(
         "SELECT oid FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
     )
@@ -290,8 +337,11 @@ pub(super) async fn exercise(
         schema_owner_role_oid: schema_owner.0,
         runtime_role_oid: role_oid(r.to_owned()).await,
         api_owner_role_oid: role_oid(api_name.to_owned()).await,
+        prepare_function_oid: prepare_function_oid.0,
         epoch_relation_oid: epoch_oid,
         journal_relation_oid: journal_oid.0,
+        effect_receipt_function_oid: effect_receipt_function_oid.0,
+        policy_discard_function_oid: policy_discard_function_oid.0,
         journal_function_oid: function_oid.0,
         journal_lookup_function_oid: lookup_function_oid.0,
     };
@@ -327,6 +377,144 @@ pub(super) async fn exercise(
         ReceiptReadback::Committed { inserted: true }
     );
 
+    let unfenced_runtime_functions: Vec<String> = sqlx::query_scalar(
+        "SELECT p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' \
+         FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+         WHERE n.nspname=$1 AND p.prorettype <> 'pg_catalog.trigger'::pg_catalog.regtype \
+           AND p.proname <> 'pubsub_runtime_attach_lock' \
+           AND pg_catalog.has_function_privilege($2,p.oid,'EXECUTE') \
+           AND pg_catalog.strpos(p.prosrc,'waddle_ingress_definer_prepare()')=0",
+    )
+    .bind(s)
+    .bind(r)
+    .fetch_all(&fixture.admin)
+    .await
+    .expect("runtime ingress API fence profile");
+    assert!(
+        unfenced_runtime_functions.is_empty(),
+        "R-callable ingress functions bypass the common fence: {unfenced_runtime_functions:?}"
+    );
+
+    let fenced_operation = ReceiptOperation {
+        operation_id: Uuid::new_v4(),
+        message: receipts[6].message,
+        kind: receipts[6].kind,
+        semantic_identity_hash: receipts[6].semantic_identity_hash,
+    };
+    let mut exclusive = fixture.admin.begin().await.expect("catalog mutator tx");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *exclusive)
+        .await
+        .expect("mutator owns exclusive catalog fence");
+    let mut blocked_writer = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime blocked-writer connection");
+    sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE")
+        .execute(&mut blocked_writer)
+        .await
+        .expect("begin blocked receipt transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {s}.ingress_protocol_epoch IN ACCESS SHARE MODE"
+    ))
+    .execute(&mut blocked_writer)
+    .await
+    .expect("epoch prelock before fixed API entry");
+    let blocked_write = sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT {s}.waddle_p21_record_effect_receipt($1,$2,$3,$4)"
+    ))
+    .bind(fenced_operation.operation_id)
+    .bind(fenced_operation.message.to_storage())
+    .bind(fenced_operation.kind.to_storage())
+    .bind(fenced_operation.semantic_identity_hash.as_slice())
+    .fetch_one(&mut blocked_writer)
+    .await;
+    assert!(
+        matches!(&blocked_write, Err(error) if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref() == Some("55P03")),
+        "direct writer call must fail closed under the exclusive catalog fence: {blocked_write:?}"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut blocked_writer)
+        .await
+        .expect("rollback denied writer");
+    drop(blocked_writer);
+
+    let mut blocked_lookup = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime blocked-lookup connection");
+    let lookup_under_fence = sqlx::query(&format!(
+        "SELECT * FROM {s}.waddle_p21_lookup_receipt_operation($1)"
+    ))
+    .bind(operation.operation_id)
+    .fetch_optional(&mut blocked_lookup)
+    .await;
+    assert!(
+        matches!(&lookup_under_fence, Err(error) if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref() == Some("55P03")),
+        "direct lookup call must fail closed under the exclusive catalog fence: {lookup_under_fence:?}"
+    );
+    drop(blocked_lookup);
+    exclusive.rollback().await.expect("release exclusive fence");
+
+    // Reverse order: the direct R-callable writer gets the shared xact fence;
+    // a mutator cannot acquire exclusive until the receipt transaction ends.
+    let mut direct_writer = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime direct-writer connection");
+    sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE")
+        .execute(&mut direct_writer)
+        .await
+        .expect("begin direct receipt transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {s}.ingress_protocol_epoch IN ACCESS SHARE MODE"
+    ))
+    .execute(&mut direct_writer)
+    .await
+    .expect("direct writer epoch prelock");
+    let direct_inserted: bool = sqlx::query_scalar(&format!(
+        "SELECT {s}.waddle_p21_record_effect_receipt($1,$2,$3,$4)"
+    ))
+    .bind(fenced_operation.operation_id)
+    .bind(fenced_operation.message.to_storage())
+    .bind(fenced_operation.kind.to_storage())
+    .bind(fenced_operation.semantic_identity_hash.as_slice())
+    .fetch_one(&mut direct_writer)
+    .await
+    .expect("fixed API receipt enters shared fence");
+    assert!(direct_inserted);
+    let mut exclusive_probe = fixture.admin.begin().await.expect("mutator probe tx");
+    let exclusive_acquired: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(&mut *exclusive_probe)
+            .await
+            .expect("nonblocking exclusive probe");
+    assert!(
+        !exclusive_acquired,
+        "mutator must wait for writer completion"
+    );
+    exclusive_probe
+        .rollback()
+        .await
+        .expect("release mutator probe");
+    sqlx::query("COMMIT")
+        .execute(&mut direct_writer)
+        .await
+        .expect("commit fixed API receipt");
+    drop(direct_writer);
+    assert_eq!(
+        authority
+            .readback(&fenced_operation)
+            .await
+            .expect("same operation exact readback"),
+        ReceiptReadback::Committed { inserted: true }
+    );
+
     let runtime_has_journal_select: bool =
         sqlx::query_scalar("SELECT pg_catalog.has_table_privilege($1,$2,'SELECT')")
             .bind(r)
@@ -349,6 +537,58 @@ pub(super) async fn exercise(
         !runtime_has_journal_column_select,
         "runtime must not read journal columns directly"
     );
+    let mut direct_runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime low-level receipt connection");
+    let direct_low_level_call = sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT {s}.waddle_ingress_record_effect_receipt($1,$2,$3)"
+    ))
+    .bind(operation.message.to_storage())
+    .bind(operation.kind.to_storage())
+    .bind(operation.semantic_identity_hash.as_slice())
+    .fetch_one(&mut direct_runtime)
+    .await;
+    assert!(
+        matches!(&direct_low_level_call, Err(error) if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref() == Some("42501")),
+        "R must not bypass the journal through the underlying receipt writer: {direct_low_level_call:?}"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut direct_runtime)
+        .await
+        .expect("clear denied-call transaction");
+    drop(direct_runtime);
+    let mut direct_policy_discard = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime policy-discard connection");
+    let direct_policy_discard_result = sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT {s}.waddle_ingress_record_policy_discard($1,$2,$3,NULL::text)"
+    ))
+    .bind(receipts[7].message.to_storage())
+    .bind(receipts[7].kind.to_storage())
+    .bind(receipts[7].semantic_identity_hash.as_slice())
+    .fetch_one(&mut direct_policy_discard)
+    .await;
+    assert!(
+        matches!(&direct_policy_discard_result, Err(error) if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref() == Some("42501")),
+        "R must not create an unjournaled plain receipt through NULL policy discard: {direct_policy_discard_result:?}"
+    );
+    drop(direct_policy_discard);
+    let unjournaled_discard_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {s}.ingress_effect_receipts WHERE message_key=$1 AND kind=$2 AND semantic_identity_hash=$3"
+    ))
+    .bind(receipts[7].message.to_storage())
+    .bind(receipts[7].kind.to_storage())
+    .bind(receipts[7].semantic_identity_hash.as_slice())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("check no unjournaled policy discard");
+    assert_eq!(unjournaled_discard_count, 0);
     let mut outsider =
         PgConnection::connect_with(&fixture.runtime_options.clone().username(&fixture.outsider))
             .await
@@ -693,11 +933,23 @@ pub(super) async fn exercise(
             ..pins
         },
         ReceiptOperationPins {
+            prepare_function_oid: u32::MAX,
+            ..pins
+        },
+        ReceiptOperationPins {
             epoch_relation_oid: pins.epoch_relation_oid + 1,
             ..pins
         },
         ReceiptOperationPins {
             journal_relation_oid: pins.journal_relation_oid + 1,
+            ..pins
+        },
+        ReceiptOperationPins {
+            effect_receipt_function_oid: u32::MAX,
+            ..pins
+        },
+        ReceiptOperationPins {
+            policy_discard_function_oid: u32::MAX,
             ..pins
         },
         ReceiptOperationPins {

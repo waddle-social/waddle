@@ -579,6 +579,17 @@ async fn v1_fixed_api_runs_v1009_with_select_only_runtime_and_exact_lookup() {
         .execute(&mut runtime)
         .await
         .expect("commit fixed API calls");
+    sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
+        .execute(&mut runtime)
+        .await
+        .expect("begin pinned lookup transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS SHARE MODE",
+        f.schema
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect("lookup epoch prelock");
     let found: (Uuid, i32, Vec<u8>, bool) = sqlx::query_as(&format!(
         "SELECT * FROM {}.waddle_p21_lookup_receipt_operation($1)",
         f.schema
@@ -597,6 +608,47 @@ async fn v1_fixed_api_runs_v1009_with_select_only_runtime_and_exact_lookup() {
     .await
     .expect("lookup absent operation");
     assert!(absent.is_none());
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("end pinned lookup transaction");
+    let direct_receipt = sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT {}.waddle_ingress_record_effect_receipt($1, 1, $2)",
+        f.schema
+    ))
+    .bind(key)
+    .bind(vec![7_u8; 32])
+    .fetch_one(&mut runtime)
+    .await;
+    assert!(
+        matches!(&direct_receipt, Err(error) if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref() == Some("42501")),
+        "R must not bypass the journal through the low-level receipt API: {direct_receipt:?}"
+    );
+    let policy_discard_signature = format!(
+        "{}.waddle_ingress_record_policy_discard(uuid,integer,bytea,text)",
+        f.schema
+    );
+    let policy_discard_oid: Option<String> =
+        sqlx::query_scalar("SELECT pg_catalog.to_regprocedure($1)::text")
+            .bind(&policy_discard_signature)
+            .fetch_one(&f.admin)
+            .await
+            .expect("inspect v1 policy-discard API presence as administrator");
+    let policy_discard_denied: bool = sqlx::query_scalar(
+        "SELECT NOT pg_catalog.has_function_privilege($1, $2::regprocedure, 'EXECUTE')",
+    )
+    .bind(&f.runtime)
+    .bind(&policy_discard_signature)
+    .fetch_one(&f.admin)
+    .await
+    .expect("inspect v1 policy-discard runtime ACL as administrator");
+    assert!(
+        policy_discard_oid.is_some() && policy_discard_denied,
+        "v1 must install policy-discard only as a non-callable API for R: oid={policy_discard_oid:?}, denied={policy_discard_denied}"
+    );
     // Even a mistaken extra EXECUTE grant cannot make a different login pass
     // the fixed API's session identity check. Remove the test-only grants.
     lab.admin(&format!(

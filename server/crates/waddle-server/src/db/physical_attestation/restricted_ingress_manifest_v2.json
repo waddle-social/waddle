@@ -2,7 +2,7 @@
   "version": 2,
   "postgres_major": 17,
   "source_sha256": {
-    "candidate": "3f583d9986d70c33861b31ec54e08efa70a06271ffb3b4805e27241429bdf735",
+    "candidate": "0e7e37574666a6420770aecfa0093e0a82aec7007b4622de0c9ef241b6cf3da8",
     "relation": "2a66930709b7cd08b6ba4d20da97992f16766d2708739f6d5c54cde82c167a35",
     "waddle": "67ea7d23aae7d6922954db61b900d22a46eba4be261059ff34b2676e92f65069",
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
@@ -86,8 +86,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 26611,
-      "source_end": 27054
+      "source_start": 27090,
+      "source_end": 27533
     },
     {
       "name": "waddle_ingress_archive_dispatch_position",
@@ -136,8 +136,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 77914,
-      "source_end": 78689
+      "source_start": 78393,
+      "source_end": 79168
     },
     {
       "name": "waddle_ingress_attach_descendant",
@@ -182,8 +182,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 32903,
-      "source_end": 33502
+      "source_start": 33382,
+      "source_end": 33981
     },
     {
       "name": "waddle_ingress_carbon_receipt_exists",
@@ -228,8 +228,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 55145,
-      "source_end": 55471
+      "source_start": 55624,
+      "source_end": 55950
     },
     {
       "name": "waddle_ingress_claim_send_attempt",
@@ -284,8 +284,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 60252,
-      "source_end": 61620
+      "source_start": 60731,
+      "source_end": 62099
     },
     {
       "name": "waddle_ingress_complete_send_attempt",
@@ -336,8 +336,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 64253,
-      "source_end": 65104
+      "source_start": 64732,
+      "source_end": 65583
     },
     {
       "name": "waddle_ingress_copy_descendant",
@@ -378,8 +378,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 34103,
-      "source_end": 35454
+      "source_start": 34582,
+      "source_end": 35933
     },
     {
       "name": "waddle_ingress_decide_owner",
@@ -420,8 +420,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 99788,
-      "source_end": 100307
+      "source_start": 100267,
+      "source_end": 100786
     },
     {
       "name": "waddle_ingress_definer_epoch_guard",
@@ -493,7 +493,7 @@
       "public_execute": false,
       "source_file": "candidate",
       "source_start": 2974,
-      "source_end": 4645
+      "source_end": 5124
     },
     {
       "name": "waddle_ingress_delete_sm_ref",
@@ -534,8 +534,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 24866,
-      "source_end": 25178
+      "source_start": 25345,
+      "source_end": 25657
     },
     {
       "name": "waddle_ingress_delete_sm_stream",
@@ -572,8 +572,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 30023,
-      "source_end": 30275
+      "source_start": 30502,
+      "source_end": 30754
     },
     {
       "name": "waddle_ingress_descendant_exists",
@@ -614,8 +614,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 38176,
-      "source_end": 38607
+      "source_start": 38655,
+      "source_end": 39086
     },
     {
       "name": "waddle_ingress_descendant_settled",
@@ -660,8 +660,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 40112,
-      "source_end": 40503
+      "source_start": 40591,
+      "source_end": 40982
     },
     {
       "name": "waddle_ingress_effect_receipt_exists",
@@ -706,8 +706,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 49087,
-      "source_end": 49500
+      "source_start": 49566,
+      "source_end": 49979
     },
     {
       "name": "waddle_ingress_epoch_guard",
@@ -818,8 +818,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 98725,
-      "source_end": 99241
+      "source_start": 99204,
+      "source_end": 99720
     },
     {
       "name": "waddle_ingress_insert_archive_dispatch",
@@ -870,8 +870,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 76215,
-      "source_end": 77134
+      "source_start": 76694,
+      "source_end": 77613
     },
     {
       "name": "waddle_ingress_insert_carbon_receipt",
@@ -916,8 +916,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 52680,
-      "source_end": 53076
+      "source_start": 53159,
+      "source_end": 53555
     },
     {
       "name": "waddle_ingress_insert_delivery_receipt",
@@ -964,8 +964,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 70105,
-      "source_end": 70561
+      "source_start": 70584,
+      "source_end": 71040
     },
     {
       "name": "waddle_ingress_insert_effect_intent",
@@ -1012,8 +1012,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 43056,
-      "source_end": 43387
+      "source_start": 43535,
+      "source_end": 43866
     },
     {
       "name": "waddle_ingress_insert_message",
@@ -1072,8 +1072,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 19658,
-      "source_end": 20517
+      "source_start": 20137,
+      "source_end": 20996
     },
     {
       "name": "waddle_ingress_insert_sm_ref",
@@ -1120,8 +1120,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 22901,
-      "source_end": 23368
+      "source_start": 23380,
+      "source_end": 23847
     },
     {
       "name": "waddle_ingress_insert_sm_stream",
@@ -1162,8 +1162,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 25705,
-      "source_end": 26040
+      "source_start": 26184,
+      "source_end": 26519
     },
     {
       "name": "waddle_ingress_intent_exists",
@@ -1206,8 +1206,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 39187,
-      "source_end": 39491
+      "source_start": 39666,
+      "source_end": 39970
     },
     {
       "name": "waddle_ingress_invalidate_retention",
@@ -1246,8 +1246,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 102192,
-      "source_end": 102640
+      "source_start": 102671,
+      "source_end": 103119
     },
     {
       "name": "waddle_ingress_list_all_delivery_receipts",
@@ -1315,8 +1315,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 72807,
-      "source_end": 73627
+      "source_start": 73286,
+      "source_end": 74106
     },
     {
       "name": "waddle_ingress_list_archive_positions",
@@ -1385,8 +1385,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 81335,
-      "source_end": 82192
+      "source_start": 81814,
+      "source_end": 82671
     },
     {
       "name": "waddle_ingress_list_archive_predecessors",
@@ -1486,8 +1486,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 88387,
-      "source_end": 90951
+      "source_start": 88866,
+      "source_end": 91430
     },
     {
       "name": "waddle_ingress_list_archive_registration",
@@ -1563,8 +1563,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 79544,
-      "source_end": 80496
+      "source_start": 80023,
+      "source_end": 80975
     },
     {
       "name": "waddle_ingress_list_carbon_receipts",
@@ -1626,8 +1626,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 53781,
-      "source_end": 54461
+      "source_start": 54260,
+      "source_end": 54940
     },
     {
       "name": "waddle_ingress_list_delivery_receipts",
@@ -1692,8 +1692,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 71319,
-      "source_end": 72029
+      "source_start": 71798,
+      "source_end": 72508
     },
     {
       "name": "waddle_ingress_list_effect_intents",
@@ -1759,8 +1759,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 44175,
-      "source_end": 44808
+      "source_start": 44654,
+      "source_end": 45287
     },
     {
       "name": "waddle_ingress_list_effect_receipts",
@@ -1821,8 +1821,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 50200,
-      "source_end": 50886
+      "source_start": 50679,
+      "source_end": 51365
     },
     {
       "name": "waddle_ingress_list_legacy_ancestry_intents",
@@ -1892,8 +1892,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 41306,
-      "source_end": 42186
+      "source_start": 41785,
+      "source_end": 42665
     },
     {
       "name": "waddle_ingress_list_pending_archive_positions",
@@ -1961,8 +1961,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 83001,
-      "source_end": 83845
+      "source_start": 83480,
+      "source_end": 84324
     },
     {
       "name": "waddle_ingress_list_pending_archive_sources",
@@ -2047,8 +2047,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 91984,
-      "source_end": 93559
+      "source_start": 92463,
+      "source_end": 94038
     },
     {
       "name": "waddle_ingress_list_pending_route_sources",
@@ -2132,8 +2132,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 94565,
-      "source_end": 95729
+      "source_start": 95044,
+      "source_end": 96208
     },
     {
       "name": "waddle_ingress_list_pending_send_attempts",
@@ -2195,8 +2195,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 56182,
-      "source_end": 56991
+      "source_start": 56661,
+      "source_end": 57470
     },
     {
       "name": "waddle_ingress_list_receipt_archive_positions",
@@ -2276,8 +2276,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 84728,
-      "source_end": 85826
+      "source_start": 85207,
+      "source_end": 86305
     },
     {
       "name": "waddle_ingress_load_message_envelope",
@@ -2326,8 +2326,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 17664,
-      "source_end": 17883
+      "source_start": 18143,
+      "source_end": 18362
     },
     {
       "name": "waddle_ingress_lock_descendant_ancestors_nowait",
@@ -2366,8 +2366,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 31699,
-      "source_end": 32274
+      "source_start": 32178,
+      "source_end": 32753
     },
     {
       "name": "waddle_ingress_lock_message",
@@ -2406,8 +2406,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 15444,
-      "source_end": 15647
+      "source_start": 15923,
+      "source_end": 16126
     },
     {
       "name": "waddle_ingress_lock_message_nowait",
@@ -2446,8 +2446,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 30985,
-      "source_end": 31186
+      "source_start": 31464,
+      "source_end": 31665
     },
     {
       "name": "waddle_ingress_lock_sm_stream",
@@ -2505,8 +2505,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 24069,
-      "source_end": 24357
+      "source_start": 24548,
+      "source_end": 24836
     },
     {
       "name": "waddle_ingress_lock_sm_stream_by_name",
@@ -2555,8 +2555,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 29308,
-      "source_end": 29540
+      "source_start": 29787,
+      "source_end": 30019
     },
     {
       "name": "waddle_ingress_lookup_delivery",
@@ -2595,8 +2595,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 22103,
-      "source_end": 22314
+      "source_start": 22582,
+      "source_end": 22793
     },
     {
       "name": "waddle_ingress_lookup_sm_stream",
@@ -2633,8 +2633,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 28584,
-      "source_end": 28782
+      "source_start": 29063,
+      "source_end": 29261
     },
     {
       "name": "waddle_ingress_message_created_at",
@@ -2680,8 +2680,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 16855,
-      "source_end": 17133
+      "source_start": 17334,
+      "source_end": 17612
     },
     {
       "name": "waddle_ingress_message_is_terminal",
@@ -2720,8 +2720,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 16117,
-      "source_end": 16349
+      "source_start": 16596,
+      "source_end": 16828
     },
     {
       "name": "waddle_ingress_next_send_attempt_delay",
@@ -2760,8 +2760,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 59023,
-      "source_end": 59527
+      "source_start": 59502,
+      "source_end": 60006
     },
     {
       "name": "waddle_ingress_owner_rejection_child",
@@ -2800,8 +2800,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 96382,
-      "source_end": 96814
+      "source_start": 96861,
+      "source_end": 97293
     },
     {
       "name": "waddle_ingress_owner_rejection_delete_guard",
@@ -2948,8 +2948,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 100826,
-      "source_end": 101662
+      "source_start": 101305,
+      "source_end": 102141
     },
     {
       "name": "waddle_ingress_protocol_epoch_guard",
@@ -3024,8 +3024,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 51465,
-      "source_end": 51923
+      "source_start": 51944,
+      "source_end": 52402
     },
     {
       "name": "waddle_ingress_record_delivery",
@@ -3066,8 +3066,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 21272,
-      "source_end": 21612
+      "source_start": 21751,
+      "source_end": 22091
     },
     {
       "name": "waddle_ingress_record_effect_receipt",
@@ -3110,8 +3110,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 46735,
-      "source_end": 47151
+      "source_start": 47214,
+      "source_end": 47630
     },
     {
       "name": "waddle_ingress_record_owner_rejection",
@@ -3152,8 +3152,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 97365,
-      "source_end": 98180
+      "source_start": 97844,
+      "source_end": 98659
     },
     {
       "name": "waddle_ingress_record_policy_discard",
@@ -3198,8 +3198,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 47791,
-      "source_end": 48414
+      "source_start": 48270,
+      "source_end": 48893
     },
     {
       "name": "waddle_ingress_refresh_retention",
@@ -3238,8 +3238,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 103146,
-      "source_end": 107539
+      "source_start": 103625,
+      "source_end": 108018
     },
     {
       "name": "waddle_ingress_release_send_attempt",
@@ -3294,8 +3294,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 65955,
-      "source_end": 67885
+      "source_start": 66434,
+      "source_end": 68364
     },
     {
       "name": "waddle_ingress_resolve_origin",
@@ -3402,8 +3402,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 5515,
-      "source_end": 15251
+      "source_start": 5994,
+      "source_end": 15730
     },
     {
       "name": "waddle_ingress_resource_receipt_exists",
@@ -3448,8 +3448,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 86602,
-      "source_end": 87392
+      "source_start": 87081,
+      "source_end": 87871
     },
     {
       "name": "waddle_ingress_retire_expired_send_attempt",
@@ -3494,8 +3494,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 68662,
-      "source_end": 69391
+      "source_start": 69141,
+      "source_end": 69870
     },
     {
       "name": "waddle_ingress_send_attempt_status",
@@ -3559,8 +3559,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 57741,
-      "source_end": 58451
+      "source_start": 58220,
+      "source_end": 58930
     },
     {
       "name": "waddle_ingress_settle_descendant",
@@ -3599,8 +3599,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 36199,
-      "source_end": 37429
+      "source_start": 36678,
+      "source_end": 37908
     },
     {
       "name": "waddle_ingress_source_binding_guard",
@@ -3723,8 +3723,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 62452,
-      "source_end": 63469
+      "source_start": 62931,
+      "source_end": 63948
     },
     {
       "name": "waddle_ingress_terminalize_if_complete",
@@ -3763,8 +3763,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 108331,
-      "source_end": 109480
+      "source_start": 108810,
+      "source_end": 109959
     },
     {
       "name": "waddle_ingress_truncate_guard",
@@ -3845,8 +3845,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 45450,
-      "source_end": 45866
+      "source_start": 45929,
+      "source_end": 46345
     },
     {
       "name": "waddle_ingress_update_message_envelope",
@@ -3889,8 +3889,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 18445,
-      "source_end": 18776
+      "source_start": 18924,
+      "source_end": 19255
     },
     {
       "name": "waddle_ingress_update_sm_checkpoint",
@@ -3933,8 +3933,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 27678,
-      "source_end": 28050
+      "source_start": 28157,
+      "source_end": 28529
     }
   ],
   "triggers": [

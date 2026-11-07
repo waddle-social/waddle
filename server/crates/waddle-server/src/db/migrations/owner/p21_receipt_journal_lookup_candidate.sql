@@ -12,18 +12,22 @@ RETURNS TABLE (
     semantic_identity_hash BYTEA,
     inserted BOOLEAN
 )
-LANGUAGE sql
-STABLE
+LANGUAGE plpgsql
+VOLATILE
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 ROWS 1
 AS $p21_lookup$
-    SELECT journal.message_key,
-           journal.receipt_kind,
-           journal.semantic_identity_hash,
-           journal.inserted
-      FROM __SCHEMA__.p21_receipt_operation_results AS journal
-     WHERE journal.operation_id = p_operation_id
+BEGIN
+    PERFORM __SCHEMA__.waddle_ingress_definer_prepare();
+    RETURN QUERY
+        SELECT journal.message_key,
+               journal.receipt_kind,
+               journal.semantic_identity_hash,
+               journal.inserted
+          FROM __SCHEMA__.p21_receipt_operation_results AS journal
+         WHERE journal.operation_id = p_operation_id;
+END
 $p21_lookup$;
 
 REVOKE ALL ON FUNCTION __SCHEMA__.waddle_p21_lookup_receipt_operation(UUID) FROM PUBLIC;

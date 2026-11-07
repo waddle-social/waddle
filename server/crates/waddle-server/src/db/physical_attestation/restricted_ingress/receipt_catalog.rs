@@ -7,6 +7,7 @@ use sqlx::{PgConnection, Row};
 use super::receipt_authority::ReceiptOperationPins;
 use super::{RestrictedIngressProfileError, Result};
 use crate::db::migrations::waddle::V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES;
+use crate::db::physical_attestation::quote_identifier;
 
 const LOOKUP_CANDIDATE: &str =
     include_str!("../../migrations/owner/p21_receipt_journal_lookup_candidate.sql");
@@ -32,6 +33,108 @@ pub(super) async fn verify(
         .and_then(|(_, tail)| tail.split_once("$p21_body$").map(|(body, _)| body))
         .ok_or(RestrictedIngressProfileError::Mismatch("journal source"))?
         .replace("%1$I", &quoted_schema);
+
+    // `inspect_profile_with_receipt_journal` checked the helper body against
+    // the manifest-rendered candidate in this same catalog-fenced transaction.
+    // This check adds the independently supplied helper OID and owner/ACL pin.
+    let prepare = sqlx::query(
+        r#"
+        SELECT p.oid=$5 AND p.proowner=a.oid
+          AND a.oid=$6 AND r.oid=$7 AND n.oid=$8 AND n.nspowner=$9
+          AND l.lanname='plpgsql' AND p.prokind='f' AND p.pronargs=0
+          AND p.prorettype='pg_catalog.int8'::pg_catalog.regtype AND NOT p.proretset
+          AND p.pronargdefaults=0 AND p.proargdefaults IS NULL AND p.proargmodes IS NULL
+          AND p.proallargtypes IS NULL AND p.provariadic=0 AND p.prosqlbody IS NULL
+          AND p.probin IS NULL AND p.protrftypes IS NULL AND p.prosupport=0
+          AND NOT p.prosecdef AND p.provolatile='v' AND p.proparallel='u'
+          AND NOT p.proleakproof AND NOT p.proisstrict AND p.procost=100 AND p.prorows=0
+          AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+          AND NOT pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE')
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+              COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) acl
+              WHERE acl.privilege_type<>'EXECUTE' OR acl.grantee<>p.proowner)
+          AND (SELECT count(*) FROM pg_catalog.pg_proc other
+               WHERE other.pronamespace=n.oid AND other.proname=p.proname)=1 AS exact
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+        JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+        JOIN pg_catalog.pg_roles r ON r.rolname=$2
+        JOIN pg_catalog.pg_roles a ON a.rolname=$3
+        WHERE n.nspname=$1 AND p.proname=$4
+        "#,
+    )
+    .bind(schema)
+    .bind(runtime)
+    .bind(api)
+    .bind("waddle_ingress_definer_prepare")
+    .bind(Oid(pins.prepare_function_oid))
+    .bind(Oid(pins.api_owner_role_oid))
+    .bind(Oid(pins.runtime_role_oid))
+    .bind(Oid(pins.schema_oid))
+    .bind(Oid(pins.schema_owner_role_oid))
+    .fetch_optional(&mut *connection)
+    .await?;
+    if !matches!(prepare, Some(row) if row.try_get::<bool, _>("exact")?) {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "ingress prepare function/ACL",
+        ));
+    }
+
+    // The same-transaction manifest pass checked both function bodies. Here
+    // bind their exact OIDs and enforce that R cannot invoke either unjournaled
+    // insertion path in the P21 profile.
+    for (name, identity_arguments, oid) in [
+        (
+            "waddle_ingress_record_effect_receipt",
+            "2950 23 17",
+            pins.effect_receipt_function_oid,
+        ),
+        (
+            "waddle_ingress_record_policy_discard",
+            "2950 23 17 25",
+            pins.policy_discard_function_oid,
+        ),
+    ] {
+        let exact = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT p.oid=$5 AND p.proowner=a.oid AND a.oid=$6 AND r.oid=$7
+              AND n.oid=$8 AND n.nspowner=$9 AND l.lanname='plpgsql'
+              AND p.prokind='f' AND p.proargtypes=$10::pg_catalog.oidvector
+              AND p.prorettype='pg_catalog.bool'::pg_catalog.regtype AND NOT p.proretset
+              AND p.prosecdef AND p.provolatile='v' AND p.proparallel='u'
+              AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+              AND NOT pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE')
+              AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                  COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) acl
+                  WHERE acl.privilege_type<>'EXECUTE' OR acl.grantee<>p.proowner)
+              AND (SELECT count(*) FROM pg_catalog.pg_proc other
+                   WHERE other.pronamespace=n.oid AND other.proname=p.proname)=1
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+            JOIN pg_catalog.pg_roles r ON r.rolname=$2
+            JOIN pg_catalog.pg_roles a ON a.rolname=$3
+            WHERE n.nspname=$1 AND p.proname=$4
+            "#,
+        )
+        .bind(schema)
+        .bind(runtime)
+        .bind(api)
+        .bind(name)
+        .bind(Oid(oid))
+        .bind(Oid(pins.api_owner_role_oid))
+        .bind(Oid(pins.runtime_role_oid))
+        .bind(Oid(pins.schema_oid))
+        .bind(Oid(pins.schema_owner_role_oid))
+        .bind(identity_arguments)
+        .fetch_optional(&mut *connection)
+        .await?;
+        if exact != Some(true) {
+            return Err(RestrictedIngressProfileError::Mismatch(
+                "unjournaled receipt API function/ACL",
+            ));
+        }
+    }
 
     let function = sqlx::query(
         r#"
@@ -80,18 +183,19 @@ pub(super) async fn verify(
         return Err(RestrictedIngressProfileError::Mismatch("journal function"));
     }
 
+    let lookup_schema = quote_identifier(schema);
     let lookup_source = LOOKUP_CANDIDATE
         .split_once("AS $p21_lookup$")
         .and_then(|(_, tail)| tail.split_once("$p21_lookup$").map(|(body, _)| body))
         .ok_or(RestrictedIngressProfileError::Mismatch(
             "journal lookup source",
         ))?
-        .replace("__SCHEMA__", &quoted_schema);
+        .replace("__SCHEMA__", &lookup_schema);
     let lookup = sqlx::query(
         r#"
         SELECT p.prosrc = $5 AND p.oid = $6 AND p.proowner = a.oid
           AND a.oid = $7 AND r.oid = $8 AND n.oid = $9 AND n.nspowner = $10
-          AND l.lanname = 'sql' AND p.prokind = 'f' AND p.pronargs = 1
+          AND l.lanname = 'plpgsql' AND p.prokind = 'f' AND p.pronargs = 1
           AND p.proargtypes = '2950'::pg_catalog.oidvector
           AND p.proargnames = ARRAY['p_operation_id','message_key','receipt_kind',
               'semantic_identity_hash','inserted']::text[]
@@ -106,7 +210,7 @@ pub(super) async fn verify(
           AND p.pronargdefaults = 0 AND p.proargdefaults IS NULL
           AND p.provariadic = 0 AND p.prosqlbody IS NULL AND p.probin IS NULL
           AND p.protrftypes IS NULL AND p.prosupport = 0
-          AND p.prosecdef AND p.provolatile = 's' AND p.proparallel = 'u'
+          AND p.prosecdef AND p.provolatile = 'v' AND p.proparallel = 'u'
           AND NOT p.proleakproof AND NOT p.proisstrict AND p.procost = 100 AND p.prorows = 1
           AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
           AND pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE')
