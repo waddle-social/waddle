@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
@@ -10,7 +9,6 @@ use waddle_xmpp::stream_management::persistence::{
     PersistedUnackedStanza,
 };
 use waddle_xmpp::stream_management::SmIngressAppendKey;
-use waddle_xmpp::tombstone::TombstoneTarget;
 
 use crate::db::{Database, DatabaseDriver, Transaction};
 
@@ -42,7 +40,6 @@ enum StoredEffect {
     Appended,
     AlreadyAllocated { accepting_stream: String },
     Acknowledged,
-    Tombstoned { removed: u64 },
     Retired,
 }
 
@@ -104,28 +101,16 @@ impl RevisionedSmStorage {
                 append_detached(&mut tx, revision, &current.session, append).await?
             }
             Mutation::Acknowledge { revision, h, mode } => {
-                check_revision(&mut tx, revision).await?;
+                let current = check_revision(&mut tx, revision).await?;
                 let driver = tx.driver();
                 promotion_inventory::acknowledge(&mut tx, &revision.stream, *h, driver, *mode)
                     .await
                     .map_err(storage)?;
+                clear_acknowledged_gap(&mut tx, &current.session, *h).await?;
                 StoredEffect::Acknowledged
             }
             Mutation::ConfirmAcknowledgement { .. } => return Err(RevisionError::Unsupported),
-            Mutation::Tombstone {
-                revision,
-                target,
-                through,
-                sequences,
-            } => {
-                let capture = check_revision(&mut tx, revision).await?;
-                validate_tombstone(&mut tx, &capture, target, *through, sequences).await?;
-                let removed =
-                    ingress_append::delete_tombstoned_unacked(&mut tx, &revision.stream, sequences)
-                        .await
-                        .map_err(storage)?;
-                StoredEffect::Tombstoned { removed }
-            }
+            Mutation::Tombstone { .. } => return Err(RevisionError::Unsupported),
             Mutation::Prune { .. } => return Err(RevisionError::Unsupported),
             Mutation::Retire { revision } => {
                 check_revision(&mut tx, revision).await?;
@@ -281,9 +266,6 @@ fn decode_result(
             }
         }
         (StoredEffect::Acknowledged, Mutation::Acknowledge { .. }) => Effect::Acknowledged,
-        (StoredEffect::Tombstoned { removed }, Mutation::Tombstone { .. }) => {
-            Effect::Tombstoned { removed: *removed }
-        }
         (StoredEffect::Retired, Mutation::Retire { .. }) => Effect::Retired,
         _ => return Err(RevisionError::OperationIdentity),
     };
@@ -390,6 +372,7 @@ async fn capture_locked(
         }
         unacked.push(frame);
     }
+    validate_snapshot(&principal, &session, &unacked, &[])?;
     let revision = Revision {
         stream: stream.clone(),
         generation: generation.parse().map_err(storage)?,
@@ -504,12 +487,20 @@ fn validate_snapshot(
         return Err(RevisionError::InvalidInput);
     }
     let outstanding = session.outbound_count.wrapping_sub(session.last_acked);
+    let gap_distance = replay_gap_distance(session)?;
     let mut seen = HashSet::with_capacity(unacked.len());
+    let mut suffix_entries = 0_u32;
     for frame in unacked {
         let distance = frame.sequence.wrapping_sub(session.last_acked);
-        if !seen.insert(frame.sequence) || distance == 0 || distance > outstanding {
+        if !seen.insert(frame.sequence) || distance <= gap_distance || distance > outstanding {
             return Err(RevisionError::InvalidInput);
         }
+        suffix_entries = suffix_entries
+            .checked_add(1)
+            .ok_or(RevisionError::InvalidInput)?;
+    }
+    if suffix_entries != outstanding - gap_distance {
+        return Err(RevisionError::InvalidInput);
     }
     for append in drained {
         let frame = unacked
@@ -527,13 +518,77 @@ fn validate_snapshot(
     Ok(())
 }
 
+fn replay_gap_distance(session: &PersistedSession) -> Result<u32, RevisionError> {
+    let outstanding = session.outbound_count.wrapping_sub(session.last_acked);
+    match session.replay_gap_through {
+        Some(gap) => {
+            let distance = gap.wrapping_sub(session.last_acked);
+            if distance == 0 || distance > outstanding || outstanding >= (1_u32 << 31) {
+                return Err(RevisionError::InvalidInput);
+            }
+            Ok(distance)
+        }
+        None => Ok(0),
+    }
+}
+
+/// Snapshot and append do not acknowledge an evicted frame or reopen an
+/// expired source. Only the checked ACK transaction can clear a covered gap.
+fn validate_session_watermarks(
+    current: &PersistedSession,
+    proposed: &PersistedSession,
+) -> Result<(), RevisionError> {
+    if proposed.last_acked != current.last_acked
+        || proposed.max_resume_duration > current.max_resume_duration
+    {
+        return Err(RevisionError::InvalidInput);
+    }
+    match (current.max_resume_time, proposed.max_resume_time) {
+        (None, None) => {}
+        (Some(old), Some(new)) if new <= old => {}
+        _ => return Err(RevisionError::InvalidInput),
+    }
+    let old_gap = replay_gap_distance(current)?;
+    let new_gap = replay_gap_distance(proposed)?;
+    if new_gap < old_gap {
+        return Err(RevisionError::InvalidInput);
+    }
+    Ok(())
+}
+
+async fn clear_acknowledged_gap(
+    tx: &mut Transaction<'_>,
+    current: &PersistedSession,
+    h: u32,
+) -> Result<(), RevisionError> {
+    if current.replay_gap_through.is_none() {
+        return Ok(());
+    }
+    let gap = replay_gap_distance(current)?;
+    if h.wrapping_sub(current.last_acked) >= gap {
+        let updated = tx
+            .execute(
+                "UPDATE sm_sessions SET replay_gap_through = NULL WHERE stream_id = ?",
+                crate::db_params![current.stream_id.as_str()],
+            )
+            .await
+            .map_err(storage)?;
+        if updated != 1 {
+            return Err(RevisionError::GenerationChanged);
+        }
+    }
+    Ok(())
+}
+
 /// Replacement may add captured suffix entries but cannot erase or rewrite an
-/// existing durable frame. ACK and tombstone are separate checked transitions.
+/// existing durable frame. ACK is a separate checked transition; tombstone
+/// deletion remains unsupported until its terminal fence is available.
 fn validate_snapshot_extension(
     current: &Capture,
     proposed: &PersistedSession,
     unacked: &[PersistedUnackedStanza],
 ) -> Result<(), RevisionError> {
+    validate_session_watermarks(&current.session, proposed)?;
     let advanced = proposed
         .outbound_count
         .wrapping_sub(current.session.outbound_count);
@@ -567,48 +622,6 @@ fn validate_snapshot_extension(
         let distance = sequence.wrapping_sub(current.session.outbound_count);
         if distance == 0 || distance > advanced {
             return Err(RevisionError::InvalidInput);
-        }
-    }
-    Ok(())
-}
-
-async fn validate_tombstone(
-    tx: &mut Transaction<'_>,
-    capture: &Capture,
-    target: &TombstoneTarget,
-    through: DateTime<Utc>,
-    sequences: &[u32],
-) -> Result<(), RevisionError> {
-    let mut seen = HashSet::new();
-    for sequence in sequences {
-        if !seen.insert(*sequence) {
-            return Err(RevisionError::InvalidInput);
-        }
-        let frame = capture
-            .unacked
-            .iter()
-            .find(|frame| frame.sequence == *sequence)
-            .ok_or(RevisionError::InvalidInput)?;
-        if frame.original_receipt_at > through
-            || !target.matches_message_element(&frame.stanza.to_element())
-        {
-            return Err(RevisionError::InvalidInput);
-        }
-        // A replay sequence can carry multiple independent custody records.
-        // Refuse to suppress any record whose immutable payload or cutoff has
-        // not been positively matched to the same tombstone.
-        let mut rows = tx.query(
-            "SELECT custody_payload, original_receipt_at_ms FROM sm_ingress_appends WHERE accepting_stream_id = ? AND sequence = ? AND disposition = 0",
-            crate::db_params![capture.revision.stream.as_str(), i64::from(*sequence)],
-        ).await.map_err(storage)?;
-        while let Some(row) = rows.next().await.map_err(storage)? {
-            let payload: String = row.get(0).map_err(storage)?;
-            let received_at: i64 = row.get(1).map_err(storage)?;
-            let element: xmpp_parsers::minidom::Element = payload.parse().map_err(storage)?;
-            if received_at > through.timestamp_millis() || !target.matches_message_element(&element)
-            {
-                return Err(RevisionError::InvalidInput);
-            }
         }
     }
     Ok(())
@@ -654,12 +667,14 @@ async fn append_detached(
 ) -> Result<StoredEffect, RevisionError> {
     append.validate().map_err(storage)?;
     validate_session(revision, &append.session)?;
+    validate_session_watermarks(current, &append.session)?;
     if append.new_delivery || !append.evicted_sequences.is_empty() {
         return Err(RevisionError::Unsupported);
     }
     let distance = append.stanza.sequence.wrapping_sub(current.outbound_count);
     if append.session.outbound_count != append.stanza.sequence
         || append.session.last_acked != current.last_acked
+        || append.session.replay_gap_through != current.replay_gap_through
         || distance != 1
         || append
             .session

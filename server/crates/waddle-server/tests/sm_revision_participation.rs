@@ -275,6 +275,16 @@ async fn exercise(db: Database, second_db: Database) {
     ));
 
     let current = a.capture(&initial.stream_id).await.expect("before ACK");
+    let outstanding = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Retire {
+            revision: &current.revision,
+        },
+    };
+    assert!(matches!(
+        b.apply(&outstanding).await,
+        Err(RevisionError::OutstandingCustody)
+    ));
     let ack = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Acknowledge {
@@ -327,7 +337,7 @@ async fn exercise(db: Database, second_db: Database) {
     };
     assert!(matches!(
         a.apply(&invalid_tombstone).await,
-        Err(RevisionError::InvalidInput)
+        Err(RevisionError::Unsupported)
     ));
     let tombstone = Request {
         id: Uuid::new_v4(),
@@ -342,15 +352,15 @@ async fn exercise(db: Database, second_db: Database) {
             sequences: &[2],
         },
     };
-    assert_eq!(
-        a.apply(&tombstone).await.expect("tombstone").effect,
-        Effect::Tombstoned { removed: 1 }
-    );
+    assert!(matches!(
+        a.apply(&tombstone).await,
+        Err(RevisionError::Unsupported)
+    ));
     let current = b
         .capture(&initial.stream_id)
         .await
         .expect("after tombstone");
-    assert!(current.unacked.is_empty());
+    assert_eq!(current.unacked.len(), 1);
     let prune = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Prune {
@@ -373,8 +383,9 @@ async fn exercise(db: Database, second_db: Database) {
         Err(RevisionError::Storage(_))
     ));
 
-    let terminal_session = session("terminal-stream");
-    let terminal_frames = vec![frame(&terminal_session.stream_id, 1)];
+    let mut terminal_session = session("terminal-stream");
+    terminal_session.outbound_count = 0;
+    let terminal_frames = Vec::new();
     let terminal_create = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Create {
@@ -392,36 +403,6 @@ async fn exercise(db: Database, second_db: Database) {
         .capture(&terminal_session.stream_id)
         .await
         .expect("capture terminal fixture");
-    let outstanding = Request {
-        id: Uuid::new_v4(),
-        mutation: Mutation::Retire {
-            revision: &current.revision,
-        },
-    };
-    assert!(matches!(
-        b.apply(&outstanding).await,
-        Err(RevisionError::OutstandingCustody)
-    ));
-    let terminal_tombstone = Request {
-        id: Uuid::new_v4(),
-        mutation: Mutation::Tombstone {
-            revision: &current.revision,
-            target: &TombstoneTarget::Direct {
-                wire_id: "frame-1".to_owned(),
-                author: "bob@example.com".parse().expect("author"),
-                archive: "alice@example.com".parse().expect("archive"),
-            },
-            through: chrono::Utc::now(),
-            sequences: &[1],
-        },
-    };
-    a.apply(&terminal_tombstone)
-        .await
-        .expect("tombstone terminal fixture");
-    let current = b
-        .capture(&terminal_session.stream_id)
-        .await
-        .expect("before retire");
     let retire = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Retire {
@@ -616,20 +597,10 @@ async fn exercise(db: Database, second_db: Database) {
             sequences: &[1],
         },
     };
-    a.apply(&retract).await.expect("retract withheld frame");
-    let current = b
-        .capture(&two.stream_id)
-        .await
-        .expect("empty withheld stream");
-    let retire_withheld = Request {
-        id: Uuid::new_v4(),
-        mutation: Mutation::Retire {
-            revision: &current.revision,
-        },
-    };
-    b.apply(&retire_withheld)
-        .await
-        .expect("retire withheld stream");
+    assert!(matches!(
+        a.apply(&retract).await,
+        Err(RevisionError::Unsupported)
+    ));
     assert_eq!(
         a.readback(&second).await.expect("retained withheld result"),
         Readback::Applied(outcome)
@@ -735,6 +706,8 @@ async fn exercise(db: Database, second_db: Database) {
         a.apply(&refused).await,
         Err(RevisionError::GenerationChanged)
     ));
+
+    exercise_watermarks_and_coverage(&a, &b, &blocker_db, &principal).await;
 }
 
 #[tokio::test]
@@ -950,4 +923,284 @@ async fn postgres_revision_readback_after_backend_commit_reply_is_lost() {
         .execute(&admin)
         .await
         .expect("drop schema");
+}
+
+async fn exercise_watermarks_and_coverage(
+    a: &RevisionedSmStorage,
+    b: &RevisionedSmStorage,
+    db: &Database,
+    principal: &AuthenticatedPrincipalRef,
+) {
+    for (label, last) in [("normal", 0_u32), ("wrapped", u32::MAX - 1)] {
+        let mut source = session(&format!("revision-gap-{label}"));
+        source.last_acked = last;
+        source.outbound_count = last.wrapping_add(3);
+        source.replay_gap_through = Some(last.wrapping_add(2));
+        let frames = vec![frame(&source.stream_id, source.outbound_count)];
+
+        let mut missing_prefix = source.clone();
+        missing_prefix.replay_gap_through = None;
+        let bad = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Create {
+                generation: Uuid::new_v4(),
+                principal,
+                session: &missing_prefix,
+                unacked: &frames,
+                drained: &[],
+            },
+        };
+        assert!(matches!(
+            a.apply(&bad).await,
+            Err(RevisionError::InvalidInput)
+        ));
+
+        let mut internal_hole = source.clone();
+        internal_hole.outbound_count = last.wrapping_add(4);
+        internal_hole.replay_gap_through = Some(last.wrapping_add(1));
+        let hole_frames = vec![
+            frame(&source.stream_id, last.wrapping_add(2)),
+            frame(&source.stream_id, last.wrapping_add(4)),
+        ];
+        let bad = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Create {
+                generation: Uuid::new_v4(),
+                principal,
+                session: &internal_hole,
+                unacked: &hole_frames,
+                drained: &[],
+            },
+        };
+        assert!(matches!(
+            a.apply(&bad).await,
+            Err(RevisionError::InvalidInput)
+        ));
+
+        let valid = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Create {
+                generation: Uuid::new_v4(),
+                principal,
+                session: &source,
+                unacked: &frames,
+                drained: &[],
+            },
+        };
+        a.apply(&valid)
+            .await
+            .expect("create complete gapped suffix");
+        let captured = b
+            .capture(&source.stream_id)
+            .await
+            .expect("capture valid suffix");
+        for regressed_gap in [None, Some(last.wrapping_add(1))] {
+            let mut proposed = captured.session.clone();
+            proposed.replay_gap_through = regressed_gap;
+            let snapshot = Request {
+                id: Uuid::new_v4(),
+                mutation: Mutation::Snapshot {
+                    revision: &captured.revision,
+                    session: &proposed,
+                    unacked: &captured.unacked,
+                    drained: &[],
+                },
+            };
+            assert!(matches!(
+                a.apply(&snapshot).await,
+                Err(RevisionError::InvalidInput)
+            ));
+            proposed.outbound_count = proposed.outbound_count.wrapping_add(1);
+            let append = PersistedDetachedAppend {
+                stanza: frame(&source.stream_id, proposed.outbound_count),
+                session: proposed,
+                evicted_sequences: Vec::new(),
+                ingress_append: None,
+                new_delivery: false,
+            };
+            let request = Request {
+                id: Uuid::new_v4(),
+                mutation: Mutation::Append {
+                    revision: &captured.revision,
+                    append: &append,
+                },
+            };
+            assert!(matches!(
+                a.apply(&request).await,
+                Err(RevisionError::InvalidInput)
+            ));
+        }
+        let mut next = captured.session.clone();
+        next.outbound_count = next.outbound_count.wrapping_add(1);
+        let append = PersistedDetachedAppend {
+            stanza: frame(&source.stream_id, next.outbound_count),
+            session: next,
+            evicted_sequences: Vec::new(),
+            ingress_append: None,
+            new_delivery: false,
+        };
+        let request = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Append {
+                revision: &captured.revision,
+                append: &append,
+            },
+        };
+        b.apply(&request).await.expect("append preserves gap");
+        let captured = a
+            .capture(&source.stream_id)
+            .await
+            .expect("capture appended suffix");
+        assert_eq!(
+            captured.session.replay_gap_through,
+            source.replay_gap_through
+        );
+        let partial_ack = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &captured.revision,
+                h: last.wrapping_add(1),
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        a.apply(&partial_ack).await.expect("partial ACK");
+        let captured = b
+            .capture(&source.stream_id)
+            .await
+            .expect("capture partial ACK");
+        assert_eq!(
+            captured.session.replay_gap_through,
+            source.replay_gap_through
+        );
+        let covering_ack = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &captured.revision,
+                h: last.wrapping_add(2),
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        b.apply(&covering_ack).await.expect("covering ACK");
+        let captured = a
+            .capture(&source.stream_id)
+            .await
+            .expect("gap cleared by ACK");
+        assert_eq!(captured.session.replay_gap_through, None);
+        assert_eq!(captured.unacked.len(), 2);
+
+        // Simulate a storage corruption after a valid commit: an internal hole
+        // must make a fresh capture fail rather than mint a usable revision.
+        let mut tx = db.begin_immediate().await.expect("corruption fixture");
+        tx.execute(
+            "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+            waddle_server::db_params![source.stream_id.as_str(), i64::from(source.outbound_count)],
+        )
+        .await
+        .expect("remove retained suffix frame");
+        tx.commit().await.expect("commit fixture corruption");
+        assert!(matches!(
+            b.capture(&source.stream_id).await,
+            Err(RevisionError::InvalidInput)
+        ));
+    }
+
+    let source = session("revision-resume-ceiling");
+    let frames = vec![frame(&source.stream_id, 1)];
+    let create = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Create {
+            generation: Uuid::new_v4(),
+            principal,
+            session: &source,
+            unacked: &frames,
+            drained: &[],
+        },
+    };
+    a.apply(&create)
+        .await
+        .expect("create resume ceiling fixture");
+    let captured = b
+        .capture(&source.stream_id)
+        .await
+        .expect("capture resume ceiling");
+    let retire = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Acknowledge {
+            revision: &captured.revision,
+            h: 0,
+            mode: SmAcknowledgementMode::RetireForPromotion,
+        },
+    };
+    a.apply(&retire).await.expect("retire for promotion");
+    let captured = b
+        .capture(&source.stream_id)
+        .await
+        .expect("capture retired source");
+    assert_eq!(captured.session.max_resume_time, Some(0));
+    assert_eq!(captured.session.max_resume_duration, Duration::ZERO);
+    for (resume_time, resume_duration) in [
+        (Some(60), Duration::ZERO),
+        (Some(0), Duration::from_secs(60)),
+        (None, Duration::ZERO),
+    ] {
+        let mut resurrected = captured.session.clone();
+        resurrected.max_resume_time = resume_time;
+        resurrected.max_resume_duration = resume_duration;
+        let snapshot = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Snapshot {
+                revision: &captured.revision,
+                session: &resurrected,
+                unacked: &captured.unacked,
+                drained: &[],
+            },
+        };
+        assert!(matches!(
+            a.apply(&snapshot).await,
+            Err(RevisionError::InvalidInput)
+        ));
+        resurrected.outbound_count += 1;
+        let append = PersistedDetachedAppend {
+            stanza: frame(&source.stream_id, resurrected.outbound_count),
+            session: resurrected,
+            evicted_sequences: Vec::new(),
+            ingress_append: None,
+            new_delivery: false,
+        };
+        let append = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Append {
+                revision: &captured.revision,
+                append: &append,
+            },
+        };
+        assert!(matches!(
+            a.apply(&append).await,
+            Err(RevisionError::InvalidInput)
+        ));
+    }
+    let current = b
+        .capture(&source.stream_id)
+        .await
+        .expect("retired source unchanged");
+    assert_eq!(current.session.max_resume_time, Some(0));
+    assert_eq!(current.session.max_resume_duration, Duration::ZERO);
+
+    // Coverage work is proportional to supplied rows, not the counter range.
+    let mut huge = session("revision-huge-window");
+    huge.outbound_count = (1_u32 << 31) - 1;
+    let request = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Create {
+            generation: Uuid::new_v4(),
+            principal,
+            session: &huge,
+            unacked: &[],
+            drained: &[],
+        },
+    };
+    assert!(matches!(
+        a.apply(&request).await,
+        Err(RevisionError::InvalidInput)
+    ));
 }

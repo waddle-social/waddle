@@ -81,6 +81,7 @@ pub enum Mutation<'a> {
         revision: &'a Revision,
         window: SmAckWindow,
     },
+    /// Refused until durable tombstone terminal evidence fences future frames.
     Tombstone {
         revision: &'a Revision,
         target: &'a TombstoneTarget,
@@ -138,7 +139,6 @@ pub enum Effect {
     Appended,
     AlreadyAllocated { accepting_stream: SmSessionId },
     Acknowledged,
-    Tombstoned { removed: u64 },
     Retired,
 }
 

@@ -8,7 +8,8 @@
 //! never be paired with an older process-local snapshot.
 //!
 //! The owner explicitly installs the schema. Each operation owns its transaction,
-//! including its revision advance and immutable result receipt. A missing receipt
+//! including its revision advance and immutable result receipt. Tombstones remain
+//! unsupported until a durable terminal fences later generations and appends. A missing receipt
 //! after an uncertain commit is never evidence that the commit rolled back.
 
 mod digest;
