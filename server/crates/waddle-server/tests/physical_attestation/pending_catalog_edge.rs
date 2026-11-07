@@ -145,14 +145,36 @@ async fn pending_owner_pins_persistent_schema_and_reset_is_atomic() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
-    let db = Database::from_config(
-        "pending shadow owner",
-        &owner_config(&fixture, "pending_shadow_owner"),
-    )
-    .await
-    .expect("owner pool");
+    for sql in [
+        format!("CREATE FUNCTION {}.reject_name_eq(pg_catalog.name, pg_catalog.name) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'shadowed name operator'; END $$", fixture.target),
+        format!("CREATE OPERATOR {}.= (FUNCTION = {}.reject_name_eq, LEFTARG = pg_catalog.name, RIGHTARG = pg_catalog.name)", fixture.target, fixture.target),
+    ] {
+        sqlx::query(&sql).execute(&fixture.admin).await.expect("install name-operator shadow");
+    }
+    let mut config = owner_config(&fixture, "pending_shadow_owner");
+    let mut scoped = url::Url::parse(&config.database_url).expect("owner URL");
+    let retained = scoped
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    scoped
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(retained)
+        .append_pair(
+            "options",
+            &format!("-c search_path={},pg_catalog", fixture.target),
+        );
+    config.database_url = scoped.to_string();
+    let db = Database::from_config("pending shadow owner", &config)
+        .await
+        .expect("owner pool");
     {
         let conn = db.guard().await.expect("same backend");
+        conn.execute("SELECT 'x'::pg_catalog.name = 'x'::pg_catalog.name", ())
+            .await
+            .expect_err("the caller path selects the hostile name operator");
         conn.execute("CREATE TEMP TABLE pending_delivery (trap TEXT)", ())
             .await
             .expect("temporary shadow");

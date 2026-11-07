@@ -71,16 +71,35 @@ fn owner_error(error: impl std::fmt::Display) -> PendingStorageError {
 
 impl PostgresOwnerSchema {
     async fn capture(tx: &mut Transaction<'_>) -> Result<Self, PendingStorageError> {
+        // Resolve only the configured schema name before changing the path.
+        // Even a catalog-qualified table comparison could otherwise resolve a
+        // hostile operator from an earlier writable search-path entry.
+        let name = {
+            let mut rows = tx
+                .query("SELECT pg_catalog.current_schema()::text", ())
+                .await
+                .map_err(owner_error)?;
+            rows.next()
+                .await
+                .map_err(owner_error)?
+                .ok_or_else(|| owner_error("pending-delivery target schema missing"))?
+                .get::<Option<String>>(0)
+                .map_err(owner_error)?
+                .ok_or_else(|| owner_error("pending-delivery target schema missing"))?
+        };
+        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await
+            .map_err(owner_error)?;
         let mut rows = tx
             .query(
                 "SELECT n.nspname::text, n.oid::bigint, pg_catalog.hashtext(n.nspname::text), \
                     pg_catalog.hashtext(?::text), pg_catalog.hashtext(?::text) \
              FROM pg_catalog.pg_namespace n \
-             WHERE n.nspname = pg_catalog.current_schema() \
+             WHERE n.nspname = ? \
                AND n.oid <> pg_catalog.pg_my_temp_schema() \
                AND NOT pg_catalog.pg_is_other_temp_schema(n.oid) \
                AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')",
-                crate::db_params![RECOVERY_GATE_NAME, V1014_CLAIM_RESET_MARKER],
+                crate::db_params![RECOVERY_GATE_NAME, V1014_CLAIM_RESET_MARKER, name],
             )
             .await
             .map_err(owner_error)?;
