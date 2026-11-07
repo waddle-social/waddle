@@ -330,6 +330,7 @@ async fn pg17_v1_helper_attaches_real_owner_prepared_pubsub_and_rejects_drift() 
     DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, &profile)
         .await
         .expect("the exact H-owned helper and real store verify");
+    verify_restricted_v1_reader_catalog_order(&f, &profile).await;
     RoomEffectOutboxStore::verify_muc_room_runtime_v1(runtime.clone(), &profile)
         .await
         .expect("the A/H profile verifies the real MUC store");
@@ -809,6 +810,14 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
 ) {
     // Keep synchronized with the production PubSub schema gate.
     const PUBSUB_SCHEMA_ADVISORY_LOCK_KEY: i64 = 7_534_519_881_230_429_064;
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+        .fetch_one(&f.admin)
+        .await
+        .expect("read PostgreSQL version");
+    assert!(
+        (170_000..180_000).contains(&version),
+        "PubSub catalog witnesses require PostgreSQL 17"
+    );
 
     let mut catalog = f.admin.begin().await.expect("begin catalog holder");
     sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
@@ -821,7 +830,7 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
     let initialize = tokio::spawn(async move {
         DatabasePubSubStorage::initialize_owner(database, &identity_copy).await
     });
-    wait_for_owner_retry(f, application).await;
+    wait_for_pubsub_retry(f, application).await;
     let mut gate_probe = f.admin.begin().await.expect("begin gate probe");
     let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
         .bind(PUBSUB_SCHEMA_ADVISORY_LOCK_KEY)
@@ -836,6 +845,53 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
         .expect("catalog-blocked owner completes")
         .expect("join catalog-blocked owner")
         .expect("owner initializes after catalog release");
+
+    let raw_application = format!("pubsub_raw_{}", uuid::Uuid::new_v4().simple());
+    let mut raw_url = url::Url::parse(owner_database.database_url()).expect("raw owner URL");
+    let retained: Vec<_> = raw_url
+        .query_pairs()
+        .filter(|(key, _)| key != "application_name")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    raw_url
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("application_name", &raw_application);
+    let mut catalog = f.admin.begin().await.expect("begin raw catalog holder");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog)
+        .await
+        .expect("hold catalog-S for raw initializer");
+    let raw =
+        tokio::spawn(async move { DatabasePubSubStorage::open(Some(raw_url.as_str())).await });
+    wait_for_pubsub_retry(f, &raw_application).await;
+    let mut gate_probe = f.admin.begin().await.expect("begin raw gate probe");
+    let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+        .bind(PUBSUB_SCHEMA_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut *gate_probe)
+        .await
+        .expect("probe raw initializer gate");
+    assert!(
+        acquired,
+        "raw initializer must take catalog-X before its gate"
+    );
+    gate_probe.rollback().await.expect("release raw gate probe");
+    catalog
+        .rollback()
+        .await
+        .expect("release raw catalog holder");
+    drop(
+        tokio::time::timeout(Duration::from_secs(30), raw)
+            .await
+            .expect("raw initializer completes after catalog release")
+            .expect("join raw initializer")
+            .expect("initialize raw PubSub"),
+    );
+    DatabasePubSubStorage::initialize_owner(owner_database.clone(), identity)
+        .await
+        .expect("restore guarded owner marker after raw initialization");
 
     // Publish an incomplete marker and old schema version while the owner is
     // retrying its lower gate. It must see that committed state on retry.
@@ -873,7 +929,7 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
         tokio::spawn(
             async move { DatabasePubSubStorage::initialize_owner(database, &identity).await },
         );
-    wait_for_owner_retry(f, application).await;
+    wait_for_pubsub_retry(f, application).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let mut probe = f.admin.begin().await.expect("begin catalog probe");
@@ -922,7 +978,7 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
     );
 }
 
-async fn wait_for_owner_retry(f: &Fixture, application: &str) {
+async fn wait_for_pubsub_retry(f: &Fixture, application: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let rolled_back: bool = sqlx::query_scalar(
@@ -935,7 +991,7 @@ async fn wait_for_owner_retry(f: &Fixture, application: &str) {
             .bind(application)
             .fetch_one(&f.admin)
             .await
-            .expect("observe acknowledged PubSub owner rollback");
+            .expect("observe acknowledged PubSub rollback");
             if rolled_back {
                 break;
             }
@@ -943,7 +999,164 @@ async fn wait_for_owner_retry(f: &Fixture, application: &str) {
         }
     })
     .await
-    .expect("observe an acknowledged PubSub owner retry");
+    .expect("observe an acknowledged PubSub retry");
+}
+
+async fn verify_pubsub_reader_catalog_order_and_retry(f: &Fixture) {
+    const PUBSUB_GATE: i64 = 7_534_519_881_230_429_064;
+    let application = format!("pubsub_reader_{}", uuid::Uuid::new_v4().simple());
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "catalog-fenced PubSub reader",
+        attested_pool(
+            f.runtime_options.clone().application_name(&application),
+            f.config(),
+            1,
+            Duration::from_secs(3),
+        )
+        .expect("one-slot attested reader"),
+    );
+
+    let mut catalog = f.admin.begin().await.expect("begin catalog mutator");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog)
+        .await
+        .expect("hold catalog-X");
+    sqlx::query(&format!(
+        "UPDATE {}.pubsub_schema_marker SET owner_phase = 0 WHERE marker_id = 1",
+        f.target
+    ))
+    .execute(&mut *catalog)
+    .await
+    .expect("stage incomplete owner marker");
+    let attach_runtime = runtime.clone();
+    let attach =
+        tokio::spawn(async move { DatabasePubSubStorage::attach_existing(attach_runtime).await });
+    wait_for_pubsub_retry(f, &application).await;
+    let mut probe = f.admin.begin().await.expect("begin PubSub gate probe");
+    let available: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+        .bind(PUBSUB_GATE)
+        .fetch_one(&mut *probe)
+        .await
+        .expect("probe PubSub gate before catalog release");
+    assert!(
+        available,
+        "reader must not take PubSub gate before catalog-S"
+    );
+    probe.rollback().await.expect("release PubSub gate probe");
+    catalog.commit().await.expect("publish incomplete marker");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(20), attach)
+            .await
+            .expect("reader completes after catalog release")
+            .expect("join reader"),
+        Err(PubSubRuntimeAttachError::InvalidMarker)
+    ));
+    run_sql(
+        f,
+        &format!(
+            "UPDATE {}.pubsub_schema_marker SET owner_phase = 1 WHERE marker_id = 1",
+            f.target
+        ),
+    )
+    .await;
+
+    let mut gate = f.admin.begin().await.expect("begin PubSub gate holder");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(PUBSUB_GATE)
+        .execute(&mut *gate)
+        .await
+        .expect("hold PubSub gate");
+    let attach_runtime = runtime.clone();
+    let attach =
+        tokio::spawn(async move { DatabasePubSubStorage::attach_existing(attach_runtime).await });
+    wait_for_pubsub_retry(f, &application).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut probe = f.admin.begin().await.expect("begin catalog probe");
+            let available: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&mut *probe)
+                    .await
+                    .expect("probe catalog-X after reader rollback");
+            probe.rollback().await.expect("release catalog probe");
+            if available {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("contended PubSub gate must release catalog-S between retries");
+    attach.abort();
+    assert!(matches!(attach.await, Err(error) if error.is_cancelled()));
+    gate.rollback().await.expect("release PubSub gate");
+    DatabasePubSubStorage::attach_existing(runtime)
+        .await
+        .expect("reader recovers after cancellation");
+}
+
+async fn verify_restricted_v1_reader_catalog_order(
+    f: &Fixture,
+    profile: &RestrictedServingProfileV1,
+) {
+    const PUBSUB_GATE: i64 = 7_534_519_881_230_429_064;
+    let application = format!("pubsub_v1_{}", uuid::Uuid::new_v4().simple());
+    let runtime = waddle_server::test_support::database_from_attested_postgres_pool(
+        "catalog-fenced PubSub v1 reader",
+        attested_pool(
+            f.runtime_options.clone().application_name(&application),
+            f.config(),
+            1,
+            Duration::from_secs(3),
+        )
+        .expect("one-slot v1 reader"),
+    );
+    let mut catalog = f.admin.begin().await.expect("begin catalog mutator");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog)
+        .await
+        .expect("hold catalog-X");
+    sqlx::query(&format!("ALTER ROLE {} LOGIN", profile.helper.as_str()))
+        .execute(&mut *catalog)
+        .await
+        .expect("stage unsafe helper role");
+    let attach_runtime = runtime.clone();
+    let attach_profile = profile.clone();
+    let verify = tokio::spawn(async move {
+        DatabasePubSubStorage::verify_restricted_profile_v1(&attach_runtime, &attach_profile).await
+    });
+    wait_for_pubsub_retry(f, &application).await;
+    let mut probe = f.admin.begin().await.expect("begin PubSub gate probe");
+    let available: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+        .bind(PUBSUB_GATE)
+        .fetch_one(&mut *probe)
+        .await
+        .expect("probe PubSub gate before catalog release");
+    assert!(
+        available,
+        "v1 reader must not take its gate before catalog-S"
+    );
+    probe.rollback().await.expect("release PubSub gate probe");
+    catalog.commit().await.expect("publish unsafe helper role");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(20), verify)
+            .await
+            .expect("v1 reader completes after catalog release")
+            .expect("join v1 reader")
+            .is_err(),
+        "v1 reader accepted helper-role drift committed during its wait"
+    );
+    run_sql(
+        f,
+        &format!("ALTER ROLE {} NOLOGIN", profile.helper.as_str()),
+    )
+    .await;
+    DatabasePubSubStorage::verify_restricted_profile_v1(&runtime, profile)
+        .await
+        .expect("restored v1 role graph verifies");
 }
 
 #[tokio::test]
@@ -1383,6 +1596,7 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
     .await
     .expect("attach inherited global owner-prepared schema");
     assert!(attached_global, "PubSub must share the exact main pool");
+    verify_pubsub_reader_catalog_order_and_retry(&f).await;
     let concurrent_runtime = waddle_server::test_support::database_from_attested_postgres_pool(
         "second one-slot PubSub runtime",
         attested_pool(
