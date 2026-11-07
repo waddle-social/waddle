@@ -1,6 +1,9 @@
 //! Restricted PostgreSQL PubSub attachment and owner bootstrap.
 #![cfg(feature = "test-support")]
 
+#[path = "push_notification_custody/catalog_fence.rs"]
+mod push_notification_custody_catalog_fence;
+
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
