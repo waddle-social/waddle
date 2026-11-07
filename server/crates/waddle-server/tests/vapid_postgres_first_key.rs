@@ -3,14 +3,22 @@
 //! Each bootstrap environment is installed in a fresh subprocess before its
 //! runtime starts. The database URL must point at a disposable PG17 cluster.
 
+#[path = "../src/test_support/postgres_proxy.rs"]
+pub mod postgres_proxy;
+
 use std::ffi::OsString;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
+use sqlx::postgres::PgConnectOptions;
 use sqlx::PgPool;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Notify;
 use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::push_service::vapid_storage::VapidStorage;
@@ -110,7 +118,19 @@ fn spawn_child(url: &str, mode: &str, key: Option<OsString>) -> Child {
     spawn_child_with_schema(url, mode, key, None)
 }
 
-fn finish_child(child: Child) {
+fn finish_child_with_timeout(mut child: Child, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    loop {
+        if child.try_wait().expect("poll VAPID process").is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("terminate stalled VAPID process");
+            let _ = child.wait();
+            panic!("VAPID subprocess exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let output = child.wait_with_output().expect("wait for VAPID process");
     assert!(
         output.status.success(),
@@ -118,6 +138,10 @@ fn finish_child(child: Child) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn finish_child(child: Child) {
+    finish_child_with_timeout(child, Duration::from_secs(60));
 }
 
 fn run_child(url: &str, mode: &str, key: Option<OsString>) {
@@ -213,6 +237,7 @@ async fn pg17_vapid_subprocess_entry() {
                 .contains("permission denied for function pg_control_system")),
             _ => panic!("marker identity check did not fail on the denied function"),
         },
+        "commit_unknown" => assert!(matches!(result, Err(VapidLoadError::CommitIndeterminate))),
         _ => panic!("unknown VAPID test mode"),
     }
 }
@@ -413,8 +438,8 @@ async fn pg17_push_marker_committed_during_gate_wait_is_rechecked_and_invalidate
     child_url
         .query_pairs_mut()
         .append_pair("application_name", &application);
-    let child = spawn_child(child_url.as_str(), "reuse", None);
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let mut child = spawn_child(child_url.as_str(), "reuse", None);
+    let retry_observed = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let saw_retry: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
@@ -437,8 +462,12 @@ async fn pg17_push_marker_committed_during_gate_wait_is_rechecked_and_invalidate
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("provisioning retried without holding catalog-X");
+    .await;
+    if retry_observed.is_err() {
+        child.kill().expect("terminate stalled VAPID process");
+        let _ = child.wait();
+        panic!("provisioning did not retry without holding catalog-X");
+    }
     let absent: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NULL")
         .bind(format!("{}.push_service_vapid_keys", f.schema))
         .fetch_one(&f.admin)
@@ -671,4 +700,115 @@ async fn pg17_raw_role_without_control_privilege_fails_closed_on_marked_schema()
         .await
         .expect("drop restricted role");
     cluster.close().await;
+}
+
+async fn withhold_commit_reply(
+    listener: tokio::net::TcpListener,
+    target: PgConnectOptions,
+    held: Arc<Notify>,
+    release: Arc<Notify>,
+) -> std::io::Result<()> {
+    let (client, _) = listener.accept().await?;
+    let server = postgres_proxy::connect_local_postgres(&target).await?;
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = tokio::io::split(server);
+    let forward = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+    });
+    loop {
+        let tag = server_read.read_u8().await?;
+        let length = server_read.read_u32().await?;
+        if !(4..=1_048_576).contains(&length) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid PostgreSQL response length",
+            ));
+        }
+        let mut body = vec![0; (length - 4) as usize];
+        server_read.read_exact(&mut body).await?;
+        if tag == b'C' && body == b"COMMIT\0" {
+            held.notify_one();
+            release.notified().await;
+            break;
+        }
+        client_write.write_u8(tag).await?;
+        client_write.write_u32(length).await?;
+        client_write.write_all(&body).await?;
+    }
+    forward.abort();
+    let _ = forward.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg17_commit_reply_timeout_is_indeterminate_and_retry_reuses_committed_key() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let target = PgConnectOptions::from_str(&url).expect("PostgreSQL connection options");
+    if postgres_proxy::ensure_local_target(&target).is_err() {
+        eprintln!("skipping plaintext proxy witness for nonlocal PostgreSQL target");
+        return;
+    }
+    let f = Fixture::new(&url).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local PostgreSQL proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    let held = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let proxy = tokio::spawn(withhold_commit_reply(
+        listener,
+        target,
+        Arc::clone(&held),
+        Arc::clone(&release),
+    ));
+    let proxy_url = postgres_proxy::local_proxy_url(&f.url, port).expect("proxy URL");
+    let mut child = spawn_child(proxy_url.as_str(), "commit_unknown", None);
+    if tokio::time::timeout(Duration::from_secs(10), held.notified())
+        .await
+        .is_err()
+    {
+        child.kill().expect("terminate stalled VAPID process");
+        let _ = child.wait();
+        proxy.abort();
+        panic!("proxy did not observe a COMMIT reply");
+    }
+    assert_eq!(f.count().await, 1, "server committed before reply was held");
+    let committed_kid: String = sqlx::query_scalar(&format!(
+        "SELECT kid FROM {}.push_service_vapid_keys",
+        f.schema
+    ))
+    .fetch_one(&f.admin)
+    .await
+    .expect("read committed key");
+    tokio::time::timeout(
+        Duration::from_secs(14),
+        tokio::task::spawn_blocking(move || {
+            finish_child_with_timeout(child, Duration::from_secs(12))
+        }),
+    )
+    .await
+    .expect("COMMIT wait exceeded its bound")
+    .expect("join VAPID process wait");
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), proxy)
+        .await
+        .expect("proxy ends")
+        .expect("join proxy")
+        .expect("proxy I/O");
+
+    // This fixture has one known primary; the retry itself must reacquire both
+    // fences and reread the durable row before returning the existing signer.
+    run_child(&f.url, "reuse", None);
+    let retried_kid: String = sqlx::query_scalar(&format!(
+        "SELECT kid FROM {}.push_service_vapid_keys",
+        f.schema
+    ))
+    .fetch_one(&f.admin)
+    .await
+    .expect("read key after fenced retry");
+    assert_eq!(committed_kid, retried_kid);
+    assert_eq!(f.count().await, 1);
+    f.cleanup().await;
 }
