@@ -15,6 +15,8 @@ use sqlx::postgres::{PgConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
 
+static PUSH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Fixture {
     cluster_admin: PgPool,
     admin: PgPool,
@@ -245,6 +247,19 @@ impl Fixture {
             "second push-service runtime",
             second_attested,
         );
+
+        match VapidStorage::load_or_ephemeral(runtime_database.clone(), &[7_u8; 32]).await {
+            Err(waddle_xmpp::push::types::VapidLoadError::DbWrite {
+                stage: waddle_xmpp::push::types::VapidDbWriteStage::Initialize,
+                source,
+            }) if source
+                .to_string()
+                .contains("attested VAPID runtime handles must use load_attested") => {}
+            Err(error) => {
+                bail!("raw VAPID initialization on attested handle had wrong error: {error}")
+            }
+            Ok(_) => bail!("raw VAPID initialization accepted an attested runtime handle"),
+        }
 
         DatabasePushServiceStore::initialize_owner(&owner_database, &identity).await?;
         if marker_phase(&self.admin, &self.target).await? != 0 {
@@ -823,8 +838,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn postgres_push_owner_preparation_and_attested_attach_contract() {
-    static CONTROL_CATALOG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _serial = CONTROL_CATALOG_LOCK.lock().await;
+    let _serial = PUSH_TEST_LOCK.lock().await;
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping PostgreSQL Push Service owner/attach test: test URL not set");
         return;
@@ -835,12 +849,146 @@ async fn postgres_push_owner_preparation_and_attested_attach_contract() {
     result.expect("owner-prepared PostgreSQL Push Service runtime attach contract");
 }
 
+#[tokio::test]
+async fn postgres_raw_vapid_initialization_waits_for_catalog_fence() {
+    let _serial = PUSH_TEST_LOCK.lock().await;
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!("skipping PostgreSQL raw VAPID catalog-fence test: test URL not set");
+        return;
+    };
+    let fixture = Fixture::new(url).await;
+    let result = async {
+        let server_version_num: i32 =
+            sqlx::query_scalar("SELECT pg_catalog.current_setting('server_version_num')::integer")
+                .fetch_one(&fixture.admin)
+                .await?;
+        if server_version_num / 10_000 != 17 {
+            bail!(
+                "raw VAPID catalog-fence test requires PostgreSQL 17, found {server_version_num}"
+            );
+        }
+        let owner_url = push_attach_url_with_role_and_schema(
+            &fixture.base_url,
+            &fixture.owner,
+            &fixture.target,
+        );
+        let owner_database = Database::from_config(
+            "raw VAPID catalog-fence test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, owner_url),
+        )
+        .await?;
+        verify_raw_vapid_initialization_waits_for_catalog_fence(
+            &owner_database,
+            &fixture.admin,
+            &fixture.target,
+        )
+        .await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    fixture.cleanup().await;
+    result.expect("raw VAPID PostgreSQL initialization catalog fence");
+}
+
 async fn marker_phase(admin: &PgPool, schema: &str) -> Result<i64> {
     Ok(sqlx::query_scalar(&format!(
         "SELECT owner_phase FROM {schema}.push_service_schema_marker WHERE marker_id = 1"
     ))
     .fetch_one(admin)
     .await?)
+}
+
+async fn verify_raw_vapid_initialization_waits_for_catalog_fence(
+    owner_database: &Database,
+    admin: &PgPool,
+    schema: &str,
+) -> Result<()> {
+    let mut marker = owner_database.begin().await?;
+    marker
+        .execute(
+            "CREATE TABLE push_service_schema_marker (\
+               marker_id INTEGER PRIMARY KEY, owner_phase BIGINT NOT NULL)",
+            (),
+        )
+        .await?;
+    marker
+        .execute(
+            "INSERT INTO push_service_schema_marker (marker_id, owner_phase) VALUES (1, 1)",
+            (),
+        )
+        .await?;
+    marker.commit().await?;
+
+    let mut catalog = owner_database.begin().await?;
+    catalog
+        .query(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)",
+            crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+    let started_at = activity_checkpoint(admin).await?;
+    let database = owner_database.clone();
+    let initialization =
+        tokio::spawn(async move { VapidStorage::load_or_ephemeral(database, &[8_u8; 32]).await });
+    let backend_pid = match wait_for_catalog_try_and_rollback(admin, &started_at).await {
+        Ok(backend_pid) => backend_pid,
+        Err(error) => {
+            initialization.abort();
+            catalog.rollback().await?;
+            let _ = initialization.await;
+            return Err(error);
+        }
+    };
+
+    let initialization_pending = !initialization.is_finished();
+    let ddl_absent: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.to_regclass(format('%I.push_service_vapid_keys', $1)) IS NULL \
+           AND pg_catalog.to_regclass(format('%I.idx_push_service_vapid_keys_active', $1)) IS NULL",
+    )
+    .bind(schema)
+    .fetch_one(admin)
+    .await?;
+    let marker_while_blocked = marker_phase(admin, schema).await?;
+    let catalog_x_available: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(admin)
+            .await?;
+    let push_gate_available: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
+            .fetch_one(admin)
+            .await?;
+    if !initialization_pending
+        || !ddl_absent
+        || marker_while_blocked != 1
+        || catalog_x_available
+        || !push_gate_available
+    {
+        initialization.abort();
+        catalog.rollback().await?;
+        let _ = initialization.await;
+        bail!(
+            "raw VAPID catalog fence probe failed for backend {backend_pid}: pending={initialization_pending}, ddl_absent={ddl_absent}, marker={marker_while_blocked}, catalog_x_available={catalog_x_available}, push_gate_available={push_gate_available}"
+        );
+    }
+
+    catalog.rollback().await?;
+    initialization.await??;
+    let ddl_visible: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.to_regclass(format('%I.push_service_vapid_keys', $1)) IS NOT NULL \
+           AND pg_catalog.to_regclass(format('%I.idx_push_service_vapid_keys_active', $1)) IS NOT NULL",
+    )
+    .bind(schema)
+    .fetch_one(admin)
+    .await?;
+    let marker_after_commit = marker_phase(admin, schema).await?;
+    if !ddl_visible || marker_after_commit != 0 {
+        bail!(
+            "raw VAPID DDL or Push marker invalidation was not committed: ddl_visible={ddl_visible}, marker={marker_after_commit}"
+        );
+    }
+    Ok(())
 }
 
 async fn activity_checkpoint(admin: &PgPool) -> Result<String> {
