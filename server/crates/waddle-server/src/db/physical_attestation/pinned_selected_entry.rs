@@ -228,20 +228,20 @@ impl PinnedSelectedEntry {
 /// backend to the pool. `close_on_drop` is asynchronous; it discards the pool
 /// session but is not proof the server already terminated it. Successful,
 /// acknowledged rollbacks explicitly keep it.
-struct DiscardOnDrop {
+pub(super) struct DiscardOnDrop {
     connection: PoolConnection<Postgres>,
     keep: bool,
 }
 
 impl DiscardOnDrop {
-    fn new(connection: PoolConnection<Postgres>) -> Self {
+    pub(super) fn new(connection: PoolConnection<Postgres>) -> Self {
         Self {
             connection,
             keep: false,
         }
     }
 
-    fn keep(&mut self) {
+    pub(super) fn keep(&mut self) {
         self.keep = true;
     }
 }
@@ -268,7 +268,7 @@ impl Drop for DiscardOnDrop {
     }
 }
 
-async fn rollback_transaction(tx: Transaction<'_, Postgres>) -> bool {
+pub(super) async fn rollback_transaction(tx: Transaction<'_, Postgres>) -> bool {
     match tokio::time::timeout(Duration::from_secs(5), tx.rollback()).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) | Err(_) => false,
