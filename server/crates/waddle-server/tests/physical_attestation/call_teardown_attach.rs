@@ -1,15 +1,18 @@
 //! Restricted PostgreSQL attachment for the call-teardown outbox.
 
 use super::{
-    attested_pool, install, test_url, url_with_schema, Database, DatabaseConfig, DatabaseDriver,
-    Duration, Fixture, CATALOG_GRANT_LOCK,
+    attested_pool, install, proxy_runtime_options, test_url, url_with_schema, Database,
+    DatabaseConfig, DatabaseDriver, DatabaseError, Duration, Fixture, CATALOG_GRANT_LOCK,
 };
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection, PgPool};
 use waddle_server::call_teardown_outbox::{
     CallTeardownOutboxError, CallTeardownOutboxStore, CallTeardownRuntimeAttachError,
 };
 use waddle_server::db::lineage::PgIdentity;
-use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
+use waddle_server::db::physical_attestation::{
+    PhysicalAttestationConfig, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+};
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
 
 const OWNER_GATE: i64 = 6_841_445_497_037_937_997;
@@ -216,19 +219,22 @@ async fn wait_backend_exit(admin: &PgPool, pid: i32) {
 }
 
 async fn assert_replacement_checkout(db: &Database, cancelled_pid: i32) {
+    let replacement = checkout_pid(db).await;
+    assert_ne!(replacement, i64::from(cancelled_pid));
+}
+
+async fn checkout_pid(db: &Database) -> i64 {
     let connection = db.guard().await.expect("replacement checkout");
     let mut rows = connection
         .query("SELECT pg_catalog.pg_backend_pid()::bigint", ())
         .await
         .expect("replacement backend PID");
-    let replacement: i64 = rows
-        .next()
+    rows.next()
         .await
         .expect("replacement PID row")
         .expect("replacement PID exists")
         .get(0)
-        .expect("decode replacement PID");
-    assert_ne!(replacement, i64::from(cancelled_pid));
+        .expect("decode replacement PID")
 }
 
 fn spawn_owner(
@@ -320,6 +326,50 @@ async fn exercise_owner_entry(
     .await
     .expect("inspect cancelled upgrade");
     assert!(!partial, "cancelled owner leaves no partial upgrade");
+
+    let mut relation_holder = fixture.admin.begin().await.expect("relation holder");
+    sqlx::query(&format!("LOCK TABLE {relation} IN ACCESS SHARE MODE"))
+        .execute(&mut *relation_holder)
+        .await
+        .expect("hold conflicting relation lock");
+    let task = spawn_owner(db.clone(), identity.clone());
+    wait_relation_waiter(
+        &fixture.admin,
+        application,
+        &relation,
+        "AccessExclusiveLock",
+    )
+    .await;
+    let error = tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .expect("owner relation wait is bounded")
+        .expect("join timed-out owner")
+        .expect_err("conflicting relation lock must time out");
+    assert!(matches!(
+        error,
+        CallTeardownOutboxError::Database(DatabaseError::Internal(sqlx::Error::Database(error)))
+            if error.code().as_deref() == Some("55P03")
+    ));
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&mut *relation_holder)
+                    .await
+                    .expect("try catalog-X after relation timeout");
+            if acquired {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("timed-out owner releases catalog-X while relation remains held");
+    relation_holder
+        .rollback()
+        .await
+        .expect("release relation holder");
 
     let mut lower = fixture.admin.begin().await.expect("lower-gate blocker");
     sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
@@ -514,6 +564,122 @@ async fn exercise_reader_entry(
         .expect("reader attaches");
 }
 
+async fn hold_reader_rollback_reply(
+    listener: tokio::net::TcpListener,
+    upstream: PgConnectOptions,
+    held: tokio::sync::oneshot::Sender<()>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (client, _) = listener.accept().await?;
+    let server = crate::postgres_proxy::connect_local_postgres(&upstream).await?;
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = tokio::io::split(server);
+    let forward = async move {
+        tokio::io::copy(&mut client_read, &mut server_write)
+            .await
+            .map(|_| ())
+    };
+    let backward = async move {
+        let mut began = false;
+        let mut held = Some(held);
+        loop {
+            let tag = server_read.read_u8().await?;
+            let length = server_read.read_u32().await?;
+            if !(4..=1_048_576).contains(&length) {
+                return Err(std::io::Error::other("invalid backend frame"));
+            }
+            let mut body = vec![0; (length - 4) as usize];
+            server_read.read_exact(&mut body).await?;
+            if tag == b'C' && body == b"BEGIN\0" {
+                began = true;
+            }
+            if began && tag == b'C' && body == b"ROLLBACK\0" {
+                held.take()
+                    .expect("first rollback")
+                    .send(())
+                    .map_err(|_| std::io::Error::other("holder dropped"))?;
+                std::future::pending::<()>().await;
+            }
+            client_write.write_u8(tag).await?;
+            client_write.write_u32(length).await?;
+            client_write.write_all(&body).await?;
+        }
+    };
+    tokio::select! { result = forward => result, result = backward => result }
+}
+
+async fn exercise_reader_rollback(
+    fixture: &Fixture,
+    attestation: &PhysicalAttestationConfig,
+    node_identity: &SharedNodeIdentity,
+) {
+    let single_pool = attested_pool(
+        fixture.runtime_options.clone(),
+        attestation.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("single-connection attested pool");
+    let single = waddle_server::test_support::database_from_attested_postgres_pool(
+        "call teardown rollback reuse",
+        single_pool,
+    );
+    let before = checkout_pid(&single).await;
+    CallTeardownOutboxStore::attach_existing(single.clone(), node_identity.clone())
+        .await
+        .expect("reader rollback acknowledged");
+    let after = checkout_pid(&single).await;
+    assert_eq!(before, after, "acknowledged rollback returns the checkout");
+    drop(single);
+
+    // Fault injection is restricted to a local plaintext PostgreSQL proxy.
+    if crate::postgres_proxy::ensure_local_target(&fixture.admin_options).is_err() {
+        return;
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind rollback proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    let (held, waiting) = tokio::sync::oneshot::channel();
+    let proxy = tokio::spawn(hold_reader_rollback_reply(
+        listener,
+        fixture.admin_options.clone(),
+        held,
+    ));
+    let proxied = attested_pool(
+        proxy_runtime_options(fixture, port).application_name("call-teardown-lost-rollback"),
+        attestation.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("proxied attested pool");
+    let proxied = waddle_server::test_support::database_from_attested_postgres_pool(
+        "call teardown lost rollback reply",
+        proxied,
+    );
+    let task = tokio::spawn({
+        let node_identity = node_identity.clone();
+        async move { CallTeardownOutboxStore::attach_existing(proxied, node_identity).await }
+    });
+    tokio::time::timeout(Duration::from_secs(8), waiting)
+        .await
+        .expect("reader reaches rollback")
+        .expect("proxy holds rollback reply");
+    let error = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("rollback acknowledgement is bounded")
+        .expect("join reader")
+        .err()
+        .expect("unacknowledged rollback must not attach");
+    assert!(matches!(
+        runtime_error(error),
+        CallTeardownRuntimeAttachError::Database(DatabaseError::CatalogMutationRollbackUnconfirmed)
+    ));
+    proxy.abort();
+    let _ = proxy.await;
+}
+
 #[tokio::test]
 async fn call_teardown_attaches_only_to_prepared_restricted_main_pool() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -584,7 +750,7 @@ async fn call_teardown_attaches_only_to_prepared_restricted_main_pool() {
                 .runtime_options
                 .clone()
                 .application_name(&reader_application),
-            attestation,
+            attestation.clone(),
             2,
             Duration::from_secs(3),
         )
@@ -738,6 +904,7 @@ async fn call_teardown_attaches_only_to_prepared_restricted_main_pool() {
         1
     );
     exercise_reader_entry(&fixture, &runtime, &node_identity, &reader_application).await;
+    exercise_reader_rollback(&fixture, &attestation, &node_identity).await;
     assert!(runtime
         .guard()
         .await

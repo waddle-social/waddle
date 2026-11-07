@@ -13,6 +13,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
         let mut tx = db
             .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(OWNER_SCHEMA_ADVISORY_LOCK_KEY)])
             .await?;
+        bound_postgres_owner_waits(&mut tx).await?;
         apply_postgres_schema(&mut tx).await?;
         tx.commit().await?;
         return Ok(());
@@ -67,6 +68,7 @@ pub(super) async fn initialize_owner(
     let mut tx = db
         .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(OWNER_SCHEMA_ADVISORY_LOCK_KEY)])
         .await?;
+    bound_postgres_owner_waits(&mut tx).await?;
     pin_owner_schema(&mut tx, identity).await?;
     apply_postgres_schema(&mut tx).await?;
     super::runtime_attach::verify_owner_shape(
@@ -77,6 +79,15 @@ pub(super) async fn initialize_owner(
     .await
     .map_err(CallTeardownOutboxError::OwnerSchemaShape)?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn bound_postgres_owner_waits(
+    tx: &mut Transaction<'_>,
+) -> Result<(), CallTeardownOutboxError> {
+    tx.execute("SET LOCAL lock_timeout = '5s'", ()).await?;
+    tx.execute("SET LOCAL statement_timeout = '30s'", ())
+        .await?;
     Ok(())
 }
 

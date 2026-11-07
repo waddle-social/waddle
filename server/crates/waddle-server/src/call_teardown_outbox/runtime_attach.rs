@@ -1,10 +1,12 @@
 //! Read-only verification of the trusted-owner prepared call-teardown outbox.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 const TABLE: &str = "call_teardown_outbox";
+const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CallTeardownRuntimeAttachError {
@@ -244,7 +246,9 @@ pub(super) async fn verify(db: &Database) -> Result<(), CallTeardownRuntimeAttac
     verify_indexes(&mut tx, schema).await?;
     verify_table_acl(&mut tx, schema).await?;
 
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(ROLLBACK_TIMEOUT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(())
 }
 
