@@ -7416,6 +7416,10 @@ mod pinned_hook_tests;
 mod pinned_entry_tests;
 
 #[cfg(feature = "test-support")]
+#[path = "physical_attestation/pinned_selected_entry.rs"]
+mod pinned_selected_entry_tests;
+
+#[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_mam_lookup.rs"]
 mod pinned_mam_lookup_tests;
 

@@ -7,6 +7,7 @@
 //! must be independently quiescent throughout this observation and its use.
 
 use sqlx::postgres::types::Oid;
+use sqlx::{PgConnection, Postgres, Transaction as SqlxTransaction};
 use thiserror::Error;
 
 use super::{quote_identifier, PhysicalAttestationError, PinnedRuntimeAuthority};
@@ -56,6 +57,35 @@ pub(super) async fn verify_pinned_epoch_manifest_catalog(
     Ok(())
 }
 
+pub(super) async fn verify_pinned_epoch_manifest_catalog_sqlx(
+    tx: &mut SqlxTransaction<'_, Postgres>,
+    authority: &PinnedRuntimeAuthority,
+) -> Result<(), PinnedCatalogError> {
+    let schema = &authority.config.postgres().schema.name.0;
+    let qualified_schema = quote_identifier(schema);
+    let connection: &mut PgConnection = &mut **tx;
+    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await?;
+
+    verify_catalog_connection(connection, authority).await?;
+    lock_relation_connection(connection, &qualified_schema, "ingress_protocol_epoch").await?;
+    verify_catalog_connection(connection, authority).await?;
+    lock_relation_connection(
+        connection,
+        &qualified_schema,
+        "ingress_epoch_guard_manifest",
+    )
+    .await?;
+    verify_catalog_connection(connection, authority).await?;
+
+    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
+        .bind(format!("{qualified_schema}, pg_temp"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
 async fn lock_relation(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -64,10 +94,18 @@ async fn lock_relation(
     let connection = tx
         .postgres_connection()
         .ok_or(PhysicalAttestationError::PostgresRequired)?;
+    lock_relation_connection(connection, schema, relation).await
+}
+
+async fn lock_relation_connection(
+    connection: &mut PgConnection,
+    schema: &str,
+    relation: &'static str,
+) -> Result<(), PinnedCatalogError> {
     sqlx::query(&format!(
         "LOCK TABLE ONLY {schema}.{relation} IN ACCESS SHARE MODE"
     ))
-    .execute(connection)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
@@ -79,6 +117,13 @@ async fn verify_catalog(
     let connection = tx
         .postgres_connection()
         .ok_or(PhysicalAttestationError::PostgresRequired)?;
+    verify_catalog_connection(connection, authority).await
+}
+
+async fn verify_catalog_connection(
+    connection: &mut PgConnection,
+    authority: &PinnedRuntimeAuthority,
+) -> Result<(), PinnedCatalogError> {
     let epoch = Oid(authority.epoch_relation_oid);
     let manifest = Oid(authority.guard_manifest_relation_oid);
     let schema_oid = Oid(authority.config.postgres().schema.oid);

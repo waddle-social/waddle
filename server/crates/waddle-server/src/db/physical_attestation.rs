@@ -27,7 +27,9 @@ pub use installer::{
     DarkInstallerPins, DarkPreparedInstallation, InstallationObservation, InstallationStatus,
 };
 mod pinned_hook;
-pub use pinned_hook::{pinned_attested_pool, PinnedRuntimeAuthority};
+pub use pinned_hook::{
+    pinned_attested_pool, PinnedRuntimeAuthority, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+};
 mod pinned_catalog;
 pub use pinned_catalog::PinnedCatalogError;
 #[cfg(feature = "test-support")]
@@ -41,6 +43,8 @@ pub use catalog_mutation_fence::{
 };
 mod pinned_entry;
 pub use pinned_entry::DarkPinnedEntryError;
+mod pinned_selected_entry;
+pub use pinned_selected_entry::{PinnedSelectedEntry, PinnedSelectedEntryError};
 mod pinned_mam;
 #[cfg(not(feature = "test-support"))]
 pub(crate) use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};

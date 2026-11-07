@@ -16,6 +16,16 @@ use super::{
 use crate::db::read_only_timeout::{bound_postgres_session_waits, timeout_millis};
 use crate::db::DarkMigrationLedgerPins;
 
+/// Shared protocol key used by protected readers and cooperative catalog
+/// mutators on the same PostgreSQL database. The adjacent `...991` through
+/// `...998` keys are already assigned to clustering claims, migration ledger,
+/// lineage, MUC/outbox schemas, call teardown, and push schema locks. Keep this
+/// protocol on its own key and acquire it before lineage and ledger locks.
+pub const CATALOG_MUTATION_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_999;
+
+const CATALOG_GUARD_WAIT: Duration = Duration::from_secs(15);
+const CATALOG_GUARD_POLL: Duration = Duration::from_millis(20);
+
 /// Immutable operator-provisioned runtime authority. The connection being
 /// checked must never be the source of these pins. This bundle binds the
 /// physical, ledger, epoch and guard identities to one complete configuration;
@@ -106,9 +116,14 @@ impl PinnedRuntimeAuthority {
 }
 
 /// Construct a pool whose fresh and reused physical sessions each pass the
-/// pinned checkout proof. It requires a direct, session-preserving PG17 primary
-/// and an independently enforced privileged catalog and role mutation boundary.
+/// pinned checkout proof. Each hook temporarily holds the cooperative shared
+/// catalog fence on the same backend before its first protected catalog read;
+/// it releases and acknowledges that fence before lending or idling the session.
+/// It requires a direct, session-preserving PG17 primary and an independently
+/// enforced privileged catalog and role mutation boundary.
 /// The pool does not authorize later transactions or production attachment.
+/// Old backends and privileged external mutators must be cut off or separately
+/// quiesced; the advisory protocol cannot constrain a nonparticipant.
 ///
 /// SQLx discards sessions on hook errors and on cancellation while acquiring.
 /// Its client deadline cannot prove that a pre-existing server-side operation
@@ -129,18 +144,22 @@ pub fn pinned_attested_pool(
     }
     let on_connect = pins.clone();
     let before_acquire = pins.clone();
+    let hook_guard_wait = acquire_timeout
+        .saturating_sub(Duration::from_millis(100))
+        .min(CATALOG_GUARD_WAIT);
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(max_connections)
         .acquire_timeout(acquire_timeout)
         .after_connect(move |connection, _| {
             let authority = on_connect.clone();
-            Box::pin(async move { checkout(connection, &authority).await })
+            Box::pin(async move { checkout(connection, &authority, hook_guard_wait).await })
         })
         .before_acquire(move |connection, _| {
             let authority = before_acquire.clone();
+            let guard_wait = hook_guard_wait;
             Box::pin(async move {
-                checkout(connection, &authority).await?;
+                checkout(connection, &authority, guard_wait).await?;
                 Ok(true)
             })
         })
@@ -158,8 +177,9 @@ pub fn pinned_attested_pool(
 async fn checkout(
     connection: &mut PgConnection,
     authority: &PinnedRuntimeAuthority,
+    guard_wait: Duration,
 ) -> Result<(), sqlx::Error> {
-    checkout_inner(connection, authority)
+    checkout_inner(connection, authority, guard_wait)
         .await
         .map_err(|_| sqlx::Error::Protocol("pinned physical attestation refused".to_owned()))
 }
@@ -167,6 +187,7 @@ async fn checkout(
 async fn checkout_inner(
     connection: &mut PgConnection,
     authority: &PinnedRuntimeAuthority,
+    guard_wait: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if <Postgres as sqlx::Database>::TransactionManager::get_transaction_depth(connection) != 0 {
         return Err("SQLx transaction still active".into());
@@ -187,8 +208,37 @@ async fn checkout_inner(
     sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
         .execute(&mut *connection)
         .await?;
-    reject_assumed_role(connection, &authority.config).await?;
 
+    // The session guard is temporary: it protects the exact hook reads on
+    // this backend and is released before the connection is lent or idled.
+    // Selected writes acquire the transaction-scoped form in their own first
+    // statement and keep it through commit.
+    acquire_catalog_shared(connection, guard_wait).await?;
+    let checked = async {
+        reject_assumed_role(connection, &authority.config).await?;
+        checkout_attestor(connection, authority).await?;
+        // The same-backend fence remains held through every catalog/ACL read
+        // and final session cleanup. It is released only immediately before
+        // the connection can be lent or returned idle.
+        reject_runtime_temp_privilege(connection).await?;
+        discard_temporary_relations(connection).await?;
+        normalize_search_path(connection, &authority.config).await?;
+        reject_assumed_role(connection, &authority.config).await?;
+        reject_runtime_temp_privilege(connection).await?;
+        timeouts.restore(connection).await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    let released = release_catalog_shared(connection).await;
+    checked?;
+    released?;
+    Ok(())
+}
+
+async fn checkout_attestor(
+    connection: &mut PgConnection,
+    authority: &PinnedRuntimeAuthority,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let restore_path = format!(
         "{}, pg_temp",
         quote_identifier(&authority.config.postgres().schema.name.0)
@@ -207,16 +257,59 @@ async fn checkout_inner(
     // A successful rollback response is required before the session can be
     // lent. Any error or cancellation causes SQLx to discard the connection.
     tx.rollback().await?;
-    // The pinned preflight bounded ACL material before using the privilege
-    // helper, and verified the runtime's effective TEMP prohibition. Repeat
-    // it after rollback before clearing any retained temporary relations.
-    reject_runtime_temp_privilege(connection).await?;
-    discard_temporary_relations(connection).await?;
-    normalize_search_path(connection, &authority.config).await?;
-    reject_assumed_role(connection, &authority.config).await?;
-    reject_runtime_temp_privilege(connection).await?;
-    timeouts.restore(connection).await?;
     Ok(())
+}
+
+async fn acquire_catalog_shared(
+    connection: &mut PgConnection,
+    wait: Duration,
+) -> Result<(), sqlx::Error> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(sqlx::Error::Protocol(
+                "catalog mutation fence remained contended".to_owned(),
+            ));
+        }
+        match tokio::time::timeout(
+            remaining,
+            sqlx::query_scalar::<_, bool>("SELECT pg_catalog.pg_try_advisory_lock_shared($1)")
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .fetch_one(&mut *connection),
+        )
+        .await
+        {
+            Ok(Ok(true)) => return Ok(()),
+            Ok(Ok(false)) => {
+                tokio::time::sleep(CATALOG_GUARD_POLL.min(remaining)).await;
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(sqlx::Error::Protocol(
+                    "catalog mutation fence acquisition timed out".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
+async fn release_catalog_shared(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let released = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query_scalar::<_, bool>("SELECT pg_catalog.pg_advisory_unlock_shared($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(&mut *connection),
+    )
+    .await
+    .map_err(|_| sqlx::Error::Protocol("catalog mutation fence release timed out".to_owned()))??;
+    if released {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(
+            "catalog mutation fence release was not acknowledged".to_owned(),
+        ))
+    }
 }
 
 async fn reject_assumed_role(
