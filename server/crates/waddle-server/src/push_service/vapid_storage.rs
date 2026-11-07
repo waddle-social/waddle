@@ -1145,13 +1145,12 @@ fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
     // Wrap the decoded bytes in Zeroizing so the raw P-256 scalar zeroes
     // out of heap when `bytes` falls out of scope, regardless of whether
     // `from_slice` succeeds.
-    let bytes = Zeroizing::new(
-        URL_SAFE_NO_PAD
-            .decode(raw.trim_end_matches('='))
-            // DecodeError can include the offending input byte. Do not retain
-            // any part of a malformed bootstrap secret in the error chain.
-            .map_err(|_| VapidEnvParseError::Base64urlDecode)?,
-    );
+    let mut bytes = Zeroizing::new(Vec::new());
+    URL_SAFE_NO_PAD
+        .decode_vec(raw.trim_end_matches('='), &mut bytes)
+        // DecodeError can include the offending input byte. Do not retain
+        // any part of a malformed bootstrap secret in the error chain.
+        .map_err(|_| VapidEnvParseError::Base64urlDecode)?;
     if bytes.len() != 32 {
         return Err(VapidEnvParseError::InvalidLength { found: bytes.len() }.into());
     }
