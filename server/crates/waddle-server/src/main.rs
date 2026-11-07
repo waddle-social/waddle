@@ -73,26 +73,25 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                 let document = document
                     .into_string()
                     .map_err(|_| anyhow::anyhow!("invalid runtime attestation document"))?;
+                let release_git_sha = std::env::var("WADDLE_GIT_SHA").map_err(|_| {
+                    db::runtime_startup::RuntimeStartupError::ReleaseIdentityMissing
+                })?;
                 let identity = db::runtime_startup::RuntimeStartupIdentity::from_json(
                     &document,
                     &lineage_config,
+                    &release_git_sha,
                 )?;
                 let limits = db::bootstrap::RuntimePoolLimits {
                     main_connections: db_runtime.pool_size,
                     ingress_connections: server_config.ingress.pool_size,
                     acquire_timeout: db_runtime.acquire_timeout,
                 };
-                let control_plane = server_config.clustering.enabled.then_some(
-                    db::bootstrap::ControlPlanePoolLimits {
-                        connections: db_runtime.control_plane_pool_size,
-                        acquire_timeout: db::CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
-                    },
+                let preparation = identity.preflight(&db_runtime.database_url, limits).await?;
+                info!(
+                    transition_id = %preparation.transition_id(),
+                    "Restricted runtime pinned read-only preflight passed; serving remains disabled"
                 );
-                let pool = identity
-                    .attach(&db_runtime.database_url, limits, control_plane)
-                    .await?;
-                info!("Restricted database attached with physical and ledger verification");
-                (pool, None, None)
+                anyhow::bail!(db::runtime_startup::RuntimeStartupError::UnconvertedStores);
             }
             None => {
                 // The existing owner startup remains for SQLite and legacy
