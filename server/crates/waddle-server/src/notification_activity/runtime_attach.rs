@@ -1,6 +1,7 @@
 //! Read-only PostgreSQL attachment checks shared by notification stores.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use super::schema::{
     ACTIVITY_OWNER_STATE_REVISION, ACTIVITY_OWNER_STATE_REVISION_CHECK,
@@ -9,6 +10,9 @@ use super::schema::{
 use crate::db::lineage::PgIdentity;
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 use thiserror::Error;
+
+const ATTACH_INSPECTION_WAIT: Duration = Duration::from_secs(60);
+const ATTACH_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 pub(crate) const CUSTODY_GATE: CatalogFenceLock =
     CatalogFenceLock::SharedPair(ACTIVITY_SCHEMA_GATE.0, ACTIVITY_SCHEMA_GATE.1);
@@ -27,6 +31,8 @@ pub enum DurableStoreAttachError {
     ActiveSchemaMismatch,
     #[error("could not verify the PostgreSQL {setting} bound for notification store attachment")]
     InvalidTimeoutSetting { setting: &'static str },
+    #[error("notification store attachment inspection timed out")]
+    InspectionTimeout,
     #[error("failed to inspect notification store relation {table}")]
     Relation {
         table: &'static str,
@@ -293,28 +299,37 @@ pub(crate) async fn verify_attested_table(
     let mut tx = db
         .begin_catalog_fenced_read_only_with_idle_bound(locks)
         .await?;
-    crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
-        .await
-        .map_err(|error| match error {
-            crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
-                DurableStoreAttachError::InvalidTimeoutSetting { setting }
-            }
-            crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
-                DurableStoreAttachError::Database(error)
-            }
-        })?;
+    let deadline = tokio::time::Instant::now() + ATTACH_INSPECTION_WAIT;
+    let inspection = tokio::time::timeout_at(deadline, async {
+        crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+            .await
+            .map_err(|error| match error {
+                crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
+                    DurableStoreAttachError::InvalidTimeoutSetting { setting }
+                }
+                crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                    DurableStoreAttachError::Database(error)
+                }
+            })?;
 
-    // The activity gate is already held by the catalog-fenced begin helper.
-    // Push registrations use the same direct-reader contract without an
-    // activity gate; both acquire catalog-S before relation and marker locks.
-    lock_attested_table_after_gate_tx(&mut tx, schema, contract).await?;
+        // The activity gate is already held by the catalog-fenced begin helper.
+        // Push registrations use the same direct-reader contract without an
+        // activity gate; both acquire catalog-S before relation and marker locks.
+        lock_attested_table_after_gate_tx(&mut tx, schema, contract).await?;
 
-    // The attestation covers the same connection that holds catalog-S, the
-    // qualified relation locks, and performs every catalog inspection below.
-    // READ COMMITTED gives each post-lock inspection a fresh catalog snapshot.
-    capability.attest_transaction(&mut tx).await?;
-    verify_attested_table_tx(&mut tx, identity, contract).await?;
-    tx.rollback().await?;
+        // The attestation covers the same connection that holds catalog-S,
+        // the qualified relation locks, and performs every catalog inspection
+        // below. READ COMMITTED gives each inspection a fresh catalog snapshot.
+        capability.attest_transaction(&mut tx).await?;
+        verify_attested_table_tx(&mut tx, identity, contract).await?;
+        Ok::<_, DurableStoreAttachError>(())
+    })
+    .await
+    .unwrap_or(Err(DurableStoreAttachError::InspectionTimeout));
+    if !tx.rollback_bounded_discard(ATTACH_ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
+    inspection?;
     Ok(())
 }
 
