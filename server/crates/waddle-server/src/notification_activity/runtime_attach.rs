@@ -258,10 +258,11 @@ pub(crate) const PUSH_REGISTRATIONS_CONTRACT: TableContract = TableContract {
 };
 
 /// Validate one owner-created table on the exact attested PostgreSQL main
-/// pool. The transaction is read-only and bounded, and its qualified
-/// `SHARE UPDATE EXCLUSIVE` relation lock is acquired before the first catalog
-/// snapshot. This blocks schema changes that could add triggers or foreign
-/// keys during validation while allowing ordinary row writers to continue.
+/// pool. The transaction is read-only and bounded. It acquires catalog-S
+/// before the activity gate (for activity) and before its qualified
+/// `SHARE UPDATE EXCLUSIVE` relation lock. This blocks schema changes that
+/// could add triggers or foreign keys during validation while allowing
+/// ordinary row writers to continue.
 pub(crate) async fn verify_attested_table(
     db: &Database,
     contract: &TableContract,
@@ -284,19 +285,14 @@ pub(crate) async fn verify_attested_table(
         .map_err(|_| DurableStoreAttachError::InvalidSchema)?;
     let activity_contract = contract.name == ACTIVITY_CONTRACT.name;
 
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    if !activity_contract {
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (),
-        )
+    let locks = if activity_contract {
+        &[CUSTODY_GATE][..]
+    } else {
+        &[]
+    };
+    let mut tx = db
+        .begin_catalog_fenced_read_only_with_idle_bound(locks)
         .await?;
-    }
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|error| match error {
@@ -308,12 +304,14 @@ pub(crate) async fn verify_attested_table(
             }
         })?;
 
-    lock_attested_table_tx(&mut tx, schema, contract).await?;
+    // The activity gate is already held by the catalog-fenced begin helper.
+    // Push registrations use the same direct-reader contract without an
+    // activity gate; both acquire catalog-S before relation and marker locks.
+    lock_attested_table_after_gate_tx(&mut tx, schema, contract).await?;
 
-    // The attestation covers the same connection that holds the qualified
-    // relation locks and performs every catalog inspection below. Activity
-    // uses READ COMMITTED for a fresh post-lock catalog snapshot; non-Activity
-    // contracts keep their existing REPEATABLE READ attachment isolation.
+    // The attestation covers the same connection that holds catalog-S, the
+    // qualified relation locks, and performs every catalog inspection below.
+    // READ COMMITTED gives each post-lock inspection a fresh catalog snapshot.
     capability.attest_transaction(&mut tx).await?;
     verify_attested_table_tx(&mut tx, identity, contract).await?;
     tx.rollback().await?;
