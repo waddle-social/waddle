@@ -335,3 +335,32 @@ closed until the exact combined path passes its acceptance gate.
   Selection needs a provisioned writer authority, cooperative catalog
   mutator/old-backend cutoff, and the full same-transaction role and epoch
   contract. No startup path selects any of these three candidates.
+
+## Selected authority work after #2247
+
+#2247 merged the candidates above without changing the serving selector.
+The next grouped implementation must join them at a single database effect
+boundary before either restricted-startup refusal can be removed.
+
+1. Specify the runtime role and callable-function boundary. A direct call by
+   the runtime login to a granted SECURITY DEFINER receipt function currently
+   bypasses the candidate catalog and singleton guards. Make each permitted
+   write entry enforce the same authority or prove an exact old-login/backend
+   cutoff and closed caller set. Verify owner, function, relation, trigger,
+   grant, role-membership, journal and epoch pins on the serving backend.
+2. Bind the deployment singleton slot, live node incarnation, claim, catalog
+   fence, protocol epoch, SM revision and effect receipt to one bounded
+   transaction. A separate long-lived guard transaction cannot authorize a
+   later mutation on another backend. Bound statement, lock, idle and total
+   lifetime; close uncertain backends and reconcile exact operation identity
+   after an indeterminate COMMIT. Do not infer rollback from a timeout.
+3. Convert every competing live, detached, batch and scheduled writer and
+   their pending/GC/ACK/tombstone paths to that boundary. Serialize actor
+   capture with outbound publication and define positive settlement for every
+   retained custody interval. Cut off old-role/raw writers before selection.
+4. Prove the combined role, claim, catalog, SM and all-store path on the
+   actual main pool with PostgreSQL 17 independent-process races, SQLite
+   compatibility, native WebSocket/XEP-0198 and exact startup/rollback
+   schedules. Only then open the restricted-startup gates. Keep workflows
+   absent until #2046 implementation is ready for `cuenv sync -A` and
+   exact-release CI.
