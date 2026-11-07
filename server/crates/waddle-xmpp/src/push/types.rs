@@ -548,6 +548,8 @@ pub enum VapidLoadError {
     InvalidStorageState,
     #[error("VAPID stored key failed integrity validation")]
     InvalidStoredKey,
+    #[error("VAPID PostgreSQL provisioning timed out before COMMIT")]
+    ProvisionTimedOut,
     #[error("VAPID PostgreSQL commit outcome is indeterminate")]
     CommitIndeterminate,
     #[error("env var WADDLE_VAPID_SUB parse failed: {0}")]

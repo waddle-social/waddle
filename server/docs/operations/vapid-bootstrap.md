@@ -25,11 +25,15 @@ Unmarked raw bootstrap does not need this identity-read privilege. Follow the
 database-lineage role setup for the grant; this API never grants it itself.
 
 The signer is returned only after the database acknowledges COMMIT. A lost
-acknowledgement leaves the commit outcome indeterminate: inspect or retry
-through the same fenced path, which rereads durable state before deciding
-whether to create a key. A failed boot alone does not prove that no key was
-stored. SQLite retains its legacy behavior: an environment key is persisted
-when supplied; otherwise the latest active key is loaded or a key generated.
+acknowledgement leaves the commit outcome indeterminate. Resolve the original
+primary and backend, or establish that a retry uses the same fenced primary
+and durable lineage. A retry on that primary reacquires both fences and reads
+durable state before deciding whether to create a key. This API does not
+establish continuity across calls or reconcile a lossy failover to a new
+primary. Socket closure alone does not prove the original backend released its
+locks. A failed boot alone does not prove that no key was stored. SQLite
+retains its legacy behavior: an environment key is persisted when supplied;
+otherwise the latest active key is loaded or a key generated.
 
 The running process does not clear the variable. Database and telemetry
 threads may already be reading the environment, and clearing it would not

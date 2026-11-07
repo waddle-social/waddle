@@ -23,6 +23,7 @@ use crate::db::DatabaseError;
 use crate::db::Rows;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::Aes256Gcm;
@@ -88,6 +89,8 @@ const SEALED_PREFIX: &str = "waddle-vapid-v1";
 /// Current root-key version. Multi-version rotation lands in a follow-up;
 /// for v1, all rows are sealed at version 1 and read at version 1.
 const CURRENT_ROOT_KEY_VERSION: u32 = 1;
+const POSTGRES_PROVISION_TIMEOUT: Duration = Duration::from_secs(35);
+const POSTGRES_COMMIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Durable VAPID keypair storage for the Push Service component.
 ///
@@ -238,12 +241,56 @@ impl VapidStorage {
             )])
             .await
             .map_err(pg_provision_error)?;
-        tx.execute("SET LOCAL lock_timeout = '3s'", ())
-            .await
-            .map_err(pg_provision_error)?;
-        tx.execute("SET LOCAL statement_timeout = '30000ms'", ())
-            .await
-            .map_err(pg_provision_error)?;
+        // The server-side timeouts do not bound a lost response. Cancel the
+        // operation on a client deadline; the fenced checkout is already marked
+        // for discard, including while a cancelled command is still in flight.
+        let signer = tokio::time::timeout(
+            POSTGRES_PROVISION_TIMEOUT,
+            Self::prepare_postgres_signer_tx(&mut tx, root_key),
+        )
+        .await
+        .map_err(|_| VapidLoadError::ProvisionTimedOut)??;
+        // A timed-out or failed COMMIT can have committed. Dropping the
+        // uncertain checkout does not prove that its backend released locks.
+        let committed = tokio::time::timeout(POSTGRES_COMMIT_TIMEOUT, tx.commit()).await;
+        if !matches!(committed, Ok(Ok(()))) {
+            return Err(VapidLoadError::CommitIndeterminate);
+        }
+        Ok(Arc::new(signer))
+    }
+
+    async fn prepare_postgres_signer_tx(
+        tx: &mut Transaction<'_>,
+        root_key: &[u8],
+    ) -> Result<InProcessVapidSigner, VapidLoadError> {
+        for (show, set, cap_millis) in [
+            (
+                "SHOW idle_in_transaction_session_timeout",
+                "SET LOCAL idle_in_transaction_session_timeout = '30000ms'",
+                30_000,
+            ),
+            ("SHOW lock_timeout", "SET LOCAL lock_timeout = '3s'", 3_000),
+            (
+                "SHOW statement_timeout",
+                "SET LOCAL statement_timeout = '30000ms'",
+                30_000,
+            ),
+        ] {
+            let mut rows = tx.query(show, ()).await.map_err(pg_provision_error)?;
+            let value: String = rows
+                .next()
+                .await
+                .map_err(pg_provision_error)?
+                .ok_or(VapidLoadError::InvalidStorageState)?
+                .get(0)
+                .map_err(pg_provision_error)?;
+            drop(rows);
+            let millis = crate::db::read_only_timeout::timeout_millis(&value)
+                .ok_or(VapidLoadError::InvalidStorageState)?;
+            if millis == 0 || millis > cap_millis {
+                tx.execute(set, ()).await.map_err(pg_provision_error)?;
+            }
+        }
 
         let mut rows = tx
             .query(
@@ -268,29 +315,29 @@ impl VapidStorage {
         if schema.is_empty() {
             return Err(VapidLoadError::InvalidStorageState);
         }
-        super::owner::verify_no_temp_push_relations_tx(&mut tx)
+        super::owner::verify_no_temp_push_relations_tx(tx)
             .await
             .map_err(|_| VapidLoadError::InvalidStorageState)?;
-        super::owner::lock_existing_push_relations_tx(&mut tx, &schema)
+        super::owner::lock_existing_push_relations_tx(tx, &schema)
             .await
             .map_err(pg_provision_error)?;
 
         let table_exists = super::runtime_attach::vapid_relation_exists_tx(
-            &mut tx,
+            tx,
             &schema,
             super::runtime_attach::VAPID_TABLE_NAME,
         )
         .await
         .map_err(pg_provision_error)?;
         let vapid_marker_exists = super::runtime_attach::vapid_relation_exists_tx(
-            &mut tx,
+            tx,
             &schema,
             super::runtime_attach::VAPID_MARKER_TABLE_NAME,
         )
         .await
         .map_err(pg_provision_error)?;
         let push_marker_exists = super::runtime_attach::vapid_relation_exists_tx(
-            &mut tx,
+            tx,
             &schema,
             "push_service_schema_marker",
         )
@@ -301,7 +348,7 @@ impl VapidStorage {
         }
 
         let identity = if push_marker_exists || vapid_marker_exists {
-            Some(live_identity_for_markers_tx(&mut tx, &schema).await?)
+            Some(live_identity_for_markers_tx(tx, &schema).await?)
         } else {
             None
         };
@@ -309,20 +356,20 @@ impl VapidStorage {
             if push_marker_exists {
                 // An incomplete marker is expected after a raw initializer,
                 // but malformed or foreign marker data is never accepted.
-                super::runtime_attach::verify_marker_shape_and_data_tx(&mut tx, identity)
+                super::runtime_attach::verify_marker_shape_and_data_tx(tx, identity)
                     .await
                     .map_err(|_| VapidLoadError::InvalidStorageState)?;
             }
         }
         let marked_kid = if vapid_marker_exists {
-            super::runtime_attach::verify_vapid_marker_shape_tx(&mut tx, &schema)
+            super::runtime_attach::verify_vapid_marker_shape_tx(tx, &schema)
                 .await
                 .map_err(|_| VapidLoadError::InvalidStorageState)?;
             let identity = identity
                 .as_ref()
                 .ok_or(VapidLoadError::InvalidStorageState)?;
             Some(
-                super::runtime_attach::verify_vapid_marker_data_tx(&mut tx, identity)
+                super::runtime_attach::verify_vapid_marker_data_tx(tx, identity)
                     .await
                     .map_err(|_| VapidLoadError::InvalidStorageState)?,
             )
@@ -340,7 +387,7 @@ impl VapidStorage {
         if !table_exists {
             // DDL and any first insert invalidate a completed Push marker in
             // this same transaction. Only the owner phase may restore it.
-            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+            super::owner::invalidate_completion_marker_tx(tx, &schema)
                 .await
                 .map_err(pg_provision_error)?;
             let quoted_schema = crate::db::physical_attestation::quote_identifier(&schema);
@@ -366,17 +413,17 @@ impl VapidStorage {
             .map_err(pg_provision_error)?;
         }
         if vapid_marker_exists {
-            super::runtime_attach::verify_vapid_table_shape_tx(&mut tx, &schema)
+            super::runtime_attach::verify_vapid_table_shape_tx(tx, &schema)
                 .await
                 .map_err(|_| VapidLoadError::InvalidStorageState)?;
-        } else if super::runtime_attach::verify_raw_vapid_table_shape_tx(&mut tx, &schema)
+        } else if super::runtime_attach::verify_raw_vapid_table_shape_tx(tx, &schema)
             .await
             .map_err(|_| VapidLoadError::InvalidStorageState)?
         {
             // Old raw initialization created this index if absent. Only
             // repair it after validating the remaining table shape; never
             // repair an owner-marked relation here.
-            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+            super::owner::invalidate_completion_marker_tx(tx, &schema)
                 .await
                 .map_err(pg_provision_error)?;
             let quoted_schema = crate::db::physical_attestation::quote_identifier(&schema);
@@ -389,7 +436,7 @@ impl VapidStorage {
             )
             .await
             .map_err(pg_provision_error)?;
-            if super::runtime_attach::verify_raw_vapid_table_shape_tx(&mut tx, &schema)
+            if super::runtime_attach::verify_raw_vapid_table_shape_tx(tx, &schema)
                 .await
                 .map_err(|_| VapidLoadError::InvalidStorageState)?
             {
@@ -397,13 +444,13 @@ impl VapidStorage {
             }
         }
 
-        let active_count = super::runtime_attach::count_active_vapid_keys_tx(&mut tx, &schema)
+        let active_count = super::runtime_attach::count_active_vapid_keys_tx(tx, &schema)
             .await
             .map_err(pg_provision_error)?;
         if active_count > 1 {
             return Err(VapidLoadError::MultipleActiveKeys);
         }
-        let record = super::runtime_attach::select_vapid_active_key_tx(&mut tx, &schema)
+        let record = super::runtime_attach::select_vapid_active_key_tx(tx, &schema)
             .await
             .map_err(pg_provision_error)?;
         if let Some(marked_kid) = marked_kid {
@@ -423,7 +470,7 @@ impl VapidStorage {
             InProcessVapidSigner::try_new(kid, secret_key)
                 .map_err(|source| VapidLoadError::SignerInit { source })?
         } else {
-            if super::runtime_attach::count_vapid_keys_tx(&mut tx, &schema)
+            if super::runtime_attach::count_vapid_keys_tx(tx, &schema)
                 .await
                 .map_err(pg_provision_error)?
                 != 0
@@ -446,7 +493,7 @@ impl VapidStorage {
                     stage: VapidDbWriteStage::SealPrivateKey,
                     source: Box::new(source),
                 })?;
-            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+            super::owner::invalidate_completion_marker_tx(tx, &schema)
                 .await
                 .map_err(pg_provision_error)?;
             let quoted_schema = crate::db::physical_attestation::quote_identifier(&schema);
@@ -468,13 +515,7 @@ impl VapidStorage {
             .map_err(pg_provision_error)?;
             signer
         };
-        // The catalog-fenced transaction discards its checkout when COMMIT is
-        // cancelled or unacknowledged. A later call must reacquire both fences
-        // and read durable state; it cannot infer rollback from socket closure.
-        tx.commit()
-            .await
-            .map_err(|_| VapidLoadError::CommitIndeterminate)?;
-        Ok(Arc::new(signer))
+        Ok(signer)
     }
 
     async fn try_new(db: Database, root_key: &[u8]) -> Result<Self, XmppError> {
