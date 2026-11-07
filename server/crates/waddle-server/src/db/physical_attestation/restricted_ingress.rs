@@ -8,7 +8,8 @@
 //! contract must be reviewed before any selector can consume this profile.
 //! The separately installed physical-identity attestor is an independent trust
 //! prerequisite: this observer neither verifies its body nor fences its installer.
-//! Epoch AS does not cover that attestor's pre-transaction pool-hook calls.
+//! The legacy pool hook runs before the transaction fence; those earlier calls
+//! still require independently quiescent catalog and role mutation.
 
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use thiserror::Error;
 
 use super::{
     attest_connection, quote_identifier, AttestationMode, AttestedPgPool, PgRoleName,
-    PhysicalAttestationError,
+    PhysicalAttestationError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 
 mod catalog;
@@ -88,10 +89,22 @@ impl AttestedPgPool {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut connection = self.acquire().await?;
             let config = &self.writer_capability.config;
-            let mut tx = connection.begin().await?;
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
-                .execute(&mut *tx)
+            let mut tx = connection
+                .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
                 .await?;
+            // Try rather than wait: a contended transaction must roll back
+            // without retaining an older snapshot while the mutator proceeds.
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !acquired {
+                tx.rollback().await?;
+                return Err(RestrictedIngressProfileError::Mismatch(
+                    "catalog mutation fence",
+                ));
+            }
             sqlx::query("SET LOCAL statement_timeout = '5s'")
                 .execute(&mut *tx)
                 .await?;

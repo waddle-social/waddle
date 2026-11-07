@@ -7,6 +7,7 @@ use sqlx::postgres::PgPool;
 use sqlx::{Connection, PgConnection};
 use waddle_server::db::physical_attestation::{
     attested_pool, AttestedPgPool, PgRoleName, RestrictedIngressProfileError,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
@@ -111,6 +112,27 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
         .expect("exact restricted profile");
     assert_eq!(observed.manifest_version, 2);
     assert_eq!(observed.epoch_relation_oid, epoch_oid);
+    let mut mutation = fixture
+        .admin
+        .begin()
+        .await
+        .expect("catalog mutator transaction");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *mutation)
+        .await
+        .expect("hold exclusive catalog mutation fence");
+    assert!(matches!(
+        pool.inspect_restricted_ingress_profile(&api_role, epoch_oid)
+            .await,
+        Err(RestrictedIngressProfileError::Mismatch(
+            "catalog mutation fence"
+        ))
+    ));
+    mutation.rollback().await.expect("release catalog mutator");
+    pool.inspect_restricted_ingress_profile(&api_role, epoch_oid)
+        .await
+        .expect("diagnostic resumes after catalog mutation fence");
     transaction_probe::exercise(&fixture, &config, &api_role, epoch_oid).await;
     catalog_preflight::exercise(&fixture, &pool, &api_role, epoch_oid).await;
     assert!(
