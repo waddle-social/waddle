@@ -342,10 +342,13 @@ closed until the exact combined path passes its acceptance gate.
 The next grouped implementation must join them at a single database effect
 boundary before either restricted-startup refusal can be removed.
 
-1. Specify the runtime role and callable-function boundary. R currently has
-   67 direct ingress API EXECUTE grants, including the underlying receipt
-   writer that bypasses the P21 operation journal. A Rust-only wrapper around
-   one receipt function cannot close this surface. Make every permitted write
+1. Specify the runtime role and callable-function boundary. At the #2247
+   baseline, R had 67 direct ingress API EXECUTE grants, including underlying
+   receipt writers that bypass the P21 operation journal. This branch's dark
+   P21 role transition revokes the two unjournaled receipt writers; the
+   remaining callable ingress surface still needs a selected-path proof. A
+   Rust-only wrapper around one receipt function cannot close this surface.
+   Make every permitted write
    entry enforce the same authority or prove an exact old-login/backend
    cutoff and closed caller set. Verify owner, function, relation, trigger,
    grant, role-membership, journal and epoch pins on the serving backend.
