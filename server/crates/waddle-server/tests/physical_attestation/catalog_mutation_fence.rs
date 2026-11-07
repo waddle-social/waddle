@@ -6,14 +6,20 @@ use std::time::Duration;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 use waddle_server::db::physical_attestation::{
-    inspect_dark_fenced_attestor, CatalogFenceExclusive, CatalogFenceIndex, CatalogFenceShared,
-    CatalogMutationFenceError, DarkFencedAttestorError, DarkFencedAttestorPause,
-    DarkFencedAttestorPauses, DarkPhysicalAttestationPins, PhysicalAttestationConfig,
+    inspect_dark_fenced_attestor, run_dark_fenced_operation, CatalogFenceExclusive,
+    CatalogFenceIndex, CatalogFenceShared, CatalogMutationFenceError, DarkFencedAttestorError,
+    DarkFencedAttestorPause, DarkFencedAttestorPauses, DarkFencedOperation,
+    DarkFencedOperationCompletion, DarkFencedOperationError, DarkFencedOperationPauses,
+    DarkPhysicalAttestationError, DarkPhysicalAttestationPins, PhysicalAttestationConfig,
 };
 
-use super::{dark_attestor_fixture, test_url, Fixture, CATALOG_GRANT_LOCK};
+use super::{
+    dark_attestor_fixture, lose_commit_reply_proxy, proxy_runtime_options, test_url, Fixture,
+    CATALOG_GRANT_LOCK,
+};
 
 const WAIT: Duration = Duration::from_secs(15);
+const LINEAGE_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_993;
 
 fn key() -> i64 {
     let id = uuid::Uuid::new_v4();
@@ -827,6 +833,447 @@ async fn fenced_attestor_cancellation_and_lost_backend_fail_closed() {
     let replacement = CatalogFenceExclusive::acquire(&fixture.admin_options, key, WAIT)
         .await
         .expect("exclusive fence after rejected proof rolls back");
+    replacement.release().await.expect("release replacement");
+    fixture.cleanup().await;
+}
+
+async fn create_operation_fixture(fixture: &Fixture) {
+    sqlx::query(&format!(
+        "CREATE TABLE {}.catalog_fence_operation_probe (operation_id uuid PRIMARY KEY)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("create fixed operation fixture");
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT ON {}.catalog_fence_operation_probe TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant fixed operation access");
+}
+
+async fn operation_present(fixture: &Fixture, operation_id: uuid::Uuid) -> bool {
+    sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {}.catalog_fence_operation_probe WHERE operation_id = $1)",
+        fixture.target
+    ))
+    .bind(operation_id)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read fixed operation on an independent session")
+}
+
+fn spawn_fenced_operation(
+    fixture: &Fixture,
+    application: &str,
+    key: i64,
+    config: PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    operation: DarkFencedOperation,
+    pauses: DarkFencedOperationPauses,
+) -> tokio::task::JoinHandle<Result<(), DarkFencedOperationError>> {
+    let options = fixture
+        .runtime_options
+        .clone()
+        .application_name(application);
+    tokio::spawn(async move {
+        run_dark_fenced_operation(&options, key, WAIT, &config, pins, operation, pauses).await
+    })
+}
+
+async fn observe_operation_pause(
+    ready: tokio::sync::oneshot::Receiver<i32>,
+    task: &mut tokio::task::JoinHandle<Result<(), DarkFencedOperationError>>,
+) -> i32 {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::select! {
+            pid = ready => pid.expect("operation stage reports backend PID"),
+            result = task => panic!("operation ended before the stage: {result:?}"),
+        }
+    })
+    .await
+    .expect("operation reaches the stage")
+}
+
+fn lab_operation(completion: DarkFencedOperationCompletion) -> DarkFencedOperation {
+    DarkFencedOperation {
+        operation_id: uuid::Uuid::new_v4(),
+        completion,
+    }
+}
+
+#[tokio::test]
+async fn fenced_operation_holds_same_backend_through_commit_and_rollback_for_both_winners() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_operation_fixture(&fixture).await;
+    let index = CatalogFenceIndex::new(&fixture.target, "catalog_fence_operation_probe_pkey")
+        .expect("fixed probe index");
+    let key = key();
+    let (before, before_ready, before_resume) = observation_pause();
+    let (after, after_ready, after_resume) = observation_pause();
+    let (inserted, inserted_ready, inserted_resume) = observation_pause();
+    let (committed, committed_ready, committed_resume) = observation_pause();
+    let operation = lab_operation(DarkFencedOperationCompletion::Commit);
+    let committed_id = operation.operation_id;
+    let mut reader = spawn_fenced_operation(
+        &fixture,
+        "p21_operation_reader_first",
+        key,
+        config.clone(),
+        pins,
+        operation,
+        DarkFencedOperationPauses {
+            before_attestor: Some(before),
+            after_attestor: Some(after),
+            after_operation: Some(inserted),
+            after_completion: Some(committed),
+        },
+    );
+    let reader_pid = observe_operation_pause(before_ready, &mut reader).await;
+    assert_reader_state(&fixture.admin, reader_pid, key, true).await;
+    let maintainer_name = format!("p21_operation_maint_{}", uuid::Uuid::new_v4().simple());
+    let maintainer_options = fixture
+        .admin_options
+        .clone()
+        .application_name(&maintainer_name);
+    let mut maintainer = tokio::spawn(async move {
+        CatalogFenceExclusive::acquire(&maintainer_options, key, WAIT).await
+    });
+    let maintainer_pid = wait_for_idle_try(
+        &fixture.admin,
+        &maintainer_name,
+        "SELECT pg_catalog.pg_try_advisory_lock(",
+    )
+    .await;
+    assert_idle_without_advisory_waiter(&fixture.admin, maintainer_pid).await;
+    before_resume.send(()).expect("run attestor");
+    assert_eq!(
+        observe_operation_pause(after_ready, &mut reader).await,
+        reader_pid
+    );
+    assert_reader_state(&fixture.admin, reader_pid, key, true).await;
+    after_resume.send(()).expect("run fixed operation");
+    assert_eq!(
+        observe_operation_pause(inserted_ready, &mut reader).await,
+        reader_pid
+    );
+    assert_reader_state(&fixture.admin, reader_pid, key, true).await;
+    assert!(
+        !operation_present(&fixture, committed_id).await,
+        "insert is not yet committed"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut maintainer)
+            .await
+            .is_err()
+    );
+    inserted_resume.send(()).expect("commit fixed operation");
+    assert_eq!(
+        observe_operation_pause(committed_ready, &mut reader).await,
+        reader_pid
+    );
+    assert_reader_state(&fixture.admin, reader_pid, key, false).await;
+    assert!(operation_present(&fixture, committed_id).await);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut maintainer)
+            .await
+            .is_err(),
+        "mutator is fenced through acknowledged commit and readback"
+    );
+    committed_resume.send(()).expect("release reader fence");
+    reader
+        .await
+        .expect("reader task")
+        .expect("fixed commit and readback");
+    let mut maintainer = maintainer
+        .await
+        .expect("maintainer task")
+        .expect("exclusive fence");
+    assert_eq!(maintainer.backend_pid(), maintainer_pid);
+
+    // Mutator wins: complete real maintenance under its exclusive fence. The
+    // other backend keeps trying in autocommit and cannot start attestation.
+    maintainer
+        .reindex(&index)
+        .await
+        .expect("fenced concurrent reindex");
+    let reader_name = format!("p21_operation_reader_{}", uuid::Uuid::new_v4().simple());
+    let (inserted, inserted_ready, inserted_resume) = observation_pause();
+    let (rolled_back, rollback_ready, rollback_resume) = observation_pause();
+    let operation = lab_operation(DarkFencedOperationCompletion::Rollback);
+    let rolled_back_id = operation.operation_id;
+    let mut second = spawn_fenced_operation(
+        &fixture,
+        &reader_name,
+        key,
+        config,
+        pins,
+        operation,
+        DarkFencedOperationPauses {
+            after_operation: Some(inserted),
+            after_completion: Some(rolled_back),
+            ..Default::default()
+        },
+    );
+    let second_pid = wait_for_idle_try(
+        &fixture.admin,
+        &reader_name,
+        "SELECT pg_catalog.pg_try_advisory_lock_shared(",
+    )
+    .await;
+    assert_idle_without_advisory_waiter(&fixture.admin, second_pid).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second)
+            .await
+            .is_err()
+    );
+    maintainer.release().await.expect("release mutator");
+    assert_eq!(
+        observe_operation_pause(inserted_ready, &mut second).await,
+        second_pid
+    );
+    assert_reader_state(&fixture.admin, second_pid, key, true).await;
+    assert!(!operation_present(&fixture, rolled_back_id).await);
+    inserted_resume.send(()).expect("roll back fixed operation");
+    assert_eq!(
+        observe_operation_pause(rollback_ready, &mut second).await,
+        second_pid
+    );
+    assert_reader_state(&fixture.admin, second_pid, key, false).await;
+    assert!(!operation_present(&fixture, rolled_back_id).await);
+    assert!(matches!(
+        CatalogFenceExclusive::acquire(&fixture.admin_options, key, Duration::from_millis(100))
+            .await,
+        Err(CatalogMutationFenceError::Contended)
+    ));
+    rollback_resume
+        .send(())
+        .expect("release rolled-back reader");
+    second
+        .await
+        .expect("second reader task")
+        .expect("fixed rollback and readback");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn fenced_operation_opposite_lineage_lock_order_refuses_within_bound() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_operation_fixture(&fixture).await;
+    let key = key();
+    assert!(matches!(
+        CatalogFenceShared::acquire(&fixture.admin_options, LINEAGE_ADVISORY_LOCK_KEY, WAIT).await,
+        Err(CatalogMutationFenceError::InvalidBounds)
+    ));
+    let mut old_mutator = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("old-order mutator backend");
+    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+        .bind(LINEAGE_ADVISORY_LOCK_KEY)
+        .execute(&mut old_mutator)
+        .await
+        .expect("old mutator holds lineage first");
+    let (before, ready, resume) = observation_pause();
+    let operation = lab_operation(DarkFencedOperationCompletion::Commit);
+    let operation_id = operation.operation_id;
+    let mut reader = spawn_fenced_operation(
+        &fixture,
+        "p21_operation_inversion",
+        key,
+        config,
+        pins,
+        operation,
+        DarkFencedOperationPauses {
+            before_attestor: Some(before),
+            ..Default::default()
+        },
+    );
+    let reader_pid = observe_operation_pause(ready, &mut reader).await;
+    assert_reader_state(&fixture.admin, reader_pid, key, true).await;
+    let (tried, observed_try) = tokio::sync::oneshot::channel();
+    let mutator = tokio::spawn(async move {
+        let mut tried = Some(tried);
+        let acquired = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let held: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock($1)")
+                    .bind(key)
+                    .fetch_one(&mut old_mutator)
+                    .await
+                    .expect("old-order try");
+                if held {
+                    break;
+                }
+                if let Some(tried) = tried.take() {
+                    let _ = tried.send(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        acquired.expect("catalog fence eventually released after refusal");
+        for held_key in [key, LINEAGE_ADVISORY_LOCK_KEY] {
+            let unlocked: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+                .bind(held_key)
+                .fetch_one(&mut old_mutator)
+                .await
+                .expect("unlock old mutator");
+            assert!(unlocked);
+        }
+    });
+    observed_try
+        .await
+        .expect("old mutator first tries catalog while holding lineage");
+    let start = tokio::time::Instant::now();
+    resume.send(()).expect("reader attempts lineage second");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = $1 \
+                 AND locktype = 'advisory' AND mode = 'ShareLock' AND NOT granted \
+                 AND classid = (($2::pg_catalog.int8 >> 32) & 4294967295)::pg_catalog.oid \
+                 AND objid = ($2::pg_catalog.int8 & 4294967295)::pg_catalog.oid \
+                 AND objsubid = 1)",
+            )
+            .bind(reader_pid)
+            .bind(LINEAGE_ADVISORY_LOCK_KEY)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("inspect the exact lineage lock wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reader waits for the exclusive lineage lock");
+    let result = tokio::time::timeout(Duration::from_secs(8), &mut reader)
+        .await
+        .expect("incompatible ordering refuses within bound")
+        .expect("reader task");
+    let sqlstate = match result {
+        Err(DarkFencedOperationError::Attestation(DarkPhysicalAttestationError::Postgres(
+            error,
+        ))) => error
+            .as_database_error()
+            .and_then(|database| database.code().map(|code| code.into_owned())),
+        other => panic!("expected the lineage lock timeout, got {other:?}"),
+    };
+    assert_eq!(sqlstate.as_deref(), Some("55P03"));
+    assert!(start.elapsed() < Duration::from_secs(8));
+    assert!(
+        !operation_present(&fixture, operation_id).await,
+        "no protected operation ran"
+    );
+    mutator
+        .await
+        .expect("mutator obtains catalog after bounded refusal");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn fenced_operation_cancellation_and_lost_commit_require_reconciliation() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, pins) = dark_attestor_fixture(&fixture).await;
+    create_operation_fixture(&fixture).await;
+    let key = key();
+    let (inserted, ready, resume) = observation_pause();
+    let operation = lab_operation(DarkFencedOperationCompletion::Commit);
+    let cancelled_id = operation.operation_id;
+    let mut reader = spawn_fenced_operation(
+        &fixture,
+        "p21_operation_cancel",
+        key,
+        config.clone(),
+        pins,
+        operation,
+        DarkFencedOperationPauses {
+            after_operation: Some(inserted),
+            ..Default::default()
+        },
+    );
+    let pid = observe_operation_pause(ready, &mut reader).await;
+    assert_reader_state(&fixture.admin, pid, key, true).await;
+    reader.abort();
+    assert!(reader
+        .await
+        .expect_err("cancelled operation")
+        .is_cancelled());
+    drop(resume);
+    reconcile_backend(&fixture.admin, pid).await;
+    assert!(!operation_present(&fixture, cancelled_id).await);
+    let replacement = CatalogFenceExclusive::acquire(&fixture.admin_options, key, WAIT)
+        .await
+        .expect("new fence only after old backend reconciliation");
+    replacement.release().await.expect("release replacement");
+
+    // The proxy sees the server respond to COMMIT and withholds that response.
+    // The operation committed, but the client must report uncertainty.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("local proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    let reply_held = std::sync::Arc::new(tokio::sync::Notify::new());
+    let disconnect = std::sync::Arc::new(tokio::sync::Notify::new());
+    let proxy = tokio::spawn(lose_commit_reply_proxy(
+        listener,
+        fixture.admin_options.clone(),
+        reply_held.clone(),
+        disconnect.clone(),
+    ));
+    let options =
+        proxy_runtime_options(&fixture, port).application_name("p21_operation_lost_commit");
+    let (inserted, ready, resume) = observation_pause();
+    let operation = lab_operation(DarkFencedOperationCompletion::Commit);
+    let committed_id = operation.operation_id;
+    let config_for_task = config.clone();
+    let mut reader = tokio::spawn(async move {
+        run_dark_fenced_operation(
+            &options,
+            key,
+            WAIT,
+            &config_for_task,
+            pins,
+            operation,
+            DarkFencedOperationPauses {
+                after_operation: Some(inserted),
+                ..Default::default()
+            },
+        )
+        .await
+    });
+    let pid = observe_operation_pause(ready, &mut reader).await;
+    assert_reader_state(&fixture.admin, pid, key, true).await;
+    resume.send(()).expect("send commit");
+    tokio::time::timeout(Duration::from_secs(5), reply_held.notified())
+        .await
+        .expect("proxy withheld commit response");
+    assert!(
+        operation_present(&fixture, committed_id).await,
+        "server committed before reply loss"
+    );
+    disconnect.notify_one();
+    assert!(matches!(reader.await.expect("lost-commit task"),
+        Err(DarkFencedOperationError::CommitUnconfirmed { backend_pid }) if backend_pid == pid));
+    proxy.await.expect("proxy task").expect("proxy I/O");
+    reconcile_backend(&fixture.admin, pid).await;
+    assert!(
+        operation_present(&fixture, committed_id).await,
+        "reconcile exact operation ID"
+    );
+    let replacement = CatalogFenceExclusive::acquire(&fixture.admin_options, key, WAIT)
+        .await
+        .expect("new fence after original backend reconciliation");
     replacement.release().await.expect("release replacement");
     fixture.cleanup().await;
 }

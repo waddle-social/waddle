@@ -231,3 +231,59 @@ blocks pending acceptance. The candidate is not wired to the production
 writer, socket, pending selector, or GC. The durable custody candidate now
 limits `appended - peer_acked` to less than 2^31, matching the live validator,
 but replay selection and restart qualification remain open.
+
+## Next grouped composition after #2245
+
+This branch groups the remaining #2116 single-node selection prerequisites.
+The accepted architecture gate may narrow or reorder the packages before
+implementation. Every intermediate change stays dark while a selected-path
+proof is incomplete; both restricted-startup refusals remain closed.
+
+1. Establish one enforceable privileged catalog mutation protocol and a
+   same-physical-backend reader fence from before the first attestor read
+   through protected operation completion. Every old backend and privileged
+   DDL, ACL, role, function, migration and concurrent-index mutator must
+   participate or be independently quiesced. Resolve the catalog/lineage
+   lock order and prove bounded failure cannot mint a serving receipt.
+2. Compose independently pinned S/R/A/H/T/I/M/migrator authority with every
+   enabled store on the actual clustering-compiled single-node main pool.
+   Reconcile V1009, MAM, room effects, PubSub/MUC/observation, Push,
+   notification, spaces, links, inbox, SM, pending and GC paths. Check the
+   exact role/function/table/column/default ACL graph under one transaction
+   and return serving handles only after its positive commit/reconciliation.
+3. Give each SM frame an authoritative durable occurrence or generation so a
+   stale caller snapshot cannot replace a newer committed frame. Convert
+   live, relay, batch, detached, drained, ACK, transfer, tombstone, pending
+   and GC paths to the complete-source recipient-wide lock order. Own every
+   transaction through mutation and reconciliation, including cancellation
+   and unknown COMMIT. Cut off old raw writers and old socket output before
+   selecting the new sink.
+4. Open restricted startup only after the preceding proofs compose with a
+   durable single-node claim, old-backend cutoff, cold/inherited listener
+   publication fence and failed-transition recovery. Qualify the exact path
+   with PostgreSQL 17, native independent-process races, real WebSocket and
+   XEP-0198 wrap/replay, restart and fault schedules. Keep the wider #2046
+   release matrix and replacement deletion as separate completion gates.
+
+The single-node claim gate needs a database-enforced deployment singleton
+slot; independent processes can otherwise register different node IDs.
+Current registration can replace a live same-ID epoch, fresh acquisition can
+proceed without a live node row, and existing ingress/SM/MUC write fences
+check only the claim row. Do not wrap that store as selected singleton
+authority. Define and test a node-slot, lease, claim and durable-write lock
+order with post-wait freshness, bounded heartbeats and exact old-backend
+reconciliation. Test a nested write while heartbeat waits before adopting a
+node-row lock protocol; its liveness is not yet established. Reconcile
+claim-only orphans and unknown registration/takeover commits before serving.
+
+A snapshot revision checked only by the dark candidate does not fence legacy
+append, ACK or deletion, nor a local frame counted after capture. Production
+selection requires every competing path to advance the same authority and
+the actor to serialize capture with outbound publication. An uncertain
+snapshot commit freezes that session for bounded reconciliation; exhaustion
+closes the stream rather than leaving an ACK request pending indefinitely.
+
+The final PR description must match the exact integrated scope and evidence.
+GitHub Actions and workflow files stay disabled while #2046 implementation is
+open; restore them with `cuenv sync -A` and run exact-release CI only when the
+entire issue is ready.
