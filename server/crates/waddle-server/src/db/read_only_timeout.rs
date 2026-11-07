@@ -29,6 +29,14 @@ const TIMEOUTS: [TimeoutSetting; 2] = [
     },
 ];
 
+const IDLE_TRANSACTION_TIMEOUT: TimeoutSetting = TimeoutSetting {
+    name: "idle_in_transaction_session_timeout",
+    show: "SHOW idle_in_transaction_session_timeout",
+    cap_millis: 30_000,
+    set_local: "SET LOCAL idle_in_transaction_session_timeout = '30s'",
+    set_session: "SET idle_in_transaction_session_timeout = '30s'",
+};
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReadOnlyTimeoutError {
     #[error("could not verify PostgreSQL {setting}")]
@@ -45,18 +53,34 @@ pub(crate) async fn bound_postgres_waits(
     tx: &mut Transaction<'_>,
 ) -> Result<(), ReadOnlyTimeoutError> {
     for setting in &TIMEOUTS {
-        let mut rows = tx.query(setting.show, ()).await?;
-        let value: String = rows
-            .next()
-            .await?
-            .ok_or(ReadOnlyTimeoutError::InvalidSetting {
-                setting: setting.name,
-            })?
-            .get(0)?;
-        drop(rows);
-        if requires_cap(setting, &value)? {
-            tx.execute(setting.set_local, ()).await?;
-        }
+        bound_postgres_local_setting(tx, setting).await?;
+    }
+    Ok(())
+}
+
+/// Bound how long PostgreSQL retains an idle transaction if a client stops
+/// receiving replies, without relaxing an existing tighter session setting.
+pub(crate) async fn bound_postgres_idle_transaction(
+    tx: &mut Transaction<'_>,
+) -> Result<(), ReadOnlyTimeoutError> {
+    bound_postgres_local_setting(tx, &IDLE_TRANSACTION_TIMEOUT).await
+}
+
+async fn bound_postgres_local_setting(
+    tx: &mut Transaction<'_>,
+    setting: &TimeoutSetting,
+) -> Result<(), ReadOnlyTimeoutError> {
+    let mut rows = tx.query(setting.show, ()).await?;
+    let value: String = rows
+        .next()
+        .await?
+        .ok_or(ReadOnlyTimeoutError::InvalidSetting {
+            setting: setting.name,
+        })?
+        .get(0)?;
+    drop(rows);
+    if requires_cap(setting, &value)? {
+        tx.execute(setting.set_local, ()).await?;
     }
     Ok(())
 }

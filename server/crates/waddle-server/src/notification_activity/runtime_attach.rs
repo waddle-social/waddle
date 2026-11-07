@@ -7,8 +7,11 @@ use super::schema::{
     ACTIVITY_OWNER_STATE_SINGLETON_CHECK, ACTIVITY_OWNER_STATE_TABLE, ACTIVITY_SCHEMA_GATE,
 };
 use crate::db::lineage::PgIdentity;
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 use thiserror::Error;
+
+pub(crate) const CUSTODY_GATE: CatalogFenceLock =
+    CatalogFenceLock::SharedPair(ACTIVITY_SCHEMA_GATE.0, ACTIVITY_SCHEMA_GATE.1);
 
 #[derive(Debug, Error)]
 pub enum DurableStoreAttachError {
@@ -350,6 +353,16 @@ pub(crate) async fn lock_attested_table_tx(
         }
         drop(rows);
     }
+    lock_attested_table_after_gate_tx(tx, schema, contract).await
+}
+
+/// Lock a contract after the caller has acquired its applicable owner gate.
+pub(crate) async fn lock_attested_table_after_gate_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    contract: &TableContract,
+) -> Result<(), DurableStoreAttachError> {
+    let activity_contract = contract.name == ACTIVITY_CONTRACT.name;
     let qualified = format!(
         "{}.\"{}\"",
         crate::db::physical_attestation::quote_identifier(schema),

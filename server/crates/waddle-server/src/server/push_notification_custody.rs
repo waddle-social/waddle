@@ -6,6 +6,8 @@
 //! ancestry inventory is one SQL statement so all mutable rows are classified
 //! from the same PostgreSQL command snapshot.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
@@ -19,6 +21,10 @@ use crate::push_service::vapid_storage::VapidRuntimeAttachError;
 use crate::push_service::PushServiceAttachError;
 
 const FOUNDATION_DESCENDANT_TABLE: &str = "ingress_effect_descendants";
+const CUSTODY_GATE_WAIT: Duration = Duration::from_secs(15);
+const CUSTODY_GATE_RETRY: Duration = Duration::from_millis(20);
+const CUSTODY_INSPECTION_WAIT: Duration = Duration::from_secs(60);
+const CUSTODY_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 /// The result contains counts only. It is intentionally not a store handle or
 /// a readiness certificate; callers cannot use it to serve Push traffic.
@@ -84,6 +90,8 @@ pub enum PushNotificationCustodyError {
     InvalidSchema,
     #[error("could not bound PostgreSQL waits for Push and notification custody inspection")]
     ReadBounds,
+    #[error("Push and notification custody inspection timed out")]
+    InspectionTimeout,
     #[error("Foundation relation {table} is absent or could not be locked")]
     FoundationRelation {
         table: &'static str,
@@ -135,61 +143,132 @@ pub async fn verify_attested_push_notification_custody(
     crate::db::physical_attestation::validate_identifier(schema, "custody diagnostic schema")
         .map_err(|_| PushNotificationCustodyError::InvalidSchema)?;
 
-    let mut tx = database.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+    let deadline = tokio::time::Instant::now() + CUSTODY_GATE_WAIT;
+    let mut tx = loop {
+        let mut tx = tokio::time::timeout_at(
+            deadline,
+            database.begin_catalog_fenced_read_only_with_idle_bound(&[]),
+        )
         .await
-        .map_err(|error| match error {
-            crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { .. } => {
-                PushNotificationCustodyError::ReadBounds
+        .map_err(|_| DatabaseError::CatalogMutationLockTimeout)??;
+        let attempt = tokio::time::timeout_at(deadline, async {
+            crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+                .await
+                .map_err(map_read_bounds)?;
+
+            // Each gate is tried in its original position, immediately before
+            // that store's relation locks. A failed try restarts the entire
+            // operation after catalog-S and earlier locks are released.
+            if !crate::db::try_catalog_fence_lock(
+                &mut tx,
+                crate::notification_outbox::runtime_attach::CUSTODY_GATE,
+            )
+            .await?
+            {
+                return Ok(false);
             }
-            crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
-                PushNotificationCustodyError::Database(error)
+            crate::notification_outbox::runtime_attach::lock_runtime_attach_relations_after_gate_tx(
+                &mut tx, schema,
+            )
+            .await?;
+            if !crate::db::try_catalog_fence_lock(
+                &mut tx,
+                crate::push_service::runtime_attach::CUSTODY_GATE,
+            )
+            .await?
+            {
+                return Ok(false);
             }
-        })?;
+            crate::push_service::runtime_attach::lock_runtime_attach_relations_after_gate_tx(
+                &mut tx, schema,
+            )
+            .await?;
+            crate::push_service::runtime_attach::lock_vapid_runtime_attach_relations_tx(
+                &mut tx, schema,
+            )
+            .await?;
+            runtime::lock_attested_table_tx(&mut tx, schema, &PUSH_REGISTRATIONS_CONTRACT).await?;
+            if !crate::db::try_catalog_fence_lock(&mut tx, runtime::CUSTODY_GATE).await? {
+                return Ok(false);
+            }
+            runtime::lock_attested_table_after_gate_tx(&mut tx, schema, &ACTIVITY_CONTRACT).await?;
 
-    // Keep the cross-store lock order explicit: the outbox owner phase takes
-    // this gate before the Push gate while adopting notification ancestry.
-    crate::notification_outbox::runtime_attach::lock_runtime_attach_relations_tx(&mut tx, schema)
-        .await?;
-    crate::push_service::runtime_attach::lock_runtime_attach_relations_tx(&mut tx, schema).await?;
-    crate::push_service::runtime_attach::lock_vapid_runtime_attach_relations_tx(&mut tx, schema)
-        .await?;
-    runtime::lock_attested_table_tx(&mut tx, schema, &PUSH_REGISTRATIONS_CONTRACT).await?;
-    runtime::lock_attested_table_tx(&mut tx, schema, &ACTIVITY_CONTRACT).await?;
+            // Verify the security-definer helper only after attesting this
+            // exact backend and before invoking it.
+            capability.attest_transaction(&mut tx).await?;
+            if !crate::db::try_catalog_fence_lock(
+                &mut tx,
+                crate::pubsub::runtime_attach::CUSTODY_GATE,
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+            crate::pubsub::runtime_attach::lock_runtime_attach_relations_after_gate_tx(
+                &mut tx, identity,
+            )
+            .await?;
+            lock_foundation_descendants_tx(&mut tx, schema).await?;
+            Ok::<_, PushNotificationCustodyError>(true)
+        })
+        .await
+        .unwrap_or_else(|_| Err(DatabaseError::CatalogMutationLockTimeout.into()));
+        if matches!(attempt, Ok(true)) {
+            break tx;
+        }
+        if !tx.rollback_bounded_discard(CUSTODY_ROLLBACK_WAIT).await {
+            return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+        }
+        attempt?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(DatabaseError::CatalogMutationGateContended.into());
+        }
+        tokio::time::sleep(CUSTODY_GATE_RETRY.min(remaining)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DatabaseError::CatalogMutationGateContended.into());
+        }
+    };
 
-    // The PubSub attach helper must verify its security-definer lock function
-    // before calling it. Attest this same transaction after the outbox then
-    // Push locks, so that catalog check and all later verification use the
-    // physically attested connection.
-    capability.attest_transaction(&mut tx).await?;
+    let snapshot = tokio::time::timeout(CUSTODY_INSPECTION_WAIT, async {
+        crate::notification_outbox::runtime_attach::verify_runtime_attach_tx(&mut tx, identity)
+            .await?;
+        crate::push_service::runtime_attach::verify_runtime_attach_tx(&mut tx, identity).await?;
+        crate::push_service::runtime_attach::verify_vapid_custody_tx(&mut tx, identity, root_key)
+            .await?;
+        runtime::verify_attested_table_tx(&mut tx, identity, &PUSH_REGISTRATIONS_CONTRACT).await?;
+        runtime::verify_attested_table_tx(&mut tx, identity, &ACTIVITY_CONTRACT).await?;
+        crate::pubsub::runtime_attach::verify_runtime_attach_tx(&mut tx, identity).await?;
 
-    crate::pubsub::runtime_attach::lock_runtime_attach_relations_tx(&mut tx, identity).await?;
-    lock_foundation_descendants_tx(&mut tx, schema).await?;
-
-    crate::notification_outbox::runtime_attach::verify_runtime_attach_tx(&mut tx, identity).await?;
-    crate::push_service::runtime_attach::verify_runtime_attach_tx(&mut tx, identity).await?;
-    crate::push_service::runtime_attach::verify_vapid_custody_tx(&mut tx, identity, root_key)
-        .await?;
-    runtime::verify_attested_table_tx(&mut tx, identity, &PUSH_REGISTRATIONS_CONTRACT).await?;
-    runtime::verify_attested_table_tx(&mut tx, identity, &ACTIVITY_CONTRACT).await?;
-    crate::pubsub::runtime_attach::verify_runtime_attach_tx(&mut tx, identity).await?;
-
-    // This is the only application-row classification query. READ COMMITTED
-    // takes one command snapshot here, covering outbox candidates/jobs,
-    // outbox lineage, Foundation descendants, and Push jobs.
-    let (evidence, contradictory_rows) = read_custody_snapshot(&mut tx, schema).await?;
-    tx.rollback().await?;
+        // The sole application-row classification query takes one READ
+        // COMMITTED command snapshot across all participating stores.
+        read_custody_snapshot(&mut tx, schema).await
+    })
+    .await
+    .unwrap_or(Err(PushNotificationCustodyError::InspectionTimeout));
+    if !tx.rollback_bounded_discard(CUSTODY_ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
+    let (evidence, contradictory_rows) = snapshot?;
     if contradictory_rows != 0 {
         return Err(PushNotificationCustodyError::ContradictoryRows {
             rows: contradictory_rows,
         });
     }
     Ok(evidence)
+}
+
+fn map_read_bounds(
+    error: crate::db::read_only_timeout::ReadOnlyTimeoutError,
+) -> PushNotificationCustodyError {
+    match error {
+        crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { .. } => {
+            PushNotificationCustodyError::ReadBounds
+        }
+        crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+            PushNotificationCustodyError::Database(error)
+        }
+    }
 }
 
 async fn lock_foundation_descendants_tx(

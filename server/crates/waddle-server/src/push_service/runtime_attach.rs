@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
+
+pub(crate) const CUSTODY_GATE: CatalogFenceLock =
+    CatalogFenceLock::Exclusive(super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY);
 
 const MARKER_TABLE: &str = "push_service_schema_marker";
 pub(super) const VAPID_TABLE_NAME: &str = "push_service_vapid_keys";
@@ -1036,13 +1039,21 @@ pub(crate) async fn lock_runtime_attach_relations_tx(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<(), PushServiceAttachError> {
-    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
     tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
         crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
     )
     .await?;
 
+    lock_runtime_attach_relations_after_gate_tx(tx, schema).await
+}
+
+/// Lock Push relations after the caller has acquired the Push schema gate.
+pub(crate) async fn lock_runtime_attach_relations_after_gate_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PushServiceAttachError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
     // SUE blocks concurrent regular and concurrent index builds while
     // allowing ordinary Push Service row writers to proceed.
     for table in TABLES {
@@ -1239,6 +1250,17 @@ pub(super) async fn verify_vapid_table_shape_tx(
     schema: &str,
 ) -> Result<(), PushServiceAttachError> {
     verify_table(tx, schema, &VAPID_KEYS).await
+}
+
+/// Legacy raw provisioning may create the table as the current role in a
+/// schema owned by another role. Marked owner-prepared tables use the stricter
+/// schema-owner rule above. Returns whether the optional legacy index needs
+/// repair after the rest of the relation has passed validation.
+pub(super) async fn verify_raw_vapid_table_shape_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<bool, PushServiceAttachError> {
+    verify_table_with_options(tx, schema, &VAPID_KEYS, true, true).await
 }
 
 pub(super) async fn verify_vapid_marker_shape_tx(
@@ -1466,10 +1488,25 @@ async fn verify_table(
     schema: &str,
     table: &Table,
 ) -> Result<(), PushServiceAttachError> {
+    verify_table_with_options(tx, schema, table, false, false)
+        .await
+        .map(|_| ())
+}
+
+async fn verify_table_with_options(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &Table,
+    allow_current_owner: bool,
+    allow_missing_vapid_index: bool,
+) -> Result<bool, PushServiceAttachError> {
     let mut rows = tx
         .query(
             "SELECT relation.relkind = 'r' AND relation.relpersistence = 'p' \
-               AND NOT relation.relispartition AND relation.relowner = namespace.nspowner \
+               AND NOT relation.relispartition \
+               AND (relation.relowner = namespace.nspowner \
+                 OR (? = 1 AND relation.relowner = (SELECT oid FROM pg_catalog.pg_roles \
+                                                WHERE rolname = current_user))) \
                AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity \
                AND relation.reloftype = 0 \
                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger trigger \
@@ -1487,7 +1524,7 @@ async fn verify_table(
              FROM pg_catalog.pg_class relation \
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
              WHERE namespace.nspname = ? AND relation.relname = ?",
-            crate::db_params![schema, table.name],
+            crate::db_params![allow_current_owner, schema, table.name],
         )
         .await
         .map_err(|source| PushServiceAttachError::Relation {
@@ -1503,9 +1540,9 @@ async fn verify_table(
     drop(rows);
     verify_columns(tx, schema, table).await?;
     verify_constraints(tx, schema, table).await?;
-    verify_indexes(tx, schema, table).await?;
+    let missing_index = verify_indexes(tx, schema, table, allow_missing_vapid_index).await?;
     verify_foreign_keys(tx, schema, table).await?;
-    Ok(())
+    Ok(missing_index)
 }
 
 async fn verify_columns(
@@ -1716,7 +1753,8 @@ async fn verify_indexes(
     tx: &mut Transaction<'_>,
     schema: &str,
     table: &Table,
-) -> Result<(), PushServiceAttachError> {
+    allow_missing_vapid_index: bool,
+) -> Result<bool, PushServiceAttachError> {
     let mut rows = tx
         .query(
             "SELECT pg_catalog.count(*)::bigint FROM pg_catalog.pg_index index_row \
@@ -1732,9 +1770,11 @@ async fn verify_indexes(
         .ok_or(PushServiceAttachError::InvalidIndex { table: table.name })?
         .get::<i64>(0)?;
     drop(rows);
-    if count != table.indexes.len() as i64 {
+    let missing_allowed = allow_missing_vapid_index && count == table.indexes.len() as i64 - 1;
+    if count != table.indexes.len() as i64 && !missing_allowed {
         return Err(PushServiceAttachError::InvalidIndex { table: table.name });
     }
+    let mut missing_index = false;
     for expected in table.indexes {
         let mut rows = tx
             .query(
@@ -1779,6 +1819,10 @@ async fn verify_indexes(
             .await
             .map_err(|source| PushServiceAttachError::Relation { table: table.name, source })?;
         let Some(row) = rows.next().await? else {
+            if missing_allowed && expected.name == "idx_push_service_vapid_keys_active" {
+                missing_index = true;
+                continue;
+            }
             return Err(PushServiceAttachError::InvalidIndex { table: table.name });
         };
         let columns: String = row.get(10)?;
@@ -1802,7 +1846,10 @@ async fn verify_indexes(
             return Err(PushServiceAttachError::InvalidIndex { table: table.name });
         }
     }
-    Ok(())
+    if missing_allowed && !missing_index {
+        return Err(PushServiceAttachError::InvalidIndex { table: table.name });
+    }
+    Ok(missing_index)
 }
 
 async fn verify_foreign_keys(

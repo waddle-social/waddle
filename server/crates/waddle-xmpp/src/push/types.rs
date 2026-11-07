@@ -501,15 +501,13 @@ pub enum VapidDbWriteStage {
     Initialize,
     SealPrivateKey,
     InsertRow,
+    FencedProvision,
 }
 
 #[derive(Debug, Error)]
 pub enum VapidEnvParseError {
     #[error("base64url decode failed")]
-    Base64urlDecode {
-        #[source]
-        source: base64::DecodeError,
-    },
+    Base64urlDecode,
     #[error("expected 32-byte P-256 scalar; got {found} bytes")]
     InvalidLength { found: usize },
     #[error("invalid P-256 scalar")]
@@ -538,6 +536,22 @@ pub enum VapidUnsealErrorKind {
 pub enum VapidLoadError {
     #[error("env var WADDLE_VAPID_PRIVATE_KEY parse failed: {0}")]
     EnvParse(#[from] VapidEnvParseError),
+    #[error("env var WADDLE_VAPID_PRIVATE_KEY is not valid UTF-8")]
+    InvalidBootstrapEnvironment,
+    #[error("VAPID bootstrap key differs from the active stored key")]
+    BootstrapKeyMismatch,
+    #[error("VAPID storage has more than one active key")]
+    MultipleActiveKeys,
+    #[error("VAPID storage has only retired keys; explicit rotation is required")]
+    RotationRequired,
+    #[error("VAPID storage has an invalid schema or completion marker")]
+    InvalidStorageState,
+    #[error("VAPID stored key failed integrity validation")]
+    InvalidStoredKey,
+    #[error("VAPID PostgreSQL provisioning timed out before COMMIT")]
+    ProvisionTimedOut,
+    #[error("VAPID PostgreSQL commit outcome is indeterminate")]
+    CommitIndeterminate,
     #[error("env var WADDLE_VAPID_SUB parse failed: {0}")]
     SubParse(#[from] VapidSubParseError),
     #[error("VAPID storage read failed at {stage:?}")]

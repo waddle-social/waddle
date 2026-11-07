@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::db::physical_attestation::PgRoleName;
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 use super::owner::{
     self, PUBSUB_ATTACH_LOCK_FUNCTION, PUBSUB_SCHEMA_ADVISORY_LOCK_KEY, PUBSUB_SCHEMA_MARKER_TABLE,
@@ -15,6 +15,8 @@ use super::schema::PUBSUB_SCHEMA_VERSION;
 const CATALOG_GATE_WAIT: Duration = Duration::from_secs(15);
 const CATALOG_GATE_RETRY: Duration = Duration::from_millis(20);
 const CATALOG_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const CUSTODY_GATE: CatalogFenceLock =
+    CatalogFenceLock::Exclusive(PUBSUB_SCHEMA_ADVISORY_LOCK_KEY);
 
 /// A restricted PubSub store cannot attach to an unverified runtime database.
 #[derive(Debug, thiserror::Error)]
@@ -517,7 +519,7 @@ async fn verify_with_profile(
             return Err(DatabaseError::CatalogMutationGateContended.into());
         }
     };
-    lock_runtime_attach_relations_after_gate_tx(
+    lock_runtime_attach_relations_with_profile_after_gate_tx(
         &mut tx,
         identity,
         capability.definer_role().as_str(),
@@ -546,31 +548,16 @@ async fn verify_with_profile(
     Ok(())
 }
 
-/// Acquire the PubSub owner gate and its owner-controlled qualified relation
-/// locks on a caller-owned transaction. The lock helper is checked before it
-/// executes; diagnostic callers attest the transaction before invoking this.
-pub(crate) async fn lock_runtime_attach_relations_tx(
+/// Lock PubSub relations after the caller has acquired its owner gate and
+/// attested the transaction. The owner-controlled helper is checked first.
+pub(crate) async fn lock_runtime_attach_relations_after_gate_tx(
     tx: &mut Transaction<'_>,
     identity: &crate::db::lineage::PgIdentity,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    lock_runtime_attach_relations_with_profile_tx(tx, identity, "", None).await
+    lock_runtime_attach_relations_with_profile_after_gate_tx(tx, identity, "", None).await
 }
 
-async fn lock_runtime_attach_relations_with_profile_tx(
-    tx: &mut Transaction<'_>,
-    identity: &crate::db::lineage::PgIdentity,
-    definer: &str,
-    profile: Option<&RestrictedServingProfileV1>,
-) -> Result<(), PubSubRuntimeAttachError> {
-    tx.execute(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
-    lock_runtime_attach_relations_after_gate_tx(tx, identity, definer, profile).await
-}
-
-async fn lock_runtime_attach_relations_after_gate_tx(
+async fn lock_runtime_attach_relations_with_profile_after_gate_tx(
     tx: &mut Transaction<'_>,
     identity: &crate::db::lineage::PgIdentity,
     definer: &str,

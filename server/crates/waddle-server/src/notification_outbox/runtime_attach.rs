@@ -6,7 +6,7 @@
 
 use thiserror::Error;
 
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 use super::schema::{
     predicate_tokens, COALESCE_COLUMNS, COALESCE_INDEX_NAME, COALESCE_PREDICATE,
@@ -17,6 +17,9 @@ use super::schema::{
     NOTIFICATION_OUTBOX_INDEXES, OUTBOX_OWNER_PREPARED_REVISION, OUTBOX_OWNER_STATE_TABLE,
     OUTBOX_SCHEMA_GATE,
 };
+
+pub(crate) const CUSTODY_GATE: CatalogFenceLock =
+    CatalogFenceLock::SharedPair(OUTBOX_SCHEMA_GATE.0, OUTBOX_SCHEMA_GATE.1);
 
 #[derive(Debug, Error)]
 pub enum NotificationOutboxRuntimeAttachError {
@@ -212,6 +215,14 @@ pub(crate) async fn lock_runtime_attach_relations_tx(
     )
     .await?;
 
+    lock_runtime_attach_relations_after_gate_tx(tx, schema).await
+}
+
+/// Lock relations after the caller has acquired the outbox schema gate.
+pub(crate) async fn lock_runtime_attach_relations_after_gate_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), NotificationOutboxRuntimeAttachError> {
     let qschema = crate::db::physical_attestation::quote_identifier(schema);
     let lock_sql = format!(
         "LOCK TABLE {qschema}.\"notification_candidates\", \

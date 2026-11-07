@@ -248,7 +248,7 @@ impl Fixture {
             second_attested,
         );
 
-        match VapidStorage::load_or_ephemeral(runtime_database.clone(), &[7_u8; 32]).await {
+        match VapidStorage::load_or_provision(runtime_database.clone(), &[7_u8; 32]).await {
             Err(waddle_xmpp::push::types::VapidLoadError::DbWrite {
                 stage: waddle_xmpp::push::types::VapidDbWriteStage::Initialize,
                 source,
@@ -850,7 +850,7 @@ async fn postgres_push_owner_preparation_and_attested_attach_contract() {
 }
 
 #[tokio::test]
-async fn postgres_raw_vapid_initialization_waits_for_catalog_fence() {
+async fn postgres_raw_vapid_provisioning_waits_for_catalog_fence() {
     let _serial = PUSH_TEST_LOCK.lock().await;
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping PostgreSQL raw VAPID catalog-fence test: test URL not set");
@@ -877,7 +877,7 @@ async fn postgres_raw_vapid_initialization_waits_for_catalog_fence() {
             &DatabaseConfig::new(DatabaseDriver::Postgres, owner_url),
         )
         .await?;
-        verify_raw_vapid_initialization_waits_for_catalog_fence(
+        verify_raw_vapid_provisioning_waits_for_catalog_fence(
             &owner_database,
             &fixture.admin,
             &fixture.target,
@@ -898,27 +898,11 @@ async fn marker_phase(admin: &PgPool, schema: &str) -> Result<i64> {
     .await?)
 }
 
-async fn verify_raw_vapid_initialization_waits_for_catalog_fence(
+async fn verify_raw_vapid_provisioning_waits_for_catalog_fence(
     owner_database: &Database,
     admin: &PgPool,
     schema: &str,
 ) -> Result<()> {
-    let mut marker = owner_database.begin().await?;
-    marker
-        .execute(
-            "CREATE TABLE push_service_schema_marker (\
-               marker_id INTEGER PRIMARY KEY, owner_phase BIGINT NOT NULL)",
-            (),
-        )
-        .await?;
-    marker
-        .execute(
-            "INSERT INTO push_service_schema_marker (marker_id, owner_phase) VALUES (1, 1)",
-            (),
-        )
-        .await?;
-    marker.commit().await?;
-
     let mut catalog = owner_database.begin().await?;
     catalog
         .query(
@@ -929,7 +913,7 @@ async fn verify_raw_vapid_initialization_waits_for_catalog_fence(
     let started_at = activity_checkpoint(admin).await?;
     let database = owner_database.clone();
     let initialization =
-        tokio::spawn(async move { VapidStorage::load_or_ephemeral(database, &[8_u8; 32]).await });
+        tokio::spawn(async move { VapidStorage::load_or_provision(database, &[8_u8; 32]).await });
     let backend_pid = match wait_for_catalog_try_and_rollback(admin, &started_at).await {
         Ok(backend_pid) => backend_pid,
         Err(error) => {
@@ -948,7 +932,6 @@ async fn verify_raw_vapid_initialization_waits_for_catalog_fence(
     .bind(schema)
     .fetch_one(admin)
     .await?;
-    let marker_while_blocked = marker_phase(admin, schema).await?;
     let catalog_x_available: bool =
         sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
             .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
@@ -959,17 +942,12 @@ async fn verify_raw_vapid_initialization_waits_for_catalog_fence(
             .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
             .fetch_one(admin)
             .await?;
-    if !initialization_pending
-        || !ddl_absent
-        || marker_while_blocked != 1
-        || catalog_x_available
-        || !push_gate_available
-    {
+    if !initialization_pending || !ddl_absent || catalog_x_available || !push_gate_available {
         initialization.abort();
         catalog.rollback().await?;
         let _ = initialization.await;
         bail!(
-            "raw VAPID catalog fence probe failed for backend {backend_pid}: pending={initialization_pending}, ddl_absent={ddl_absent}, marker={marker_while_blocked}, catalog_x_available={catalog_x_available}, push_gate_available={push_gate_available}"
+            "raw VAPID catalog fence probe failed for backend {backend_pid}: pending={initialization_pending}, ddl_absent={ddl_absent}, catalog_x_available={catalog_x_available}, push_gate_available={push_gate_available}"
         );
     }
 
@@ -982,10 +960,14 @@ async fn verify_raw_vapid_initialization_waits_for_catalog_fence(
     .bind(schema)
     .fetch_one(admin)
     .await?;
-    let marker_after_commit = marker_phase(admin, schema).await?;
-    if !ddl_visible || marker_after_commit != 0 {
+    let key_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {schema}.push_service_vapid_keys WHERE retired_at_ms IS NULL"
+    ))
+    .fetch_one(admin)
+    .await?;
+    if !ddl_visible || key_count != 1 {
         bail!(
-            "raw VAPID DDL or Push marker invalidation was not committed: ddl_visible={ddl_visible}, marker={marker_after_commit}"
+            "raw VAPID DDL or first key was not committed: ddl_visible={ddl_visible}, keys={key_count}"
         );
     }
     Ok(())

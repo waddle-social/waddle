@@ -65,9 +65,8 @@ pub struct PushNotificationRuntimeAttachEvidence {
 /// constructed from PubSub's database handle rather than opening another pool.
 ///
 /// The prepared VAPID signer is also loaded through its read-only attachment
-/// API. The existing `load_or_provision` and `load_or_ephemeral` paths are
-/// intentionally excluded because both initialize the VAPID schema, and the
-/// former can also provision a key.
+/// API. The legacy `load_or_provision` path is excluded because it can
+/// initialize the VAPID schema and provision a key.
 pub async fn verify_attested_push_notification_stores(
     database: Database,
     secret_key: &[u8],
