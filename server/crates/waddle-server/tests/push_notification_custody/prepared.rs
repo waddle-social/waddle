@@ -1,5 +1,8 @@
 //! Successful public-entry custody inspection with real owner-prepared stores.
 
+#[path = "stall.rs"]
+mod stall;
+
 use super::{run_sql, Fixture};
 use sqlx::postgres::PgPool;
 use std::time::Duration;
@@ -112,7 +115,7 @@ async fn pg17_prepared_custody_reader_classifies_and_acknowledges_rollback() {
     let application = format!("custody_prepared_{}", uuid::Uuid::new_v4().simple());
     let attested = attested_pool(
         f.runtime_options.clone().application_name(&application),
-        config,
+        config.clone(),
         1,
         Duration::from_secs(3),
     )
@@ -213,6 +216,7 @@ async fn pg17_prepared_custody_reader_classifies_and_acknowledges_rollback() {
         idle_after_rollback,
         "operation rollback not observed on backend {pid}"
     );
+    stall::exercise(&f, &config).await;
 
     drop(runtime);
     drop(owner_db);
