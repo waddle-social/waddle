@@ -392,3 +392,28 @@ boundary before either restricted-startup refusal can be removed.
   transaction lifetime and old-backend cutoff remain prerequisites.
 
 No production selector or restricted-startup refusal changes in this group.
+
+### Next dark pinned receipt and singleton pilot
+
+The next grouped branch must prove one fixed receipt operation on one physical
+READ COMMITTED READ WRITE transaction from the pinned pool. It must acquire the
+shared catalog fence first, then verify the pinned attestor, full V1030 ledger,
+epoch, restricted role/function graph, exact current singleton slot and claim,
+and receipt operation journal before committing. A separate slot guard or
+legacy `Database` transaction cannot supply this authority. A pinned read-only
+ledger verifier cannot be reused unchanged for a read-write transaction.
+
+The pilot must keep every bypass closed: R cannot directly invoke the old
+unjournaled or unguarded receipt functions or write their relations. Its new
+fixed API and slot/lease schema need independent provisioned pins, catalog
+bounds before decoding attacker-controlled definitions, and both writer versus
+takeover race orders. It must retain the operation and original backend
+identity across an uncertain COMMIT, close uncertain pooled sessions, and use
+positive exact-key journal readback. Absence never proves rollback. SQLite
+receipt behavior remains unchanged.
+
+This is a disposable dark proof. The selected serving path also needs old
+login/backend and privileged-mutator cutoff, all other ingress writers,
+source/recipient and SM participation, complete role/store qualification and
+end-to-end startup tests. Do not change the selector, pinned `into_parts`
+refusal, either restricted-startup refusal, or workflows in this pilot.
