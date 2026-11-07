@@ -29,12 +29,20 @@ use crate::db::{Database, Transaction};
 /// `idx_mam_room_reply_to`, `idx_mam_room_origin`, `idx_mam_room_stanza`,
 /// and `idx_mam_room_archive_seq`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 pub struct PinnedMamLookupPins {
     pub messages_relation_oid: u32,
     pub index_oids: [u32; 9],
 }
 
 #[derive(Debug, Error)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 pub enum PinnedMamLookupError {
     #[error("MAM lookup requires a pinned pool and distinct nonzero object pins")]
     InvalidPins,
@@ -65,6 +73,10 @@ pub enum PinnedMamLookupError {
 /// the database adapter's cleanup path and cannot return a message or a miss.
 /// No returned message or definitive miss is exposed before rollback is
 /// acknowledged. Runtime shutdown or a backend failure is not rollback proof.
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 pub struct PinnedMamLookupAuthority {
     pool: AttestedPgPool,
     pins: PinnedMamLookupPins,
@@ -72,16 +84,28 @@ pub struct PinnedMamLookupAuthority {
 }
 
 /// An owned result receiver. Dropping it detaches the already-started worker.
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 pub struct PinnedMamLookupJob {
     result: oneshot::Receiver<Result<Option<ArchivedMessage>, PinnedMamLookupError>>,
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 struct LookupPause {
     ready: oneshot::Sender<(i32, bool, bool)>,
     release: oneshot::Receiver<()>,
 }
 
 impl PinnedMamLookupJob {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "pinned MAM awaits serving attachment")
+    )]
     pub async fn finish(self) -> Result<Option<ArchivedMessage>, PinnedMamLookupError> {
         self.result
             .await
@@ -90,6 +114,10 @@ impl PinnedMamLookupJob {
 }
 
 impl PinnedMamLookupAuthority {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "pinned MAM awaits serving attachment")
+    )]
     pub fn new(
         pool: AttestedPgPool,
         pins: PinnedMamLookupPins,
@@ -127,6 +155,10 @@ impl PinnedMamLookupAuthority {
 
     /// Start immediately, transferring the immutable typed request to bounded
     /// supervised ownership before the caller's first cancellable wait.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "pinned MAM awaits serving attachment")
+    )]
     pub fn start_lookup(
         &self,
         stanza: StanzaId,
@@ -145,6 +177,10 @@ impl PinnedMamLookupAuthority {
         self.start(stanza, Some(LookupPause { ready, release }))
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "pinned MAM awaits serving attachment")
+    )]
     fn start(
         &self,
         stanza: StanzaId,
@@ -171,6 +207,10 @@ impl PinnedMamLookupAuthority {
     }
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 async fn lookup(
     database: &Database,
     authority: &PinnedRuntimeAuthority,
@@ -223,6 +263,10 @@ async fn lookup(
     outcome
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 async fn preflight_mam(
     tx: &mut Transaction<'_>,
     authority: &PinnedRuntimeAuthority,
@@ -248,6 +292,10 @@ async fn preflight_mam(
     verify_mam_catalog(tx, authority, pins).await
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 async fn verify_mam_catalog(
     tx: &mut Transaction<'_>,
     authority: &PinnedRuntimeAuthority,
@@ -295,6 +343,10 @@ async fn verify_mam_catalog(
     Ok(())
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 const INVENTORY: &str = r#"
 SELECT c.relnamespace=$2 AND c.relowner=$3 AND c.relname='mam_messages'
   AND n.oid=$2 AND n.nspname=$4 AND n.nspowner=$3
@@ -314,6 +366,10 @@ FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespac
 WHERE c.oid=$1
 "#;
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 const BOUNDED: &str = r#"
 SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid=$1
   AND c.relacl IS NOT NULL AND (pg_catalog.pg_column_compression(c.relacl) IS NOT NULL
@@ -329,6 +385,10 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid=$1
     OR pg_catalog.pg_column_compression(i.indoption) IS NOT NULL OR pg_catalog.pg_column_size(i.indoption)>4096))
 "#;
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "pinned MAM awaits serving attachment")
+)]
 const SHAPE: &str = r#"
 WITH expected_columns(name, typ, required) AS (VALUES
  ('id',25::pg_catalog.oid,true), ('room_jid',25::pg_catalog.oid,true),

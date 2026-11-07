@@ -48,6 +48,10 @@ use waddle_xmpp::registry::{
 };
 
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 pub enum ActorLocalEndpointError {
     #[error(transparent)]
     Socket(#[from] SocketAdmissionError),
@@ -68,6 +72,10 @@ pub enum ActorLocalEndpointError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 pub enum ActorLocalPublishError {
     #[error(transparent)]
     Authority(#[from] SocketAdmissionError),
@@ -86,6 +94,10 @@ pub enum ActorLocalPublishError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 pub enum ActorLocalWriteError {
     #[error("outbound ID or physical owner does not match")]
     WrongOwner,
@@ -101,6 +113,10 @@ pub enum ActorLocalWriteError {
     Output(#[from] OutputError<axum::Error>),
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 struct CleanupRecord {
     custodian: IoCustodianHandle,
     driver_shutdown_grace: Duration,
@@ -114,12 +130,20 @@ struct CleanupRecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 enum CleanupPhase {
     Accepting,
     Stopping,
     Joined,
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 struct CleanupLifecycle {
     phase: CleanupPhase,
     driver: Option<ConnectionActorDriverTaskCleanup>,
@@ -163,12 +187,20 @@ impl ActorPublicationProbe {
     }
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 struct PublicationState {
     stopped: bool,
     tickets: Vec<PublicationTicket>,
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 struct PublicationTicket {
     jid: FullJid,
     candidate: ActorProvisionalConnectionEntry,
@@ -177,6 +209,10 @@ struct PublicationTicket {
 }
 
 impl PublicationTicket {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     async fn retire(&self, deadline: Duration) {
         loop {
             let guard = self.registry.lock_bind(&self.jid).await;
@@ -208,6 +244,10 @@ impl PublicationTicket {
 }
 
 impl CleanupRecord {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn seal_all(&self) {
         {
             let custodies = self
@@ -229,6 +269,10 @@ impl CleanupRecord {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn retain_publication(&self, ticket: PublicationTicket) -> Result<(), ActorLocalPublishError> {
         let mut state = self
             .publications
@@ -248,6 +292,10 @@ impl CleanupRecord {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn stop_publication(&self) {
         self.publications
             .lock()
@@ -255,6 +303,10 @@ impl CleanupRecord {
             .stopped = true;
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn publication_stopped(&self) -> bool {
         self.publications
             .lock()
@@ -262,6 +314,10 @@ impl CleanupRecord {
             .stopped
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn forget_publication(&self, owner: LocalConnectionBindingId) {
         self.publications
             .lock()
@@ -270,6 +326,10 @@ impl CleanupRecord {
             .retain(|ticket| ticket.candidate.binding_id() != owner);
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     async fn retire_publications(&self, deadline: Duration) {
         loop {
             let next = self
@@ -285,6 +345,10 @@ impl CleanupRecord {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn has_publications(&self) -> bool {
         !self
             .publications
@@ -294,6 +358,10 @@ impl CleanupRecord {
             .is_empty()
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn contains_custody(&self, candidate: &Arc<ActorOutboundCustody>) -> bool {
         self.custodies
             .lock()
@@ -302,6 +370,10 @@ impl CleanupRecord {
             .any(|current| Arc::ptr_eq(current, candidate))
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn attach_driver(
         &self,
         connection: &ConnectionRef,
@@ -344,6 +416,10 @@ impl CleanupRecord {
     }
 
     /// Atomically prevent late attachment and hand stop to the attached task.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn begin_shutdown(&self, reason: StopReason) -> Option<ConnectionActorDriverTaskCleanup> {
         let driver = {
             let mut lifecycle = self
@@ -362,6 +438,10 @@ impl CleanupRecord {
         driver
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn driver(&self) -> Option<ConnectionActorDriverTaskCleanup> {
         self.lifecycle
             .lock()
@@ -370,6 +450,10 @@ impl CleanupRecord {
             .clone()
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn mark_joined(&self, pumps_joined: bool, driver_joined: bool) {
         if !pumps_joined || !driver_joined {
             return;
@@ -388,6 +472,10 @@ impl CleanupRecord {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn is_joined(&self) -> bool {
         self.lifecycle
             .lock()
@@ -396,11 +484,19 @@ impl CleanupRecord {
             == CleanupPhase::Joined
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn driver_is_settled(&self) -> bool {
         self.driver().is_none_or(|driver| driver.is_settled())
     }
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 struct CleanupIndexState {
     records: HashMap<ConnectionRef, Arc<CleanupRecord>>,
     max_connections: usize,
@@ -412,11 +508,19 @@ struct CleanupIndexState {
 /// for accepted envelopes until explicit terminal settlement. It provides no
 /// process-crash durability. Removing the final envelope releases its slot.
 #[derive(Clone)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 pub struct ActorEndpointCleanupIndex {
     state: Arc<Mutex<CleanupIndexState>>,
 }
 
 impl ActorEndpointCleanupIndex {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn new(max_connections: usize) -> Option<Self> {
         (max_connections > 0).then(|| Self {
             state: Arc::new(Mutex::new(CleanupIndexState {
@@ -460,6 +564,10 @@ impl ActorEndpointCleanupIndex {
         Ok(record)
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn contains(&self, connection: &ConnectionRef) -> bool {
         self.state
             .lock()
@@ -480,6 +588,10 @@ impl ActorEndpointCleanupIndex {
 
     /// Resolve a retained driver operation only through the exact physical
     /// connection record. The index does not create a second operation map.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(super) fn lookup_driver(
         &self,
         connection: &ConnectionRef,
@@ -497,6 +609,10 @@ impl ActorEndpointCleanupIndex {
 
     /// Acknowledge a terminal driver result through its app-owned connection
     /// record, then release the record if all actor and pump custody settled.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(super) fn acknowledge_driver(
         &self,
         connection: &ConnectionRef,
@@ -560,6 +676,10 @@ impl ActorEndpointCleanupIndex {
 
     /// An attempt still running or unjoined pumps cannot be settled by this
     /// index. The caller decides retry, retention or durable compensation.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn take_joined_terminal(
         &self,
         id: &ActorOutboundId,
@@ -591,6 +711,10 @@ impl ActorEndpointCleanupIndex {
 
     /// Enumerate the entire bounded terminal inventory after both pumps
     /// join. No actor-held ID is needed, including after mailbox loss.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn drain_joined_terminal(
         &self,
         connection: &ConnectionRef,
@@ -625,11 +749,19 @@ impl ActorEndpointCleanupIndex {
         Some(terminal)
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn prune_if_settled(&self, connection: &ConnectionRef) {
         prune_cleanup_index_state(&self.state, connection);
     }
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 fn prune_cleanup_index_state(state: &Mutex<CleanupIndexState>, connection: &ConnectionRef) {
     let mut index = state
         .lock()
@@ -652,6 +784,10 @@ fn prune_cleanup_index_state(state: &Mutex<CleanupIndexState>, connection: &Conn
 
 /// The actor holds this object, while the cleanup index independently keeps
 /// accepted work and the custodian until both pumps join.
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+)]
 pub struct ActorLocalEndpointOwner {
     authority: ActorSocketPublicationAuthority,
     cleanup: Arc<CleanupRecord>,
@@ -673,6 +809,10 @@ impl ActorLocalEndpointOwner {
     /// `index` must be held independently by process-lifetime app state. A
     /// caller-owned temporary index would make post-join terminal work
     /// undiscoverable after the owner and join task exit.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(crate) async fn start(
         admission: SocketAdmission,
         socket: WebSocket,
@@ -751,6 +891,10 @@ impl ActorLocalEndpointOwner {
         ))
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn connection_ref(&self) -> &ConnectionRef {
         self.authority.connection_ref()
     }
@@ -758,6 +902,10 @@ impl ActorLocalEndpointOwner {
     /// Attach the one dormant actor driver to this physical endpoint's
     /// existing cleanup record. The supplied state must carry this exact
     /// transport identity; task and I/O custody remain under one index entry.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(super) fn attach_driver_task(
         &self,
         state: super::state::WsConnState,
@@ -777,6 +925,10 @@ impl ActorLocalEndpointOwner {
         self.attach_parked_driver(task, release)
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn attach_parked_driver(
         &self,
         mut task: ConnectionActorDriverTask,
@@ -922,6 +1074,10 @@ impl ActorLocalEndpointOwner {
 
     /// A new binding gets a fresh queue. Earlier queues must be sealed and
     /// empty before their space can be reused on the same physical socket.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn new_binding_channel(
         &mut self,
     ) -> Result<(ActorSocketOutboundEndpoint, ActorOutboundReceiver), ActorLocalEndpointError> {
@@ -974,6 +1130,10 @@ impl ActorLocalEndpointOwner {
         Ok((endpoint, receiver))
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub fn request_stop(&self, reason: StopReason) {
         self.cleanup.stop_publication();
         self.cleanup.seal_all();
@@ -984,6 +1144,10 @@ impl ActorLocalEndpointOwner {
     /// The actor moves only an ID through its mailbox. This writer derives
     /// one frame while custody keeps the complete original envelope. Its
     /// separately bounded WebSocket output may hold a serialized copy.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub async fn write_next_direct(
         &self,
         receiver: &mut ActorOutboundReceiver,

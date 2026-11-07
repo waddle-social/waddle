@@ -258,6 +258,10 @@ impl StopSignal {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -1695,6 +1699,7 @@ impl IoCustodianHandle {
 
     /// Clone the exact physical connection's first-wins stop signal for
     /// independently owned cleanup tasks.
+    #[cfg(feature = "test-support")]
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
     }
@@ -1808,6 +1813,10 @@ impl IoCustodianHandle {
 
     /// Install the app-owned retirement fence. It runs once, synchronously,
     /// before either pump-stop cancellation or graceful shutdown is visible.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(crate) fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_retirement_listener(listener);
     }
@@ -2222,10 +2231,7 @@ async fn run_io_custodian<ReadError, WriteError>(
         None
     };
     #[cfg(not(feature = "test-support"))]
-    let physical_joined: Option<(
-        Result<InboundExit<ReadError>, JoinError>,
-        Result<OutboundExit<WriteError>, JoinError>,
-    )> = None;
+    let physical_joined = None;
     let (inbound, outbound) = if let Some(joined) = physical_joined {
         joined
     } else {
