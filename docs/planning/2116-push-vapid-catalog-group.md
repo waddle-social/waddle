@@ -98,7 +98,7 @@ all four ordered gates and two lost-reply proxy schedules); VAPID first-key
 integration 10/10 in default parallel execution (including one subprocess
 dispatcher and a URL precedence test); strict Push/VAPID owner and attach
 library tests 2/2. XEP-0357 Push regressions passed 7/7, and VAPID storage
-unit tests passed 10/10. The no-default server build, workspace formatting
+unit tests passed 10/10. The no-default server Cargo check, workspace formatting
 and diff checks passed. Independent source review found no actionable issue.
 Strict server Clippy with `-D warnings` remains blocked by the same 21
 pre-existing unused/dead-code diagnostics; this group introduced none.
