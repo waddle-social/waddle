@@ -82,8 +82,7 @@ pub(crate) async fn verify_guarded_receipt_profile(
         runtime,
         api,
         receipt.epoch_relation_oid,
-        true,
-        true,
+        super::ProfileMode::GuardedReceipt,
     )
     .await?;
     if observed.runtime_role_oid != receipt.runtime_role_oid

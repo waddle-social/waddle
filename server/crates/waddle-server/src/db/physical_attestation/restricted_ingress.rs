@@ -138,9 +138,22 @@ async fn inspect_profile_on_connection(
     epoch_oid: u32,
 ) -> Result<RestrictedIngressProfileObservation> {
     inspect_profile_with_receipt_journal(
-        connection, schema, schema_oid, runtime, api_owner, epoch_oid, false, false,
+        connection,
+        schema,
+        schema_oid,
+        runtime,
+        api_owner,
+        epoch_oid,
+        ProfileMode::Base,
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+enum ProfileMode {
+    Base,
+    ReceiptJournal,
+    GuardedReceipt,
 }
 
 async fn inspect_profile_with_receipt_journal(
@@ -150,9 +163,10 @@ async fn inspect_profile_with_receipt_journal(
     runtime: &str,
     api_owner: &str,
     epoch_oid: u32,
-    receipt_journal: bool,
-    guarded_receipt: bool,
+    mode: ProfileMode,
 ) -> Result<RestrictedIngressProfileObservation> {
+    let receipt_journal = !matches!(mode, ProfileMode::Base);
+    let guarded_receipt = matches!(mode, ProfileMode::GuardedReceipt);
     let row = sqlx::query(
         "SELECT pg_catalog.current_setting('server_version_num')::integer, \
          pg_catalog.current_setting('search_path'), session_user::text, current_user::text, \

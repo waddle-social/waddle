@@ -350,8 +350,7 @@ impl ReceiptOperationAuthority {
                     config.runtime_login.as_str(),
                     api_owner.as_str(),
                     pins.epoch_relation_oid,
-                    true,
-                    false,
+                    super::ProfileMode::ReceiptJournal,
                 )
                 .await?;
                 let expected = RestrictedIngressProfileObservation {
