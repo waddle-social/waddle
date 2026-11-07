@@ -507,10 +507,7 @@ pub enum VapidDbWriteStage {
 #[derive(Debug, Error)]
 pub enum VapidEnvParseError {
     #[error("base64url decode failed")]
-    Base64urlDecode {
-        #[source]
-        source: base64::DecodeError,
-    },
+    Base64urlDecode,
     #[error("expected 32-byte P-256 scalar; got {found} bytes")]
     InvalidLength { found: usize },
     #[error("invalid P-256 scalar")]

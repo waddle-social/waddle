@@ -1107,7 +1107,9 @@ fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
     let bytes = Zeroizing::new(
         URL_SAFE_NO_PAD
             .decode(raw.trim_end_matches('='))
-            .map_err(|source| VapidEnvParseError::Base64urlDecode { source })?,
+            // DecodeError can include the offending input byte. Do not retain
+            // any part of a malformed bootstrap secret in the error chain.
+            .map_err(|_| VapidEnvParseError::Base64urlDecode)?,
     );
     if bytes.len() != 32 {
         return Err(VapidEnvParseError::InvalidLength { found: bytes.len() }.into());
@@ -1199,6 +1201,19 @@ mod tests {
             err,
             VapidLoadError::EnvParse(VapidEnvParseError::InvalidLength { found: 16 })
         ));
+    }
+
+    #[test]
+    fn malformed_environment_error_does_not_retain_secret_bytes() {
+        let secret = "very-private-key!";
+        let error = parse_env_scalar(secret).unwrap_err();
+        assert!(matches!(
+            &error,
+            VapidLoadError::EnvParse(VapidEnvParseError::Base64urlDecode)
+        ));
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("InvalidByte"));
     }
 
     #[test]
