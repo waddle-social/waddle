@@ -23,6 +23,7 @@ use crate::push_service::PushServiceAttachError;
 const FOUNDATION_DESCENDANT_TABLE: &str = "ingress_effect_descendants";
 const CUSTODY_GATE_WAIT: Duration = Duration::from_secs(15);
 const CUSTODY_GATE_RETRY: Duration = Duration::from_millis(20);
+const CUSTODY_INSPECTION_WAIT: Duration = Duration::from_secs(60);
 const CUSTODY_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 /// The result contains counts only. It is intentionally not a store handle or
@@ -89,6 +90,8 @@ pub enum PushNotificationCustodyError {
     InvalidSchema,
     #[error("could not bound PostgreSQL waits for Push and notification custody inspection")]
     ReadBounds,
+    #[error("Push and notification custody inspection timed out")]
+    InspectionTimeout,
     #[error("Foundation relation {table} is absent or could not be locked")]
     FoundationRelation {
         table: &'static str,
@@ -232,7 +235,7 @@ pub async fn verify_attested_push_notification_custody(
         }
     };
 
-    let snapshot = async {
+    let snapshot = tokio::time::timeout(CUSTODY_INSPECTION_WAIT, async {
         crate::notification_outbox::runtime_attach::verify_runtime_attach_tx(&mut tx, identity)
             .await?;
         crate::push_service::runtime_attach::verify_runtime_attach_tx(&mut tx, identity).await?;
@@ -245,8 +248,9 @@ pub async fn verify_attested_push_notification_custody(
         // The sole application-row classification query takes one READ
         // COMMITTED command snapshot across all participating stores.
         read_custody_snapshot(&mut tx, schema).await
-    }
-    .await;
+    })
+    .await
+    .unwrap_or(Err(PushNotificationCustodyError::InspectionTimeout));
     if !tx.rollback_bounded_discard(CUSTODY_ROLLBACK_WAIT).await {
         return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
     }
