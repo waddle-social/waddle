@@ -36,8 +36,11 @@ use crate::websocket_transport::LegacySocketAdmission;
 use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
 use futures::stream::{SplitSink, SplitStream};
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
+use tokio_util::sync::CancellationToken;
 use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint};
 use waddle_xmpp::stream_management::SmRequest;
 
@@ -48,7 +51,7 @@ enum BatchCompletionOutcome {
     RetryOnly,
 }
 
-async fn close_revoked_upgraded_socket<S, E>(socket: &mut S)
+async fn close_unstarted_upgraded_socket<S, E>(socket: &mut S)
 where
     S: futures::Sink<Message, Error = E> + Unpin,
     E: super::send::WebSocketWriteError,
@@ -57,20 +60,16 @@ where
         let _ = send_ws_message(
             socket,
             Message::Close(None),
-            "Failed to send WebSocket close frame after admission revocation",
+            "Failed to send WebSocket close frame before XMPP start",
         )
         .await;
-        let _ = close_ws_connection(
-            socket,
-            "Failed to close WebSocket after admission revocation",
-        )
-        .await;
+        let _ = close_ws_connection(socket, "Failed to close WebSocket before XMPP start").await;
     };
     if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close)
         .await
         .is_err()
     {
-        warn!("Timed out closing WebSocket after admission revocation");
+        warn!("Timed out closing WebSocket before XMPP start");
     }
 }
 
@@ -156,13 +155,55 @@ async fn xmpp_websocket_handler(
     }
 
     ws.protocols(["xmpp"]).on_upgrade(move |socket| {
-        LiveWebSocketConnection {
+        #[cfg(feature = "test-support")]
+        let waiter_control = state
+            .deps
+            .app_state
+            .websocket_admission_test_barriers
+            .callback_waiter
+            .clone();
+        let waiter = LiveWebSocketConnection {
             phase: LiveSocketPhase::Upgraded(Box::new(socket)),
             state,
             admission,
             _connection_guard: connection_guard,
         }
-        .run()
+        .spawn();
+        #[cfg(feature = "test-support")]
+        let waiter = if waiter_control
+            .as_ref()
+            .is_some_and(|control| control.drop_before_poll)
+        {
+            drop(waiter);
+            if let Some(control) = &waiter_control {
+                control.waiter_dropped.cancel();
+            }
+            None
+        } else {
+            Some(waiter)
+        };
+        #[cfg(not(feature = "test-support"))]
+        let waiter = Some(waiter);
+
+        async move {
+            #[cfg(feature = "test-support")]
+            if let Some(control) = waiter_control {
+                if let Some(waiter) = waiter {
+                    let mut waiter = Box::pin(waiter);
+                    tokio::select! {
+                        _ = control.drop_waiter.cancelled() => {
+                            drop(waiter);
+                            control.waiter_dropped.cancel();
+                        }
+                        _ = &mut waiter => {}
+                    }
+                }
+                return;
+            }
+            if let Some(waiter) = waiter {
+                waiter.await;
+            }
+        }
     })
 }
 
@@ -292,8 +333,35 @@ struct LiveSocketState {
 }
 
 impl LiveWebSocketConnection {
+    /// Transfer the whole lifecycle to the runtime before returning a waiter.
+    /// Dropping even an unpolled waiter requests a soft stop; it never aborts
+    /// the owner or its connection-owned settlement.
+    fn spawn(self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let caller_gone = CancellationToken::new();
+        let caller_guard = caller_gone.clone().drop_guard();
+        let connection_ref = self.admission.connection_ref().clone();
+        let owner = tokio::spawn(async move {
+            if AssertUnwindSafe(self.run(caller_gone))
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                error!(
+                    ?connection_ref,
+                    "WebSocket connection owner panicked; cleanup completion is unconfirmed"
+                );
+            }
+        });
+        async move {
+            let _caller_guard = caller_guard;
+            // The owner catches and reports its own panic even if this waiter
+            // has already gone away. Dropping a JoinHandle detaches the task.
+            let _ = owner.await;
+        }
+    }
+
     /// Run the connection through its live I/O loop and shutdown settlement.
-    async fn run(mut self) {
+    async fn run(mut self, caller_gone: CancellationToken) {
         #[cfg(feature = "test-support")]
         if let Some(barrier) = &self
             .state
@@ -315,7 +383,18 @@ impl LiveWebSocketConnection {
             let LiveSocketPhase::Upgraded(socket) = &mut self.phase else {
                 unreachable!("run starts with the upgraded socket");
             };
-            close_revoked_upgraded_socket(socket.as_mut()).await;
+            close_unstarted_upgraded_socket(socket.as_mut()).await;
+            return;
+        }
+        if caller_gone.is_cancelled() {
+            info!(
+                connection_ref = ?self.admission.connection_ref(),
+                "WebSocket upgrade waiter dropped before XMPP start"
+            );
+            let LiveSocketPhase::Upgraded(socket) = &mut self.phase else {
+                unreachable!("run starts with the upgraded socket");
+            };
+            close_unstarted_upgraded_socket(socket.as_mut()).await;
             return;
         }
         let LiveSocketPhase::Upgraded(socket) =
@@ -450,7 +529,9 @@ impl LiveWebSocketConnection {
                 // deadline (mirrors the batch writer's inline re-request). The
                 // deadline stays armed from the rising edge as the true dead-peer
                 // bound, so a genuinely stuck client is still detached in time.
-                if rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked {
+                if (rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked)
+                    && !caller_gone.is_cancelled()
+                {
                     conn.send_window_last_request_acked = conn.sm_state.last_acked;
                     if admission.revalidate().is_err() {
                         close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
@@ -597,6 +678,17 @@ impl LiveWebSocketConnection {
                     }
                 }
 
+                // Losing the upgrade callback's waiter requests normal
+                // settlement. In-flight handlers and cleanup are not raced
+                // against this signal, and shutdown/detach retain priority.
+                _ = caller_gone.cancelled() => {
+                    info!(
+                        connection_ref = ?admission.connection_ref(),
+                        "WebSocket upgrade waiter dropped; settling connection"
+                    );
+                    break;
+                }
+
                 // Accepted detach requests stay ahead of new preflight work, so
                 // a stream of rejected attempts cannot starve its own retirement.
                 // Validation still precedes ordinary inbound/deferred work.
@@ -629,6 +721,9 @@ impl LiveWebSocketConnection {
                         .await
                         {
                             break 'connection;
+                        }
+                        if caller_gone.is_cancelled() {
+                            break;
                         }
                     }
                     tokio::task::yield_now().await;
@@ -1078,6 +1173,15 @@ pub(super) async fn finish_connection<S, R, E>(
     };
     ack_force_detach_requests(late_requests, late_outcome);
 
+    #[cfg(feature = "test-support")]
+    if let Some(barrier) = &state
+        .deps
+        .app_state
+        .websocket_admission_test_barriers
+        .after_cleanup
+    {
+        barrier.arrive().await;
+    }
     info!("XMPP WebSocket connection closed");
 }
 
@@ -1597,6 +1701,15 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    #[cfg(feature = "test-support")]
+    if let Some(barrier) = &state
+        .deps
+        .app_state
+        .websocket_admission_test_barriers
+        .in_inbound_handler
+    {
+        barrier.arrive().await;
+    }
     let RegistrationChannels {
         pending_tx,
         force_detach_rx,

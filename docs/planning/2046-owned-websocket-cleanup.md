@@ -18,11 +18,10 @@ proving the connection's detach and acknowledgement outcomes.
    Finish the selected operation and run the existing ordered
    `finish_connection` path; do not cancel an in-flight handler or cleanup
    future. Keep process shutdown and admission revocation separate.
-3. Test waiter loss before first poll and at representative registration,
-   resume, relay, force-detach, and cleanup barriers. Verify retained capacity
-   and guard, exact binding safety, SM replay order, and honest force-detach
-   outcomes. Run formatting, focused tests, and strict scoped Clippy, followed
-   by independent adversarial review.
+3. Test waiter loss before first poll, while an inbound handler is blocked,
+   and during cleanup. Verify the owner retains capacity and the drain guard
+   through settlement. Run formatting, focused tests, and strict scoped Clippy,
+   followed by independent adversarial review.
 
 ## Boundary
 
@@ -30,4 +29,6 @@ This protects against cancellation of the upgrade callback waiter. A panic in
 the owner task can still drop in-flight values; task completion alone does not
 prove successful cleanup. Process loss, durable pre-accept SM custody, and the
 local unregister mailbox-admission guarantee remain separate #2046 gates.
+The cancellation tests do not directly exercise waiter loss during SM
+resume/replay, ordered relay settlement, or force-detach acknowledgement.
 GitHub Actions and workflow files remain disabled until final qualification.

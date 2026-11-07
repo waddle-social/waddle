@@ -874,7 +874,19 @@ pub struct AdmissionTestBarriers {
     pub before_parse: Option<Arc<AdmissionTestBarrier>>,
     pub before_response: Option<Arc<AdmissionTestBarrier>>,
     pub in_callback: Option<Arc<AdmissionTestBarrier>>,
+    pub in_inbound_handler: Option<Arc<AdmissionTestBarrier>>,
     pub before_cleanup: Option<Arc<AdmissionTestBarrier>>,
+    pub after_cleanup: Option<Arc<AdmissionTestBarrier>>,
+    pub callback_waiter: Option<Arc<CallbackWaiterTestControl>>,
+}
+
+/// Test-only control of the actual upgrade callback's observational waiter.
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+pub struct CallbackWaiterTestControl {
+    pub drop_before_poll: bool,
+    pub drop_waiter: CancellationToken,
+    pub waiter_dropped: CancellationToken,
 }
 
 /// Test-only access to the same non-cloneable admission and generic factory.

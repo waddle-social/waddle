@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -13,7 +13,9 @@ use waddle_server::config::MaxWebSocketConnections;
 use waddle_server::test_support::{
     router, websocket_state_with_admission, WebSocketAdmissionTestConfig, WebSocketState,
 };
-use waddle_server::websocket_transport::{AdmissionTestBarrier, AdmissionTestBarriers};
+use waddle_server::websocket_transport::{
+    AdmissionTestBarrier, AdmissionTestBarriers, CallbackWaiterTestControl,
+};
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
 
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -91,6 +93,33 @@ async fn wait_entered(barrier: &AdmissionTestBarrier) {
     tokio::time::timeout(DEADLINE, barrier.wait_until_entered())
         .await
         .expect("barrier entered");
+}
+
+async fn wait_for_drain(state: &WebSocketState) {
+    tokio::time::timeout(DEADLINE, async {
+        while !state
+            .deps
+            .app_state
+            .websocket_inventory_for_test()
+            .is_empty()
+            || state.deps.shutdown.active_connections() != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("connection and admission drained");
+}
+
+async fn wait_for_waiter_drop(control: &CallbackWaiterTestControl) {
+    tokio::time::timeout(DEADLINE, control.waiter_dropped.cancelled())
+        .await
+        .expect("callback waiter dropped");
+}
+
+fn assert_connection_owned(state: &WebSocketState) {
+    assert_eq!(state.deps.app_state.websocket_inventory_for_test().len(), 1);
+    assert_eq!(state.deps.shutdown.active_connections(), 1);
 }
 
 #[test]
@@ -363,6 +392,112 @@ async fn capacity_remains_held_until_connection_cleanup_finishes() {
     wait_entered(&barrier).await;
     barrier.release();
     wait_for_slots(&h.state, 0).await;
+}
+
+#[tokio::test]
+async fn unpolled_upgrade_waiter_drop_keeps_owner_until_unstarted_socket_closes() {
+    let in_callback = Arc::new(AdmissionTestBarrier::default());
+    let control = Arc::new(CallbackWaiterTestControl {
+        drop_before_poll: true,
+        ..Default::default()
+    });
+    let h = start(
+        1,
+        None,
+        AdmissionTestBarriers {
+            in_callback: Some(Arc::clone(&in_callback)),
+            callback_waiter: Some(Arc::clone(&control)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut peer = connect(&h.url).await.expect("upgrade");
+    wait_for_waiter_drop(&control).await;
+    wait_entered(&in_callback).await;
+    assert_connection_owned(&h.state);
+    assert_unavailable(connect(&h.url).await);
+
+    in_callback.release();
+    let frame = tokio::time::timeout(DEADLINE, peer.next())
+        .await
+        .expect("close frame");
+    assert!(matches!(frame, Some(Ok(Message::Close(_)))), "{frame:?}");
+    wait_for_drain(&h.state).await;
+}
+
+#[tokio::test]
+async fn dropping_waiter_during_handler_finishes_handler_then_cleanup() {
+    let handler = Arc::new(AdmissionTestBarrier::default());
+    let cleanup = Arc::new(AdmissionTestBarrier::default());
+    let after_cleanup = Arc::new(AdmissionTestBarrier::default());
+    let control = Arc::new(CallbackWaiterTestControl::default());
+    let h = start(
+        1,
+        None,
+        AdmissionTestBarriers {
+            in_inbound_handler: Some(Arc::clone(&handler)),
+            before_cleanup: Some(Arc::clone(&cleanup)),
+            after_cleanup: Some(Arc::clone(&after_cleanup)),
+            callback_waiter: Some(Arc::clone(&control)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut peer = connect(&h.url).await.expect("upgrade");
+    peer.send(Message::Text(
+        "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='example.com' version='1.0'/>".into(),
+    ))
+    .await
+    .expect("open frame");
+    wait_entered(&handler).await;
+    control.drop_waiter.cancel();
+    wait_for_waiter_drop(&control).await;
+    assert_connection_owned(&h.state);
+
+    handler.release();
+    let response = tokio::time::timeout(DEADLINE, peer.next())
+        .await
+        .expect("handler response")
+        .expect("response frame")
+        .expect("websocket response");
+    assert!(matches!(response, Message::Text(text) if text.contains("<open")));
+    wait_entered(&cleanup).await;
+    assert_connection_owned(&h.state);
+    cleanup.release();
+    wait_entered(&after_cleanup).await;
+    assert_connection_owned(&h.state);
+    after_cleanup.release();
+    wait_for_drain(&h.state).await;
+}
+
+#[tokio::test]
+async fn dropping_waiter_during_cleanup_does_not_interrupt_cleanup() {
+    let cleanup = Arc::new(AdmissionTestBarrier::default());
+    let after_cleanup = Arc::new(AdmissionTestBarrier::default());
+    let control = Arc::new(CallbackWaiterTestControl::default());
+    let h = start(
+        1,
+        None,
+        AdmissionTestBarriers {
+            before_cleanup: Some(Arc::clone(&cleanup)),
+            after_cleanup: Some(Arc::clone(&after_cleanup)),
+            callback_waiter: Some(Arc::clone(&control)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let peer = connect(&h.url).await.expect("upgrade");
+    drop(peer);
+    wait_entered(&cleanup).await;
+    control.drop_waiter.cancel();
+    wait_for_waiter_drop(&control).await;
+    assert_connection_owned(&h.state);
+
+    cleanup.release();
+    wait_entered(&after_cleanup).await;
+    assert_connection_owned(&h.state);
+    after_cleanup.release();
+    wait_for_drain(&h.state).await;
 }
 
 #[tokio::test]
