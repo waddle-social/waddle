@@ -15,12 +15,18 @@ const EXPRESSION_DEPENDENCIES_SQL: &str = include_str!("expression_dependencies.
 const INVENTORY_BOUNDS: &str = include_str!("inventory_bounds.sql");
 const PHYSICAL_BOUNDS: &str = include_str!("physical_bounds.sql");
 const STORAGE_BOUNDS: &str = include_str!("storage_bounds.sql");
+const ARRAY_BOUNDS: &str = include_str!("array_bounds.sql");
 
 /// Bound inventories first, then raw variable-length inputs before any ACL
 /// expansion, catalog JSON aggregation, expression deparsing, or SQLx decoding.
 /// Both queries run under the caller's cooperative catalog mutation fence.
 pub(super) async fn bound(connection: &mut PgConnection, schema: &str) -> Result<()> {
-    for statement in [INVENTORY_BOUNDS, PHYSICAL_BOUNDS, STORAGE_BOUNDS] {
+    for statement in [
+        INVENTORY_BOUNDS,
+        PHYSICAL_BOUNDS,
+        STORAGE_BOUNDS,
+        ARRAY_BOUNDS,
+    ] {
         let valid: bool = sqlx::query_scalar(statement)
             .bind(schema)
             .fetch_one(&mut *connection)

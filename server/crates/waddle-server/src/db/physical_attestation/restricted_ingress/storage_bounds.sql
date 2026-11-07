@@ -1,7 +1,14 @@
 -- Inventory bounds were proven by the preceding, separate statement. Reject
--- compressed catalog arrays before aclexplode/JSON expansion, and bound source
+-- unbounded catalog arrays before aclexplode/JSON expansion, and bound source
 -- by logical byte length before SQLx can decode it. PostgreSQL's octet_length
--- on text/bytea uses the datum's raw length, including toasted values.
+-- on text uses the datum's raw length, including toasted values.
+--
+-- Some valid pg_proc arrays are pglz-compressed. PG17 uses 2-3 byte backrefs
+-- producing at most 273 bytes per tag, so 137x physical size is a conservative
+-- expansion bound; 512 physical bytes therefore expand to at most 70,144
+-- bytes. Other compression methods are rejected. See PostgreSQL 17's format:
+-- https://github.com/postgres/postgres/blob/REL_17_STABLE/src/common/pg_lzcompress.c#L1-L6
+-- The subsequent separate array_bounds.sql caps element counts after this pass.
 WITH relations AS MATERIALIZED (
   SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
   WHERE n.nspname=$1 AND (pg_catalog.starts_with(c.relname,'ingress_')
@@ -33,11 +40,21 @@ SELECT NOT EXISTS (
   SELECT 1 FROM pg_catalog.pg_proc p JOIN functions f ON f.oid=p.oid
   WHERE pg_catalog.octet_length(p.prosrc)>32768
      OR p.proargdefaults IS NOT NULL OR p.prosqlbody IS NOT NULL OR p.probin IS NOT NULL OR p.protrftypes IS NOT NULL
-     OR (p.proacl IS NOT NULL AND (pg_catalog.pg_column_compression(p.proacl) IS NOT NULL OR pg_catalog.pg_column_size(p.proacl)>8192))
-     OR (p.proconfig IS NOT NULL AND (pg_catalog.pg_column_compression(p.proconfig) IS NOT NULL OR pg_catalog.pg_column_size(p.proconfig)>8192))
-     OR (p.proargnames IS NOT NULL AND (pg_catalog.pg_column_compression(p.proargnames) IS NOT NULL OR pg_catalog.pg_column_size(p.proargnames)>8192))
-     OR (p.proallargtypes IS NOT NULL AND (pg_catalog.pg_column_compression(p.proallargtypes) IS NOT NULL OR pg_catalog.pg_column_size(p.proallargtypes)>8192))
-     OR (p.proargmodes IS NOT NULL AND (pg_catalog.pg_column_compression(p.proargmodes) IS NOT NULL OR pg_catalog.pg_column_size(p.proargmodes)>8192))
+     OR (p.proacl IS NOT NULL AND pg_catalog.pg_column_size(p.proacl) > CASE
+       WHEN pg_catalog.pg_column_compression(p.proacl) IS NULL THEN 8192
+       WHEN pg_catalog.pg_column_compression(p.proacl)='pglz' THEN 512 ELSE 0 END)
+     OR (p.proconfig IS NOT NULL AND pg_catalog.pg_column_size(p.proconfig) > CASE
+       WHEN pg_catalog.pg_column_compression(p.proconfig) IS NULL THEN 8192
+       WHEN pg_catalog.pg_column_compression(p.proconfig)='pglz' THEN 512 ELSE 0 END)
+     OR (p.proargnames IS NOT NULL AND pg_catalog.pg_column_size(p.proargnames) > CASE
+       WHEN pg_catalog.pg_column_compression(p.proargnames) IS NULL THEN 8192
+       WHEN pg_catalog.pg_column_compression(p.proargnames)='pglz' THEN 512 ELSE 0 END)
+     OR (p.proallargtypes IS NOT NULL AND pg_catalog.pg_column_size(p.proallargtypes) > CASE
+       WHEN pg_catalog.pg_column_compression(p.proallargtypes) IS NULL THEN 8192
+       WHEN pg_catalog.pg_column_compression(p.proallargtypes)='pglz' THEN 512 ELSE 0 END)
+     OR (p.proargmodes IS NOT NULL AND pg_catalog.pg_column_size(p.proargmodes) > CASE
+       WHEN pg_catalog.pg_column_compression(p.proargmodes) IS NULL THEN 8192
+       WHEN pg_catalog.pg_column_compression(p.proargmodes)='pglz' THEN 512 ELSE 0 END)
 ) AND NOT EXISTS (
   SELECT 1 FROM pg_catalog.pg_trigger t JOIN relations r ON r.oid=t.tgrelid
   WHERE (t.tgqual IS NOT NULL AND pg_catalog.octet_length(t.tgqual::text)>32768)
