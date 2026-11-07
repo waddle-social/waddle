@@ -14,15 +14,15 @@ use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::PgPool;
 use sqlx::postgres::PgConnectOptions;
+use sqlx::PgPool;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{watch, Notify};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::inbox::DatabaseInboxStorage;
 use waddle_xmpp::inbox::storage::InboxStorageError;

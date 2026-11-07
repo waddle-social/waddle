@@ -279,6 +279,92 @@ async fn pg17_inbox_owner_fences_legacy_migration_on_the_mutating_backend() {
     .expect("count retained keyed recovery");
     assert_eq!(retained, 1);
 
+    // A legacy heap can carry a DELETE trigger that mutates an unrelated
+    // table. Refuse it before the conditional legacy-row deletion.
+    for statement in [
+        format!("DROP TABLE {schema}.groupchat_notification_recovery"),
+        format!(
+            "CREATE TABLE {schema}.groupchat_notification_recovery (\
+             recipient_bare_jid TEXT NOT NULL, room_jid TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '', \
+             stanza_id_by TEXT NOT NULL, stanza_id TEXT NOT NULL, sender_jid TEXT NOT NULL, \
+             is_live_occupant INTEGER NOT NULL, room_members_only INTEGER NOT NULL, \
+             sender_can_broadcast_channel_mention INTEGER NOT NULL DEFAULT 0, \
+             created_at_ms BIGINT NOT NULL, completed_at_ms BIGINT, \
+             PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id))"
+        ),
+        format!(
+            "INSERT INTO {schema}.groupchat_notification_recovery \
+             (recipient_bare_jid, room_jid, stanza_id_by, stanza_id, sender_jid, \
+              is_live_occupant, room_members_only, created_at_ms) \
+             VALUES ('u@example.com', 'r@example.com', 'r@example.com', 'legacy', \
+                     'r@example.com/a', 1, 0, 3)"
+        ),
+        format!("CREATE TABLE {schema}.side_effect_audit (id INTEGER NOT NULL)"),
+        format!("INSERT INTO {schema}.side_effect_audit VALUES (1)"),
+        format!(
+            "CREATE FUNCTION {schema}.delete_audit_on_recovery() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN DELETE FROM {schema}.side_effect_audit; RETURN OLD; END $$"
+        ),
+        format!(
+            "CREATE TRIGGER delete_audit_on_recovery AFTER DELETE \
+             ON {schema}.groupchat_notification_recovery FOR EACH ROW \
+             EXECUTE FUNCTION {schema}.delete_audit_on_recovery()"
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&admin)
+            .await
+            .expect("prepare executable legacy recovery");
+    }
+    // A parent DELETE/ALTER would also reach an inherited child. The parent
+    // here is still legacy and lacks message_key, so deletion is pending.
+    sqlx::query(&format!(
+        "CREATE TABLE {schema}.recovery_child () INHERITS ({schema}.groupchat_notification_recovery)"
+    ))
+    .execute(&admin)
+    .await
+    .expect("create inherited recovery child");
+    sqlx::query(&format!(
+        "INSERT INTO {schema}.recovery_child SELECT * FROM ONLY {schema}.groupchat_notification_recovery"
+    ))
+    .execute(&admin)
+    .await
+    .expect("seed inherited recovery child");
+    let error = match DatabaseInboxStorage::from_database(db.clone()).await {
+        Ok(_) => panic!("owner accepted inherited recovery child"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("inheritance"));
+    let child_rows: i64 =
+        sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.recovery_child"))
+            .fetch_one(&admin)
+            .await
+            .expect("read untouched inherited child");
+    assert_eq!(child_rows, 1);
+    sqlx::query(&format!("DROP TABLE {schema}.recovery_child"))
+        .execute(&admin)
+        .await
+        .expect("drop inherited child");
+
+    let error = match DatabaseInboxStorage::from_database(db.clone()).await {
+        Ok(_) => panic!("owner accepted executable legacy DELETE"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("DELETE side effects"));
+    let audit_rows: i64 =
+        sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.side_effect_audit"))
+            .fetch_one(&admin)
+            .await
+            .expect("read untouched audit table");
+    assert_eq!(audit_rows, 1);
+    let legacy_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM ONLY {schema}.groupchat_notification_recovery"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("read untouched legacy rows");
+    assert_eq!(legacy_rows, 1);
+
     // A same-name updatable view must be refused before the legacy DELETE.
     for statement in [
         format!("DROP TABLE {schema}.groupchat_notification_recovery"),

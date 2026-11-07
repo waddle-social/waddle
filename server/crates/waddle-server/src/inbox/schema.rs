@@ -171,6 +171,8 @@ async fn lock_and_verify_postgres_relation(
     ) -> Result<Option<(i64, bool)>, InboxStorageError> {
         sqlx::query_as(
             "SELECT c.oid::pg_catalog.int8, c.relkind = 'r' AND c.relpersistence = 'p' \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i \
+                 WHERE i.inhparent = c.oid OR i.inhrelid = c.oid) \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relname = $2",
@@ -186,7 +188,7 @@ async fn lock_and_verify_postgres_relation(
         None if !required => return Ok(()),
         _ => {
             return Err(InboxStorageError::Other(format!(
-                "inbox owner refused unexpected PostgreSQL relation kind for {table}"
+                "inbox owner refused unexpected PostgreSQL relation kind or inheritance for {table}"
             )));
         }
     };
@@ -194,13 +196,35 @@ async fn lock_and_verify_postgres_relation(
     let name = crate::db::physical_attestation::quote_identifier(table);
     postgres_execute(
         connection,
-        &format!("LOCK TABLE {namespace}.{name} IN ACCESS EXCLUSIVE MODE"),
+        &format!("LOCK TABLE ONLY {namespace}.{name} IN ACCESS EXCLUSIVE MODE"),
     )
     .await?;
     if relation(connection, schema, table).await? != Some((oid, true)) {
         return Err(InboxStorageError::Other(format!(
             "inbox owner relation changed while locking {table}"
         )));
+    }
+    if table == "groupchat_notification_recovery" {
+        // The legacy migration deletes rows. An executable rule, trigger,
+        // policy, or incoming FK could make that DELETE mutate another table.
+        let direct_delete: bool = sqlx::query_scalar(
+            "SELECT NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint f \
+                 WHERE f.contype = 'f' AND f.confrelid = c.oid) \
+             FROM pg_catalog.pg_class c WHERE c.oid = $1::pg_catalog.oid",
+        )
+        .bind(oid)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(inbox_database_error)?;
+        if !direct_delete {
+            return Err(InboxStorageError::Other(
+                "inbox owner refused executable PostgreSQL recovery DELETE side effects".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -227,23 +251,32 @@ async fn prepare_postgres_schema(
     .await?;
     lock_and_verify_postgres_relation(connection, schema, "inbox_entries", true).await?;
 
-    let current_type: Option<String> = sqlx::query_scalar(
-        "SELECT data_type::pg_catalog.text FROM information_schema.columns \
-         WHERE table_schema = $1 AND table_name = 'inbox_entries' AND column_name = 'last_updated'",
+    let current_type: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT a.atttypid = 'pg_catalog.int4'::pg_catalog.regtype, \
+                a.atttypid = 'pg_catalog.int8'::pg_catalog.regtype \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = 'inbox_entries' \
+           AND a.attname = 'last_updated' AND a.attnum > 0 AND NOT a.attisdropped",
     )
     .bind(schema)
     .fetch_optional(&mut *connection)
     .await
     .map_err(inbox_database_error)?;
-    if current_type
-        .as_deref()
-        .is_some_and(|data_type| !data_type.eq_ignore_ascii_case("bigint"))
-    {
+    let (is_int4, is_int8) = current_type.ok_or_else(|| {
+        InboxStorageError::Other("inbox owner requires last_updated column".into())
+    })?;
+    if is_int4 {
         postgres_execute(
             connection,
             &format!("ALTER TABLE {entries} ALTER COLUMN last_updated TYPE BIGINT"),
         )
         .await?;
+    } else if !is_int8 {
+        return Err(InboxStorageError::Other(
+            "inbox owner refused non-integer last_updated conversion".into(),
+        ));
     }
     postgres_execute(
         connection,

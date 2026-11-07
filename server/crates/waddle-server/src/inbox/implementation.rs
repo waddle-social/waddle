@@ -96,10 +96,12 @@ impl DatabaseInboxStorage {
     /// required columns, primary keys and named indexes, but not index
     /// definitions or completion of the owner job. It does not establish
     /// identity provenance, all grants, or future schema state. PostgreSQL
-    /// provisionally caps each later lock wait at 5 seconds and statement at
-    /// 10 seconds, preserving tighter session limits. These are not a total
-    /// or network deadline. SQLite checks temporary shadows of inbox and recovery
-    /// ledger relations only on the connection used for this check.
+    /// caps each later lock wait at 5 seconds and statement at 10 seconds,
+    /// preserving tighter session limits. The fenced PostgreSQL inspection
+    /// has a 60-second client deadline after catalog acquisition and ends
+    /// with bounded acknowledged rollback. Pool checkout and fence acquisition
+    /// have separate bounds. SQLite checks temporary shadows of inbox and
+    /// recovery ledger relations only on the connection used for this check.
     /// Attested PostgreSQL inbox startup uses this verifier after the owner
     /// has prepared the shared global schema.
     pub async fn attach_existing(db: Database) -> Result<Self, super::InboxRuntimeAttachError> {
