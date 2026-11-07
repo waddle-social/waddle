@@ -213,6 +213,9 @@ impl PgLease {
     async fn commit(&mut self) -> Result<(), DatabaseError> {
         PgTransactionManager::commit(self).await?;
         self.transaction_open = false;
+        // An acknowledged COMMIT ends the transaction. A failed or cancelled
+        // COMMIT leaves this flag set, so an uncertain session is closed.
+        self.discard_on_drop = false;
         Ok(())
     }
 }
@@ -900,6 +903,25 @@ impl<'a> Transaction<'a> {
         admission_permit: tokio::sync::OwnedSemaphorePermit,
         acquisition_deadline: tokio::time::Instant,
     ) -> Result<Self, DatabaseError> {
+        Self::begin_with_discard(backend, admission_permit, acquisition_deadline, false).await
+    }
+
+    /// Close a PostgreSQL checkout if BEGIN or any subsequent transaction
+    /// work is cancelled before its end is acknowledged.
+    pub(super) async fn begin_discard_postgres_on_drop(
+        backend: &'a DatabaseBackend,
+        admission_permit: tokio::sync::OwnedSemaphorePermit,
+        acquisition_deadline: tokio::time::Instant,
+    ) -> Result<Self, DatabaseError> {
+        Self::begin_with_discard(backend, admission_permit, acquisition_deadline, true).await
+    }
+
+    async fn begin_with_discard(
+        backend: &'a DatabaseBackend,
+        admission_permit: tokio::sync::OwnedSemaphorePermit,
+        acquisition_deadline: tokio::time::Instant,
+        discard_postgres_on_drop: bool,
+    ) -> Result<Self, DatabaseError> {
         let (inner, sqlite_permit) = match backend {
             DatabaseBackend::Sqlite(pool) => (
                 TransactionInner::Sqlite(pool.begin().await?),
@@ -910,6 +932,10 @@ impl<'a> Transaction<'a> {
                     PendingPgAcquire::new(pool.clone(), admission_permit, acquisition_deadline)
                         .acquire()
                         .await?;
+                // PendingPgAcquire owns the floating SQLx checkout and permit
+                // until checkout/hooks finish. Mark the acquired lease before
+                // the first cancellable transaction operation.
+                lease.discard_on_drop = discard_postgres_on_drop;
                 tokio::time::timeout_at(acquisition_deadline, lease.begin())
                     .await
                     .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
