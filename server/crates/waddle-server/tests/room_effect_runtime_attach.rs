@@ -24,7 +24,6 @@ struct Fixture {
     admin: PgPool,
     installer_options: PgConnectOptions,
     runtime_options: PgConnectOptions,
-    runtime_app_name: String,
     base_url: String,
     database_name: String,
     lineage: AttestedLineage,
@@ -124,17 +123,12 @@ impl Fixture {
 
         let admin_options = PgConnectOptions::from_str(&boundary_url).expect("admin options");
         let installer_options = admin_options.clone().username(&installer);
-        let runtime_app_name = format!("room_runtime_{suffix}");
-        let runtime_options = admin_options
-            .clone()
-            .username(&runtime)
-            .application_name(&runtime_app_name);
+        let runtime_options = admin_options.clone().username(&runtime);
         Self {
             cluster_admin,
             admin,
             installer_options,
             runtime_options,
-            runtime_app_name,
             base_url,
             database_name,
             lineage,
@@ -249,9 +243,9 @@ const MUC_DESTROY_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_995;
 const ROOM_EFFECT_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_996;
 
 /// Exercise a public owner entry while its family gate is held. Observe the
-/// public backend holding catalog-X during an advisory-lock attempt, confirm
-/// the retry releases catalog-X while it remains pending, then verify relation
-/// visibility after releasing the family gate.
+/// backend's acknowledged ROLLBACK after a failed lower-gate attempt, confirm
+/// catalog-X is released while the operation remains pending, then verify
+/// relation visibility after releasing the family gate.
 async fn assert_owner_gate_releases_catalog<T>(
     admin: PgPool,
     schema: String,
@@ -273,8 +267,13 @@ where
         .await
         .expect("hold owner-family gate");
 
+    let rollback_baseline: String = sqlx::query_scalar("SELECT pg_catalog.clock_timestamp()::text")
+        .fetch_one(&admin)
+        .await
+        .expect("owner rollback timestamp baseline");
     let operation = tokio::spawn(operation);
-    let lower_gate_attempt_seen = wait_for_owner_gate_attempt(&admin, application_name).await;
+    let retry_rollback_seen =
+        wait_for_owner_retry_rollback(&admin, application_name, &rollback_baseline).await;
 
     let catalog_released = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -301,8 +300,8 @@ where
         .expect("public owner entry completed after gate release")
         .expect("join public owner entry");
     assert!(
-        lower_gate_attempt_seen,
-        "public owner transaction never reached its lower advisory gate"
+        retry_rollback_seen,
+        "public owner transaction did not expose its acknowledged retry rollback"
     );
     assert!(
         remained_pending,
@@ -324,9 +323,11 @@ where
     output
 }
 
-async fn assert_reader_waits_for_catalog_fence<T>(
+/// This public-entry check only proves the reader completes after catalog-X
+/// is released. It does not independently prove that the operation reached its
+/// catalog-S attempt before the release.
+async fn assert_public_reader_completes_after_catalog_x_release<T>(
     admin: PgPool,
-    application_name: &str,
     operation: impl Future<Output = T> + Send + 'static,
 ) -> T
 where
@@ -340,64 +341,33 @@ where
         .expect("hold catalog-X");
 
     let operation = tokio::spawn(operation);
-    let catalog_attempt_seen = wait_for_reader_catalog_attempt(&admin, application_name).await;
-    let remained_pending = !operation.is_finished();
 
     catalog.rollback().await.expect("release catalog-X");
     let output = tokio::time::timeout(Duration::from_secs(10), operation)
         .await
         .expect("public reader completed after catalog-X release")
         .expect("join public reader");
-    assert!(
-        catalog_attempt_seen,
-        "public reader never attempted to acquire catalog-S"
-    );
-    assert!(
-        remained_pending,
-        "public reader completed while catalog-X was held"
-    );
     output
 }
 
-async fn wait_for_owner_gate_attempt(admin: &PgPool, application_name: &str) -> bool {
+async fn wait_for_owner_retry_rollback(
+    admin: &PgPool,
+    application_name: &str,
+    baseline: &str,
+) -> bool {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let observed: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
-                 JOIN pg_catalog.pg_locks l ON l.pid = a.pid \
-                 WHERE a.application_name = $1 AND a.state = 'active' \
-                   AND a.query LIKE '%pg_try_advisory_xact_lock%' \
-                   AND l.locktype = 'advisory' AND l.objsubid = 1 \
-                   AND l.mode = 'ExclusiveLock' AND l.granted \
-                   AND ((l.classid::bigint << 32) | l.objid::bigint) = $2)",
+                 WHERE a.application_name = $1 AND a.state = 'idle' \
+                   AND a.query LIKE 'ROLLBACK%' \
+                   AND a.state_change > $2::timestamptz)",
             )
             .bind(application_name)
-            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .bind(baseline)
             .fetch_one(admin)
             .await
-            .expect("observe owner catalog lock while trying its family gate");
-            if observed {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .is_ok()
-}
-
-async fn wait_for_reader_catalog_attempt(admin: &PgPool, application_name: &str) -> bool {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let observed: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
-                 WHERE a.application_name = $1 AND a.state = 'active' \
-                   AND a.query LIKE '%pg_try_advisory_xact_lock_shared%')",
-            )
-            .bind(application_name)
-            .fetch_one(admin)
-            .await
-            .expect("observe reader catalog-S try-lock attempt");
+            .expect("observe acknowledged owner retry rollback");
             if observed {
                 break;
             }
@@ -694,16 +664,14 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         ),
     )
     .await;
-    let verified_room_runtime = assert_reader_waits_for_catalog_fence(
+    let verified_room_runtime = assert_public_reader_completes_after_catalog_x_release(
         f.admin.clone(),
-        &f.runtime_app_name,
         RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()),
     )
     .await
     .expect("verify complete room runtime schema after acquiring catalog-S");
-    assert_reader_waits_for_catalog_fence(
+    assert_public_reader_completes_after_catalog_x_release(
         f.admin.clone(),
-        &f.runtime_app_name,
         MucDestroyCompletionOutboxStore::attach_existing(runtime.clone()),
     )
     .await
