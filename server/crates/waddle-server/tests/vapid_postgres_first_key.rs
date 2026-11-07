@@ -92,6 +92,31 @@ fn url_with_options(url: &str, options: &str) -> String {
     url.to_string()
 }
 
+fn url_with_database(url: &str, database: &str) -> String {
+    let mut url = url::Url::parse(url).expect("PostgreSQL URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "dbname" && key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_path(&format!("/{database}"));
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("dbname", database);
+    url.to_string()
+}
+
+#[test]
+fn isolated_database_url_overrides_original_dbname() {
+    let url = url_with_database(
+        "postgresql://localhost/original?dbname=original&options=-c%20search_path%3Dpublic",
+        "isolated_vapid",
+    );
+    let options = PgConnectOptions::from_str(&url).expect("parse isolated database URL");
+    assert_eq!(options.get_database(), Some("isolated_vapid"));
+}
+
 fn spawn_child_with_schema(
     url: &str,
     mode: &str,
@@ -631,9 +656,8 @@ async fn pg17_raw_role_without_control_privilege_fails_closed_on_marked_schema()
             .await
             .expect("prepare isolated database and role");
     }
-    let mut database_url = url::Url::parse(&url).expect("PostgreSQL URL");
-    database_url.set_path(&format!("/{database}"));
-    let admin = PgPool::connect(database_url.as_str())
+    let database_url = url_with_database(&url, &database);
+    let admin = PgPool::connect(&database_url)
         .await
         .expect("connect isolated database");
     for sql in [
@@ -655,7 +679,7 @@ async fn pg17_raw_role_without_control_privilege_fails_closed_on_marked_schema()
     .expect("inspect raw role privilege");
     assert!(!can_read_identity);
     let role_url = url_with_options(
-        database_url.as_str(),
+        &database_url,
         &format!("-c role={role} -c search_path={schema}"),
     );
     run_child(&role_url, "reuse", None);
@@ -937,10 +961,9 @@ async fn exercise_pre_fence_idle_cap(url: &str, initial_idle: &str) {
         .execute(&cluster)
         .await
         .expect("create isolated idle-cap database");
-    let mut isolated_url = url::Url::parse(url).expect("PostgreSQL URL");
-    isolated_url.set_path(&format!("/{database}"));
-    let f = Fixture::new(isolated_url.as_str()).await;
-    let target = PgConnectOptions::from_str(isolated_url.as_str()).expect("PostgreSQL options");
+    let isolated_url = url_with_database(url, &database);
+    let f = Fixture::new(&isolated_url).await;
+    let target = PgConnectOptions::from_str(&isolated_url).expect("PostgreSQL options");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind local proxy");
@@ -954,7 +977,7 @@ async fn exercise_pre_fence_idle_cap(url: &str, initial_idle: &str) {
         release_receiver,
     ));
     let scoped = url_with_options(
-        isolated_url.as_str(),
+        &isolated_url,
         &format!(
             "-c search_path={} -c idle_in_transaction_session_timeout={initial_idle}",
             f.schema
