@@ -17,6 +17,13 @@ transaction under the catalog and Push schema fences:
    retired-only history, invalid stored material, or inconsistent markers.
    Adding another row is not a rotation procedure.
 
+The direct PostgreSQL provisioning API verifies existing Push or VAPID
+markers against the live cluster identity. When either marker exists, its
+database role must be able to execute `pg_catalog.pg_control_system()`;
+otherwise provisioning fails closed without changing the marker or key.
+Unmarked raw bootstrap does not need this identity-read privilege. Follow the
+database-lineage role setup for the grant; this API never grants it itself.
+
 The signer is returned only after the database acknowledges COMMIT. A lost
 acknowledgement leaves the commit outcome indeterminate: inspect or retry
 through the same fenced path, which rereads durable state before deciding
