@@ -6,7 +6,9 @@ refusals remain active; this work cannot enable serving.
 ## Scope
 
 Convert the already-proven live executor receipt continuation to a dark,
-test-selected exact-main-pool authority. Derive a stable, domain-separated,
+test-selected exact pinned receipt-pool authority. The fixture's ordinary
+executor pool shares lineage but is not a selected shared main pool. Derive a
+stable, domain-separated,
 nonzero operation UUID from the committed effect-intent receipt identity, or
 persist the UUID with that source. A complete immutable receipt tuple and UUID
 must be admitted synchronously before any cancellable await. An owned bounded
