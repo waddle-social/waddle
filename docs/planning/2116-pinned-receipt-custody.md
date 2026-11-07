@@ -64,6 +64,14 @@ their existing paths. These are dark tests, not one shared main-pool serving
 proof. The S NOLOGIN/migrator SET ROLE graph remains a provisioning and
 quiescence premise, not a runtime guarantee of this selector.
 
+Focused PostgreSQL 17 producer tests passed 3/3; the existing pinned receipt
+test passed 1/1, SQLite receipt journal 2/2 and ordinary live-receipt 1/1.
+Formatting, diff check and independent exact-tree source review passed. Strict
+all-features Clippy with `-D warnings` reports 21 preexisting unused/dead-code
+diagnostics outside this diff; the new probe warning was fixed before the
+final check. GitHub Actions and workflows remain disabled, so there is no
+hosted CI result for this group.
+
 Process-crash restart cannot retire a surviving original backend or release
 its retained capacity yet. Other stores, old writers, provider role changes,
 full role graph, production SM custody, terminalization, serving activation,
