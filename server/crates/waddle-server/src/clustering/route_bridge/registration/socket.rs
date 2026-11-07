@@ -1276,11 +1276,8 @@ impl OrderedRelayDeliveryBridge {
         let queued = if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
         {
             entry.try_force_detach_and_interrupt(request).is_ok()
-        } else if entry.binding_ref().is_some() {
-            entry.try_force_detach_and_revoke(request).is_ok()
         } else {
-            // Remote mirrors have no local binding permit to revoke.
-            entry.force_detach_sender().try_send(request).is_ok()
+            entry.try_force_detach_for_jid(&msg.jid, request).is_ok()
         };
         if !queued {
             return RelayForceDetachRemoteUserResourceReply {

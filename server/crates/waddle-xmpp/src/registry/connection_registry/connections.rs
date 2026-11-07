@@ -430,6 +430,33 @@ impl ConnectionRegistry {
         ))
     }
 
+    /// Capture the SM enable permit only when the current entry is wired to
+    /// the actual socket owner's control and exact full-JID binding. A later
+    /// removal still revokes the shared permit before a start can win.
+    pub fn local_sm_enable_binding_permit_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+        binding: &crate::ownership::BindingRef,
+        control: &std::sync::Arc<super::LiveResumeControl>,
+    ) -> Option<LocalBindingPermit> {
+        let entry = self.entry_if_owner(jid, owner)?;
+        if entry.binding_ref() != Some(binding) {
+            return None;
+        }
+        let bound_control = entry.resume_control()?;
+        if !std::sync::Arc::ptr_eq(&bound_control, control)
+            || control.with_exact_binding(jid, binding, || ()).is_none()
+        {
+            return None;
+        }
+        let permit = self.local_binding_permit_if_owner(jid, owner)?;
+        if permit.binding() != binding || !permit.shares_state(&entry.binding_permit) {
+            return None;
+        }
+        Some(permit)
+    }
+
     /// Check if a JID is currently connected. ADR-0017 Phase 3 Slice 9
     /// retired its former production caller (the Slice-1 DashMap-liveness
     /// selection filter); it is retained as a connection-state introspection

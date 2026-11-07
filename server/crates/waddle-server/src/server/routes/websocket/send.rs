@@ -273,14 +273,17 @@ where
     send_ws_message_with_binding(sender, message, failure_message, authority, None).await
 }
 
-/// The local binding cell is held only for synchronous `start_send`, inside
-/// the node permit and before the physical socket interruption gate.
+/// Node admission, socket control, binding cell, and physical interruption
+/// gate are held in that order only for synchronous `start_send`.
 pub(super) async fn send_ws_message_with_binding<S, E>(
     sender: &mut S,
     message: Message,
     failure_message: &'static str,
     authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
-    binding: Option<&waddle_xmpp::registry::LocalBindingPermit>,
+    binding: Option<(
+        &waddle_xmpp::registry::LocalBindingPermit,
+        &waddle_xmpp::registry::LiveResumeControl,
+    )>,
 ) -> AuthoritySendOutcome
 where
     S: Sink<Message, Error = E> + Unpin,
@@ -294,7 +297,7 @@ where
     if !authoritative() {
         return AuthoritySendOutcome::AuthorityRevoked;
     }
-    if binding.is_some_and(|permit| !permit.is_active()) {
+    if binding.is_some_and(|(permit, _)| !permit.is_active()) {
         return AuthoritySendOutcome::TransportClosed;
     }
 
@@ -317,7 +320,7 @@ where
             } => return AuthoritySendOutcome::AuthorityRevoked,
             _ = async {
                 match binding {
-                    Some(permit) => permit.revoked().await,
+                    Some((permit, _)) => permit.revoked().await,
                     None => std::future::pending().await,
                 }
             } => return AuthoritySendOutcome::TransportClosed,
@@ -350,9 +353,9 @@ where
     }
     let start = || {
         let result = match binding {
-            Some(permit) => {
-                permit.start_if_current(|| std::pin::Pin::new(&mut *sender).start_send(message))
-            }
+            Some((permit, control)) => control.start_sm_enable_if_current(permit, || {
+                std::pin::Pin::new(&mut *sender).start_send(message)
+            }),
             None => Some(std::pin::Pin::new(&mut *sender).start_send(message)),
         };
         result

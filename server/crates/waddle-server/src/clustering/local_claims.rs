@@ -839,7 +839,7 @@ impl UserLocalClaims {
                 ack,
             };
             let mut remove_after_wait = false;
-            match entry.force_detach_sender().try_send(request) {
+            match entry.try_force_detach_for_jid(&jid, request) {
                 Ok(()) => match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
                     Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {
                         remove_after_wait = true;
@@ -1316,6 +1316,50 @@ mod tests {
             presence_priority: 0,
             presence_payloads: Vec::new(),
             pending_subscribes_flushed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn user_demotion_revokes_only_proven_binding_and_preserves_mismatch_ack() {
+        for valid in [true, false] {
+            let claims = UserLocalClaims::new();
+            let connections = Arc::new(ConnectionRegistry::new());
+            claims.wire_connection_registry(connections.clone());
+            let jid: FullJid = "alice@example.com/phone".parse().unwrap();
+            let bare: BareJid = if valid {
+                jid.to_bare()
+            } else {
+                "mallory@example.com".parse().unwrap()
+            };
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let entry = waddle_xmpp::registry::ConnectionEntry::new(tx);
+            let sm = waddle_xmpp::stream_management::StreamManagementState::new();
+            let control = waddle_xmpp::registry::LiveResumeControl::new(
+                sm.resume_checkpoint(),
+                entry.write_interruption.clone(),
+            );
+            assert!(entry.wire_resume_control(jid.clone(), control));
+            let mut receiver = entry.take_force_detach_rx().expect("receiver");
+            let owner = connections
+                .register_socket_entry(jid.clone(), entry.clone())
+                .expect("publish");
+            let permit = connections
+                .local_binding_permit_if_owner(&jid, &owner)
+                .expect("permit");
+            let retirement = claims.force_detach_entries(&bare, vec![(jid.clone(), entry)]);
+            tokio::pin!(retirement);
+            assert!(futures::poll!(retirement.as_mut()).is_pending());
+            assert_eq!(permit.is_active(), !valid);
+            let request = receiver.try_recv().expect("queued");
+            request
+                .ack
+                .send(ForceDetachOutcome::IdentityMismatch)
+                .unwrap();
+            retirement.await;
+            assert!(
+                connections.is_owned_by(&jid, &owner),
+                "identity mismatch preserves the route"
+            );
         }
     }
 

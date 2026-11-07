@@ -111,6 +111,45 @@ impl LiveResumeControl {
         true
     }
 
+    /// Run a synchronous decision only while this control still names the
+    /// socket owner's exact full JID and binding attempt. The callback must
+    /// not re-enter this control or invoke a receiver wake.
+    pub(super) fn with_exact_binding<T>(
+        &self,
+        owner: &FullJid,
+        binding_ref: &BindingRef,
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let binding = self
+            .binding
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        let current = binding.as_ref()?;
+        if &current.owner != owner || current.binding_ref.as_ref() != Some(binding_ref) {
+            return None;
+        }
+        Some(operation())
+    }
+
+    /// Serialize a resumable enable's synchronous start with control rebind
+    /// and exact-binding revocation. The callback must not await or re-enter
+    /// the control, permit, or registry; it acquires the socket gate last.
+    pub fn start_sm_enable_if_current<T>(
+        &self,
+        permit: &super::LocalBindingPermit,
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.with_exact_binding(permit.jid(), permit.binding(), || {
+            permit.start_if_current(operation)
+        })
+        .flatten()
+    }
+
+    #[cfg(test)]
+    pub(super) fn requests_locked_for_test(&self) -> bool {
+        self.requests.try_lock().is_err()
+    }
+
     /// Queue a bounded request for the caller's captured binding without
     /// touching the old connection's I/O. Dropping this future never rolls
     /// back cleanup already accepted by the owner.

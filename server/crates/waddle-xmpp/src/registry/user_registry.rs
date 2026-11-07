@@ -19,8 +19,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use super::connection_registry::{
-    ConnectionEntry, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
-    LocalConnectionBindingId,
+    ConnectionEntry, ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome,
+    ForceDetachRequest, LocalConnectionBindingId,
 };
 use super::user_actor::{
     RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
@@ -788,16 +788,16 @@ impl UserRegistryActor {
                 requester_bare_jid: bare_jid.clone(),
                 ack,
             };
-            match resource.force_detach_sender().try_send(request) {
+            match resource.try_force_detach_for_jid(&jid, request) {
                 Ok(()) => acks.push(ack_rx),
                 Err(error) => match error {
-                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    ForceDetachOfferError::Closed(_) | ForceDetachOfferError::NoLocalBinding(_) => {
                         warn!(
                             jid = %jid,
                             "stale UserActor resource force-detach receiver is closed; demoting stale actor"
                         );
                     }
-                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    ForceDetachOfferError::Full(_) => {
                         saturated = true;
                         warn!(
                             jid = %jid,

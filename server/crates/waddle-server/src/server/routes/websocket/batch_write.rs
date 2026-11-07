@@ -334,17 +334,20 @@ where
                 .phase
                 .bound_jid()
                 .zip(conn.registry_owner.as_ref())
-                .and_then(|(jid, owner)| {
+                .zip(conn.binding_ref.as_ref())
+                .and_then(|((jid, owner), binding)| {
                     state
                         .deps
                         .protocol
                         .connection_registry
-                        .local_binding_permit_if_owner(jid, owner)
+                        .local_sm_enable_binding_permit_if_owner(
+                            jid,
+                            owner,
+                            binding,
+                            &conn.live_resume_control,
+                        )
                 })
-                .filter(|permit| {
-                    conn.binding_ref.as_ref() == Some(permit.binding())
-                        && &conn.connection_ref == permit.connection()
-                });
+                .filter(|permit| &conn.connection_ref == permit.connection());
             let Some(permit) = captured else {
                 return BatchWriteReport {
                     outcome: BatchWriteOutcome::TransportClosed,
@@ -480,7 +483,7 @@ where
                 Message::Text(frame_xml.into()),
                 "Failed to send WebSocket message",
                 authority,
-                Some(binding),
+                Some((binding, &conn.live_resume_control)),
             )
             .await
             {

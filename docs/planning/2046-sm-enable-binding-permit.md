@@ -88,8 +88,9 @@ path claimed to revoke on an accepted request must do so for the exact binding.
 
 ## Lock order and retirement evidence
 
-The real WebSocket start acquires node admission read guards, the binding cell,
-and the physical socket interruption gate in that order. The inner
+The real WebSocket start acquires node admission read guards, the socket-control
+binding mutex, the binding cell, and the physical socket interruption gate in
+that order. The inner
 `futures-util` 0.3.32 `SplitSink::start_send` stores its local slot; it does not
 acquire its `BiLock` or call the route registry. Replacement holds the route
 shard, then the old binding cell, then the new socket gate; this order also
@@ -107,6 +108,17 @@ the binding cell. Reservation success is an accepted but unconfirmed offer;
 receiver closure afterward is not evidence of completed detachment. A binder
 continues waiting for observed lifecycle stop while holding its normal bind
 gate, but the incumbent never waits for that gate.
+
+The socket owner must successfully wire its live control before registration;
+resumable enable capture additionally checks that same control's exact full JID
+and binding attempt. A failed wiring or missing/mismatched control closes the
+attempt before `<enabled/>` starts. User demotion, stale-actor retirement, and
+non-fresh socket-relay offers revoke only after this socket-owned identity proof
+and requester bare JID agree; otherwise they keep the legacy raw offer and ACK
+behavior, including remote mirrors. The control-binding mutex is acquired before
+the short permit cell and released before notification or queue wake; the
+`start_send` and registry-removal paths do not take that control mutex while
+holding the permit.
 
 Only `resume='true'` uses this fence, after the existing claim and enrollment
 futures have completed successfully. Neither the binding signal nor the

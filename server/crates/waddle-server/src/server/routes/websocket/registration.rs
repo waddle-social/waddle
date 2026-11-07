@@ -646,8 +646,10 @@ where
         None => waddle_xmpp::registry::ConnectionEntry::new_for_binding(tx, binding_ref),
     };
     entry.write_interruption = conn.write_interruption.clone();
-    let wired = entry.wire_resume_control(jid.clone(), conn.live_resume_control.clone());
-    debug_assert!(wired, "new connection resume control must be unbound");
+    if !entry.wire_resume_control(jid.clone(), conn.live_resume_control.clone()) {
+        conn.retire_binding_ref();
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
     entry
         .carbons_enabled
         .store(conn.carbons_enabled, std::sync::atomic::Ordering::Relaxed);

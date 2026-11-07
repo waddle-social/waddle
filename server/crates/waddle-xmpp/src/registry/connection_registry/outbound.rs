@@ -693,6 +693,63 @@ impl ConnectionEntry {
         self.force_detach_tx.clone()
     }
 
+    /// Preserve ordinary queue and acknowledgement behavior, but when the
+    /// socket's own control proves this exact local JID/binding, serialize a
+    /// successful queue reservation with its pre-write permit revocation.
+    /// Unverified or remote entries use the existing raw offer unchanged.
+    pub fn try_force_detach_for_jid(
+        &self,
+        jid: &jid::FullJid,
+        request: ForceDetachRequest,
+    ) -> Result<(), ForceDetachOfferError> {
+        let Some(binding) = self.binding_ref.as_ref() else {
+            return self.try_force_detach_raw(request);
+        };
+        if !self.is_locally_hosted()
+            || request.requester_bare_jid != jid.to_bare()
+            || request.target_binding.as_ref() != Some(binding)
+        {
+            return self.try_force_detach_raw(request);
+        }
+        let Some(control) = self.resume_control.get() else {
+            return self.try_force_detach_raw(request);
+        };
+        let Some(reservation) = control.with_exact_binding(jid, binding, || {
+            self.binding_permit
+                .revoke_on_ok(|| self.force_detach_tx.try_reserve())
+        }) else {
+            return self.try_force_detach_raw(request);
+        };
+        let reservation = match reservation {
+            Ok(reservation) => reservation,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err(ForceDetachOfferError::Full(Box::new(request)));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(ForceDetachOfferError::Closed(Box::new(request)));
+            }
+        };
+        self.binding_permit.notify_revoked();
+        reservation.send(request);
+        Ok(())
+    }
+
+    fn try_force_detach_raw(
+        &self,
+        request: ForceDetachRequest,
+    ) -> Result<(), ForceDetachOfferError> {
+        self.force_detach_tx
+            .try_send(request)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(request) => {
+                    ForceDetachOfferError::Full(Box::new(request))
+                }
+                mpsc::error::TrySendError::Closed(request) => {
+                    ForceDetachOfferError::Closed(Box::new(request))
+                }
+            })
+    }
+
     /// Queue retirement before interrupting this captured connection's I/O.
     /// The caller must first verify requester identity, ownership, and any
     /// applicable stream or occupancy generation. Cleanup and acknowledgement

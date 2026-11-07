@@ -61,6 +61,12 @@ async fn fresh_remote_retirement_fixture() -> (
     let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
+    let sm = waddle_xmpp::stream_management::StreamManagementState::new();
+    let live_control = waddle_xmpp::registry::LiveResumeControl::new(
+        sm.resume_checkpoint(),
+        entry.write_interruption.clone(),
+    );
+    assert!(entry.wire_resume_control(jid.clone(), live_control));
     *entry.occupancy_session.lock().unwrap() = Some(generation);
     let control = entry.take_force_detach_rx().unwrap();
     services
@@ -244,4 +250,78 @@ async fn nonfresh_remote_retirement_keeps_the_socket_write_uninterrupted() {
         }
         assert!(!entry.write_interruption.is_cancelled());
     }
+}
+
+#[tokio::test]
+async fn nonfresh_remote_wrong_identity_preserves_permit_and_original_ack() {
+    use waddle_xmpp::registry::ForceDetachOrigin;
+    for wrong_resource in [false, true] {
+        let (services, bridge, entry, mut control, mut request) =
+            fresh_remote_retirement_fixture().await;
+        let original_jid = request.jid.clone();
+        let permit = services
+            .connection_registry
+            .local_binding_permit_if_owner(&original_jid, &entry.binding_id())
+            .expect("original permit");
+        request.origin = ForceDetachOrigin::OwnerManagedRetirement;
+        if wrong_resource {
+            request.jid = "alice@example.test/other".parse().unwrap();
+            services
+                .connection_registry
+                .register_entry(request.jid.clone(), entry.clone());
+            request.registration_id =
+                track_remote_socket_for_test(&bridge, &request.jid, &entry).await;
+        } else {
+            request.requester_bare_jid = "mallory@example.test".parse().unwrap();
+        }
+        let retirement = bridge.force_detach_remote_user_resource_on_socket(request);
+        tokio::pin!(retirement);
+        assert!(futures::poll!(retirement.as_mut()).is_pending());
+        let queued = control.try_recv().expect("original raw offer");
+        assert!(permit.is_active(), "unverified request cannot revoke");
+        let expected = if wrong_resource {
+            ForceDetachOutcome::Detached
+        } else {
+            ForceDetachOutcome::IdentityMismatch
+        };
+        queued.ack.send(expected).unwrap();
+        let reply = retirement.await;
+        assert_eq!(reply.outcome, expected);
+        assert_eq!(
+            reply.status,
+            if wrong_resource {
+                RelayRemoteResourceForceDetachStatus::Detached
+            } else {
+                RelayRemoteResourceForceDetachStatus::Refused
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn nonfresh_remote_exact_local_offer_revokes_before_ack() {
+    let (services, bridge, entry, mut control, mut request) =
+        fresh_remote_retirement_fixture().await;
+    let permit = services
+        .connection_registry
+        .local_binding_permit_if_owner(&request.jid, &entry.binding_id())
+        .expect("permit");
+    request.origin = waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement;
+    let retirement = bridge.force_detach_remote_user_resource_on_socket(request);
+    tokio::pin!(retirement);
+    assert!(futures::poll!(retirement.as_mut()).is_pending());
+    assert!(
+        !permit.is_active(),
+        "accepted exact offer revokes before acknowledgement"
+    );
+    control
+        .try_recv()
+        .expect("queued")
+        .ack
+        .send(ForceDetachOutcome::NotPersisted)
+        .unwrap();
+    assert_eq!(
+        retirement.await.status,
+        RelayRemoteResourceForceDetachStatus::Detached
+    );
 }

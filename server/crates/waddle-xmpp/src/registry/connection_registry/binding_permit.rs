@@ -93,6 +93,10 @@ impl LocalBindingPermit {
         }
     }
 
+    pub(super) fn shares_state(&self, state: &Arc<BindingPermitState>) -> bool {
+        Arc::ptr_eq(&self.state, state)
+    }
+
     pub fn jid(&self) -> &FullJid {
         &self.jid
     }

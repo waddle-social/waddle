@@ -507,3 +507,246 @@ fn unconditional_replacement_and_stale_eviction_preserve_only_the_successor() {
         .is_none());
     assert!(next_permit.is_active());
 }
+
+fn wire_socket_control(entry: &ConnectionEntry, owner: FullJid) -> Arc<super::LiveResumeControl> {
+    let sm = crate::stream_management::StreamManagementState::new();
+    let control =
+        super::LiveResumeControl::new(sm.resume_checkpoint(), entry.write_interruption.clone());
+    assert!(entry.wire_resume_control(owner, control.clone()));
+    control
+}
+
+fn addressed_request(
+    entry: &ConnectionEntry,
+    requester: jid::BareJid,
+) -> (
+    ForceDetachRequest,
+    oneshot::Receiver<super::ForceDetachOutcome>,
+) {
+    let (ack, receiver) = oneshot::channel();
+    (
+        ForceDetachRequest {
+            origin: ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: entry.binding_ref().cloned(),
+            requester_bare_jid: requester,
+            ack,
+        },
+        receiver,
+    )
+}
+
+#[test]
+fn sm_enable_capture_requires_the_exact_wired_socket_control() {
+    let registry = ConnectionRegistry::new();
+    let (unwired, _rx) = entry();
+    let owner = registry
+        .register_socket_entry(jid(), unwired.clone())
+        .expect("publish");
+    let unbound_control = super::LiveResumeControl::new(
+        crate::stream_management::StreamManagementState::new().resume_checkpoint(),
+        unwired.write_interruption.clone(),
+    );
+    assert!(registry
+        .local_binding_permit_if_owner(&jid(), &owner)
+        .is_some());
+    assert!(
+        registry
+            .local_sm_enable_binding_permit_if_owner(
+                &jid(),
+                &owner,
+                unwired.binding_ref().expect("binding"),
+                &unbound_control,
+            )
+            .is_none(),
+        "unwired control cannot admit an enable"
+    );
+    assert!(unwired.wire_resume_control(jid(), unbound_control.clone()));
+    let binding = unwired.binding_ref().expect("binding");
+    assert!(registry
+        .local_sm_enable_binding_permit_if_owner(&jid(), &owner, binding, &unbound_control)
+        .is_some());
+    let other_control = super::LiveResumeControl::new(
+        crate::stream_management::StreamManagementState::new().resume_checkpoint(),
+        unwired.write_interruption.clone(),
+    );
+    assert!(
+        registry
+            .local_sm_enable_binding_permit_if_owner(&jid(), &owner, binding, &other_control)
+            .is_none(),
+        "another control is not the socket owner"
+    );
+    let wrong_resource: FullJid = "alice@example.com/tablet".parse().unwrap();
+    assert!(registry
+        .local_sm_enable_binding_permit_if_owner(&wrong_resource, &owner, binding, &unbound_control)
+        .is_none());
+    let other_binding = BindingRef::fresh(binding.connection_ref().clone());
+    assert!(registry
+        .local_sm_enable_binding_permit_if_owner(&jid(), &owner, &other_binding, &unbound_control)
+        .is_none());
+    let (tx, _rx) = mpsc::channel(1);
+    let successor = ConnectionEntry::new_for_binding(tx, other_binding);
+    assert!(successor.wire_resume_control(jid(), unbound_control.clone()));
+    assert!(
+        registry
+            .local_sm_enable_binding_permit_if_owner(&jid(), &owner, binding, &unbound_control)
+            .is_none(),
+        "a later control binding cannot validate the retired attempt"
+    );
+}
+
+#[tokio::test]
+async fn verified_offers_revoke_and_mismatches_keep_raw_ack_behavior() {
+    use super::ForceDetachOutcome;
+    for mismatch in ["principal", "resource", "binding", "none"] {
+        let registry = ConnectionRegistry::new();
+        let (old, _rx) = entry();
+        let owner = registry
+            .register_socket_entry(jid(), old.clone())
+            .expect("publish");
+        let permit = registry
+            .local_binding_permit_if_owner(&jid(), &owner)
+            .expect("permit");
+        let _control = wire_socket_control(&old, jid());
+        let mut receiver = old.take_force_detach_rx().expect("control receiver");
+        let target_jid: FullJid = if mismatch == "resource" {
+            "alice@example.com/tablet".parse().unwrap()
+        } else {
+            jid()
+        };
+        let requester: jid::BareJid = if mismatch == "principal" {
+            "mallory@example.com".parse().unwrap()
+        } else {
+            jid().to_bare()
+        };
+        let (mut request, ack) = addressed_request(&old, requester);
+        if mismatch == "binding" {
+            request.target_binding = Some(BindingRef::fresh(old.connection_ref().clone()));
+        }
+        old.try_force_detach_for_jid(&target_jid, request)
+            .expect("offer");
+        let queued = receiver.try_recv().expect("queued");
+        let expected_ack = if mismatch == "principal" || mismatch == "binding" {
+            ForceDetachOutcome::IdentityMismatch
+        } else {
+            ForceDetachOutcome::Detached
+        };
+        queued.ack.send(expected_ack).expect("ack");
+        assert_eq!(ack.await.expect("ACK forwarded"), expected_ack);
+        assert_eq!(
+            permit.is_active(),
+            mismatch != "none",
+            "only the exact socket identity revokes"
+        );
+    }
+}
+
+#[test]
+fn verified_offer_preserves_full_closed_and_remote_mirror_behavior() {
+    let registry = ConnectionRegistry::new();
+    let (old, _rx) = entry();
+    let owner = registry
+        .register_socket_entry(jid(), old.clone())
+        .expect("publish");
+    let permit = registry
+        .local_binding_permit_if_owner(&jid(), &owner)
+        .expect("permit");
+    let _control = wire_socket_control(&old, jid());
+    let receiver = old.take_force_detach_rx().expect("control receiver");
+    while old
+        .force_detach_sender()
+        .try_send(addressed_request(&old, jid().to_bare()).0)
+        .is_ok()
+    {}
+    assert!(matches!(
+        old.try_force_detach_for_jid(&jid(), addressed_request(&old, jid().to_bare()).0),
+        Err(ForceDetachOfferError::Full(_))
+    ));
+    assert!(permit.is_active());
+    drop(receiver);
+    assert!(matches!(
+        old.try_force_detach_for_jid(&jid(), addressed_request(&old, jid().to_bare()).0),
+        Err(ForceDetachOfferError::Closed(_))
+    ));
+    assert!(permit.is_active());
+
+    let (tx, _rx) = mpsc::channel(1);
+    let remote = ConnectionEntry::remote_hosted(tx);
+    let mut remote_receiver = remote.take_force_detach_rx().expect("remote receiver");
+    remote
+        .try_force_detach_for_jid(&jid(), addressed_request(&remote, jid().to_bare()).0)
+        .expect("remote raw offer");
+    assert!(remote_receiver.try_recv().is_ok());
+}
+
+#[test]
+fn socket_control_rebind_and_enable_start_have_one_winner() {
+    let registry = ConnectionRegistry::new();
+    let (old, _rx) = entry();
+    let owner = registry
+        .register_socket_entry(jid(), old.clone())
+        .expect("publish");
+    let control = wire_socket_control(&old, jid());
+    let binding = old.binding_ref().expect("binding").clone();
+    let permit = registry
+        .local_sm_enable_binding_permit_if_owner(&jid(), &owner, &binding, &control)
+        .expect("enable permit");
+    let (inside, entered) = sync_mpsc::channel();
+    let (release, proceed) = sync_mpsc::channel();
+    let start = std::thread::spawn({
+        let permit = permit.clone();
+        let control = control.clone();
+        move || {
+            control.start_sm_enable_if_current(&permit, || {
+                inside.send(()).expect("start entered");
+                proceed.recv().expect("release start");
+            })
+        }
+    });
+    entered
+        .recv_timeout(Duration::from_secs(5))
+        .expect("start entered");
+    let (tx, _rx) = mpsc::channel(1);
+    let successor =
+        ConnectionEntry::new_for_binding(tx, BindingRef::fresh(old.connection_ref().clone()));
+    let (trying_tx, trying_rx) = sync_mpsc::channel();
+    let (done_tx, done_rx) = sync_mpsc::channel();
+    let rebind = std::thread::spawn({
+        let control = control.clone();
+        move || {
+            trying_tx.send(()).expect("rebind started");
+            done_tx
+                .send(successor.wire_resume_control(jid(), control))
+                .expect("rebind result");
+        }
+    });
+    trying_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("rebind trying");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !control.requests_locked_for_test() {
+        assert!(
+            Instant::now() < deadline,
+            "rebind never acquired the requests lock"
+        );
+        std::thread::yield_now();
+    }
+    assert!(
+        done_rx.try_recv().is_err(),
+        "rebind waits for the synchronous start"
+    );
+    release.send(()).expect("release start");
+    assert_eq!(start.join().expect("start thread"), Some(()));
+    assert!(done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("rebind completed"));
+    rebind.join().expect("rebind thread");
+    assert!(
+        permit.is_active(),
+        "control rebind did not itself retire the old route"
+    );
+    assert_eq!(
+        control.start_sm_enable_if_current(&permit, || ()),
+        None,
+        "a rebind that wins suppresses the old start"
+    );
+}
