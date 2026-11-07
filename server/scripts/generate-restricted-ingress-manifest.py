@@ -52,9 +52,26 @@ def migrations(source):
         if name in constants:
             raise ValueError(f"duplicate migration constant: {name}")
         constants[name] = value
+    # Registered migrations can also keep their SQL in a literal include.
+    # Resolve only relative files beneath the migration directory.
+    migration_root = (ROOT / "migrations").resolve()
+    for name, relative in re.findall(
+        r'pub const (V\w+): &str\s*=\s*include_str!\("([^"\\]+)"\);', source
+    ):
+        if name in constants:
+            raise ValueError(f"duplicate migration constant: {name}")
+        if Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise ValueError(f"migration include must be a relative source path: {relative}")
+        path = (migration_root / relative).resolve()
+        if not path.is_relative_to(migration_root):
+            raise ValueError(f"migration include escapes source directory: {relative}")
+        constants[name] = path.read_text()
     names = re.findall(r"sql_postgres:\s*(V\w+)", source)
     if not names or len(names) != len(set(names)):
         raise ValueError("migration catalog format changed")
+    missing = [name for name in names if name not in constants]
+    if missing:
+        raise ValueError(f"unresolved migration constants: {missing}")
     return "\n".join(constants[name] for name in names)
 
 
@@ -84,8 +101,13 @@ def pending_owner_schema(source, recovery):
         "CREATE FUNCTION pending_notification_recovery_ordinal_immutable() "
         f"RETURNS trigger LANGUAGE plpgsql AS $${body}$$"
     )
-    statements += re.findall(
+    # The owner stage uses a qualified {table}; its SQLite predecessor has
+    # the same index definitions. Render and deduplicate the exact statements.
+    indexes = re.findall(
         r'"(CREATE (?:UNIQUE )?INDEX IF NOT EXISTS idx_pending_notification_[^"]+)"', recovery
+    )
+    statements += list(
+        dict.fromkeys(index.replace("{table}", "pending_delivery") for index in indexes)
     )
     statements.append(
         "CREATE TRIGGER pending_notification_recovery_ordinal_immutable "
