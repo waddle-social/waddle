@@ -63,7 +63,7 @@ pub(super) async fn verify_pinned_epoch_manifest_catalog_sqlx(
 ) -> Result<(), PinnedCatalogError> {
     let schema = &authority.config.postgres().schema.name.0;
     let qualified_schema = quote_identifier(schema);
-    let connection: &mut PgConnection = &mut **tx;
+    let connection: &mut PgConnection = tx;
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;

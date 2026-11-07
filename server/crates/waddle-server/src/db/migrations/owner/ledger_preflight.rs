@@ -178,7 +178,7 @@ pub async fn verify_dark_shared_migration_ledger_v1030_read_sqlx(
     {
         return Err(DarkLedgerPreflightError::InvalidRestorePath);
     }
-    let connection: &mut PgConnection = &mut **tx;
+    let connection: &mut PgConnection = tx;
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;

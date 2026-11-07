@@ -298,7 +298,7 @@ async fn prepare_selected_transaction(
     )
     .await?;
     verify_pinned_epoch_manifest_catalog_sqlx(tx, authority).await?;
-    let connection: &mut PgConnection = &mut **tx;
+    let connection: &mut PgConnection = tx;
     let epoch = read_epoch_after_prelock(
         connection,
         schema_name,
