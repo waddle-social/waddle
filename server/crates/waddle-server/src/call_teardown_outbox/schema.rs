@@ -1,13 +1,23 @@
 use super::CallTeardownOutboxError;
 use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
+use crate::db::CatalogFenceLock;
 use crate::db::ConnectionGuard;
 use crate::db::Database;
 use crate::db::DatabaseDriver;
 use crate::db::Transaction;
 
-const OWNER_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_997;
+pub(super) const OWNER_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_997;
 
 pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxError> {
+    if db.driver() == DatabaseDriver::Postgres {
+        let mut tx = db
+            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(OWNER_SCHEMA_ADVISORY_LOCK_KEY)])
+            .await?;
+        apply_postgres_schema(&mut tx).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
     let timestamp_type = crate::db::i64_sql_type(db.driver());
     let driver = db.driver();
     let connection = db.guard().await?;
@@ -54,21 +64,28 @@ pub(super) async fn initialize_owner(
         return Err(CallTeardownOutboxError::OwnerPreparationRequired);
     }
 
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-        (),
-    )
-    .await?;
-    tx.query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![OWNER_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(OWNER_SCHEMA_ADVISORY_LOCK_KEY)])
+        .await?;
     pin_owner_schema(&mut tx, identity).await?;
+    apply_postgres_schema(&mut tx).await?;
+    super::runtime_attach::verify_owner_shape(
+        &mut tx,
+        &identity.schema.name.0,
+        i64::from(identity.schema.oid),
+    )
+    .await
+    .map_err(CallTeardownOutboxError::OwnerSchemaShape)?;
+    tx.commit().await?;
+    Ok(())
+}
 
+async fn apply_postgres_schema(tx: &mut Transaction<'_>) -> Result<(), CallTeardownOutboxError> {
     tx.execute(
-        &table_sql("call_teardown_outbox", crate::db::i64_sql_type(db.driver())),
+        &table_sql(
+            "call_teardown_outbox",
+            crate::db::i64_sql_type(DatabaseDriver::Postgres),
+        ),
         (),
     )
     .await?;
@@ -87,7 +104,7 @@ pub(super) async fn initialize_owner(
         )
         .await?;
     }
-    upgrade_retirement_action_postgres(&mut tx).await?;
+    upgrade_retirement_action_postgres(tx).await?;
     tx.execute(
         "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \
          ON call_teardown_outbox (status, next_attempt_at_ms, created_at_ms)",
@@ -100,14 +117,6 @@ pub(super) async fn initialize_owner(
         (),
     )
     .await?;
-    super::runtime_attach::verify_owner_shape(
-        &mut tx,
-        &identity.schema.name.0,
-        i64::from(identity.schema.oid),
-    )
-    .await
-    .map_err(CallTeardownOutboxError::OwnerSchemaShape)?;
-    tx.commit().await?;
     Ok(())
 }
 
