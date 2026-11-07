@@ -54,6 +54,21 @@ pub enum DatabaseError {
         source: Box<DatabaseError>,
     },
 
+    /// The bounded acquisition ended after an observed catalog-fence conflict.
+    #[error("migration catalog fence remained contended")]
+    MigrationCatalogFenceContended,
+
+    /// The bounded acquisition ended after an observed ledger-lock conflict.
+    #[error("migration ledger lock remained contended")]
+    MigrationLedgerLockContended,
+
+    /// The acquisition deadline elapsed without a definitive contention result.
+    #[error("migration lock acquisition timed out")]
+    MigrationLockTimeout,
+
+    #[error("migration lock rollback was not acknowledged; reconcile the original backend")]
+    MigrationLockRollbackUnconfirmed,
+
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
 

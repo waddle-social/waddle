@@ -1144,7 +1144,16 @@ async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() 
     };
     let schema = unique_postgres_schema_name("ledger_lock");
     let (db_a, admin) = open_isolated_postgres_database(&database_url, &schema).await;
-    let db_b = open_postgres_database_in_schema(&database_url, &schema, "ledger-lock-b", 10).await;
+    let application = format!("ledger_lock_{}", uuid::Uuid::new_v4().simple());
+    let mut scoped_url = url::Url::parse(&postgres_url_with_search_path(&database_url, &schema))
+        .expect("parse scoped Postgres URL");
+    scoped_url
+        .query_pairs_mut()
+        .append_pair("application_name", &application);
+    let config = DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.to_string());
+    let db_b = Database::from_config("ledger-lock-b", &config)
+        .await
+        .expect("open scoped migration database");
     let mut lock_tx = db_a.begin().await.expect("start lock transaction");
     lock_tx
         .query(
@@ -1161,11 +1170,7 @@ async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() 
     });
     local
         .run_until(async {
-            wait_for_postgres_advisory_waiter(
-                &admin,
-                super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
-            )
-            .await;
+            wait_for_postgres_migration_retry(&admin, &application).await;
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(100), &mut run)
                     .await
@@ -3968,33 +3973,31 @@ async fn drop_postgres_schema(admin: &sqlx::PgPool, schema: &str) {
         .expect("drop isolated postgres schema");
 }
 
-async fn wait_for_postgres_advisory_waiter(admin: &sqlx::PgPool, key: i64) {
-    let waiter = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+async fn wait_for_postgres_migration_retry(admin: &sqlx::PgPool, application: &str) {
+    let retry = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            // Postgres exposes a single-bigint advisory key with its high
-            // 32 bits in `classid`, low 32 bits in `objid`, and `objsubid = 1`.
-            let count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) \
-                 FROM pg_locks \
-                 WHERE locktype = 'advisory' \
-                   AND granted = false \
-                   AND objsubid = 1 \
-                   AND ((classid::bigint << 32) | objid::bigint) = $1",
+            let idle: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                 WHERE a.application_name = $1 AND a.state = 'idle' \
+                   AND a.query = 'ROLLBACK' AND a.xact_start IS NULL \
+                   AND a.backend_xmin IS NULL AND NOT EXISTS (SELECT 1 \
+                     FROM pg_catalog.pg_locks l WHERE l.pid = a.pid \
+                       AND l.locktype = 'advisory'))",
             )
-            .bind(key)
+            .bind(application)
             .fetch_one(admin)
             .await
-            .expect("query postgres advisory lock waiters");
-            if count > 0 {
+            .expect("inspect retrying migration session");
+            if idle {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
     })
     .await;
     assert!(
-        waiter.is_ok(),
-        "migration runner must show an ungranted advisory waiter in pg_locks"
+        retry.is_ok(),
+        "migration runner must retry without a transaction or advisory lock"
     );
 }
 

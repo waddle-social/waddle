@@ -3125,14 +3125,22 @@ async fn verified_global_attachment_checks_identity_ledger_grants_and_shared_cap
 async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolLimits) {
     use waddle_server::db::runtime_startup::{RuntimeStartupError, RuntimeStartupIdentity};
 
+    const RELEASE_GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
     let physical = fixture
         .lineage
         .postgres_identity
         .as_ref()
         .expect("physical identity");
+    let unreachable = format!(
+        "postgres://{}@127.0.0.1:1/{}?sslmode=verify-full",
+        fixture.runtime, fixture.database_name
+    );
+    let configured_options =
+        PgConnectOptions::from_str(&unreachable).expect("runtime endpoint options");
     let mut document = serde_json::json!({
-        "version": 2,
-        "operator_asserts_direct_fenced_primary": true,
+        "version": 3,
+        "release_git_sha": RELEASE_GIT_SHA,
         "deployment_uuid": fixture.lineage.deployment_uuid.to_string(),
         "lineage_uuid": fixture.lineage.lineage_uuid.to_string(),
         "system_identifier": physical.system_identifier.to_string(),
@@ -3144,9 +3152,32 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         "runtime_login": fixture.runtime,
         "definer_role": fixture.definer,
         "trusted_schema": fixture.trusted,
+        "cutover": {
+            "transition_id": uuid::Uuid::new_v4().to_string(),
+            "primary": {
+                "provider": "test-postgresql",
+                "cluster_id": "fixture-cluster",
+                "instance_id": "fixture-primary",
+                "endpoint_host": configured_options.get_host(),
+                "endpoint_port": configured_options.get_port(),
+                "endpoint_socket_dir": configured_options.get_socket().map(|path| path.to_string_lossy().into_owned()),
+                "observation_record_id": uuid::Uuid::new_v4().to_string(),
+            },
+            "old_runtime": {
+                "login": fixture.outsider,
+                "role_oid": 4000000015_u32,
+                "credential_cutoff_record_id": uuid::Uuid::new_v4().to_string(),
+            },
+            "listener_cutoff_record_id": uuid::Uuid::new_v4().to_string(),
+            "backend_cutoff_record_id": uuid::Uuid::new_v4().to_string(),
+            "prepared_transaction_cutoff_record_id": uuid::Uuid::new_v4().to_string(),
+            "mutator_policy": {
+                "mode": "quiesced_for_serving_interval",
+                "record_id": uuid::Uuid::new_v4().to_string(),
+            },
+        },
         // Structurally valid synthetic pins exercise document admission only.
-        // Attachment must refuse before any query until the pinned bootstrap
-        // path exists; these are not an operator attestation of this fixture.
+        // The endpoint below is unreachable, so preflight must fail closed.
         "pins": {
             "database_owner_role_oid": 4000000001_u32,
             "schema_owner_role_oid": 4000000002_u32,
@@ -3169,83 +3200,154 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         deployment_uuid: Some(fixture.lineage.deployment_uuid),
         action: None,
     };
-    let identity = RuntimeStartupIdentity::from_json(&document.to_string(), &lineage)
-        .expect("operator identity document");
-    document["version"] = 1.into();
+    let identity =
+        RuntimeStartupIdentity::from_json(&document.to_string(), &lineage, RELEASE_GIT_SHA)
+            .expect("operator identity document");
+    document["version"] = 2.into();
     assert!(matches!(
-        RuntimeStartupIdentity::from_json(&document.to_string(), &lineage),
+        RuntimeStartupIdentity::from_json(&document.to_string(), &lineage, RELEASE_GIT_SHA),
         Err(RuntimeStartupError::InvalidDocument)
     ));
-    document["version"] = 2.into();
+    document["version"] = 3.into();
     let mut missing_pin = document.clone();
     missing_pin["pins"]
         .as_object_mut()
         .expect("pin object")
         .remove("ledger_relation_oid");
     assert!(matches!(
-        RuntimeStartupIdentity::from_json(&missing_pin.to_string(), &lineage),
+        RuntimeStartupIdentity::from_json(&missing_pin.to_string(), &lineage, RELEASE_GIT_SHA),
         Err(RuntimeStartupError::InvalidDocument)
     ));
-    let oversized = format!("{}{}", document, " ".repeat(8 * 1024));
+    let oversized = format!("{}{}", document, " ".repeat(16 * 1024));
     assert!(matches!(
-        RuntimeStartupIdentity::from_json(&oversized, &lineage),
+        RuntimeStartupIdentity::from_json(&oversized, &lineage, RELEASE_GIT_SHA),
         Err(RuntimeStartupError::InvalidDocument)
     ));
-    document["operator_asserts_direct_fenced_primary"] = false.into();
+    let mut missing_cutoff = document.clone();
+    missing_cutoff["cutover"]
+        .as_object_mut()
+        .expect("cutover object")
+        .remove("backend_cutoff_record_id");
     assert!(matches!(
-        RuntimeStartupIdentity::from_json(&document.to_string(), &lineage),
-        Err(RuntimeStartupError::DirectPrimaryAssertionRequired)
+        RuntimeStartupIdentity::from_json(&missing_cutoff.to_string(), &lineage, RELEASE_GIT_SHA),
+        Err(RuntimeStartupError::InvalidDocument)
     ));
-    document["operator_asserts_direct_fenced_primary"] = true.into();
+    let mut unsupported_cooperative = document.clone();
+    unsupported_cooperative["cutover"]["mutator_policy"]["mode"] =
+        "cooperative_catalog_fence_v1".into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &unsupported_cooperative.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        ),
+        Err(RuntimeStartupError::CooperativeMutatorPolicyUnavailable)
+    ));
+    let mut old_boolean_only = document.clone();
+    old_boolean_only["operator_asserts_direct_fenced_primary"] = true.into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&old_boolean_only.to_string(), &lineage, RELEASE_GIT_SHA,),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
+    let mut same_old_login = document.clone();
+    same_old_login["cutover"]["old_runtime"]["login"] = fixture.runtime.clone().into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&same_old_login.to_string(), &lineage, RELEASE_GIT_SHA,),
+        Err(RuntimeStartupError::OldRuntimePrincipalMismatch)
+    ));
+    let mut same_old_oid = document.clone();
+    same_old_oid["cutover"]["old_runtime"]["role_oid"] =
+        same_old_oid["pins"]["runtime_role_oid"].clone();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(&same_old_oid.to_string(), &lineage, RELEASE_GIT_SHA,),
+        Err(RuntimeStartupError::OldRuntimePrincipalMismatch)
+    ));
+    let mut conflicting_installer_login = document.clone();
+    conflicting_installer_login["cutover"]["old_runtime"]["login"] =
+        fixture.installer.clone().into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &conflicting_installer_login.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        ),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
+    let mut conflicting_definer_oid = document.clone();
+    conflicting_definer_oid["cutover"]["old_runtime"]["role_oid"] =
+        document["pins"]["definer_role_oid"].clone();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &conflicting_definer_oid.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        ),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &document.to_string(),
+            &lineage,
+            "0123456789abcdef0123456789abcdef01234568",
+        ),
+        Err(RuntimeStartupError::ReleaseMismatch)
+    ));
     let mut wrong_deployment = lineage.clone();
     wrong_deployment.deployment_uuid = Some(DeploymentUuid(uuid::Uuid::new_v4()));
     assert!(matches!(
-        RuntimeStartupIdentity::from_json(&document.to_string(), &wrong_deployment),
+        RuntimeStartupIdentity::from_json(
+            &document.to_string(),
+            &wrong_deployment,
+            RELEASE_GIT_SHA,
+        ),
         Err(RuntimeStartupError::DeploymentMismatch)
     ));
     let mut owner_action = lineage.clone();
     owner_action.action = Some(lineage::LineageAction::Enroll);
     assert!(matches!(
-        RuntimeStartupIdentity::from_json(&document.to_string(), &owner_action),
+        RuntimeStartupIdentity::from_json(&document.to_string(), &owner_action, RELEASE_GIT_SHA),
         Err(RuntimeStartupError::OperatorActionConfigured)
     ));
     assert!(matches!(
         identity
-            .attach(
-                "postgres://example.test/other?sslmode=disable",
-                limits,
-                None
-            )
+            .preflight("postgres://example.test/other?sslmode=disable", limits,)
             .await,
         Err(RuntimeStartupError::DatabaseNameMismatch)
     ));
-    let insecure = format!(
-        "postgres://example.test/{}?sslmode=disable",
-        fixture.database_name
-    );
-    assert!(matches!(
-        identity.attach(&insecure, limits, None).await,
-        Err(RuntimeStartupError::UnauthenticatedTcp)
-    ));
-    let unreachable = format!(
-        "postgres://{}@127.0.0.1:1/{}?sslmode=verify-full",
+    let wrong_primary = format!(
+        "postgres://{}@example.test/{}?sslmode=verify-full",
         fixture.runtime, fixture.database_name
     );
     assert!(matches!(
-        identity.attach(&unreachable, limits, None).await,
-        Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
+        identity.preflight(&wrong_primary, limits).await,
+        Err(RuntimeStartupError::PrimaryEndpointMismatch)
     ));
-
-    let control = ControlPlanePoolLimits {
-        connections: 1,
-        acquire_timeout: Duration::from_secs(3),
-    };
-    let control_result = identity.attach(&unreachable, limits, Some(control)).await;
-    match control_result {
-        Err(RuntimeStartupError::UnconvertedPinnedBootstrap) => {}
-        Err(error) => panic!("unexpected v2 attachment error: {error:?}"),
-        Ok(_) => panic!("unconverted v2 attachment must refuse"),
-    }
+    let wrong_port = format!(
+        "postgres://{}@{}:{}/{}?sslmode=verify-full",
+        fixture.runtime,
+        configured_options.get_host(),
+        configured_options.get_port() + 1,
+        fixture.database_name
+    );
+    assert!(matches!(
+        identity.preflight(&wrong_port, limits).await,
+        Err(RuntimeStartupError::PrimaryEndpointMismatch)
+    ));
+    let insecure = format!(
+        "postgres://{}@{}:{}/{}?sslmode=disable",
+        fixture.runtime,
+        configured_options.get_host(),
+        configured_options.get_port(),
+        fixture.database_name
+    );
+    assert!(matches!(
+        identity.preflight(&insecure, limits).await,
+        Err(RuntimeStartupError::UnauthenticatedTcp)
+    ));
+    assert!(matches!(
+        identity.preflight(&unreachable, limits).await,
+        Err(RuntimeStartupError::PinnedPreflightIndeterminate(_))
+    ));
 
     let temp = tempfile::tempdir().expect("startup gate directory");
     let port_file = temp.path().join("port");
@@ -3267,7 +3369,8 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
             "integration-test-occupant-id-secret-32-bytes-long",
         )
         .env("WADDLE_DB_DRIVER", "postgres")
-        .env("WADDLE_DATABASE_URL", &unreachable)
+        .env("WADDLE_DATABASE_URL", &wrong_port)
+        .env("WADDLE_GIT_SHA", RELEASE_GIT_SHA)
         .env(
             "WADDLE_DEPLOYMENT_UUID",
             fixture.lineage.deployment_uuid.to_string(),
@@ -3286,9 +3389,7 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(
-            "restricted runtime bootstrap still has unconverted ledger and transaction entry"
-        ),
+        stderr.contains("operator-recorded primary endpoint"),
         "unexpected startup refusal: {stderr}"
     );
     assert!(
@@ -3297,8 +3398,8 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
     );
 
     assert!(matches!(
-        identity.attach(&unreachable, limits, None).await,
-        Err(RuntimeStartupError::UnconvertedPinnedBootstrap)
+        identity.preflight(&unreachable, limits).await,
+        Err(RuntimeStartupError::PinnedPreflightIndeterminate(_))
     ));
 }
 
@@ -7414,6 +7515,10 @@ mod pinned_hook_tests;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_entry.rs"]
 mod pinned_entry_tests;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/runtime_startup.rs"]
+mod runtime_startup_tests;
 
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_selected_entry.rs"]

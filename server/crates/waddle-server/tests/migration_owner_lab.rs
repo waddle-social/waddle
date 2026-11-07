@@ -16,6 +16,8 @@ use waddle_server::db::{
     DatabaseConfig, DatabaseDriver, MigrationRunner,
 };
 
+#[path = "migration_owner_lab/catalog_fence.rs"]
+mod catalog_fence;
 #[path = "migration_owner_lab/epoch_acl.rs"]
 mod epoch_acl;
 #[cfg(feature = "test-support")]

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use tracing::{debug, info, instrument};
 
@@ -6,6 +7,7 @@ use super::sql::migrations_table_sql;
 use super::{
     global, migration_checksum, waddle, Migration, MigrationLedgerError, MigrationNamespace,
 };
+use crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 #[cfg(test)]
 use crate::db::ConnectionGuard;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
@@ -15,6 +17,10 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 /// `clustering::claims`; SQLite is single-node, where `BEGIN IMMEDIATE`
 /// provides the corresponding write serialization.
 pub(crate) const MIGRATION_LEDGER_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_992;
+
+const MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(15);
+const MIGRATION_LOCK_RETRY: Duration = Duration::from_millis(20);
+const MIGRATION_LOCK_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 /// Migration runner for applying migrations to a database.
 pub struct MigrationRunner {
@@ -61,25 +67,24 @@ impl MigrationRunner {
         Self::new(migrations)
     }
 
-    /// Run all pending migrations on one transaction. Postgres serializes
-    /// starters with a transaction-scoped advisory lock; SQLite is a
-    /// single-node deployment and uses its immediate write lock instead.
+    /// Run all pending migrations on one transaction. PostgreSQL acquires the
+    /// cooperative catalog fence before the migration-ledger lock, and holds
+    /// both through commit or rollback. Each contended attempt ends its
+    /// transaction before retrying, so a ledger holder does not keep readers
+    /// behind the catalog fence indefinitely. SQLite uses its immediate lock.
+    /// Other privileged catalog mutators and any pool hooks that run before
+    /// checkout must independently participate in the same fence or be
+    /// quiesced; this does not establish global closure.
+    /// Cancellation or a lost database response cannot prove that the original
+    /// backend, its lock, or a possibly dispatched commit has finished. The
+    /// operator must fence and reconcile that backend and any uncertain commit.
+    /// This API does not return a durable backend identity, so that identity
+    /// must be tracked independently, including before acquisition completes.
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn run(&self, db: &Database) -> Result<Vec<i64>, DatabaseError> {
         let driver = db.driver();
         let mut tx = match driver {
-            DatabaseDriver::Postgres => {
-                let mut tx = db.begin().await?;
-                // The loser must see the winner's post-lock ledger commit.
-                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                    .await?;
-                tx.query(
-                    "SELECT pg_advisory_xact_lock(?)",
-                    crate::db_params![MIGRATION_LEDGER_ADVISORY_LOCK_KEY],
-                )
-                .await?;
-                tx
-            }
+            DatabaseDriver::Postgres => begin_fenced_postgres(db).await?,
             DatabaseDriver::Sqlite => db.begin_immediate().await?,
         };
 
@@ -658,6 +663,91 @@ impl MigrationRunner {
             .unwrap_or(0);
         Ok(current < latest)
     }
+}
+
+/// Retry both locks in fresh transactions, with the catalog fence first. A
+/// failed ledger try must release the catalog fence before retrying. Holding a
+/// snapshot while waiting can prevent concurrent index maintenance finishing.
+async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, DatabaseError> {
+    let deadline = tokio::time::Instant::now() + MIGRATION_LOCK_WAIT;
+    loop {
+        let mut tx = tokio::time::timeout_at(deadline, db.begin())
+            .await
+            .map_err(|_| DatabaseError::MigrationLockTimeout)??;
+        // This utility statement takes no data snapshot. READ COMMITTED makes
+        // the post-ledger-lock read observe a competing runner's commit.
+        tokio::time::timeout_at(
+            deadline,
+            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ()),
+        )
+        .await
+        .map_err(|_| DatabaseError::MigrationLockTimeout)??;
+        let mut contended = None;
+        for (key, contention_error) in [
+            (
+                CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+                DatabaseError::MigrationCatalogFenceContended,
+            ),
+            (
+                MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+                DatabaseError::MigrationLedgerLockContended,
+            ),
+        ] {
+            let connection = tx.postgres_connection().ok_or_else(|| {
+                DatabaseError::QueryFailed("migration locks require PostgreSQL".to_owned())
+            })?;
+            let acquired = tokio::time::timeout_at(
+                deadline,
+                sqlx::query_scalar::<_, bool>("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(key)
+                    .fetch_one(connection),
+            )
+            .await;
+            match acquired {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    contended = Some(contention_error);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    rollback_migration_attempt(tx).await?;
+                    return Err(error.into());
+                }
+                Err(_) => {
+                    rollback_migration_attempt(tx).await?;
+                    return Err(DatabaseError::MigrationLockTimeout);
+                }
+            }
+        }
+        match contended {
+            None if tokio::time::Instant::now() < deadline => return Ok(tx),
+            None => {
+                rollback_migration_attempt(tx).await?;
+                return Err(DatabaseError::MigrationLockTimeout);
+            }
+            Some(error) => {
+                rollback_migration_attempt(tx).await?;
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                tokio::time::sleep(MIGRATION_LOCK_RETRY.min(remaining)).await;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+async fn rollback_migration_attempt(tx: Transaction<'_>) -> Result<(), DatabaseError> {
+    if !matches!(
+        tokio::time::timeout(MIGRATION_LOCK_ROLLBACK_WAIT, tx.rollback()).await,
+        Ok(Ok(()))
+    ) {
+        return Err(DatabaseError::MigrationLockRollbackUnconfirmed);
+    }
+    Ok(())
 }
 
 /// The SM owner may have bootstrapped this column before the global migration.
