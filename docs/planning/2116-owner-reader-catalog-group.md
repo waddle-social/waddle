@@ -5,14 +5,22 @@ remain active. This group cannot select serving authority.
 
 ## Objective
 
-Close the next actual single-transaction catalog edges under one grouped PR:
-paired spaces-metadata/channel-space-links owner preparation and attested
-verification, PubSub strict owner and attested verification, room-effect and
-MUC core owner/reader entries, and strict call-teardown owner/reader entries.
-The independent architecture gate must confirm each selected public entry's
-checkout and transaction count before implementation. A family is complete
-only when every raw, owner and attested path that can reach its protected
-relations participates or is explicitly refused.
+Fence the next bounded owner and reader transaction entries under one grouped
+PR: paired spaces-metadata/channel-space-links preparation, raw initializers
+and attested verification; PubSub legacy and strict owners and all direct
+attested reader variants; room-effect strict/raw owners and readers; MUC core
+strict/raw bootstraps; and the destroy-completion owner/reader used by the MUC
+composition. Include the outer push-notification custody reader if its
+notification → Push → VAPID → PubSub order can be preserved catalog-first;
+otherwise retain an explicit uncovered entry. Consolidate call-teardown's
+three-checkout PostgreSQL compatibility initializer into one actual fenced
+transaction before claiming its owner family converted; its strict owner and
+attested reader can share the same PR.
+
+The independent architecture gate found these entries are distinct
+transactions. Fencing each MUC `open()` constituent does not make its three
+commits atomic, and this work does not claim a complete store-family or
+selected-serving conversion until every raw/owner/attested path is covered.
 
 ## Lock and transaction contract
 
@@ -22,24 +30,33 @@ relations participates or is explicitly refused.
   subordinate gate in the repository's global order; acknowledge rollback
   and discard uncertain BEGIN/rollback connections before retrying.
 - Attested readers start a READ COMMITTED READ ONLY transaction on the actual
-  read backend. Acquire catalog-S first, then the existing lineage/ledger,
-  store and relation locks in a reviewed order. Do not run an attestor or H
-  helper before the catalog proof. Recheck catalog identity after any wait.
+  read backend. Acquire catalog-S as its first statement, then the existing
+  lineage/ledger, store and relation locks in a reviewed order. No operation
+  attestor, PubSub H helper, or protected catalog read runs before that
+  transaction's catalog proof. Existing SQLx checkout hooks can run their
+  attestor before the caller begins; that separate hook-custody gap remains.
+  Recheck catalog identity after any wait. Remove later REPEATABLE READ
+  switches from converted readers rather than pinning an old snapshot.
 - Preserve each owner's original backend and unknown-COMMIT semantics. Never
   use a coordinator lock while sibling checkouts perform writes, and never
   claim a raw pool is authorized by another pool's receipt.
 
 ## Boundaries
 
-The PubSub compatibility initializer, MUC `open()` composition, MAM, inbox,
-pending, notification and other multi-session constructors need separate
-custody work unless the architecture gate proves their whole write sequence
-can be made one fenced transaction. Raw VAPID key load/insert remains a
-separate data-path conversion after #2258's schema DDL. #2260's pinned
-receipt worker is test-selected and remains separate. Do not relax either
-startup refusal, old-writer cutoff, provider role boundary, production SM
-custody, or exact-release gate. GitHub Actions and workflow files stay absent
-until #2046 is complete and `cuenv sync -A` restores them.
+The MUC `open()` composition still commits core, destroy and effects
+separately. MAM, inbox, pending, notification and other multi-session
+constructors need their own custody design; a catalog lock on a coordinator
+does not cover sibling checkouts. Raw VAPID key load/insert remains separate
+after #2258's DDL. #2260's pinned receipt worker is test-selected and
+separate. PubSub's outer push-notification custody reader cannot acquire
+catalog-S inside the PubSub helper after notification/Push locks. Call
+teardown's compatibility PostgreSQL initializer cannot remain three
+unfenced checkouts if this PR claims its raw owner covered. Privileged
+mutators that bypass the cooperative catalog protocol remain an external
+cutover gate. Do not relax either startup refusal, old-writer cutoff,
+provider role boundary, production SM custody, or exact-release gate. GitHub
+Actions and workflow files stay absent until #2046 is complete and
+`cuenv sync -A` restores them.
 
 ## Verification
 
