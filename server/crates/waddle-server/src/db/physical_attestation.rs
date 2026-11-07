@@ -34,9 +34,10 @@ pub use pinned_catalog::PinnedCatalogError;
 mod catalog_mutation_fence;
 #[cfg(feature = "test-support")]
 pub use catalog_mutation_fence::{
-    inspect_dark_fenced_attestor, CatalogFenceExclusive, CatalogFenceIndex, CatalogFenceShared,
-    CatalogMutationFenceError, DarkFencedAttestorError, DarkFencedAttestorPause,
-    DarkFencedAttestorPauses,
+    inspect_dark_fenced_attestor, run_dark_fenced_operation, CatalogFenceExclusive,
+    CatalogFenceIndex, CatalogFenceShared, CatalogMutationFenceError, DarkFencedAttestorError,
+    DarkFencedAttestorPause, DarkFencedAttestorPauses, DarkFencedOperation,
+    DarkFencedOperationCompletion, DarkFencedOperationError, DarkFencedOperationPauses,
 };
 mod pinned_entry;
 pub use pinned_entry::DarkPinnedEntryError;

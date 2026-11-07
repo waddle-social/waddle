@@ -53,6 +53,18 @@ pub enum CandidateRouteError {
     Retry,
     #[error("snapshot ledger conflict; roll back before looking up the winner")]
     LedgerConflict,
+    #[error("snapshot revision is stale")]
+    StaleRevision,
+    #[error("snapshot session authority is terminal")]
+    Terminal,
+    #[error("snapshot session generation changed")]
+    GenerationChanged,
+    #[error("snapshot operation UUID was reused with different input")]
+    OperationIdentity,
+    #[error("snapshot revision is exhausted")]
+    RevisionExhausted,
+    #[error("snapshot revision laboratory does not support this ledger mode")]
+    UnsupportedLedger,
     #[error("recipient route candidate requires PostgreSQL")]
     PostgresRequired,
     #[error("recipient route candidate requires READ COMMITTED")]
@@ -72,7 +84,7 @@ pub async fn lock_source_recipient_set(
     lock_route_set(tx, schema, routes, &[]).await
 }
 
-async fn lock_route_set(
+pub(super) async fn lock_route_set(
     tx: &mut Transaction<'_>,
     schema: &str,
     routes: &[(Uuid, BareJid)],
@@ -282,7 +294,7 @@ pub async fn append_promotion_if_open(
     Ok(outcome)
 }
 
-async fn lock_stream_gate(
+pub(super) async fn lock_stream_gate(
     tx: &mut Transaction<'_>,
     stream: &waddle_xmpp::pending_delivery::SmSessionId,
 ) -> Result<(), CandidateRouteError> {
@@ -375,6 +387,7 @@ fn frame_routes(
 }
 
 /// Which existing snapshot ledger behavior to exercise in the dark candidate.
+#[derive(Clone)]
 pub enum CandidateSnapshotLedger {
     Untouched,
     Exclusive(waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
@@ -388,6 +401,8 @@ pub enum CandidateSnapshotOutcome {
         withheld: Vec<waddle_xmpp::stream_management::SmIngressAppendKey>,
     },
     AlreadyResolved,
+    /// The same immutable operation already committed, as proven by its row.
+    AlreadyApplied,
 }
 
 /// Replace a portable snapshot under its complete old/new route inventory.
@@ -409,7 +424,8 @@ pub async fn store_snapshot_if_open<'a>(
     unacked: &[PersistedUnackedStanza],
     ledger: CandidateSnapshotLedger,
 ) -> Result<(Transaction<'a>, CandidateSnapshotOutcome), CandidateRouteError> {
-    match store_snapshot_in_transaction(&mut tx, schema, principal, session, unacked, ledger).await
+    match store_snapshot_in_transaction(&mut tx, schema, principal, session, unacked, ledger, None)
+        .await
     {
         Ok(outcome) => Ok((tx, outcome)),
         Err(error) => {
@@ -419,13 +435,14 @@ pub async fn store_snapshot_if_open<'a>(
     }
 }
 
-async fn store_snapshot_in_transaction(
+pub(super) async fn store_snapshot_in_transaction(
     tx: &mut Transaction<'_>,
     schema: &str,
     principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
     session: &waddle_xmpp::stream_management::persistence::PersistedSession,
     unacked: &[PersistedUnackedStanza],
     ledger: CandidateSnapshotLedger,
+    revision: Option<&super::snapshot_revision_candidate::Operation>,
 ) -> Result<CandidateSnapshotOutcome, CandidateRouteError> {
     use super::atomic_store::{Ledger, PreparedSnapshot, SnapshotApplyError, StoreOutcome};
 
@@ -492,6 +509,12 @@ async fn store_snapshot_in_transaction(
         }
     }
     lock_stream_gate(tx, &session.stream_id).await?;
+    if let Some(operation) = revision {
+        if super::snapshot_revision_candidate::operation_applied(tx, schema, operation).await? {
+            return Ok(CandidateSnapshotOutcome::AlreadyApplied);
+        }
+        super::snapshot_revision_candidate::check_revision(tx, schema, session, operation).await?;
+    }
     let current = read_snapshot_inventory(tx, schema, &session.stream_id, true).await?;
     if current != old {
         return Err(CandidateRouteError::Retry);
@@ -521,12 +544,15 @@ async fn store_snapshot_in_transaction(
     for frame in unacked {
         insert_owner(tx, schema, frame, &session.jid.to_bare()).await?;
     }
+    if let Some(operation) = revision {
+        super::snapshot_revision_candidate::record_operation(tx, schema, operation).await?;
+    }
     Ok(outcome)
 }
 
 #[derive(PartialEq, Eq)]
-struct SnapshotInventory {
-    session: Option<(String, String, String)>,
+pub(super) struct SnapshotInventory {
+    pub(super) session: Option<(String, String, String)>,
     frames: Vec<SnapshotFrame>,
 }
 
@@ -541,7 +567,7 @@ struct SnapshotFrame {
 }
 
 impl SnapshotInventory {
-    fn routes(&self) -> Result<Vec<(Uuid, BareJid)>, CandidateRouteError> {
+    pub(super) fn routes(&self) -> Result<Vec<(Uuid, BareJid)>, CandidateRouteError> {
         let Some((bare, full, _)) = &self.session else {
             return if self.frames.is_empty() {
                 Ok(Vec::new())
@@ -580,7 +606,7 @@ impl SnapshotInventory {
     }
 }
 
-async fn read_snapshot_inventory(
+pub(super) async fn read_snapshot_inventory(
     tx: &mut Transaction<'_>,
     schema: &str,
     stream: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -691,7 +717,7 @@ async fn has_row(mut rows: Rows) -> Result<bool, crate::db::DatabaseError> {
     Ok(rows.next().await?.is_some())
 }
 
-fn validated_schema(schema: &str) -> Result<String, CandidateRouteError> {
+pub(super) fn validated_schema(schema: &str) -> Result<String, CandidateRouteError> {
     if schema.is_empty()
         || schema.len() > 63
         || !schema
@@ -712,6 +738,6 @@ fn stanza_recipient(stanza: &PersistedUnackedStanza) -> Option<BareJid> {
     message.to.as_ref().map(jid::Jid::to_bare)
 }
 
-fn storage(error: impl std::fmt::Display) -> CandidateRouteError {
+pub(super) fn storage(error: impl std::fmt::Display) -> CandidateRouteError {
     CandidateRouteError::Storage(error.to_string())
 }

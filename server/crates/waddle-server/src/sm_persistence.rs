@@ -48,6 +48,9 @@ pub(crate) mod promotion_inventory;
 pub mod recipient_route_interlock_candidate;
 mod runtime_attach;
 mod schema;
+/// Unselected revision authority for the recipient-route snapshot laboratory.
+#[cfg(feature = "test-support")]
+pub mod snapshot_revision_candidate;
 pub use runtime_attach::SmRuntimeAttachError;
 pub use schema::bootstrap_schema_owner as bootstrap_portable_sm_owner_schema;
 

@@ -265,6 +265,24 @@ proof is incomplete; both restricted-startup refusals remain closed.
    XEP-0198 wrap/replay, restart and fault schedules. Keep the wider #2046
    release matrix and replacement deletion as separate completion gates.
 
+The single-node claim gate needs a database-enforced deployment singleton
+slot; independent processes can otherwise register different node IDs.
+Current registration can replace a live same-ID epoch, fresh acquisition can
+proceed without a live node row, and existing ingress/SM/MUC write fences
+check only the claim row. Do not wrap that store as selected singleton
+authority. Define and test a node-slot, lease, claim and durable-write lock
+order with post-wait freshness, bounded heartbeats and exact old-backend
+reconciliation. Test a nested write while heartbeat waits before adopting a
+node-row lock protocol; its liveness is not yet established. Reconcile
+claim-only orphans and unknown registration/takeover commits before serving.
+
+A snapshot revision checked only by the dark candidate does not fence legacy
+append, ACK or deletion, nor a local frame counted after capture. Production
+selection requires every competing path to advance the same authority and
+the actor to serialize capture with outbound publication. An uncertain
+snapshot commit freezes that session for bounded reconciliation; exhaustion
+closes the stream rather than leaving an ACK request pending indefinitely.
+
 The final PR description must match the exact integrated scope and evidence.
 GitHub Actions and workflow files stay disabled while #2046 implementation is
 open; restore them with `cuenv sync -A` and run exact-release CI only when the

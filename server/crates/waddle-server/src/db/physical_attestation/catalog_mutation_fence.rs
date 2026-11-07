@@ -29,18 +29,27 @@
 //!
 //! The separate fenced-attestor observation uses the acquired reader's own
 //! physical connection; a lock on some other connection cannot protect its
-//! reads. It is a laboratory witness, not pool-hook integration or serving
+//! reads. The fixed operation witness keeps that same session and fence through
+//! one lab-table insert and acknowledged transaction completion. It is a
+//! laboratory witness, not pool-hook integration or serving
 //! authority. The current pinned hook rolls back and clears session advisory
 //! locks, so passing a guard through that hook would not preserve this proof.
 //! The lock is cooperative: unmodified old backends and any privileged DDL,
 //! ACL, role, function, or index mutator that ignores it remain outside the
-//! boundary. All must be independently excluded or fenced before use.
+//! boundary. All must be independently excluded or fenced before use. Every
+//! production mutator and the pool hook still need conversion. In particular,
+//! the attestor acquires the lineage barrier after this catalog fence; a
+//! mutator taking those locks in the opposite order can cause a bounded
+//! refusal, not authority. All participants need one compatible lock order.
 
 use std::time::Duration;
 
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection};
 use thiserror::Error;
+use uuid::Uuid;
+
+use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
 use super::{
     attest_dark_catalog_pinned, quote_identifier, validate_identifier,
@@ -54,7 +63,7 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Error)]
 pub enum CatalogMutationFenceError {
-    #[error("catalog fence key must be nonzero and lock wait must be 1 to 15000 ms")]
+    #[error("catalog fence key must be nonzero and distinct from the lineage key; lock wait must be 1 to 15000 ms")]
     InvalidBounds,
     #[error("catalog fence index names must be simple PostgreSQL identifiers")]
     InvalidIndex,
@@ -205,6 +214,199 @@ async fn pause(
             .map_err(|_| DarkFencedAttestorError::PauseCancelled)?;
     }
     Ok(())
+}
+
+/// Result of the fixed lab transaction after its insert has completed.
+#[derive(Clone, Copy)]
+pub enum DarkFencedOperationCompletion {
+    Commit,
+    Rollback,
+}
+
+/// The only operation this laboratory entry can execute.
+pub struct DarkFencedOperation {
+    pub operation_id: Uuid,
+    pub completion: DarkFencedOperationCompletion,
+}
+
+/// Test pauses expose only the backend PID, never the connection or a transaction.
+#[derive(Default)]
+pub struct DarkFencedOperationPauses {
+    pub before_attestor: Option<DarkFencedAttestorPause>,
+    pub after_attestor: Option<DarkFencedAttestorPause>,
+    pub after_operation: Option<DarkFencedAttestorPause>,
+    pub after_completion: Option<DarkFencedAttestorPause>,
+}
+
+#[derive(Debug, Error)]
+pub enum DarkFencedOperationError {
+    #[error(transparent)]
+    Fence(#[from] CatalogMutationFenceError),
+    #[error(transparent)]
+    Attestation(#[from] DarkPhysicalAttestationError),
+    #[error("lab operation ID must be nonzero")]
+    InvalidOperation,
+    #[error("fenced operation transaction could not be started on backend {backend_pid}")]
+    BeginUnconfirmed { backend_pid: i32 },
+    #[error("fenced operation rollback was not acknowledged on backend {backend_pid}")]
+    RollbackUnconfirmed { backend_pid: i32 },
+    #[error("fenced operation commit was not acknowledged on backend {backend_pid}; reconcile its outcome")]
+    CommitUnconfirmed { backend_pid: i32 },
+    #[error("fenced operation completion readback was not confirmed on backend {backend_pid}; reconcile its outcome")]
+    CompletionUnconfirmed { backend_pid: i32 },
+    #[error("fenced operation timed out on backend {backend_pid}; reconcile its outcome")]
+    OperationUnconfirmed { backend_pid: i32 },
+    #[error("fenced operation pause was cancelled")]
+    PauseCancelled,
+    #[error("fenced operation PostgreSQL statement failed")]
+    Postgres(#[from] sqlx::Error),
+}
+
+/// Run one fixed lab insert on the dedicated backend holding the shared
+/// catalog fence, after the pinned attestor and through confirmed transaction
+/// completion and readback. The trusted fixture must provide
+/// `<lineage schema>.catalog_fence_operation_probe(operation_id uuid PRIMARY
+/// KEY)` and grant this login INSERT and SELECT. A fresh non-nil operation ID
+/// is required. No connection, transaction, row contents, or serving
+/// capability escapes. This fixture is not a proof of arbitrary table shape,
+/// application privileges, or application-store behavior.
+///
+/// The caller must independently establish the direct, session-preserving
+/// primary, fresh operation ID, trusted fixture, pins, and all-mutator lock
+/// protocol. A commit acknowledgment alone does not resolve a lost response.
+/// On an error, timeout, or cancellation the original backend and, for a
+/// possibly sent commit, the operation outcome require independent fencing
+/// and reconciliation. Cancellation before a pause reports no PID; use an
+/// independent session identity to find the original backend.
+pub async fn run_dark_fenced_operation(
+    options: &PgConnectOptions,
+    key: i64,
+    wait: Duration,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    operation: DarkFencedOperation,
+    pauses: DarkFencedOperationPauses,
+) -> Result<(), DarkFencedOperationError> {
+    if operation.operation_id.is_nil() {
+        return Err(DarkFencedOperationError::InvalidOperation);
+    }
+    let session = acquire(options, key, wait, Mode::Shared).await?;
+    let backend_pid = session.backend_pid;
+    tokio::time::timeout(
+        STATEMENT_DEADLINE,
+        run_fenced_operation(session, config, pins, operation, pauses),
+    )
+    .await
+    .map_err(|_| DarkFencedOperationError::OperationUnconfirmed { backend_pid })?
+}
+
+async fn run_fenced_operation(
+    mut session: HeldSession,
+    config: &PhysicalAttestationConfig,
+    pins: DarkPhysicalAttestationPins,
+    operation: DarkFencedOperation,
+    pauses: DarkFencedOperationPauses,
+) -> Result<(), DarkFencedOperationError> {
+    let DarkFencedOperation {
+        operation_id,
+        completion,
+    } = operation;
+    let backend_pid = session.backend_pid;
+    let mut tx = session
+        .connection
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE")
+        .await
+        .map_err(|_| DarkFencedOperationError::BeginUnconfirmed { backend_pid })?;
+    let table = format!(
+        "{}.catalog_fence_operation_probe",
+        quote_identifier(&config.postgres().schema.name.0)
+    );
+    let observed = async {
+        for statement in [
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '10s'",
+            "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+            "SET LOCAL transaction_timeout = '20s'",
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        verify_held_connection(&mut tx, backend_pid, session.key, session.mode).await?;
+        pause(pauses.before_attestor, backend_pid)
+            .await
+            .map_err(|_| DarkFencedOperationError::PauseCancelled)?;
+        let restore_path = format!(
+            "{}, pg_temp",
+            quote_identifier(&config.postgres().schema.name.0)
+        );
+        attest_dark_catalog_pinned(&mut tx, config, pins, &restore_path).await?;
+        verify_held_connection(&mut tx, backend_pid, session.key, session.mode).await?;
+        pause(pauses.after_attestor, backend_pid)
+            .await
+            .map_err(|_| DarkFencedOperationError::PauseCancelled)?;
+        let inserted = sqlx::query(&format!("INSERT INTO {table} (operation_id) VALUES ($1)"))
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(DarkFencedOperationError::CompletionUnconfirmed { backend_pid });
+        }
+        verify_held_connection(&mut tx, backend_pid, session.key, session.mode).await?;
+        pause(pauses.after_operation, backend_pid)
+            .await
+            .map_err(|_| DarkFencedOperationError::PauseCancelled)?;
+        Ok::<(), DarkFencedOperationError>(())
+    }
+    .await;
+
+    if observed.is_ok() && matches!(completion, DarkFencedOperationCompletion::Commit) {
+        tx.commit()
+            .await
+            .map_err(|_| DarkFencedOperationError::CommitUnconfirmed { backend_pid })?;
+    } else {
+        tx.rollback()
+            .await
+            .map_err(|_| DarkFencedOperationError::RollbackUnconfirmed { backend_pid })?;
+    }
+
+    // SQLx reports successful execution of COMMIT, but a PostgreSQL COMMIT
+    // in a failed transaction can complete as ROLLBACK. Check the unique lab
+    // operation ID after the acknowledged end before reporting success.
+    if observed.is_ok() {
+        let present = sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {table} WHERE operation_id = $1)"
+        ))
+        .bind(operation_id)
+        .fetch_one(&mut session.connection)
+        .await
+        .map_err(|_| DarkFencedOperationError::CompletionUnconfirmed { backend_pid })?;
+        if present != matches!(completion, DarkFencedOperationCompletion::Commit) {
+            return Err(DarkFencedOperationError::CompletionUnconfirmed { backend_pid });
+        }
+    }
+    verify_held_connection(
+        &mut session.connection,
+        backend_pid,
+        session.key,
+        session.mode,
+    )
+    .await?;
+    let after_completion = if observed.is_ok() {
+        pause(pauses.after_completion, backend_pid)
+            .await
+            .map_err(|_| DarkFencedOperationError::PauseCancelled)
+    } else {
+        Ok(())
+    };
+    verify_held_connection(
+        &mut session.connection,
+        backend_pid,
+        session.key,
+        session.mode,
+    )
+    .await?;
+    release(Some(session)).await?;
+    observed?;
+    after_completion
 }
 
 /// A qualified index name supplied by the trusted lab caller.
@@ -370,7 +572,7 @@ async fn acquire(
     mode: Mode,
 ) -> Result<HeldSession, CatalogMutationFenceError> {
     let wait_ms = wait.as_millis();
-    if key == 0 || !(1..=MAX_LOCK_WAIT_MS).contains(&wait_ms) {
+    if key == 0 || key == LINEAGE_ADVISORY_LOCK_KEY || !(1..=MAX_LOCK_WAIT_MS).contains(&wait_ms) {
         return Err(CatalogMutationFenceError::InvalidBounds);
     }
     let mut connection =
