@@ -289,7 +289,9 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
     use crate::db::{Database, DatabaseConfig, DatabaseDriver};
     use crate::space_identity::SpaceNode;
 
-    async fn wait_for_retry(admin: &PgPool, application: &str) -> Result<()> {
+    // Attested reader checkout hooks can also issue ROLLBACK. For those
+    // pools this observes checkout, not necessarily a catalog-fence retry.
+    async fn wait_for_idle_rollback(admin: &PgPool, application: &str) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let rolled_back: bool = sqlx::query_scalar(
@@ -682,7 +684,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 )
                 .await
             });
-            wait_for_retry(&self.admin, &self.owner).await?;
+            wait_for_idle_rollback(&self.admin, &self.owner).await?;
             let mut gate_probe = self.admin.begin().await?;
             let acquired: bool =
                 sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
@@ -764,7 +766,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                             .map_err(|error| error.to_string())
                     }
                 });
-                wait_for_retry(&self.admin, &self.owner).await?;
+                wait_for_idle_rollback(&self.admin, &self.owner).await?;
                 let mut probe = self.admin.begin().await?;
                 let available: bool =
                     sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
@@ -894,9 +896,8 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 bail!("owner preparation did not cancel at the invalidated-marker checkpoint");
             }
 
-            // Both public attachment methods must take catalog-S before the
-            // shared family gate, and must see marker drift committed while
-            // they were retrying the catalog fence.
+            // Both public attachment methods must see marker drift committed
+            // by a catalog holder. Checkout hooks can run before catalog-S.
             for links in [false, true] {
                 let application = format!("space_reader_{}", uuid::Uuid::new_v4().simple());
                 let options = PgConnectOptions::from_str(&boundary_url)?
@@ -934,7 +935,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                             .map(|_| ())
                     }
                 });
-                wait_for_retry(&self.admin, &application).await?;
+                wait_for_idle_rollback(&self.admin, &application).await?;
                 let mut probe = self.admin.begin().await?;
                 let available: bool =
                     sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
@@ -942,7 +943,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                         .fetch_one(&mut *probe)
                         .await?;
                 if !available {
-                    bail!("space reader took the owner gate before catalog-S");
+                    bail!("space owner gate was unavailable during catalog hold");
                 }
                 probe.rollback().await?;
                 catalog.commit().await?;
@@ -950,7 +951,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                     tokio::time::timeout(Duration::from_secs(20), attach).await??,
                     Err(SpaceStoreAttachError::OwnerMarkerInvalid)
                 ) {
-                    bail!("space reader accepted marker drift committed after catalog wait");
+                    bail!("space reader accepted marker drift committed by the catalog holder");
                 }
                 sqlx::query(&format!(
                     "UPDATE {}._waddle_space_store_owner SET database_name = $1 \
