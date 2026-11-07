@@ -1069,6 +1069,13 @@ async fn live_ingress_fixture(fixture: &Fixture) -> crate::ingress_support::Ingr
     )
     .await
     .expect("owner fixture database");
+    // Produce and recover the real decision while the registered V1009
+    // guard is still installed. The candidate guard installed by `setup`
+    // has a different prelock contract from this legacy producer UOW.
+    waddle_server::db::MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("prepare registered ingress migrations");
     crate::ingress_support::IngressFixture::existing(
         db,
         waddle_server::config::LineageConfig {
@@ -1135,8 +1142,9 @@ async fn live_executor_retains_pinned_attempt_past_its_five_second_budget() {
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
-    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let ingress = live_ingress_fixture(&fixture).await;
+    let (decision, recovered, state) = live_call_decision(&ingress, "pinned-slow").await;
+    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let authority = live_receipt_authority(&fixture, &ingress);
     assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
     let socket = websocket_state().await;
@@ -1144,7 +1152,6 @@ async fn live_executor_retains_pinned_attempt_past_its_five_second_budget() {
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&socket);
-    let (decision, recovered, state) = live_call_decision(&ingress, "pinned-slow").await;
     let message = decision.message_key.expect("canonical message");
     let probe = receipt_custody_probe(&authority, message, false);
     probe.stop_pausing_attempts();
@@ -1227,8 +1234,10 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
-    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let ingress = live_ingress_fixture(&fixture).await;
+    let (decision, _, state) = live_call_decision(&ingress, "pinned-lost-ack").await;
+    let (next, _, _) = live_call_decision(&ingress, "pinned-capacity").await;
+    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let authority = live_receipt_authority(&fixture, &ingress);
     assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
     let socket = websocket_state().await;
@@ -1237,7 +1246,6 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&socket);
-    let (decision, _, state) = live_call_decision(&ingress, "pinned-lost-ack").await;
     let message = decision.message_key.expect("canonical message");
     let probe = receipt_custody_probe(&authority, message, true);
     let mut execution = Box::pin(authority.execute(&decision, &ImmediateSink, &deps));
@@ -1296,7 +1304,6 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
         .protocol
         .pending_dm_call_offers
         .contains_key(&state.key));
-    let (next, _, _) = live_call_decision(&ingress, "pinned-capacity").await;
     let report = authority.execute(&next, &ImmediateSink, &deps).await;
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
     assert!(!report.receipt_failures.is_empty());
@@ -1326,8 +1333,9 @@ async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
-    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let ingress = live_ingress_fixture(&fixture).await;
+    let (decision, _, state) = live_call_decision(&ingress, "pinned-unknown").await;
+    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let authority = live_receipt_authority(&fixture, &ingress);
     assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
     let socket = websocket_state().await;
@@ -1335,7 +1343,6 @@ async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&socket);
-    let (decision, _, state) = live_call_decision(&ingress, "pinned-unknown").await;
     let message = decision.message_key.expect("canonical message");
     let probe = receipt_custody_probe(&authority, message, false);
     let mut execution = Box::pin(authority.execute(&decision, &ImmediateSink, &deps));
