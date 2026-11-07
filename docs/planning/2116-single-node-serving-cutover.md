@@ -49,6 +49,10 @@ against V1030.
    runtime LOGIN R, API owner A NOLOGIN, PubSub helper owner H NOLOGIN,
    attestor owner T, a separate attestor-installer LOGIN I with SET-only T
    membership, monitor M, and a distinct migrator with SET-only S membership.
+   The migrator becomes a privileged table owner after `SET ROLE S`; SET-only
+   membership does not deny DML or grant/trigger changes in that assumed role.
+   Independently fence or quiesce those sessions on the authoritative primary
+   before relying on R's catalog and role profile.
    Reconcile ingress, observation, MUC,
    PubSub, MAM, claim, Push, notification, room, and outbox privileges as one
    versioned matrix. H owns a fixed nonrecursive `LOCK TABLE ONLY` helper and

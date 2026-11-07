@@ -77,6 +77,15 @@ provision subsets of this graph; they do not provision it for startup.
 | M, monitor | PostgreSQL `pg_monitor` role in the current ingress profile | Its permitted SELECT grants must be included in the complete role/ACL matrix; R must not inherit monitor authority. |
 | Migrator | Separate LOGIN with SET-only S membership | Runs owner DDL under lineage, ledger and epoch mutation protocol; cannot assume T or use the R pool. |
 
+SET-only membership prevents S's rights from being inherited by the migrator
+login before `SET ROLE`; it does not make the migrator DML-denied. After
+`SET ROLE S`, PostgreSQL grants the schema/table owner's DML, grant and trigger
+authority. Treat S and any session that can assume S as privileged mutators.
+Before selecting R, every such session must either follow the catalog-first
+mutation protocol for its whole transaction or be independently quiesced and
+fenced on the authoritative primary. A negative DML test on the unassumed
+migrator login is not proof of this boundary.
+
 The current dark attestor checks its own S/R/T/I subset and the receipt
 profile checks S/R/A. Other owner-prepared stores verify separate fragments.
 No single selected verifier currently joins those fragments with H, M and the
