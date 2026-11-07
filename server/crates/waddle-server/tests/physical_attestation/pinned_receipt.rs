@@ -1259,9 +1259,13 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
         .await
         .expect("readback follows lost acknowledgement");
     let original = probe.original_attempt().expect("retained original attempt");
-    assert_eq!(original.0, operation);
-    assert_eq!(original.1, original.2.map(|backend| backend.pid));
-    assert!(original.2.is_some());
+    assert_eq!(original.operation, operation);
+    assert!(original.attempted);
+    assert_eq!(
+        original.backend_pid,
+        original.backend.map(|backend| backend.pid)
+    );
+    assert!(original.backend.is_some());
     assert_eq!(probe.pinned_counts(), (1, 0));
     let terminal: bool = sqlx::query_scalar(&format!(
         "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",
@@ -1298,7 +1302,7 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
     let unresolved = receipt_custody_unresolved(&authority);
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].operation, operation);
-    assert_eq!(unresolved[0].backend, original.2);
+    assert_eq!(unresolved[0].backend, original.backend);
     assert!(!socket
         .deps
         .protocol
@@ -1370,7 +1374,10 @@ async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
         .await
         .expect("unknown first attempt switches to readback");
     let original = probe.original_attempt().expect("original attempt retained");
-    assert_eq!(original, (operation, None, None));
+    assert_eq!(original.operation, operation);
+    assert!(original.attempted);
+    assert_eq!(original.backend_pid, None);
+    assert_eq!(original.backend, None);
     assert_eq!(probe.pinned_counts(), (1, 0));
     let terminal: bool = sqlx::query_scalar(&format!(
         "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",

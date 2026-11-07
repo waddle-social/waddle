@@ -687,7 +687,12 @@ async fn pinned_attempt(
             .original
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) =
-            Some((work.operation, attempt.backend_pid, attempt.backend));
+            Some(ReceiptCustodyUnresolved {
+                operation: work.operation,
+                attempted: true,
+                backend_pid: attempt.backend_pid,
+                backend: attempt.backend,
+            });
     }
     // Every other result, including a failure before PID observation, is
     // retained verbatim. Only positive exact readback can complete receipt
@@ -719,7 +724,7 @@ pub struct ReceiptCustodyProbe {
     operations: Mutex<Vec<ReceiptOperation>>,
     record_attempts: AtomicUsize,
     readbacks: AtomicUsize,
-    original: Mutex<Option<(ReceiptOperation, Option<i32>, Option<GuardBackend>)>>,
+    original: Mutex<Option<ReceiptCustodyUnresolved>>,
     pause_pinned: AtomicBool,
     pinned_ready: Notify,
     pinned_resume: Mutex<Option<oneshot::Sender<()>>>,
@@ -742,9 +747,7 @@ impl ReceiptCustodyProbe {
         )
     }
 
-    pub fn original_attempt(
-        &self,
-    ) -> Option<(ReceiptOperation, Option<i32>, Option<GuardBackend>)> {
+    pub fn original_attempt(&self) -> Option<ReceiptCustodyUnresolved> {
         *self
             .original
             .lock()
