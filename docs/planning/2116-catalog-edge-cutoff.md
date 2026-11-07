@@ -1,7 +1,7 @@
 # P2.1 catalog edge cutoff
 
-Status: draft plan for #2116 and #2046. Both restricted-startup refusals remain
-in force. This group cannot enable serving.
+Status: implemented dark catalog-edge cutoff for #2116 and #2046. Both
+restricted-startup refusals remain in force. This group cannot enable serving.
 
 ## Objective
 
@@ -39,11 +39,20 @@ many cross backends or transactions and need their own custody protocol.
 
 ## Verification and remaining gates
 
-Use focused PostgreSQL 17 public-entry witnesses for catalog-first ordering,
-lower-gate contention, acknowledged rollback, cancellation, and commit
-visibility. Run the affected SQLite regressions, formatting, strict Clippy,
-and an independent exact-head adversarial review. Record existing baseline
-diagnostics separately from new failures. Old writers, prepared work,
-external privileged actors, failover, full selected serving, exact-release CI
-and deployment remain release gates. GitHub Actions and workflow files stay
-disabled until #2046 is complete, when `cuenv sync -A` will regenerate them.
+The PostgreSQL 17 public-entry owner-rejection fixture covers catalog-first
+ordering, lower-gate rollback, and commit visibility. It also checks that the
+preopened runtime correlation session inherits READ COMMITTED READ ONLY even
+when its role defaults to REPEATABLE READ, so it cannot retain an old snapshot
+while the owner waits for catalog-X. The raw VAPID fixture observes catalog-X
+before both DDL statements. The room-observation fixture exercises catalog-S
+and ledger-X contention, acknowledged rollback, and a fresh post-release
+completion marker. The existing Push owner fixture still passes.
+
+The room verifier and owner-rejection inspection use a distinct READ COMMITTED
+READ ONLY catalog-S path. Raw VAPID key loading and insertion after schema
+initialization remain outside this transaction and need a separate conversion.
+This group does not convert other store families or enable the selected serving
+authority. Old writers, prepared work, external privileged actors, failover,
+production SM custody, full selected serving, exact-release CI, and deployment
+remain release gates. GitHub Actions and workflow files stay disabled until
+#2046 is complete, when `cuenv sync -A` will regenerate them.

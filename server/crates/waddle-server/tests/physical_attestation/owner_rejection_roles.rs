@@ -859,6 +859,16 @@ async fn exercise_catalog_fence(
     .expect("PostgreSQL version");
     assert!((170_000..180_000).contains(&version), "PG17 is required");
 
+    // The separately pinned runtime correlation session must not retain an
+    // inherited repeatable-read snapshot while its owner waits for catalog-X.
+    sqlx::query(&format!(
+        "ALTER ROLE {} SET default_transaction_isolation = 'repeatable read'",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("make runtime session inherit repeatable read");
+
     for grant in [false, true] {
         let mut coordinator = PgConnection::connect_with(&fixture.admin_options)
             .await
@@ -907,16 +917,20 @@ async fn exercise_catalog_fence(
         .await
         .expect("inspect failed catalog attempt");
         assert_eq!(held, 0, "failed catalog try releases all gates");
-        let runtime_live: bool = sqlx::query_scalar(
+        let runtime_live_without_snapshot: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
              WHERE usename=$1 AND application_name LIKE 'waddle-owner-rejection-%' \
-               AND xact_start IS NOT NULL)",
+               AND state='idle in transaction' AND xact_start IS NOT NULL \
+               AND backend_xmin IS NULL)",
         )
         .bind(&fixture.runtime)
         .fetch_one(&fixture.admin)
         .await
         .expect("inspect separate runtime correlation session");
-        assert!(runtime_live, "runtime session precedes the owner checkout");
+        assert!(
+            runtime_live_without_snapshot,
+            "runtime correlation session must precede owner checkout without an inherited snapshot"
+        );
         sqlx::query(&format!("ALTER ROLE {} NOCREATEROLE", migrator.as_str()))
             .execute(&fixture.admin)
             .await
@@ -1035,6 +1049,13 @@ async fn exercise_catalog_fence(
     .execute(&fixture.admin)
     .await
     .expect("reset scoped fixture grant");
+    sqlx::query(&format!(
+        "ALTER ROLE {} RESET default_transaction_isolation",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore runtime default isolation");
 }
 
 fn spawn_grant(

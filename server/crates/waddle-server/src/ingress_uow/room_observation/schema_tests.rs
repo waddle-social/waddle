@@ -1746,11 +1746,31 @@ impl Fixture {
             let backend_pid = wait_for_catalog_try_and_rollback(&self.admin, &started_at).await?;
             let verifier_pending = !verifier.is_finished();
             let marker_complete = marker_exists(&self.admin, &self.target).await?;
-            let catalog_x_available: bool =
+            let catalog_x_available = if catalog_blocked {
                 sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
                     .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
                     .fetch_one(&self.admin)
-                    .await?;
+                    .await?
+            } else {
+                // Hold a session catalog-X once the failed ledger try has
+                // rolled back. This stabilizes the lower-gate probes against
+                // the verifier's next short-lived retry.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let acquired: bool =
+                            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock($1)")
+                                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                                .fetch_one(&mut gate)
+                                .await?;
+                        if acquired {
+                            return Ok::<(), sqlx::Error>(());
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await??;
+                true
+            };
             let lineage_x_available: bool =
                 sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
                     .bind(lineage::LINEAGE_ADVISORY_LOCK_KEY)
@@ -1775,12 +1795,24 @@ impl Fixture {
             {
                 verifier.abort();
                 let _ = verifier.await;
+                if !catalog_blocked {
+                    sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+                        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                        .execute(&mut gate)
+                        .await?;
+                }
                 sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
                     .bind(gate_key)
                     .execute(&mut gate)
                     .await?;
                 gate.close().await?;
                 bail!("room-observation reader fence probe failed for backend {backend_pid}");
+            }
+            if !catalog_blocked {
+                sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .execute(&mut gate)
+                    .await?;
             }
             sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
                 .bind(gate_key)
@@ -1815,6 +1847,7 @@ impl Fixture {
         let runtime_database = runtime_database.clone();
         let lineage = lineage.clone();
         let designated_migrator = designated_migrator.clone();
+        let started_at = activity_checkpoint(&self.admin).await?;
         let verifier = tokio::spawn(async move {
             verify_attested_room_observation_schema(
                 &runtime_database,
@@ -1823,27 +1856,10 @@ impl Fixture {
             )
             .await
         });
-        let wait_seen = matches!(
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let waiting: bool = sqlx::query_scalar(
-                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-                     WHERE datname = pg_catalog.current_database() \
-                       AND pid <> pg_catalog.pg_backend_pid() \
-                       AND wait_event_type = 'Lock' \
-                       AND query LIKE '%pg_advisory_xact_lock_shared%')",
-                    )
-                    .fetch_one(&self.admin)
-                    .await?;
-                    if waiting {
-                        return Ok::<(), sqlx::Error>(());
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await,
-            Ok(Ok(()))
-        );
+        let retry_seen = wait_for_catalog_try_and_rollback(&self.admin, &started_at)
+            .await
+            .is_ok()
+            && !verifier.is_finished();
 
         sqlx::query(&format!(
             "UPDATE {}.{} SET prepared_revision = '1' WHERE singleton = '1'",
@@ -1857,8 +1873,8 @@ impl Fixture {
             .await?;
         gate.close().await?;
 
-        if !wait_seen {
-            bail!("attested verifier did not wait on the owner session gate");
+        if !retry_seen {
+            bail!("attested verifier did not retry the owner session gate");
         }
         let evidence = verifier.await??;
         assert_eq!(evidence.revision(), ROOM_OBSERVATION_SCHEMA_REVISION);

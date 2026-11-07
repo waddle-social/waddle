@@ -133,7 +133,8 @@ async fn with_fresh_connection(
         .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
     match tokio::time::timeout(
         CONNECT_DEADLINE,
-        sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *runtime_tx),
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
+            .execute(&mut *runtime_tx),
     )
     .await
     {
@@ -221,9 +222,9 @@ async fn run_on_connection(
         i64::from(identity.schema.oid),
     )
     .await?;
-    // Catalog-only physical preflight does not lock lineage, ledger or
-    // guarded relations. The dedicated owner session must take this barrier
-    // before any such read; mutation uses AX, observation alone uses AS.
+    // Physical preflight inspects catalogs only. The lineage and ledger gates
+    // are already held; take the epoch relation barrier before reading either
+    // protected relation. Mutation uses AX, observation uses AS.
     let epoch_oid = verify_physical_epoch(&mut tx, config, schema).await?;
     let epoch_mode = if grant {
         "ACCESS EXCLUSIVE"
