@@ -1,7 +1,7 @@
 # P2.1 owner and reader catalog group
 
-Status: draft plan for #2116 and #2046. Both restricted-startup refusals
-remain active. This group cannot select serving authority.
+Status: grouped dark implementation for #2116 and #2046. Both restricted-startup
+refusals remain active. This group cannot select serving authority.
 
 ## Objective
 
@@ -10,9 +10,9 @@ PR: paired spaces-metadata/channel-space-links preparation, raw initializers
 and attested verification; PubSub legacy and strict owners and all direct
 attested reader variants; room-effect strict/raw owners and readers; MUC core
 strict/raw bootstraps; and the destroy-completion owner/reader used by the MUC
-composition. Include the outer push-notification custody reader if its
-notification → Push → VAPID → PubSub order can be preserved catalog-first;
-otherwise retain an explicit uncovered entry. Consolidate call-teardown's
+composition. The outer push-notification custody reader remains uncovered:
+its notification → Push → VAPID → PubSub order needs a separate catalog-first
+entry change. Consolidate call-teardown's
 three-checkout PostgreSQL compatibility initializer into one actual fenced
 transaction before claiming its owner family converted; its strict owner and
 attested reader can share the same PR.
@@ -67,3 +67,20 @@ Run affected SQLite behavior tests, formatting, strict Clippy and an
 independent exact-head adversarial review. Record baseline diagnostics and
 unconverted entry points explicitly; dark fixture success is not serving
 qualification.
+
+The PubSub and paired-space attested reader contention witnesses cannot by
+themselves distinguish an SQLx checkout-hook rollback from an operation-level
+catalog retry. They establish public-entry refusal of committed drift. The
+MUC/destroy reader wrapper observes completion after catalog-X release but
+cannot prove that the operation attempted catalog-S before that release.
+Source ordering and the call-teardown blocked-relation witness support the
+transaction-order review. These limits are not serving proof.
+
+## Local verification
+
+On the integrated tree, PostgreSQL 17 and SQLite focused suites passed:
+PubSub runtime attach 4/4, spaces metadata 11/11, call-teardown physical
+attestation 3/3, and room-effect runtime attach 1/1. Strict server Clippy
+with `-D warnings` still reports 21 pre-existing unused/dead-code diagnostics;
+no new diagnostic arose from this group. GitHub Actions and workflow files
+remain disabled, so this is not exact-release CI or clustered qualification.

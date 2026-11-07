@@ -1,6 +1,6 @@
 use super::RoomEffectOutboxError;
-use crate::db::ConnectionGuard;
 use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
+use crate::db::ConnectionGuard;
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, Transaction};
 
 /// Dedicated transaction-scoped Postgres advisory lock for room-effect outbox

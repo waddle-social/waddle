@@ -511,7 +511,7 @@ impl MucDestroyCompletionOutboxStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{DEFAULT_CONTROL_PLANE_POOL_SIZE, DatabaseConfig};
+    use crate::db::{DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE};
 
     #[tokio::test]
     async fn runtime_attach_refuses_sqlite_before_schema_work() {

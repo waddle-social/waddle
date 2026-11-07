@@ -8,8 +8,8 @@ use std::time::Duration;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
 use waddle_server::db::physical_attestation::{
-    CATALOG_MUTATION_ADVISORY_LOCK_KEY, PgRoleName, PhysicalAttestationConfig, attested_pool,
-    install,
+    attested_pool, install, PgRoleName, PhysicalAttestationConfig,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError};
 use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
@@ -435,25 +435,19 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         absent_room_table.is_none(),
         "runtime verification must not create schema"
     );
-    assert!(
-        RoomEffectOutboxStore::try_new(runtime.clone())
-            .await
-            .is_err()
-    );
-    assert!(
-        RoomEffectOutboxStore::initialize_owner(&runtime, &identity)
-            .await
-            .is_err()
-    );
-    assert!(
-        PostgresMucRoomStore::open(
-            runtime.clone(),
-            tokio_util::sync::CancellationToken::new(),
-            SharedNodeIdentity::new(NodeIdentity::new("node", "epoch")),
-        )
+    assert!(RoomEffectOutboxStore::try_new(runtime.clone())
         .await
-        .is_err()
-    );
+        .is_err());
+    assert!(RoomEffectOutboxStore::initialize_owner(&runtime, &identity)
+        .await
+        .is_err());
+    assert!(PostgresMucRoomStore::open(
+        runtime.clone(),
+        tokio_util::sync::CancellationToken::new(),
+        SharedNodeIdentity::new(NodeIdentity::new("node", "epoch")),
+    )
+    .await
+    .is_err());
     let owner_app_name = format!("muc_owner_{}", f.operation_id.simple());
     let mut url = url::Url::parse(&f.base_url).unwrap();
     let retained: Vec<_> = url
@@ -487,11 +481,9 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         .unwrap();
     let mut wrong = identity.clone();
     wrong.database.oid += 1;
-    assert!(
-        RoomEffectOutboxStore::initialize_owner(&owner_db, &wrong)
-            .await
-            .is_err()
-    );
+    assert!(RoomEffectOutboxStore::initialize_owner(&owner_db, &wrong)
+        .await
+        .is_err());
     run_sql(
         &f,
         &format!("GRANT TEMPORARY ON DATABASE {} TO {owner}", f.database_name),
@@ -678,11 +670,9 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
     .expect("attach destroy outbox after acquiring catalog-S");
     assert!(verified_room_runtime.belongs_to_main_pool(&runtime));
     assert!(!verified_room_runtime.belongs_to_main_pool(&pool.ingress()));
-    assert!(
-        verified_room_runtime
-            .effect_outbox()
-            .belongs_to_main_pool(&runtime)
-    );
+    assert!(verified_room_runtime
+        .effect_outbox()
+        .belongs_to_main_pool(&runtime));
     let mut mismatched_lineage = f.lineage.clone();
     mismatched_lineage
         .postgres_identity
@@ -989,11 +979,9 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
             .await
             .is_err()
     );
-    assert!(
-        RoomEffectOutboxStore::attach_existing(runtime.clone())
-            .await
-            .is_err()
-    );
+    assert!(RoomEffectOutboxStore::attach_existing(runtime.clone())
+        .await
+        .is_err());
     let mut relation_holder = f.admin.begin().await.expect("begin relation lock holder");
     sqlx::query(&format!(
         "LOCK TABLE {}.clustering_muc_room_effects IN ACCESS EXCLUSIVE MODE",

@@ -1,5 +1,6 @@
 //! Implementation behind the parent module facade.
 
+use super::admin_receipts;
 use super::AffiliationEntry;
 use super::BareJid;
 use super::CancellationToken;
@@ -10,7 +11,6 @@ use super::RelayHandle;
 use super::RoomEffectEnqueue;
 use super::RoomEffectOutboxStore;
 use super::RoomEffectProducingNode;
-use super::admin_receipts;
 use super::{Affiliation, XmppError};
 use super::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity};
 use super::{Database, DatabaseError, Transaction};
