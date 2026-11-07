@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use crate::config::LineageConfig;
+use crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use crate::db::{
     ConnectionGuard, Database, DatabaseDriver, DatabaseError, Row, Rows, Transaction, Value,
 };
@@ -18,6 +21,10 @@ use super::{
 /// Dedicated PostgreSQL advisory lock for serializing lineage enrollment and adoption.
 pub const LINEAGE_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_993;
 
+const LINEAGE_LOCK_WAIT: Duration = Duration::from_secs(15);
+const LINEAGE_LOCK_RETRY: Duration = Duration::from_millis(20);
+const LINEAGE_LOCK_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
+
 /// A lineage record successfully attested against the database currently serving the query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttestedLineage {
@@ -28,10 +35,10 @@ pub struct AttestedLineage {
 
 /// Create and validate the lineage bootstrap table without writing its row.
 ///
-/// Takes the lineage advisory lock (SQLite: immediate write lock) for the
-/// same reason the migration runner locks its own bootstrap DDL: Postgres's
-/// `CREATE TABLE IF NOT EXISTS` is not race-free, and two replicas starting
-/// against a fresh schema would otherwise crash one of them with a spurious
+/// Takes the catalog mutation fence and lineage advisory lock (SQLite:
+/// immediate write lock) for the same reason the migration runner locks its
+/// own bootstrap DDL: Postgres's `CREATE TABLE IF NOT EXISTS` is not
+/// race-free, and concurrent startups can otherwise fail with a spurious
 /// `pg_type` unique-constraint violation.
 pub async fn ensure_table(db: &Database) -> Result<(), DatabaseError> {
     let driver = db.driver();
@@ -41,6 +48,10 @@ pub async fn ensure_table(db: &Database) -> Result<(), DatabaseError> {
 }
 
 /// Enroll this durable database boundary, or attest the existing enrollment without modifying it.
+///
+/// A cancelled or unacknowledged COMMIT has an indeterminate outcome. The
+/// newly generated lineage UUID has no durable operation result for automatic
+/// recovery, so this function does not retry it.
 pub async fn enroll(
     db: &Database,
     config: &LineageConfig,
@@ -100,6 +111,10 @@ pub enum AdoptOutcome {
 /// where the row matches and is a read-only no-op everywhere else; the
 /// startup gate separately fails attestation when the action matched no
 /// boundary at all (an operator typo must stay loud).
+///
+/// A cancelled or unacknowledged COMMIT has an indeterminate outcome. The
+/// newly generated lineage UUID has no durable operation result for automatic
+/// recovery, so this function does not retry it.
 pub async fn adopt_if_matched(
     db: &Database,
     config: &LineageConfig,
@@ -313,19 +328,97 @@ pub async fn live_postgres_identity_via_pg_pool(
 
 async fn begin_locked(db: &Database) -> Result<Transaction<'_>, DatabaseError> {
     match db.driver() {
-        DatabaseDriver::Postgres => {
-            let mut tx = db.begin().await?;
-            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                .await?;
-            tx.query(
-                "SELECT pg_advisory_xact_lock(?)",
-                crate::db_params![LINEAGE_ADVISORY_LOCK_KEY],
-            )
-            .await?;
-            Ok(tx)
-        }
+        DatabaseDriver::Postgres => begin_fenced_postgres(db).await,
         DatabaseDriver::Sqlite => db.begin_immediate().await,
     }
+}
+
+#[derive(Clone, Copy)]
+enum LineageLockAttempt {
+    Acquired,
+    CatalogContended,
+    LineageContended,
+}
+
+/// Retry from a fresh transaction after releasing any catalog fence. In
+/// particular, a lineage-only blocker must not strand a snapshot or keep
+/// catalog readers behind an exclusive fence while this operation waits.
+async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, DatabaseError> {
+    let deadline = tokio::time::Instant::now() + LINEAGE_LOCK_WAIT;
+    loop {
+        // Checkout, including any pool hook, finishes before catalog-X. The
+        // lease is marked for discard before the cancellable BEGIN operation.
+        let mut tx = tokio::time::timeout_at(deadline, db.begin_discard_postgres_on_drop())
+            .await
+            .map_err(|_| lineage_lock_timeout())??;
+        let outcome = match tokio::time::timeout_at(deadline, try_lineage_locks(&mut tx)).await {
+            Ok(Ok(LineageLockAttempt::Acquired)) if tokio::time::Instant::now() < deadline => {
+                return Ok(tx);
+            }
+            Ok(outcome) => outcome,
+            Err(_) => Err(lineage_lock_timeout()),
+        };
+
+        // A cancellation or unacknowledged rollback closes the checkout. That
+        // does not establish when the server finished or released its locks.
+        if !tx
+            .rollback_bounded_discard(LINEAGE_LOCK_ROLLBACK_WAIT)
+            .await
+        {
+            return Err(DatabaseError::QueryFailed(
+                "lineage lock rollback was not acknowledged; reconcile the original backend"
+                    .to_owned(),
+            ));
+        }
+
+        let contention = match outcome? {
+            LineageLockAttempt::CatalogContended => "lineage catalog fence remained contended",
+            LineageLockAttempt::LineageContended => "lineage lock remained contended",
+            LineageLockAttempt::Acquired => return Err(lineage_lock_timeout()),
+        };
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(DatabaseError::QueryFailed(contention.to_owned()));
+        }
+        tokio::time::sleep(LINEAGE_LOCK_RETRY.min(remaining)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DatabaseError::QueryFailed(contention.to_owned()));
+        }
+    }
+}
+
+async fn try_lineage_locks(tx: &mut Transaction<'_>) -> Result<LineageLockAttempt, DatabaseError> {
+    // This utility statement takes no data snapshot. READ COMMITTED makes
+    // subsequent reads observe a competing mutator's committed changes.
+    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        .await?;
+    let connection = tx
+        .postgres_connection()
+        .ok_or_else(|| DatabaseError::QueryFailed("lineage locks require PostgreSQL".to_owned()))?;
+    for (key, contention) in [
+        (
+            CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+            LineageLockAttempt::CatalogContended,
+        ),
+        (
+            LINEAGE_ADVISORY_LOCK_KEY,
+            LineageLockAttempt::LineageContended,
+        ),
+    ] {
+        let acquired =
+            sqlx::query_scalar::<_, bool>("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(key)
+                .fetch_one(&mut *connection)
+                .await?;
+        if !acquired {
+            return Ok(contention);
+        }
+    }
+    Ok(LineageLockAttempt::Acquired)
+}
+
+fn lineage_lock_timeout() -> DatabaseError {
+    DatabaseError::QueryFailed("lineage lock acquisition timed out".to_owned())
 }
 
 async fn ensure_table_in_transaction(

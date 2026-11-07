@@ -812,6 +812,17 @@ impl Database {
         Transaction::begin(&self.backend, permit, acquisition_deadline).await
     }
 
+    /// Begin with a PostgreSQL checkout that is discarded if its transaction
+    /// end is not acknowledged. The mark is set before sending BEGIN.
+    pub(crate) async fn begin_discard_postgres_on_drop(
+        &self,
+    ) -> Result<Transaction<'_>, DatabaseError> {
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
+        Transaction::begin_discard_postgres_on_drop(&self.backend, permit, acquisition_deadline)
+            .await
+    }
+
     /// Begin a transaction that acquires the database write lock
     /// immediately. Use this for transactions that perform writes after
     /// a read, to avoid SQLite deadlocks when two connections both
