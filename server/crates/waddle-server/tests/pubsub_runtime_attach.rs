@@ -1203,26 +1203,48 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
         &format!("GRANT TEMPORARY ON DATABASE {} TO {owner}", f.database_name),
     )
     .await;
-    owner_db
-        .guard()
-        .await
-        .unwrap()
+    let shadow_guard = owner_db.guard().await.unwrap();
+    shadow_guard
         .execute("CREATE TEMP TABLE pubsub_nodes (sentinel integer)", ())
         .await
         .unwrap();
+    let mut shadow_rows = shadow_guard
+        .query("SELECT pg_catalog.pg_backend_pid()", ())
+        .await
+        .unwrap();
+    let shadow_pid: i32 = shadow_rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(shadow_rows);
+    drop(shadow_guard);
     assert!(
         DatabasePubSubStorage::initialize_owner(owner_db.clone(), &identity)
             .await
             .is_err(),
         "temporary shadow is refused"
     );
-    owner_db
-        .guard()
-        .await
-        .unwrap()
-        .execute("DROP TABLE pg_temp.pubsub_nodes", ())
+    let replacement = owner_db.guard().await.unwrap();
+    let mut rows = replacement
+        .query(
+            "SELECT pg_catalog.pg_backend_pid(), EXISTS (\
+               SELECT 1 FROM pg_catalog.pg_class \
+               WHERE relnamespace = pg_catalog.pg_my_temp_schema() \
+                 AND relname = 'pubsub_nodes')",
+            (),
+        )
         .await
         .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let replacement_pid: i32 = row.get(0).unwrap();
+    let shadow_exists: bool = row.get(1).unwrap();
+    assert_ne!(
+        replacement_pid, shadow_pid,
+        "refused owner checkout is discarded"
+    );
+    assert!(
+        !shadow_exists,
+        "replacement checkout has no temporary shadow"
+    );
+    drop(rows);
+    drop(replacement);
     run_sql(
         &f,
         &format!(
