@@ -249,6 +249,179 @@ async fn pg17_activity_public_entries_fence_mutation_and_marker() {
         .expect("strict owner reinitializes");
     assert_eq!(marker(&admin, &schema).await, "1");
     sqlx::query(&format!(
+        "ALTER TABLE {schema}.notification_activity ADD CONSTRAINT \"legacy-chat\" \
+         CHECK (last_chat_state IS NULL OR last_chat_state IN ('active'))"
+    ))
+    .execute(&admin)
+    .await
+    .expect("add quoted stale CHECK");
+    NotificationActivityStore::initialize_owner(db.clone())
+        .await
+        .expect("migrate quoted stale CHECK");
+    let stale_check_present: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c \
+         JOIN pg_catalog.pg_class t ON t.oid = c.conrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+         WHERE n.nspname = $1 AND t.relname = 'notification_activity' \
+           AND c.conname = 'legacy-chat')",
+    )
+    .bind(&schema)
+    .fetch_one(&admin)
+    .await
+    .expect("inspect stale CHECK removal");
+    assert!(!stale_check_present);
+    sqlx::query(&format!(
+        "CREATE TABLE {schema}.marker_rule_effect (value integer NOT NULL)"
+    ))
+    .execute(&admin)
+    .await
+    .expect("create rule side-effect table");
+    sqlx::query(&format!(
+        "GRANT INSERT ON {schema}.marker_rule_effect TO {owner}"
+    ))
+    .execute(&admin)
+    .await
+    .expect("allow the owner to execute the hostile rule");
+    sqlx::query(&format!(
+        "CREATE RULE activity_marker_update_rule AS ON UPDATE TO \
+         {schema}.notification_activity_owner_state DO ALSO \
+         INSERT INTO {schema}.marker_rule_effect (value) VALUES (1)"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install hostile marker rule");
+    sqlx::query(&format!(
+        "UPDATE {schema}.notification_activity_owner_state \
+         SET prepared_revision = prepared_revision WHERE singleton = '1'"
+    ))
+    .execute(&admin)
+    .await
+    .expect("prove hostile rule can execute");
+    let positive_effects: i64 = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) FROM {schema}.marker_rule_effect"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("inspect positive rule effect");
+    assert_eq!(
+        positive_effects, 1,
+        "hostile rule fixture must be effective"
+    );
+    sqlx::query(&format!("TRUNCATE {schema}.marker_rule_effect"))
+        .execute(&admin)
+        .await
+        .expect("reset rule effect witness");
+    assert!(NotificationActivityStore::initialize_owner(db.clone())
+        .await
+        .is_err());
+    assert!(NotificationActivityStore::try_new(db.clone())
+        .await
+        .is_err());
+    let rule_effects: i64 = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) FROM {schema}.marker_rule_effect"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("inspect marker rule effects");
+    assert_eq!(rule_effects, 0, "marker rule must never execute");
+    assert_eq!(marker(&admin, &schema).await, "1");
+    sqlx::query(&format!(
+        "DROP RULE activity_marker_update_rule ON {schema}.notification_activity_owner_state"
+    ))
+    .execute(&admin)
+    .await
+    .expect("remove hostile marker rule");
+    // A poisoned path may put attacker-defined builtins and operators before
+    // pg_catalog. The strict owner must reject it before either can execute.
+    let poison = format!("activity_poison_{suffix}");
+    for statement in [
+        format!("CREATE SCHEMA {poison}"),
+        format!("GRANT USAGE ON SCHEMA {poison} TO {owner}"),
+        format!("CREATE TABLE {poison}.path_effect (value integer NOT NULL)"),
+        format!("GRANT INSERT ON {poison}.path_effect TO {owner}"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&admin)
+            .await
+            .expect("prepare poisoned path");
+    }
+    let poison_url = database_url(
+        &url,
+        &database,
+        &format!("-c role={owner} -c search_path={poison},pg_catalog,{schema}"),
+        &application,
+    );
+    let mut poison_config = DatabaseConfig::new(DatabaseDriver::Postgres, poison_url.clone());
+    poison_config.pool_size = 1;
+    let poisoned_db = Database::from_config("activity poisoned owner", &poison_config)
+        .await
+        .expect("open poisoned-path handle before functions exist");
+    sqlx::query(&format!(
+        "CREATE FUNCTION {poison}.current_database() RETURNS pg_catalog.name \
+         LANGUAGE plpgsql VOLATILE AS $$ BEGIN \
+           INSERT INTO {poison}.path_effect (value) VALUES (1); \
+           RETURN '{database}'::pg_catalog.name; END $$"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install lookalike builtin");
+    sqlx::query(&format!(
+        "CREATE FUNCTION {poison}.poison_name_eq(pg_catalog.name, pg_catalog.name) \
+         RETURNS pg_catalog.bool LANGUAGE plpgsql VOLATILE AS $$ BEGIN \
+           INSERT INTO {poison}.path_effect (value) VALUES (1); \
+           RETURN $1 OPERATOR(pg_catalog.=) $2; END $$"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install lookalike operator function");
+    sqlx::query(&format!(
+        "CREATE OPERATOR {poison}.= (LEFTARG = pg_catalog.name, \
+         RIGHTARG = pg_catalog.name, PROCEDURE = {poison}.poison_name_eq)"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install lookalike operator");
+    let poison_control = PgPool::connect(&poison_url)
+        .await
+        .expect("connect positive-control poisoned path");
+    let _: String = sqlx::query_scalar("SELECT current_database()::pg_catalog.text")
+        .fetch_one(&poison_control)
+        .await
+        .expect("lookalike builtin is callable");
+    let _: bool = sqlx::query_scalar("SELECT 'a'::pg_catalog.name = 'b'::pg_catalog.name")
+        .fetch_one(&poison_control)
+        .await
+        .expect("lookalike operator is callable");
+    let positive_path_effects: i64 = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) FROM {poison}.path_effect"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("inspect positive poisoned-path controls");
+    assert_eq!(positive_path_effects, 2);
+    sqlx::query(&format!("TRUNCATE {poison}.path_effect"))
+        .execute(&admin)
+        .await
+        .expect("reset poisoned-path effect table");
+    assert!(
+        NotificationActivityStore::initialize_owner(poisoned_db.clone())
+            .await
+            .is_err()
+    );
+    let rejected_path_effects: i64 = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) FROM {poison}.path_effect"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("inspect rejected poisoned path");
+    assert_eq!(
+        rejected_path_effects, 0,
+        "owner path must not execute lookalikes"
+    );
+    assert_eq!(marker(&admin, &schema).await, "1");
+    drop(poisoned_db);
+    poison_control.close().await;
+    sqlx::query(&format!(
         "UPDATE {schema}.notification_activity_owner_state SET system_identifier = 'wrong'"
     ))
     .execute(&admin)

@@ -24,7 +24,10 @@ catalog-S. Preserve the SQLite initialization path and current startup policy.
   strict completion marker. Do not substitute an i64 advisory key
   for the two-integer gate. A contended lower gate requires acknowledged
   rollback and a fresh catalog transaction before retry. Unknown COMMIT must
-  not be reported as success.
+  not be reported as success. Capture the configured effective schema with
+  explicitly qualified builtins, then use a transaction-local `pg_catalog`
+  first path before any operator-bearing catalog inspection. Verify the
+  captured strict owner path and identity on that same backend.
 - On the actual direct attested reader backend, begin READ COMMITTED READ ONLY
   and acquire catalog-S before the shared activity gate, relation locks,
   attestor and catalog checks. Keep relation identity and ACL checks inside
@@ -44,9 +47,14 @@ catalog-S. Preserve the SQLite initialization path and current startup policy.
 
 Use native PostgreSQL 17 public-entry tests for owner/reader gate order,
 contention, rollback, cancellation, marker and schema drift; run affected
-SQLite regressions, formatting and strict Clippy. Obtain an independent exact
-head adversarial review. The SQLx pool checkout hook can still execute before
-the caller's catalog transaction, so this is not whole-pool or serving proof.
+SQLite regressions, formatting and strict Clippy. Test withheld COMMIT replies
+and actual backend lock retention. Obtain an independent exact-head adversarial
+review. The SQLx pool checkout hook can still execute before the caller's
+catalog transaction, so this is not whole-pool or serving proof. The reader's
+60-second client deadline is source-reviewed; the local proxy cases cover
+owner COMMIT and pre-fence response stalls, not a withheld reader reply or a
+COMMIT request held before PostgreSQL receives it. Privileged custom index
+opclasses remain outside this cooperative catalog boundary.
 Inbox, pending delivery and MAM each have distinct multi-session initialization
 and remain separate follow-ups. Old writers, privileged DDL, role/epoch
 rollout, SM custody and exact-release CI remain gated. GitHub Actions and

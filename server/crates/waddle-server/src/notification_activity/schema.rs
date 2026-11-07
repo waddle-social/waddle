@@ -213,8 +213,6 @@ pub(super) async fn initialize_postgres(
     schema: &str,
 ) -> Result<(), NotificationActivityError> {
     validate_codecs()?;
-    crate::db::physical_attestation::validate_identifier(schema, "notification activity schema")
-        .map_err(DatabaseError::from)?;
     let table = format!(
         "{}.\"notification_activity\"",
         crate::db::physical_attestation::quote_identifier(schema)
@@ -277,11 +275,6 @@ async fn migrate_postgres_constraint(
             current_named_present = true;
             continue;
         }
-        crate::db::physical_attestation::validate_identifier(
-            &name,
-            "notification activity constraint",
-        )
-        .map_err(DatabaseError::from)?;
         let quoted_name = crate::db::physical_attestation::quote_identifier(&name);
         sqlx::query(&format!(
             "ALTER TABLE {table} DROP CONSTRAINT {quoted_name}"
