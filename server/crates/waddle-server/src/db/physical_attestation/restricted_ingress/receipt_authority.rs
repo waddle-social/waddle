@@ -24,6 +24,7 @@ use super::{PgRoleName, RestrictedIngressProfileObservation};
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 use crate::db::physical_attestation::{
     attest_connection, quote_identifier, AttestedPostgresWriterCapability,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use crate::db::read_only_timeout::timeout_millis;
 use crate::db::{Database, DatabaseDriver, Transaction, MIGRATION_LEDGER_ADVISORY_LOCK_KEY};
@@ -40,8 +41,11 @@ pub struct ReceiptOperationPins {
     pub schema_owner_role_oid: u32,
     pub runtime_role_oid: u32,
     pub api_owner_role_oid: u32,
+    pub prepare_function_oid: u32,
     pub epoch_relation_oid: u32,
     pub journal_relation_oid: u32,
+    pub effect_receipt_function_oid: u32,
+    pub policy_discard_function_oid: u32,
     pub journal_function_oid: u32,
     pub journal_lookup_function_oid: u32,
 }
@@ -53,8 +57,11 @@ impl ReceiptOperationPins {
             self.schema_owner_role_oid,
             self.runtime_role_oid,
             self.api_owner_role_oid,
+            self.prepare_function_oid,
             self.epoch_relation_oid,
             self.journal_relation_oid,
+            self.effect_receipt_function_oid,
+            self.policy_discard_function_oid,
             self.journal_function_oid,
             self.journal_lookup_function_oid,
         ]
@@ -63,7 +70,16 @@ impl ReceiptOperationPins {
             && self.schema_owner_role_oid != self.runtime_role_oid
             && self.schema_owner_role_oid != self.api_owner_role_oid
             && self.runtime_role_oid != self.api_owner_role_oid
+            && self.prepare_function_oid != self.effect_receipt_function_oid
+            && self.prepare_function_oid != self.journal_function_oid
+            && self.prepare_function_oid != self.journal_lookup_function_oid
+            && self.policy_discard_function_oid != self.prepare_function_oid
             && self.epoch_relation_oid != self.journal_relation_oid
+            && self.effect_receipt_function_oid != self.policy_discard_function_oid
+            && self.effect_receipt_function_oid != self.journal_function_oid
+            && self.effect_receipt_function_oid != self.journal_lookup_function_oid
+            && self.policy_discard_function_oid != self.journal_function_oid
+            && self.policy_discard_function_oid != self.journal_lookup_function_oid
             && self.journal_function_oid != self.journal_lookup_function_oid
     }
 }
@@ -108,6 +124,8 @@ pub enum ReceiptAuthorityError {
     InvalidOperation,
     #[error("receipt operation ID is already bound to a different receipt")]
     OperationConflict,
+    #[error("receipt transaction refused because the catalog mutation fence is held")]
+    CatalogFenceBusy,
     #[error("receipt operation transaction could not be prepared")]
     Database,
     #[error(transparent)]
@@ -255,6 +273,15 @@ impl ReceiptOperationAuthority {
                     .execute(&mut *connection)
                     .await
                     .map_err(RestrictedIngressProfileError::from)?;
+                let catalog_fence: bool =
+                    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                        .fetch_one(&mut *connection)
+                        .await
+                        .map_err(RestrictedIngressProfileError::from)?;
+                if !catalog_fence {
+                    return Err(ReceiptAuthorityError::CatalogFenceBusy);
+                }
                 for (name, cap) in [("lock_timeout", 3_000), ("statement_timeout", 5_000)] {
                     let current: String =
                         sqlx::query_scalar("SELECT pg_catalog.current_setting($1)")

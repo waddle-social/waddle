@@ -226,7 +226,12 @@ ALTER FUNCTION __SCHEMA__.waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, 
 ALTER FUNCTION __SCHEMA__.waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA) SECURITY DEFINER;
 REVOKE ALL ON FUNCTION __SCHEMA__.waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION __SCHEMA__.waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA) TO __R_IDENT__;
+-- R reaches effect receipts only through the fixed operation-ID journal API.
 SET LOCAL ROLE __A_IDENT__;
+REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_record_effect_receipt(UUID, INTEGER, BYTEA)
+    FROM PUBLIC, __R_IDENT__;
+REVOKE ALL ON FUNCTION __SCHEMA__.waddle_ingress_record_policy_discard(UUID, INTEGER, BYTEA, TEXT)
+    FROM PUBLIC, __R_IDENT__;
 __FIXED_RECEIPT_LOOKUP__
 RESET ROLE;
 
@@ -325,6 +330,8 @@ BEGIN
        )
        OR pg_catalog.has_function_privilege(r, '__SCHEMA_PATH__.waddle_ingress_definer_prepare()', 'EXECUTE')
        OR pg_catalog.has_function_privilege(r, '__SCHEMA_PATH__.waddle_ingress_definer_epoch_guard()', 'EXECUTE')
+       OR pg_catalog.has_function_privilege(r, '__SCHEMA_PATH__.waddle_ingress_record_effect_receipt(uuid,integer,bytea)', 'EXECUTE')
+       OR pg_catalog.has_function_privilege(r, '__SCHEMA_PATH__.waddle_ingress_record_policy_discard(uuid,integer,bytea,text)', 'EXECUTE')
        OR (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc WHERE proowner = h) <> 1 THEN
         RAISE EXCEPTION 'waddle: v1 role graph postflight failed';
     END IF;

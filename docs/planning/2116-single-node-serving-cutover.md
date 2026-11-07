@@ -335,3 +335,60 @@ closed until the exact combined path passes its acceptance gate.
   Selection needs a provisioned writer authority, cooperative catalog
   mutator/old-backend cutoff, and the full same-transaction role and epoch
   contract. No startup path selects any of these three candidates.
+
+## Selected authority work after #2247
+
+#2247 merged the candidates above without changing the serving selector.
+The next grouped implementation must join them at a single database effect
+boundary before either restricted-startup refusal can be removed.
+
+1. Specify the runtime role and callable-function boundary. At the #2247
+   baseline, R had 67 direct ingress API EXECUTE grants, including underlying
+   receipt writers that bypass the P21 operation journal. This branch's dark
+   P21 role transition revokes the two unjournaled receipt writers; the
+   remaining callable ingress surface still needs a selected-path proof. A
+   Rust-only wrapper around one receipt function cannot close this surface.
+   Make every permitted write
+   entry enforce the same authority or prove an exact old-login/backend
+   cutoff and closed caller set. Verify owner, function, relation, trigger,
+   grant, role-membership, journal and epoch pins on the serving backend.
+2. Bind the deployment singleton slot, live node incarnation, claim, catalog
+   fence, protocol epoch, SM revision and effect receipt to one bounded
+   transaction. A separate long-lived guard transaction cannot authorize a
+   later mutation on another backend. Bound statement, lock, idle and total
+   lifetime; close uncertain backends and reconcile exact operation identity
+   after an indeterminate COMMIT. Do not infer rollback from a timeout.
+3. Convert every competing live, detached, batch and scheduled writer and
+   their pending/GC/ACK/tombstone paths to that boundary. Serialize actor
+   capture with outbound publication and define positive settlement for every
+   retained custody interval. ACK validation needs a durable contiguous
+   authorized write-attempt frontier; that frontier is not proof of peer
+   receipt. Cut off old-role/raw writers and transports before selection.
+4. Prove the combined role, claim, catalog, SM and all-store path on the
+   actual main pool with PostgreSQL 17 independent-process races, SQLite
+   compatibility, native WebSocket/XEP-0198 and exact startup/rollback
+   schedules. Only then open the restricted-startup gates. Keep workflows
+   absent until #2046 implementation is ready for `cuenv sync -A` and
+   exact-release CI.
+
+### Dark hardening boundary in this grouped branch
+
+- The singleton candidate bounds a returned slot guard with PostgreSQL idle
+  and total transaction deadlines, and identifies an unconfirmed rollback's
+  original backend/transaction. Registration, renewal, revocation and a
+  cancelled acquisition still lack a complete bounded-backend reconciliation
+  contract. This guard cannot authorize a writer on a different transaction.
+- The revisioned SM candidate records generation-local acknowledged, exposed
+  and appended ordinals. It refuses ACK beyond the authorized write-attempt
+  frontier and refuses a duplicate wrapping settlement-window key before
+  deleting replay rows. Exposure is not peer receipt. Old writers, exact
+  source/recipient claims, terminal settlement, absolute-ordinal ACK windows,
+  actor publication and ambiguous COMMIT recovery remain unconverted.
+- The P21 role candidate gives its common ingress helper a transaction-scoped
+  catalog fence, removes R's two unjournaled effect-receipt insertion routes,
+  and checks helper/function identity and denial in its dark receipt pilot.
+  The pilot still uses the legacy attested transaction entry rather than the
+  pinned selected pool; trusted catalog-mutator cooperation, server-side
+  transaction lifetime and old-backend cutoff remain prerequisites.
+
+No production selector or restricted-startup refusal changes in this group.

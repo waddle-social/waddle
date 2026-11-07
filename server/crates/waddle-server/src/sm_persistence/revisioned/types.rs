@@ -11,6 +11,8 @@ use waddle_xmpp::stream_management::SmIngressAppendKey;
 use waddle_xmpp::tombstone::TombstoneTarget;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
+use super::frontier::ExposureFrontier;
+
 /// A database capture's opaque generation and revision, bound to its identity.
 #[derive(Clone, Debug)]
 pub struct Revision {
@@ -42,6 +44,8 @@ pub struct Capture {
     pub principal: AuthenticatedPrincipalRef,
     pub session: PersistedSession,
     pub unacked: Vec<PersistedUnackedStanza>,
+    /// Captured under the same gate as the session, queue and revision.
+    pub frontier: ExposureFrontier,
 }
 
 /// An immutable operation. The caller retains it, including its UUID, until an
@@ -70,6 +74,12 @@ pub enum Mutation<'a> {
     Append {
         revision: &'a Revision,
         append: &'a PersistedDetachedAppend,
+    },
+    /// Record the next retained ordinal as authorized for a write attempt.
+    /// This is not proof of socket ownership, an actual write or peer receipt.
+    Expose {
+        revision: &'a Revision,
+        ordinal: u64,
     },
     Acknowledge {
         revision: &'a Revision,
@@ -104,6 +114,7 @@ impl Mutation<'_> {
             Self::Create { session, .. } => &session.stream_id,
             Self::Snapshot { revision, .. }
             | Self::Append { revision, .. }
+            | Self::Expose { revision, .. }
             | Self::Acknowledge { revision, .. }
             | Self::ConfirmAcknowledgement { revision, .. }
             | Self::Tombstone { revision, .. }
@@ -117,6 +128,7 @@ impl Mutation<'_> {
             Self::Create { generation, .. } => *generation,
             Self::Snapshot { revision, .. }
             | Self::Append { revision, .. }
+            | Self::Expose { revision, .. }
             | Self::Acknowledge { revision, .. }
             | Self::ConfirmAcknowledgement { revision, .. }
             | Self::Tombstone { revision, .. }
@@ -138,6 +150,7 @@ pub enum Effect {
     Snapshot { withheld: Vec<SmIngressAppendKey> },
     Appended,
     AlreadyAllocated { accepting_stream: SmSessionId },
+    Exposed { ordinal: u64 },
     Acknowledged,
     Retired,
 }
@@ -160,6 +173,14 @@ pub enum RevisionError {
     StaleRevision,
     #[error("session revision is exhausted")]
     RevisionExhausted,
+    #[error("the nonwrapping SM ordinal is exhausted")]
+    OrdinalExhausted,
+    #[error("exposure must identify the next retained ordinal")]
+    InvalidExposure,
+    #[error("acknowledgement exceeds the exposed frontier")]
+    AcknowledgementBeyondExposure,
+    #[error("an earlier acknowledgement with the same wrapping window is unsettled")]
+    AcknowledgementWindowConflict,
     #[error("operation requires an unsupported authority or ledger mode")]
     Unsupported,
     #[error("session still has replay or pending custody")]

@@ -71,6 +71,14 @@ AS $$
 DECLARE
     live_epoch BIGINT;
 BEGIN
+    -- This is the common first-step fence for every runtime-callable ingress
+    -- API. It must precede role/catalog/relation inspection and be held through
+    -- transaction completion. A false result fails closed; callers retry only
+    -- in a fresh READ COMMITTED transaction.
+    IF NOT pg_catalog.pg_try_advisory_xact_lock_shared(6841445497037937999) THEN
+        RAISE EXCEPTION 'waddle: catalog mutation fence is held'
+            USING ERRCODE = '55P03';
+    END IF;
     IF SESSION_USER <> '__RUNTIME_ROLE_LITERAL__' THEN
         RAISE EXCEPTION 'waddle: ingress function is restricted to the runtime login'
             USING ERRCODE = '42501';
