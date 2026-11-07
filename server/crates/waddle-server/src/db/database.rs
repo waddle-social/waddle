@@ -54,6 +54,20 @@ pub enum DatabaseError {
         source: Box<DatabaseError>,
     },
 
+    /// No catalog mutation was started while a cooperative reader held the
+    /// catalog fence through the bounded acquisition interval.
+    #[error("migration catalog fence remained contended")]
+    MigrationCatalogFenceContended,
+
+    /// The acquisition deadline elapsed before the runner could proceed.
+    #[error("migration catalog fence acquisition timed out")]
+    MigrationCatalogFenceTimeout,
+
+    #[error(
+        "migration catalog fence rollback was not acknowledged; reconcile the original backend"
+    )]
+    MigrationCatalogFenceRollbackUnconfirmed,
+
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
 
