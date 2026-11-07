@@ -30,6 +30,28 @@ fn replay_payload_rejects_a_different_or_malformed_producer_frame() {
             SmReplayPayload::from_wire_matching(mismatch.to_owned(), original.as_ref()).is_err()
         );
     }
+    for root in [
+        equivalent,
+        "<message xmlns='jabber:client'/>",
+        "<iq xmlns='jabber:client' type='result' id='q'/>",
+        "<presence xmlns='jabber:client'><status>ready</status></presence>",
+    ] {
+        let parsed = SmReplayPayload::from_wire(root.to_owned()).expect("single stanza");
+        for suffix in [
+            "<presence xmlns='jabber:client'/>",
+            "garbage",
+            "x",
+            " ",
+            "<",
+            "\n",
+            " \n",
+        ] {
+            let mut frame = root.to_owned();
+            frame.push_str(suffix);
+            assert!(SmReplayPayload::from_wire(frame.clone()).is_err());
+            assert!(SmReplayPayload::from_wire_matching(frame, parsed.as_ref()).is_err());
+        }
+    }
 }
 
 fn full(s: &str) -> FullJid {

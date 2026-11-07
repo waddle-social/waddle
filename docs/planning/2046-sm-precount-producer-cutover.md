@@ -66,6 +66,8 @@ storage. The second detach drain passes its captured frame into both keyed and
 unkeyed detached appends when its XML structurally matches the typed producer
 stanza. A malformed or mismatched drain frame takes the existing typed append
 path with a warning; it is not covered by the exact-byte claim.
+The retained storage frame must end with its one stanza; additional bytes,
+including a second root or trailing whitespace, are rejected.
 Selected promotion retries retain their existing semantic XML comparison; a
 matching retry keeps the first frame's bytes rather than replacing them.
 

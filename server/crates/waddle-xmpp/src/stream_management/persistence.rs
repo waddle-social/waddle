@@ -232,9 +232,14 @@ impl SmReplayPayload {
     }
 
     fn parse_wire(wire: String, expected: Option<&Stanza>) -> Result<Self, SmPersistenceError> {
-        let element: minidom::Element = wire
-            .parse()
-            .map_err(|error: minidom::Error| SmPersistenceError::Other(error.to_string()))?;
+        let mut reader = std::io::Cursor::new(wire.as_bytes());
+        let element = minidom::Element::from_reader(&mut reader)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        if reader.position() != wire.len() as u64 {
+            return Err(SmPersistenceError::Other(
+                "replay frame contains bytes after its stanza".to_owned(),
+            ));
+        }
         if expected.is_some_and(|expected| element != expected.to_element()) {
             return Err(SmPersistenceError::Other(
                 "replay frame differs from its producer stanza".to_owned(),
