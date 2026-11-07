@@ -1323,10 +1323,8 @@ async fn create_websocket_state(
     // Provision (or load) the VAPID signing key once at boot. The
     // signer is `Arc<dyn VapidSigner>` so the publish-job worker can
     // sign once per (kid, aud, sub) and share the JWT across the device
-    // fan-out. `load_or_provision` returns `Err` only when the root key
-    // is unusable or the env-bootstrap value is malformed — in that
-    // case the entire push service degrades, so the caller intentionally
-    // fails boot rather than silently dispatching without VAPID.
+    // fan-out. If provisioning, integrity checks, or commit acknowledgement
+    // fail, no signer is returned and this startup fails.
     let vapid_signer = if lineage_attested {
         VapidStorage::load_or_provision(
             state.db_pool.global().clone(),
