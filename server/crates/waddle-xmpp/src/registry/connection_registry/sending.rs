@@ -703,12 +703,14 @@ impl ConnectionRegistry {
             if !entry.endpoint.is_closed() {
                 return false;
             }
+            entry.binding_permit.revoke_deferred();
             entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
-        if removed.is_some() {
+        if let Some((_, entry)) = &removed {
+            entry.binding_permit.notify_revoked();
             crate::metrics::adjust_connections_active(-1);
             debug!(jid = %jid, "Evicted stale closed connection entry");
         }
@@ -745,12 +747,14 @@ impl ConnectionRegistry {
             if !entry.endpoint.is_closed() || !entry.endpoint.same_binding(endpoint) {
                 return false;
             }
+            entry.binding_permit.revoke_deferred();
             entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(sm_stream_owners, jid, entry);
             Self::remove_retired_presence(presence_states, jid);
             true
         });
-        if removed.is_some() {
+        if let Some((_, entry)) = &removed {
+            entry.binding_permit.notify_revoked();
             crate::metrics::adjust_connections_active(-1);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }

@@ -421,3 +421,63 @@ pub(in crate::server::routes::websocket) async fn detach_canonical_read(
         read.await
     }
 }
+
+/// The armed seam never lets an enable through after a setup error or timeout.
+pub(in crate::server::routes::websocket) enum SmEnableHoldOutcome {
+    Continue,
+    Refused,
+}
+
+/// Hold one resumable enable immediately before its transport attempt. The
+/// test waits for the real binding revocation, then lets normal code proceed.
+pub(in crate::server::routes::websocket) async fn hold_sm_enable_before_start(
+    jid: Option<&FullJid>,
+    stream: &waddle_xmpp::pending_delivery::SmSessionId,
+    permit: &waddle_xmpp::registry::LocalBindingPermit,
+) -> SmEnableHoldOutcome {
+    let Some(directory) =
+        std::env::var_os("WADDLE_TEST_SEAM_SM_ENABLE_DIRECTORY").map(PathBuf::from)
+    else {
+        return SmEnableHoldOutcome::Continue;
+    };
+    let Ok(target) = std::env::var("WADDLE_TEST_SEAM_SM_ENABLE_JID") else {
+        tracing::error!("SM enable hold lacks its target JID");
+        return SmEnableHoldOutcome::Refused;
+    };
+    if !jid.is_some_and(|jid| jid.to_string() == target) {
+        return SmEnableHoldOutcome::Continue;
+    }
+    if let Err(error) = std::fs::write(directory.join("held"), stream.as_str()) {
+        tracing::error!(%error, "could not record SM enable hold");
+        return SmEnableHoldOutcome::Refused;
+    }
+    let release = directory.join("release");
+    let wait = async {
+        loop {
+            if release.exists() {
+                return Ok::<(), std::io::Error>(());
+            }
+            tokio::select! {
+                _ = permit.revoked() => {
+                    std::fs::write(directory.join("revoked"), stream.as_str())?;
+                    while !release.exists() {
+                        tokio::time::sleep(HOLD_POLL_INTERVAL).await;
+                    }
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(HOLD_POLL_INTERVAL) => {}
+            }
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(30), wait).await {
+        Ok(Ok(())) => SmEnableHoldOutcome::Continue,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "could not record SM enable revocation");
+            SmEnableHoldOutcome::Refused
+        }
+        Err(_) => {
+            tracing::error!("SM enable hold timed out");
+            SmEnableHoldOutcome::Refused
+        }
+    }
+}

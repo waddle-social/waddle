@@ -97,6 +97,13 @@ impl SmEnableCommit {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    pub(in crate::server::routes::websocket) fn stream_id(
+        &self,
+    ) -> &waddle_xmpp::pending_delivery::SmSessionId {
+        &self.stream_id
+    }
+
     pub(in crate::server::routes::websocket) fn publish(
         mut self,
         state: &WebSocketState,
@@ -794,7 +801,11 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
         enable.resume,
         max,
     ));
-    vec![ResponseFrame::from(enabled.to_element())]
+    if enable.resume {
+        vec![ResponseFrame::SmEnabled(enabled.to_element())]
+    } else {
+        vec![ResponseFrame::from(enabled.to_element())]
+    }
 }
 
 /// Outcome of racing [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::prepare_cross_node_resume`]

@@ -1,6 +1,7 @@
 use super::{
     debug, instrument, ActorProvisionalConnectionEntry, ConnectionBindGuard, ConnectionEntry,
-    ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering, SocketOutboundEndpoint,
+    ConnectionRegistry, FullJid, LocalBindingPermit, LocalConnectionBindingId, Ordering,
+    SocketOutboundEndpoint,
 };
 use crate::pending_delivery::SmSessionId;
 #[cfg(any(test, feature = "test-utils"))]
@@ -21,14 +22,20 @@ impl ConnectionRegistry {
         if !guard.is_for(&jid) || candidate.jid() != &jid || candidate.binding_ref().is_none() {
             return false;
         }
-        match self.connections.entry(jid.clone()) {
+        let retired = match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 if Some(occupied.get().binding_id()) != expected || !candidate.is_provisional() {
                     return false;
                 }
-                occupied.get().seal_actor_binding_if_any();
+                let next = candidate.entry_for_publication();
+                let retire = !occupied.get().same_exact_local_binding(&next);
+                if retire {
+                    occupied.get().binding_permit.revoke_deferred();
+                    occupied.get().seal_actor_binding_if_any();
+                }
                 Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
-                occupied.insert(candidate.entry_for_publication());
+                let old = occupied.insert(next);
+                retire.then_some(old)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 if expected.is_some() || !candidate.is_provisional() {
@@ -36,7 +43,11 @@ impl ConnectionRegistry {
                 }
                 vacant.insert(candidate.entry_for_publication());
                 crate::metrics::adjust_connections_active(1);
+                None
             }
+        };
+        if let Some(old) = retired {
+            old.binding_permit.notify_revoked();
         }
         true
     }
@@ -83,12 +94,14 @@ impl ConnectionRegistry {
             if !candidate.matches_entry(entry) {
                 return false;
             }
+            entry.binding_permit.revoke_deferred();
             entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
-        if removed.is_some() {
+        if let Some((_, entry)) = &removed {
+            entry.binding_permit.notify_revoked();
             crate::metrics::adjust_connections_active(-1);
         }
         removed.is_some()
@@ -157,20 +170,29 @@ impl ConnectionRegistry {
     #[instrument(skip(self, entry, jid), fields(jid = %jid))]
     pub fn register_entry(&self, jid: FullJid, entry: ConnectionEntry) -> LocalConnectionBindingId {
         let binding_id = entry.binding_id();
-        match self.connections.entry(jid.clone()) {
+        let retired = match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
-                occupied.get().seal_actor_binding_if_any();
+                let retire = !occupied.get().same_exact_local_binding(&entry);
+                if retire {
+                    occupied.get().binding_permit.revoke_deferred();
+                    occupied.get().seal_actor_binding_if_any();
+                }
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
                 }
-                occupied.insert(entry);
+                let old = occupied.insert(entry);
                 debug!("Replaced existing connection registration");
+                retire.then_some(old)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 vacant.insert(entry);
                 crate::metrics::adjust_connections_active(1);
                 debug!("Registered new connection");
+                None
             }
+        };
+        if let Some(old) = retired {
+            old.binding_permit.notify_revoked();
         }
         binding_id
     }
@@ -186,17 +208,32 @@ impl ConnectionRegistry {
         let binding_id = entry.binding_id();
         let binding = entry.binding_ref()?.clone();
         let interruption = entry.write_interruption.clone();
-        match self.connections.entry(jid.clone()) {
+        let retired = match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 let remove_old_stream = occupied.get().sm_stream_id() != entry.sm_stream_id();
-                let old = interruption.publish_binding(&binding, || {
-                    occupied.get().seal_actor_binding_if_any();
-                    occupied.insert(entry)
-                })?;
+                let same_binding = occupied.get().same_exact_local_binding(&entry);
+                let old_permit = occupied.get().binding_permit.clone();
+                // A start takes old permit -> physical socket gate. Take those
+                // locks in the same order even when both entries share a socket.
+                // Failed publication leaves the incumbent permit unchanged.
+                let publish = || {
+                    interruption.publish_binding(&binding, || {
+                        if !same_binding {
+                            occupied.get().seal_actor_binding_if_any();
+                        }
+                        occupied.insert(entry)
+                    })
+                };
+                let old = if same_binding {
+                    publish()?
+                } else {
+                    old_permit.revoke_on_success(publish)?
+                };
                 if remove_old_stream {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, &old);
                 }
                 debug!("Replaced existing connection registration");
+                (!same_binding).then_some(old)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 interruption.publish_binding(&binding, || {
@@ -204,7 +241,11 @@ impl ConnectionRegistry {
                 })?;
                 crate::metrics::adjust_connections_active(1);
                 debug!("Registered new connection");
+                None
             }
+        };
+        if let Some(old) = retired {
+            old.binding_permit.notify_revoked();
         }
         Some(binding_id)
     }
@@ -221,27 +262,35 @@ impl ConnectionRegistry {
             debug!("Skipped register: entry owner does not match guard owner");
             return false;
         }
-        match self.connections.entry(jid.clone()) {
+        let retired = match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 if occupied.get().binding_id() != *owner {
                     debug!("Skipped register: ownership moved to replacement connection");
                     return false;
                 }
-                occupied.get().seal_actor_binding_if_any();
+                let retire = !occupied.get().same_exact_local_binding(&entry);
+                if retire {
+                    occupied.get().binding_permit.revoke_deferred();
+                    occupied.get().seal_actor_binding_if_any();
+                }
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
                     Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
                 }
-                occupied.insert(entry);
+                let old = occupied.insert(entry);
                 debug!("Replaced owned connection registration");
-                true
+                retire.then_some(old)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 vacant.insert(entry);
                 crate::metrics::adjust_connections_active(1);
                 debug!("Registered new connection");
-                true
+                None
             }
+        };
+        if let Some(old) = retired {
+            old.binding_permit.notify_revoked();
         }
+        true
     }
 
     /// Unregister a connection.
@@ -250,12 +299,14 @@ impl ConnectionRegistry {
     #[instrument(skip(self, jid), fields(jid = %jid))]
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
+            entry.binding_permit.revoke_deferred();
             entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
-        if removed.is_some() {
+        if let Some((_, entry)) = &removed {
+            entry.binding_permit.notify_revoked();
             crate::metrics::adjust_connections_active(-1);
             debug!("Unregistered connection");
         } else {
@@ -286,12 +337,14 @@ impl ConnectionRegistry {
             if entry.binding_id() != *owner {
                 return false;
             }
+            entry.binding_permit.revoke_deferred();
             entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
-        if removed.is_some() {
+        if let Some((_, entry)) = &removed {
+            entry.binding_permit.notify_revoked();
             crate::metrics::adjust_connections_active(-1);
             debug!("Unregistered owned connection");
         } else {
@@ -320,12 +373,14 @@ impl ConnectionRegistry {
             if entry.sm_stream_id().as_ref() != Some(stream_id) {
                 return false;
             }
+            entry.binding_permit.revoke_deferred();
             entry.seal_actor_binding_if_any();
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
             Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
-        if removed.is_some() {
+        if let Some((_, entry)) = &removed {
+            entry.binding_permit.notify_revoked();
             crate::metrics::adjust_connections_active(-1);
             debug!("Unregistered SM-owned connection at expiry");
         } else {
@@ -347,6 +402,32 @@ impl ConnectionRegistry {
                 None
             }
         })
+    }
+
+    /// Capture a permit only for the exact current local binding. The route
+    /// shard excludes removal until the shared revocation cell is captured.
+    pub fn local_binding_permit_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+    ) -> Option<LocalBindingPermit> {
+        let entry = self.connections.get(jid)?;
+        if entry.binding_id() != *owner
+            || !entry.is_locally_hosted()
+            || entry.endpoint.check_active().is_err()
+        {
+            return None;
+        }
+        let binding = entry.binding_ref()?.clone();
+        if !entry.binding_permit.is_active() {
+            return None;
+        }
+        Some(LocalBindingPermit::new(
+            jid.clone(),
+            *owner,
+            binding,
+            entry.binding_permit.clone(),
+        ))
     }
 
     /// Check if a JID is currently connected. ADR-0017 Phase 3 Slice 9

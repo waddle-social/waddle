@@ -1,7 +1,7 @@
 # Exact local binding permit for SM enable
 
-Status: implementation plan for #2046 and #2137. The reviewed scope is a local
-pre-`start_send` fence. It does not select durable session authority or change
+Status: implementation and verification record for #2046 and #2137. The
+reviewed scope is a local pre-`start_send` fence. It does not select durable session authority or change
 resume admission, SM acknowledgement, or output custody.
 
 ## Problem
@@ -54,8 +54,9 @@ not resolve that uncertainty or make it safe to release an uncertain session.
    the immediate start operation; it must not re-enter registry or permit
    code. The sink's own interruption mutex is distinct. Audit the lock order
    against publication, force detach, and node revocation before integration.
-6. If revocation wins before `start_send`, do not start `<enabled/>` and let the
-   existing exact claim/stream cleanup own the known enrolled stream. If
+6. If revocation wins before `start_send`, do not start `<enabled/>` and exit
+   the old transport. The pending claim guard attempts to inventory exact claim
+   release; the existing orphan-retirement sweep retries the enrolled stream. If
    `start_send` wins, retain the existing post-attempt transport and session
    behavior: this permit says neither that flush completed nor that the peer
    received the response. A later revoke cannot retroactively invalidate the
@@ -84,6 +85,39 @@ path claimed to revoke on an accepted request must do so for the exact binding.
 - Targeted XEP-0198 and registry regressions, formatting, and strict scoped
   Clippy. Coordinate Cargo use with the other #2046 work. Report separately
   any environment or pre-existing check limitation.
+
+## Lock order and retirement evidence
+
+The real WebSocket start acquires node admission read guards, the binding cell,
+and the physical socket interruption gate in that order. The inner
+`futures-util` 0.3.32 `SplitSink::start_send` stores its local slot; it does not
+acquire its `BiLock` or call the route registry. Replacement holds the route
+shard, then the old binding cell, then the new socket gate; this order also
+covers two bindings on the same physical socket. Refused socket publication
+leaves the old binding active. Actor sealing takes endpoint admission followed
+by actor custody; `ActorOutboundCustody::attempt_with` releases its custody
+state before executing its start callback. The binding start callback does not
+re-enter the registry or take endpoint/custody locks.
+
+Force detach uses Tokio 1.54.1's nonblocking `try_reserve` while holding the
+binding cell. Success revokes the cell; Full and Closed do not. After unlocking,
+the code notifies parked writers and sends the reserved request. The actual
+receiver wake can run a reentrant waker synchronously and is never called under
+the binding cell. Reservation success is an accepted but unconfirmed offer;
+receiver closure afterward is not evidence of completed detachment. A binder
+continues waiting for observed lifecycle stop while holding its normal bind
+gate, but the incumbent never waits for that gate.
+
+Only `resume='true'` uses this fence, after the existing claim and enrollment
+futures have completed successfully. Neither the binding signal nor the
+readiness wait cancels the enrollment COMMIT. For a known committed enrollment
+whose response is refused before start, dropping the pending enable guard
+attempts to inventory exact claim release. When that succeeds, the SM janitor
+retries the release, scans durable ingress streams, and retires the exact
+unprotected row. A failed inventory emits a warning and does not prove release.
+The clustering PostgreSQL path additionally fences claim absence in its
+retirement transaction. Cleanup depends on ownership reconciliation, the
+janitor, and the backend; the guard does not delete the row itself.
 
 ## Later gates
 

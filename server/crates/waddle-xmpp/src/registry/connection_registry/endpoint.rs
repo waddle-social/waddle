@@ -440,7 +440,7 @@ impl BindingOutboundEndpoint {
         })
     }
 
-    fn check_active(&self) -> Result<(), EndpointEnqueueRejection> {
+    pub(super) fn check_active(&self) -> Result<(), EndpointEnqueueRejection> {
         let admission = self
             .admission
             .lock()

@@ -60,11 +60,7 @@ impl OrderedRelayDeliveryBridge {
                             ack,
                         };
                         let _ = if pending.generation == generation {
-                            pending
-                                .entry
-                                .force_detach_sender()
-                                .try_send(request)
-                                .is_ok()
+                            pending.entry.try_force_detach_and_revoke(request).is_ok()
                         } else {
                             pending
                                 .entry

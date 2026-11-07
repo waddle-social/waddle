@@ -92,11 +92,7 @@ async fn prepare_socket_bind(
                 ack,
             };
             let _ = if resumed {
-                incumbent
-                    .entry
-                    .force_detach_sender()
-                    .try_send(request)
-                    .is_ok()
+                incumbent.entry.try_force_detach_and_revoke(request).is_ok()
             } else {
                 incumbent
                     .entry
