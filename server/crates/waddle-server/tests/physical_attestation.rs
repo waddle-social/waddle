@@ -4749,7 +4749,7 @@ async fn same_id_installers_with_repeatable_read_default_converge_after_lock_wai
     tokio::time::timeout(Duration::from_secs(4), async {
         let mut seen = [false, false];
         loop {
-            let names: Vec<String> = sqlx::query_scalar("SELECT application_name FROM pg_catalog.pg_stat_activity WHERE application_name = ANY($1)")
+            let names: Vec<String> = sqlx::query_scalar("SELECT application_name FROM pg_catalog.pg_stat_activity WHERE application_name = ANY($1) AND query LIKE '%pg_try_advisory_xact_lock%'")
                 .bind(vec![first_name.clone(), second_name.clone()])
                 .fetch_all(&fixture.admin).await.expect("observe retrying installers");
             seen[0] |= names.contains(&first_name);
@@ -4921,7 +4921,7 @@ async fn cancelled_lock_wait_is_indeterminate_and_same_id_retry_converges() {
     let pending = tokio::spawn(async move { install(&options, config, operation).await });
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
-            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name=$1)")
+            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name=$1 AND query LIKE '%pg_try_advisory_xact_lock%')")
                 .bind(&application).fetch_one(&fixture.admin).await.expect("observe retrying installer");
             if active { break; }
             tokio::time::sleep(Duration::from_millis(1)).await;
