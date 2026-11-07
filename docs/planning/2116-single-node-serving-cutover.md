@@ -367,3 +367,25 @@ boundary before either restricted-startup refusal can be removed.
    schedules. Only then open the restricted-startup gates. Keep workflows
    absent until #2046 implementation is ready for `cuenv sync -A` and
    exact-release CI.
+
+### Dark hardening boundary in this grouped branch
+
+- The singleton candidate bounds a returned slot guard with PostgreSQL idle
+  and total transaction deadlines, and identifies an unconfirmed rollback's
+  original backend/transaction. Registration, renewal, revocation and a
+  cancelled acquisition still lack a complete bounded-backend reconciliation
+  contract. This guard cannot authorize a writer on a different transaction.
+- The revisioned SM candidate records generation-local acknowledged, exposed
+  and appended ordinals. It refuses ACK beyond the authorized write-attempt
+  frontier and refuses a duplicate wrapping settlement-window key before
+  deleting replay rows. Exposure is not peer receipt. Old writers, exact
+  source/recipient claims, terminal settlement, absolute-ordinal ACK windows,
+  actor publication and ambiguous COMMIT recovery remain unconverted.
+- The P21 role candidate gives its common ingress helper a transaction-scoped
+  catalog fence, removes R's two unjournaled effect-receipt insertion routes,
+  and checks helper/function identity and denial in its dark receipt pilot.
+  The pilot still uses the legacy attested transaction entry rather than the
+  pinned selected pool; trusted catalog-mutator cooperation, server-side
+  transaction lifetime and old-backend cutoff remain prerequisites.
+
+No production selector or restricted-startup refusal changes in this group.
