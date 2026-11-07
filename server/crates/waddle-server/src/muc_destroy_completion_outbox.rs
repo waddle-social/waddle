@@ -3,7 +3,10 @@
 //! The table is intentionally outside the application migration ledger: it is
 //! support state for clustered MUC recovery, not application schema history.
 
-use crate::db::{Database, DatabaseDriver, DatabaseError};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError};
+use std::time::Duration;
+
+const READ_ONLY_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 /// A restricted runtime may only adopt an owner-prepared outbox on its
 /// physically attested main lane. The legacy constructor still owns bootstrap.
@@ -66,17 +69,7 @@ impl MucDestroyCompletionOutboxStore {
         db.verify_attested_pg_writer_capability(&capability)
             .map_err(DatabaseError::from)?;
 
-        let mut tx = db.begin().await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (),
-        )
-        .await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (),
-        )
-        .await?;
+        let mut tx = db.begin_catalog_fenced_read_only(&[]).await?;
         crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
             .await
             .map_err(|error| match error {
@@ -93,9 +86,10 @@ impl MucDestroyCompletionOutboxStore {
             "\"{}\".\"clustering_muc_destroy_outbox\"",
             schema.replace('"', "\"\"")
         );
-        // Lock the qualified relation before the first snapshot-forming SELECT.
-        // Otherwise owner DDL could commit after an RR catalog snapshot and
-        // before a relation lock, falsely accepting an obsolete shape.
+        // Catalog-S excludes catalog-fenced owner schema transactions while
+        // this read-only check is in progress. Lock the exact relation before
+        // reading its catalog metadata so the READ COMMITTED query sees any
+        // owner transaction that completed while this relation lock waited.
         tx.execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
             .await
             .map_err(MucDestroyRuntimeAttachError::Relation)?;
@@ -352,7 +346,9 @@ impl MucDestroyCompletionOutboxStore {
         if !safe {
             return Err(MucDestroyRuntimeAttachError::UnsafeRuntimeRole);
         }
-        tx.commit().await?;
+        if !tx.rollback_bounded_discard(READ_ONLY_ROLLBACK_WAIT).await {
+            return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+        }
         Ok(Self { _db: db })
     }
 
@@ -364,16 +360,12 @@ impl MucDestroyCompletionOutboxStore {
     }
 
     async fn ensure_postgres_schema(db: &Database) -> Result<(), DatabaseError> {
-        let mut tx = db.begin().await?;
-        // The transaction isolation command must remain first: a bootstrap
-        // loser needs to observe the winner's committed DDL.
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        let mut tx = db
+            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+                MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
+            )])
             .await?;
-        tx.query(
-            "SELECT pg_advisory_xact_lock(?)",
-            crate::db_params![MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY],
-        )
-        .await?;
+        Self::bound_owner_bootstrap_waits(&mut tx).await?;
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_destroy_outbox (
@@ -452,6 +444,15 @@ impl MucDestroyCompletionOutboxStore {
         )
         .await?;
         tx.commit().await
+    }
+
+    async fn bound_owner_bootstrap_waits(
+        tx: &mut crate::db::Transaction<'_>,
+    ) -> Result<(), DatabaseError> {
+        tx.execute("SET LOCAL lock_timeout = '3s'", ()).await?;
+        tx.execute("SET LOCAL statement_timeout = '30s'", ())
+            .await?;
+        Ok(())
     }
 
     async fn ensure_sqlite_schema(db: &Database) -> Result<(), DatabaseError> {

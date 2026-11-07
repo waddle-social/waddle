@@ -1,5 +1,5 @@
 use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
-use crate::db::{DatabaseDriver, IntoParams, Rows, Transaction};
+use crate::db::{CatalogFenceLock, DatabaseDriver, IntoParams, Rows, Transaction};
 use tracing::{error, info, warn};
 use waddle_xmpp::XmppError;
 
@@ -68,38 +68,26 @@ impl DatabasePubSubStorage {
             ));
         }
         let driver = self.db.driver();
-        let mut tx = self
-            .db
-            .begin_immediate()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let mut tx = match driver {
+            DatabaseDriver::Postgres => {
+                self.db
+                    .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+                        PUBSUB_SCHEMA_ADVISORY_LOCK_KEY,
+                    )])
+                    .await
+            }
+            DatabaseDriver::Sqlite => self.db.begin_immediate().await,
+        }
+        .map_err(|error| XmppError::internal(error.to_string()))?;
         if driver == DatabaseDriver::Postgres {
-            // Refuse an inherited used transaction while ending at READ
-            // COMMITTED so a lock waiter sees the previous owner's commit.
-            tx.execute(
-                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
-                (),
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-            tx.execute(
-                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-                (),
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+            // The catalog fence and PubSub gate are held by this same
+            // READ COMMITTED transaction before any catalog or relation read.
             tx.execute("SET LOCAL lock_timeout = '30s'", ())
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             tx.execute("SET LOCAL statement_timeout = '300000ms'", ())
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            tx.query(
-                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-                crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
             if let BootstrapPolicy::GuardedOwner(identity) = policy {
                 pin_owner_schema(&mut tx, identity).await?;
                 owner::lock_existing_relations_tx(&mut tx, &identity.schema.name.0).await?;

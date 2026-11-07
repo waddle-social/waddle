@@ -1,6 +1,7 @@
 //! Read-only validation shared by the durable space-store attachments.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -10,9 +11,10 @@ use crate::db::lineage::{
     PgDatabaseIdentity, PgDatabaseName, PgIdentity, PgSchemaIdentity, PgSchemaName,
     PgSystemIdentifier,
 };
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 const OWNER_GATE_KEY: i64 = 0x5753_4442_4f57_4e52;
+const ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 const OWNER_MARKER: &str = "_waddle_space_store_owner";
 // Bump the marker version when its row shape changes and each store's
 // contract version whenever its prepared PostgreSQL shape changes.
@@ -224,9 +226,10 @@ async fn prepare_space_stores_owner_inner(
     crate::db::physical_attestation::validate_identifier(schema, "space-store owner schema")
         .map_err(|_| SpaceStoreAttachError::InvalidSchema)?;
 
-    let mut tx = db.begin_immediate().await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(OWNER_GATE_KEY)])
+        .await?;
     set_owner_transaction(&mut tx).await?;
-    acquire_owner_gate(&mut tx, true).await?;
     verify_owner_boundary(&mut tx, identity).await?;
     set_local_search_path(&mut tx, schema).await?;
     verify_no_temporary_shadows(&mut tx).await?;
@@ -288,9 +291,10 @@ pub(crate) async fn initialize_raw_space_store(
         return Err(SpaceStoreAttachError::OwnerDatabaseRequired);
     }
 
-    let mut tx = db.begin_immediate().await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(OWNER_GATE_KEY)])
+        .await?;
     set_owner_transaction(&mut tx).await?;
-    acquire_owner_gate(&mut tx, true).await?;
     let schema = current_schema(&mut tx).await?;
     crate::db::physical_attestation::validate_identifier(&schema, "space-store schema")
         .map_err(|_| SpaceStoreAttachError::InvalidSchema)?;
@@ -345,30 +349,10 @@ pub(crate) async fn initialize_raw_space_store(
 }
 
 async fn set_owner_transaction(tx: &mut Transaction<'_>) -> Result<(), SpaceStoreAttachError> {
-    // Keep the lock waiter's next statement on a fresh READ COMMITTED
-    // snapshot; the owner gate serializes the cooperating DDL paths.
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-        (),
-    )
-    .await?;
+    // Catalog-X and the owner gate are already held on this transaction.
     tx.execute("SET LOCAL lock_timeout = '5s'", ()).await?;
     tx.execute("SET LOCAL statement_timeout = '30s'", ())
         .await?;
-    Ok(())
-}
-
-async fn acquire_owner_gate(
-    tx: &mut Transaction<'_>,
-    exclusive: bool,
-) -> Result<(), SpaceStoreAttachError> {
-    let sql = if exclusive {
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)"
-    } else {
-        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)"
-    };
-    let mut rows = tx.query(sql, crate::db_params![OWNER_GATE_KEY]).await?;
-    let _ = rows.next().await?;
     Ok(())
 }
 
@@ -828,12 +812,9 @@ pub(crate) async fn verify_attested_store(
     let schema = &identity.schema.name.0;
     crate::db::physical_attestation::validate_identifier(schema, "space-store schema")
         .map_err(|_| SpaceStoreAttachError::InvalidSchema)?;
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
+    let mut tx = db
+        .begin_catalog_fenced_read_only(&[CatalogFenceLock::Shared(OWNER_GATE_KEY)])
+        .await?;
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|error| match error {
@@ -845,7 +826,6 @@ pub(crate) async fn verify_attested_store(
             }
         })?;
 
-    acquire_owner_gate(&mut tx, false).await?;
     lock_attested_relations(&mut tx, schema).await?;
     verify_no_temporary_shadows(&mut tx).await?;
 
@@ -869,7 +849,9 @@ pub(crate) async fn verify_attested_store(
 
     // No mutation is performed. Roll back so the operation's read-only
     // boundary is explicit and no session state can be committed accidentally.
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(())
 }
 

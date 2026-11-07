@@ -1,6 +1,7 @@
 //! Read-only verification of an owner-prepared PostgreSQL PubSub store.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::db::physical_attestation::PgRoleName;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
@@ -10,6 +11,10 @@ use super::owner::{
     PUBSUB_SCHEMA_MARKER_VERSION,
 };
 use super::schema::PUBSUB_SCHEMA_VERSION;
+
+const CATALOG_GATE_WAIT: Duration = Duration::from_secs(15);
+const CATALOG_GATE_RETRY: Duration = Duration::from_millis(20);
+const CATALOG_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 /// A restricted PubSub store cannot attach to an unverified runtime database.
 #[derive(Debug, thiserror::Error)]
@@ -451,32 +456,68 @@ async fn verify_with_profile(
     db.verify_attested_pg_writer_capability(&capability)
         .map_err(DatabaseError::from)?;
     let identity = capability.identity();
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+    let deadline = tokio::time::Instant::now() + CATALOG_GATE_WAIT;
+    let mut tx = loop {
+        // Attestation must precede the PubSub gate and its owner-controlled
+        // helper. A contended gate therefore requires a fresh transaction and
+        // attestation, not a wait while retaining catalog-S.
+        let mut tx = tokio::time::timeout_at(deadline, db.begin_catalog_fenced_read_only(&[]))
+            .await
+            .map_err(|_| DatabaseError::CatalogMutationLockTimeout)??;
+        let attempt = tokio::time::timeout_at(deadline, async {
+            crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+                .await
+                .map_err(|_| PubSubRuntimeAttachError::ReadBounds)?;
+            capability.attest_transaction(&mut tx).await?;
+            if profile.is_some() {
+                verify_active_schema(&mut tx, identity).await?;
+                // Retained temporary types cannot intercept catalog helpers.
+                tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+                    .await?;
+            }
+            if let Some(profile) = v2 {
+                verify_restricted_v2_graph_tx(
+                    &mut tx,
+                    identity,
+                    capability.definer_role().as_str(),
+                    profile,
+                )
+                .await?;
+            }
+            let mut rows = tx
+                .query(
+                    "SELECT pg_catalog.pg_try_advisory_xact_lock(?)",
+                    crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
+                )
+                .await?;
+            let acquired: bool = rows
+                .next()
+                .await?
+                .ok_or_else(|| {
+                    DatabaseError::QueryFailed("PubSub gate probe returned no row".to_owned())
+                })?
+                .get(0)?;
+            Ok::<_, PubSubRuntimeAttachError>(acquired)
+        })
         .await
-        .map_err(|_| PubSubRuntimeAttachError::ReadBounds)?;
-    capability.attest_transaction(&mut tx).await?;
-    if profile.is_some() {
-        verify_active_schema(&mut tx, identity).await?;
-        // Retained temporary types cannot intercept casts or catalog helpers.
-        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
-            .await?;
-    }
-    if let Some(profile) = v2 {
-        verify_restricted_v2_graph_tx(
-            &mut tx,
-            identity,
-            capability.definer_role().as_str(),
-            profile,
-        )
-        .await?;
-    }
-    lock_runtime_attach_relations_with_profile_tx(
+        .unwrap_or_else(|_| Err(DatabaseError::CatalogMutationLockTimeout.into()));
+        if matches!(attempt, Ok(true)) {
+            break tx;
+        }
+        if !tx.rollback_bounded_discard(CATALOG_ROLLBACK_WAIT).await {
+            return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+        }
+        attempt?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(DatabaseError::CatalogMutationGateContended.into());
+        }
+        tokio::time::sleep(CATALOG_GATE_RETRY.min(remaining)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(DatabaseError::CatalogMutationGateContended.into());
+        }
+    };
+    lock_runtime_attach_relations_after_gate_tx(
         &mut tx,
         identity,
         capability.definer_role().as_str(),
@@ -499,7 +540,9 @@ async fn verify_with_profile(
         )
         .await?;
     }
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(CATALOG_ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(())
 }
 
@@ -519,12 +562,21 @@ async fn lock_runtime_attach_relations_with_profile_tx(
     definer: &str,
     profile: Option<&RestrictedServingProfileV1>,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    let schema = &identity.schema.name.0;
     tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
         crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
     )
     .await?;
+    lock_runtime_attach_relations_after_gate_tx(tx, identity, definer, profile).await
+}
+
+async fn lock_runtime_attach_relations_after_gate_tx(
+    tx: &mut Transaction<'_>,
+    identity: &crate::db::lineage::PgIdentity,
+    definer: &str,
+    profile: Option<&RestrictedServingProfileV1>,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let schema = &identity.schema.name.0;
     if let Some(profile) = profile {
         verify_runtime_role(tx, schema).await?;
         verify_restricted_v1_graph_tx(tx, identity, definer, profile).await?;

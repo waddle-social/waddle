@@ -289,6 +289,31 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
     use crate::db::{Database, DatabaseConfig, DatabaseDriver};
     use crate::space_identity::SpaceNode;
 
+    // Attested reader checkout hooks can also issue ROLLBACK. For those
+    // pools this observes checkout, not necessarily a catalog-fence retry.
+    async fn wait_for_idle_rollback(admin: &PgPool, application: &str) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let rolled_back: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                     WHERE a.application_name = $1 AND a.state = 'idle' \
+                       AND a.query = 'ROLLBACK' AND a.xact_start IS NULL \
+                       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l \
+                         WHERE l.pid = a.pid AND l.locktype = 'advisory'))",
+                )
+                .bind(application)
+                .fetch_one(admin)
+                .await?;
+                if rolled_back {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
     struct Fixture {
         cluster_admin: PgPool,
         admin: PgPool,
@@ -421,13 +446,25 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
         }
 
         async fn exercise(&self) -> Result<()> {
-            let owner_url =
-                space_attach_url_with_role_and_schema(&self.base_url, &self.owner, &self.target);
-            let owner_database = Database::from_config(
-                "space-store owner",
-                &DatabaseConfig::new(DatabaseDriver::Postgres, owner_url),
-            )
-            .await?;
+            let version: i32 =
+                sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+                    .fetch_one(&self.admin)
+                    .await?;
+            if !(170_000..180_000).contains(&version) {
+                bail!("space-store catalog witnesses require PostgreSQL 17");
+            }
+            let mut owner_url = url::Url::parse(&space_attach_url_with_role_and_schema(
+                &self.base_url,
+                &self.owner,
+                &self.target,
+            ))?;
+            owner_url
+                .query_pairs_mut()
+                .append_pair("application_name", &self.owner);
+            let mut owner_config =
+                DatabaseConfig::new(DatabaseDriver::Postgres, owner_url.to_string());
+            owner_config.pool_size = 1;
+            let owner_database = Database::from_config("space-store owner", &owner_config).await?;
             let owner_guard = owner_database.guard().await?;
             owner_guard
                 .execute(
@@ -629,8 +666,37 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 )
                 .await?;
             drop(owner_guard);
-            crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+            // The real paired owner must retry catalog-X before taking the
+            // shared spaces/link gate. Observe a completed retry rather than
+            // assuming a spawned task has reached its transaction.
+            const OWNER_GATE: i64 = 0x5753_4442_4f57_4e52;
+            let mut catalog = self.admin.begin().await?;
+            sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+                .bind(crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .execute(&mut *catalog)
                 .await?;
+            let preparing_database = owner_database.clone();
+            let preparing_identity = identity.clone();
+            let prepare = tokio::spawn(async move {
+                crate::spaces_metadata::prepare_space_stores_owner(
+                    preparing_database,
+                    &preparing_identity,
+                )
+                .await
+            });
+            wait_for_idle_rollback(&self.admin, &self.owner).await?;
+            let mut gate_probe = self.admin.begin().await?;
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(OWNER_GATE)
+                    .fetch_one(&mut *gate_probe)
+                    .await?;
+            if !acquired {
+                bail!("paired space owner took its gate before catalog-X");
+            }
+            gate_probe.rollback().await?;
+            catalog.rollback().await?;
+            tokio::time::timeout(Duration::from_secs(30), prepare).await???;
             let owner_guard = owner_database.guard().await?;
             let mut migrated_rows = owner_guard
                 .query(
@@ -677,6 +743,47 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 bail!("owner prep changed the PostgreSQL lineage row");
             }
             drop(owner_guard);
+
+            // Each raw public initializer independently starts the same
+            // catalog-first owner transaction and invalidates the marker.
+            for links in [false, true] {
+                let mut catalog = self.admin.begin().await?;
+                sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+                    .bind(crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .execute(&mut *catalog)
+                    .await?;
+                let raw_database = owner_database.clone();
+                let raw = tokio::spawn(async move {
+                    if links {
+                        DatabaseChannelSpaceLinkStore::initialize_owner(raw_database)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    } else {
+                        DatabaseSpacesMetadataStore::initialize_owner(raw_database)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    }
+                });
+                wait_for_idle_rollback(&self.admin, &self.owner).await?;
+                let mut probe = self.admin.begin().await?;
+                let available: bool =
+                    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                        .bind(OWNER_GATE)
+                        .fetch_one(&mut *probe)
+                        .await?;
+                if !available {
+                    bail!("raw space initializer took its gate before catalog-X");
+                }
+                probe.rollback().await?;
+                catalog.rollback().await?;
+                tokio::time::timeout(Duration::from_secs(30), raw)
+                    .await??
+                    .map_err(anyhow::Error::msg)?;
+            }
+            crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+                .await?;
 
             let attestation_config = PhysicalAttestationConfig::new(
                 lineage,
@@ -745,7 +852,7 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 PgConnectOptions::from_str(&boundary_url)?.username(&self.runtime);
             let attested = attested_pool(
                 runtime_options,
-                attestation_config,
+                attestation_config.clone(),
                 1,
                 Duration::from_secs(3),
             )?;
@@ -787,6 +894,73 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
             cancelled_prepare.abort();
             if !matches!(cancelled_prepare.await, Err(error) if error.is_cancelled()) {
                 bail!("owner preparation did not cancel at the invalidated-marker checkpoint");
+            }
+
+            // Both public attachment methods must see marker drift committed
+            // by a catalog holder. Checkout hooks can run before catalog-S.
+            for links in [false, true] {
+                let application = format!("space_reader_{}", uuid::Uuid::new_v4().simple());
+                let options = PgConnectOptions::from_str(&boundary_url)?
+                    .username(&self.runtime)
+                    .application_name(&application);
+                let reader = crate::test_support::database_from_attested_postgres_pool(
+                    "catalog-fenced space reader",
+                    attested_pool(
+                        options,
+                        attestation_config.clone(),
+                        1,
+                        Duration::from_secs(3),
+                    )?,
+                );
+                let mut catalog = self.admin.begin().await?;
+                sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+                    .bind(crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .execute(&mut *catalog)
+                    .await?;
+                sqlx::query(&format!(
+                    "UPDATE {}._waddle_space_store_owner SET database_name = 'wrong' \
+                     WHERE marker_id = 1",
+                    self.target
+                ))
+                .execute(&mut *catalog)
+                .await?;
+                let attach = tokio::spawn(async move {
+                    if links {
+                        DatabaseChannelSpaceLinkStore::attach_existing(reader)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        DatabaseSpacesMetadataStore::attach_existing(reader)
+                            .await
+                            .map(|_| ())
+                    }
+                });
+                wait_for_idle_rollback(&self.admin, &application).await?;
+                let mut probe = self.admin.begin().await?;
+                let available: bool =
+                    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                        .bind(OWNER_GATE)
+                        .fetch_one(&mut *probe)
+                        .await?;
+                if !available {
+                    bail!("space owner gate was unavailable during catalog hold");
+                }
+                probe.rollback().await?;
+                catalog.commit().await?;
+                if !matches!(
+                    tokio::time::timeout(Duration::from_secs(20), attach).await??,
+                    Err(SpaceStoreAttachError::OwnerMarkerInvalid)
+                ) {
+                    bail!("space reader accepted marker drift committed by the catalog holder");
+                }
+                sqlx::query(&format!(
+                    "UPDATE {}._waddle_space_store_owner SET database_name = $1 \
+                     WHERE marker_id = 1",
+                    self.target
+                ))
+                .bind(&self.database)
+                .execute(&self.admin)
+                .await?;
             }
 
             let inherited =

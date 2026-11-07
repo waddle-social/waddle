@@ -1,10 +1,12 @@
 //! Read-only verification of the trusted-owner prepared call-teardown outbox.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 const TABLE: &str = "call_teardown_outbox";
+const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CallTeardownRuntimeAttachError {
@@ -217,14 +219,14 @@ pub(super) async fn verify(db: &Database) -> Result<(), CallTeardownRuntimeAttac
     crate::db::physical_attestation::validate_identifier(schema, "call teardown schema")
         .map_err(|_| CallTeardownRuntimeAttachError::ActiveSchemaMismatch)?;
     let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
-    let mut tx = db.begin().await?;
-    // Require a fresh, bounded read-only transaction. The repeatable-read
-    // snapshot is first established only after the relation lock is acquired.
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-        (),
-    )
-    .await?;
+    // The checkout hook runs before this transaction. The actual attachment
+    // backend holds catalog-S and the shared owner gate before it takes a
+    // relation lock or re-attests its physical identity after that wait.
+    let mut tx = db
+        .begin_catalog_fenced_read_only(&[CatalogFenceLock::Shared(
+            super::schema::OWNER_SCHEMA_ADVISORY_LOCK_KEY,
+        )])
+        .await?;
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| CallTeardownRuntimeAttachError::ReadBounds)?;
@@ -244,7 +246,9 @@ pub(super) async fn verify(db: &Database) -> Result<(), CallTeardownRuntimeAttac
     verify_indexes(&mut tx, schema).await?;
     verify_table_acl(&mut tx, schema).await?;
 
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(ROLLBACK_TIMEOUT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(())
 }
 
