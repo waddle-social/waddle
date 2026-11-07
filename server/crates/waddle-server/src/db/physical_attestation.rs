@@ -77,7 +77,6 @@ pub use restricted_ingress::{RestrictedIngressProfileError, RestrictedIngressPro
 pub use restricted_ingress::{RestrictedTransactionProbe, RestrictedTransactionProbeObservation};
 mod typed_authority;
 #[cfg(feature = "test-support")]
-pub(crate) use typed_authority::prelock_epoch_relation;
 pub(crate) use typed_authority::read_epoch_after_prelock;
 #[cfg(feature = "test-support")]
 pub use typed_authority::{

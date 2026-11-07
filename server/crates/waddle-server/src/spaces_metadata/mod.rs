@@ -51,5 +51,6 @@ pub(crate) use metadata::SPACES_METADATA_CONTRACT;
 /// Prepare both PostgreSQL space tables as one owner-controlled boundary.
 /// The supplied identity is checked in the same transaction that runs the
 /// DDL/backfills and writes the completion marker.
+#[cfg(test)]
 pub(crate) use runtime_attach::prepare_space_stores_owner;
 pub use runtime_attach::SpaceStoreAttachError;

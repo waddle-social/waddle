@@ -495,7 +495,7 @@ async fn exercise_exact_start(pilot: &Pilot) {
                 .await
                 .expect("change after start");
         }));
-        wait_for_lock(&pilot, application).await;
+        wait_for_lock(pilot, application).await;
     }
     let grant = prepared.commit().await.expect("acknowledged commit");
     for change in changes {

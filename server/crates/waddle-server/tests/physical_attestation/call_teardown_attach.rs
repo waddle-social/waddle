@@ -1244,10 +1244,9 @@ async fn call_teardown_attachment_rejects_non_postgres_and_unattested_handles() 
         ),
         CallTeardownRuntimeAttachError::AttestedPostgresRequired
     ));
-    assert!(matches!(
-        CallTeardownOutboxStore::try_new(sqlite.clone()).await,
-        Ok(_)
-    ));
+    assert!(CallTeardownOutboxStore::try_new(sqlite.clone())
+        .await
+        .is_ok());
 
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
