@@ -1,4 +1,4 @@
-use super::schema::ACTIVITY_OWNER_STATE_TABLE;
+use super::schema::{ACTIVITY_OWNER_STATE_TABLE, ACTIVITY_SCHEMA_GATE};
 use super::{
     DurableStoreAttachError, NotificationActivityReader, NotificationActivityStore,
     NotificationChatState,
@@ -141,10 +141,19 @@ impl Fixture {
     async fn exercise(&self) -> Result<()> {
         use crate::config::LineageConfig;
         use crate::db::lineage::{self, DeploymentUuid};
+        use crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
         use crate::db::physical_attestation::{
             attested_pool, install, PgRoleName, PhysicalAttestationConfig,
         };
         use crate::db::{DatabaseConfig, DatabaseDriver};
+
+        let server_version: i32 =
+            sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+                .fetch_one(&self.admin)
+                .await?;
+        if !(170_000..180_000).contains(&server_version) {
+            bail!("notification-store reader witness requires PostgreSQL 17, got {server_version}");
+        }
 
         let owner_url =
             notification_attach_url_with_role_and_schema(&self.base_url, &self.owner, &self.target);
@@ -239,8 +248,9 @@ impl Fixture {
         }
 
         let runtime_options = PgConnectOptions::from_str(&boundary_url)?.username(&self.runtime);
+        let application_name = format!("notification_attach_{}", uuid::Uuid::new_v4().simple());
         let attested = attested_pool(
-            runtime_options,
+            runtime_options.application_name(&application_name),
             attestation_config,
             1,
             Duration::from_secs(3),
@@ -347,7 +357,14 @@ impl Fixture {
         let attach_during_ddl = tokio::spawn(async move {
             NotificationActivityStore::attach_existing(attach_database).await
         });
-        self.wait_for_activity_lock_wait().await?;
+        self.wait_for_catalog_fenced_relation_wait(
+            &application_name,
+            "notification_activity",
+            true,
+            CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+            ACTIVITY_SCHEMA_GATE,
+        )
+        .await?;
         sqlx::query(&format!(
             "CREATE FUNCTION {}.notification_activity_attach_race() \
              RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
@@ -384,8 +401,65 @@ impl Fixture {
         .execute(&self.admin)
         .await?;
 
+        // Exercise both public reader entry points. Push registrations share
+        // catalog-S fencing but intentionally do not take the Activity gate.
         let activity = NotificationActivityStore::attach_existing(runtime_database.clone()).await?;
         let push = DatabasePushRegistrationStore::attach_existing(runtime_database.clone()).await?;
+
+        let mut push_ddl = self.admin.begin().await?;
+        sqlx::query(&format!(
+            "LOCK TABLE {}.push_registrations IN ACCESS EXCLUSIVE MODE",
+            self.target
+        ))
+        .execute(&mut *push_ddl)
+        .await?;
+        let attach_database = runtime_database.clone();
+        let push_attach_during_ddl = tokio::spawn(async move {
+            DatabasePushRegistrationStore::attach_existing(attach_database).await
+        });
+        self.wait_for_catalog_fenced_relation_wait(
+            &application_name,
+            "push_registrations",
+            false,
+            CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+            ACTIVITY_SCHEMA_GATE,
+        )
+        .await?;
+        sqlx::query(&format!(
+            "CREATE FUNCTION {}.push_registration_attach_race() \
+             RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+            self.target
+        ))
+        .execute(&mut *push_ddl)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE TRIGGER push_registration_attach_race \
+             BEFORE INSERT ON {}.push_registrations FOR EACH ROW \
+             EXECUTE FUNCTION {}.push_registration_attach_race()",
+            self.target, self.target
+        ))
+        .execute(&mut *push_ddl)
+        .await?;
+        push_ddl.commit().await?;
+        match push_attach_during_ddl.await? {
+            Err(DurableStoreAttachError::UnexpectedTrigger {
+                table: "push_registrations",
+            }) => {}
+            Err(error) => bail!("push-registration trigger race had wrong error: {error}"),
+            Ok(_) => bail!("push-registration trigger committed during attach was accepted"),
+        }
+        sqlx::query(&format!(
+            "DROP TRIGGER push_registration_attach_race ON {}.push_registrations",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
+        sqlx::query(&format!(
+            "DROP FUNCTION {}.push_registration_attach_race()",
+            self.target
+        ))
+        .execute(&self.admin)
+        .await?;
 
         let owner: jid::BareJid = "alice@example.net".parse()?;
         let conversation: jid::BareJid = "chat@example.net".parse()?;
@@ -564,26 +638,67 @@ impl Fixture {
         Ok(())
     }
 
-    async fn wait_for_activity_lock_wait(&self) -> Result<()> {
+    async fn wait_for_catalog_fenced_relation_wait(
+        &self,
+        application_name: &str,
+        table: &str,
+        activity_gate_expected: bool,
+        catalog_lock_key: i64,
+        activity_gate: (i32, i32),
+    ) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (\
-                       SELECT 1 FROM pg_catalog.pg_locks lock_entry \
-                       JOIN pg_catalog.pg_class relation \
-                         ON relation.oid = lock_entry.relation \
-                       JOIN pg_catalog.pg_namespace namespace \
-                         ON namespace.oid = relation.relnamespace \
-                       WHERE namespace.nspname = $1 \
-                         AND relation.relname = 'notification_activity' \
-                         AND lock_entry.mode = 'ShareUpdateExclusiveLock' \
-                         AND NOT lock_entry.granted\
-                     )",
+                let operation: Option<(i32, bool, bool)> = sqlx::query_as(
+                    "SELECT activity.pid, \
+                       EXISTS (SELECT 1 FROM pg_catalog.pg_locks catalog_lock \
+                         WHERE catalog_lock.pid = activity.pid \
+                           AND catalog_lock.locktype = 'advisory' \
+                           AND catalog_lock.objsubid = 1 \
+                           AND catalog_lock.classid::bigint = ($4::bigint >> 32) \
+                           AND catalog_lock.objid::bigint = ($4::bigint & 4294967295::bigint) \
+                           AND catalog_lock.mode = 'ShareLock' \
+                           AND catalog_lock.granted), \
+                       EXISTS (SELECT 1 FROM pg_catalog.pg_locks activity_gate_lock \
+                         WHERE activity_gate_lock.pid = activity.pid \
+                           AND activity_gate_lock.locktype = 'advisory' \
+                           AND activity_gate_lock.objsubid = 2 \
+                           AND activity_gate_lock.classid::bigint = $5::bigint \
+                           AND activity_gate_lock.objid::bigint = $6::bigint \
+                           AND activity_gate_lock.mode = 'ShareLock' \
+                           AND activity_gate_lock.granted) \
+                     FROM pg_catalog.pg_stat_activity activity \
+                     WHERE activity.application_name = $1 \
+                       AND activity.state = 'active' \
+                       AND activity.xact_start IS NOT NULL \
+                       AND activity.wait_event_type = 'Lock' \
+                       AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks relation_wait \
+                         JOIN pg_catalog.pg_class relation \
+                           ON relation.oid = relation_wait.relation \
+                         JOIN pg_catalog.pg_namespace namespace \
+                           ON namespace.oid = relation.relnamespace \
+                         WHERE relation_wait.pid = activity.pid \
+                           AND namespace.nspname = $2 \
+                           AND relation.relname = $3 \
+                           AND relation_wait.mode = 'ShareUpdateExclusiveLock' \
+                           AND NOT relation_wait.granted)",
                 )
+                .bind(application_name)
                 .bind(&self.target)
-                .fetch_one(&self.admin)
+                .bind(table)
+                .bind(catalog_lock_key)
+                .bind(i64::from(activity_gate.0))
+                .bind(i64::from(activity_gate.1))
+                .fetch_optional(&self.admin)
                 .await?;
-                if waiting {
+                if let Some((pid, holds_catalog_s, holds_activity_gate)) = operation {
+                    if !holds_catalog_s {
+                        bail!("operation backend {pid} waited on {table} without catalog-S");
+                    }
+                    if holds_activity_gate != activity_gate_expected {
+                        bail!(
+                            "operation backend {pid} held activity gate: expected {activity_gate_expected}"
+                        );
+                    }
                     return Ok::<(), anyhow::Error>(());
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
