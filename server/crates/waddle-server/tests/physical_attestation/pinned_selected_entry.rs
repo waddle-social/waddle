@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use waddle_server::db::physical_attestation::{
     CatalogFenceExclusive, CatalogFenceIndex, CatalogMutationFenceError, PinnedSelectedEntry,
-    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+    PinnedSelectedEntryError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 
 use super::{pinned_entry_tests::pinned_pool, test_url, Fixture, CATALOG_GRANT_LOCK};
@@ -145,7 +145,7 @@ async fn selected_entry_and_pool_hook_coordinate_with_catalog_mutator() {
 
     // The mutator now performs actual PostgreSQL concurrent index maintenance
     // under the exact protocol key used by both production candidates.
-    let mut mutator = CatalogFenceExclusive::acquire(
+    let mutator = CatalogFenceExclusive::acquire(
         &fixture.admin_options,
         CATALOG_MUTATION_ADVISORY_LOCK_KEY,
         WAIT,
@@ -164,6 +164,70 @@ async fn selected_entry_and_pool_hook_coordinate_with_catalog_mutator() {
         .expect("mutator release acknowledged");
 
     hook_pool.close().await;
+    drop(selected);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn selected_entry_timeout_reports_and_discards_uncertain_backend() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let pool = pinned_pool(&fixture, None).await;
+    let selected = PinnedSelectedEntry::new(pool).expect("closed pinned entry");
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+    let result = selected
+        .observe_protocol_epoch_with_timeout_paused_for_test(
+            Duration::from_secs(2),
+            ready_tx,
+            release_rx,
+        )
+        .await;
+    let backend_pid = ready_rx
+        .await
+        .expect("the paused transaction reports its backend PID");
+    assert!(matches!(
+        result,
+        Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+            backend_pid: Some(pid)
+        }) if pid == backend_pid
+    ));
+
+    // The timeout canceled an observation while it held its transaction lock.
+    // The pool wrapper must close that physical session instead of returning
+    // it for reuse or treating the client deadline as proof of rollback.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let still_connected: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+            )
+            .bind(backend_pid)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observe timed-out backend");
+            if !still_connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed-out backend is discarded");
+
+    let mut mutator = CatalogFenceExclusive::acquire(
+        &fixture.admin_options,
+        CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+        WAIT,
+    )
+    .await
+    .expect("discarded backend no longer holds its xact catalog guard");
+    mutator
+        .release()
+        .await
+        .expect("acknowledge mutator release");
+
     drop(selected);
     fixture.cleanup().await;
 }

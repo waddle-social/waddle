@@ -8,8 +8,10 @@
 //! epoch relation, then guard-manifest relation. Cooperative mutators must take
 //! the exclusive catalog fence before any of those subordinate locks.
 
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Postgres, Transaction};
 use thiserror::Error;
@@ -33,12 +35,8 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(20);
 pub enum PinnedSelectedEntryError {
     #[error("selected transaction entry requires the pinned PostgreSQL pool")]
     NotPinned,
-    #[error("catalog mutation guard remained contended through the bounded retry period")]
-    CatalogContended,
-    #[error("selected transaction entry timed out")]
-    Timeout,
-    #[error("selected transaction rollback was not acknowledged")]
-    RollbackUnconfirmed,
+    #[error("selected transaction outcome is unconfirmed; reconcile backend {backend_pid:?}")]
+    ObservationUnconfirmed { backend_pid: Option<i32> },
     #[error("selected transaction test pause was cancelled")]
     PauseCancelled,
     #[error(transparent)]
@@ -75,9 +73,14 @@ impl PinnedSelectedEntry {
     /// acquired the shared catalog fence as its first statement. Contention
     /// rolls back before backoff and starts a fresh transaction, so no stale
     /// transaction snapshot waits on the fence. Every successful observation
-    /// ends with an acknowledged rollback.
+    /// ends with an acknowledged rollback. The deadline covers pool checkout,
+    /// every lock/preflight statement, retries, and rollback. An elapsed
+    /// deadline returns an unconfirmed backend identity and closes that pool
+    /// session; callers must not treat the client timeout as proof that the
+    /// server has already released its locks. Dropping the caller future also
+    /// marks any acquired session for close-on-drop.
     pub async fn observe_protocol_epoch(&self) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_protocol_epoch_inner(None).await
+        self.observe_with_deadline(ENTRY_DEADLINE, None).await
     }
 
     #[cfg(feature = "test-support")]
@@ -86,12 +89,44 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_protocol_epoch_inner(Some((ready, release)))
+        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)))
             .await
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn observe_protocol_epoch_with_timeout_paused_for_test(
+        &self,
+        timeout: Duration,
+        ready: tokio::sync::oneshot::Sender<i32>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
+        self.observe_with_deadline(timeout, Some((ready, release)))
+            .await
+    }
+
+    async fn observe_with_deadline(
+        &self,
+        timeout: Duration,
+        pause: Option<(
+            tokio::sync::oneshot::Sender<i32>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
+        let mut backend_pid = None;
+        match tokio::time::timeout(
+            timeout,
+            self.observe_protocol_epoch_inner(&mut backend_pid, pause),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(PinnedSelectedEntryError::ObservationUnconfirmed { backend_pid }),
+        }
     }
 
     async fn observe_protocol_epoch_inner(
         &self,
+        backend_pid: &mut Option<i32>,
         pause: Option<(
             tokio::sync::oneshot::Sender<i32>,
             tokio::sync::oneshot::Receiver<()>,
@@ -100,21 +135,30 @@ impl PinnedSelectedEntry {
         let AttestationMode::Pinned(authority) = &self.pool.writer_capability.mode else {
             return Err(PinnedSelectedEntryError::NotPinned);
         };
-        let deadline = tokio::time::Instant::now() + ENTRY_DEADLINE;
-        let mut connection = tokio::time::timeout(ENTRY_DEADLINE, self.pool.acquire())
+        let mut connection = DiscardOnDrop::new(self.pool.acquire().await?);
+        let pid: i32 = match sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+            .fetch_one(&mut *connection)
             .await
-            .map_err(|_| PinnedSelectedEntryError::Timeout)??;
+        {
+            Ok(pid) => pid,
+            Err(_) => {
+                return Err(PinnedSelectedEntryError::ObservationUnconfirmed { backend_pid: None });
+            }
+        };
+        *backend_pid = Some(pid);
 
         loop {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(PinnedSelectedEntryError::CatalogContended);
-            }
-            let mut tx = tokio::time::timeout_at(
-                deadline,
-                connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY"),
-            )
-            .await
-            .map_err(|_| PinnedSelectedEntryError::Timeout)??;
+            let mut tx = match connection
+                .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
+                .await
+            {
+                Ok(tx) => tx,
+                Err(_) => {
+                    return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                        backend_pid: Some(pid),
+                    });
+                }
+            };
 
             // Keep this as the first SQL statement after BEGIN. A false result
             // is not waited on inside the transaction: rollback releases the
@@ -128,21 +172,19 @@ impl PinnedSelectedEntry {
             match acquired {
                 Ok(true) => {}
                 Ok(false) => {
-                    if rollback_transaction(tx).await.is_err() {
-                        let _ = connection.close().await;
-                        return Err(PinnedSelectedEntryError::RollbackUnconfirmed);
+                    if !rollback_transaction(tx).await {
+                        return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                            backend_pid: Some(pid),
+                        });
                     }
-                    tokio::time::sleep(
-                        RETRY_INTERVAL
-                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
-                    )
-                    .await;
+                    tokio::time::sleep(RETRY_INTERVAL).await;
                     continue;
                 }
                 Err(error) => {
-                    if rollback_transaction(tx).await.is_err() {
-                        let _ = connection.close().await;
-                        return Err(PinnedSelectedEntryError::RollbackUnconfirmed);
+                    if !rollback_transaction(tx).await {
+                        return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                            backend_pid: Some(pid),
+                        });
                     }
                     return Err(PinnedSelectedEntryError::Postgres(error));
                 }
@@ -151,53 +193,85 @@ impl PinnedSelectedEntry {
             let epoch = match prepare_selected_transaction(&mut tx, authority).await {
                 Ok(epoch) => epoch,
                 Err(error) => {
-                    if rollback_transaction(tx).await.is_err() {
-                        let _ = connection.close().await;
-                        return Err(PinnedSelectedEntryError::RollbackUnconfirmed);
+                    if !rollback_transaction(tx).await {
+                        return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                            backend_pid: Some(pid),
+                        });
                     }
                     return Err(error);
                 }
             };
 
             if let Some((ready, release)) = pause {
-                let backend_pid: i32 =
-                    match sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
-                        .fetch_one(&mut *tx)
-                        .await
-                    {
-                        Ok(pid) => pid,
-                        Err(error) => {
-                            if rollback_transaction(tx).await.is_err() {
-                                let _ = connection.close().await;
-                                return Err(PinnedSelectedEntryError::RollbackUnconfirmed);
-                            }
-                            return Err(PinnedSelectedEntryError::Postgres(error));
-                        }
-                    };
-                if ready.send(backend_pid).is_err() || release.await.is_err() {
-                    if rollback_transaction(tx).await.is_err() {
-                        let _ = connection.close().await;
-                        return Err(PinnedSelectedEntryError::RollbackUnconfirmed);
+                if ready.send(pid).is_err() || release.await.is_err() {
+                    if !rollback_transaction(tx).await {
+                        return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                            backend_pid: Some(pid),
+                        });
                     }
                     return Err(PinnedSelectedEntryError::PauseCancelled);
                 }
             }
 
-            if rollback_transaction(tx).await.is_err() {
-                let _ = connection.close().await;
-                return Err(PinnedSelectedEntryError::RollbackUnconfirmed);
+            if !rollback_transaction(tx).await {
+                return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                    backend_pid: Some(pid),
+                });
             }
+            connection.keep();
             return Ok(epoch);
         }
     }
 }
 
-async fn rollback_transaction(
-    tx: Transaction<'_, Postgres>,
-) -> Result<(), PinnedSelectedEntryError> {
+/// A cancelled or timed-out observation must never return its uncertain
+/// backend to the pool. `close_on_drop` is asynchronous; it discards the pool
+/// session but is not proof the server already terminated it. Successful,
+/// acknowledged rollbacks explicitly keep it.
+struct DiscardOnDrop {
+    connection: PoolConnection<Postgres>,
+    keep: bool,
+}
+
+impl DiscardOnDrop {
+    fn new(connection: PoolConnection<Postgres>) -> Self {
+        Self {
+            connection,
+            keep: false,
+        }
+    }
+
+    fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Deref for DiscardOnDrop {
+    type Target = PgConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for DiscardOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+
+impl Drop for DiscardOnDrop {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.connection.close_on_drop();
+        }
+    }
+}
+
+async fn rollback_transaction(tx: Transaction<'_, Postgres>) -> bool {
     match tokio::time::timeout(Duration::from_secs(5), tx.rollback()).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err(PinnedSelectedEntryError::RollbackUnconfirmed),
+        Ok(Ok(())) => true,
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 
