@@ -1710,16 +1710,27 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 
 #[tokio::test]
 async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control() {
-    assert_replay_gap_rollback_endpoint_custody(false).await;
+    assert_replay_gap_rollback_endpoint_custody(false, false).await;
 }
 
 #[tokio::test]
 async fn replay_gap_with_queued_outbound_refuses_same_socket_endpoint_handoff() {
-    assert_replay_gap_rollback_endpoint_custody(true).await;
+    assert_replay_gap_rollback_endpoint_custody(true, false).await;
 }
 
-async fn assert_replay_gap_rollback_endpoint_custody(queue_before_rollback: bool) {
-    use super::super::connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority};
+#[tokio::test]
+async fn replay_gap_with_queued_outbound_cannot_acknowledge_an_unpublished_bind() {
+    assert_replay_gap_rollback_endpoint_custody(true, true).await;
+}
+
+async fn assert_replay_gap_rollback_endpoint_custody(
+    queue_before_rollback: bool,
+    exercise_bind_response: bool,
+) {
+    use super::super::connection::{
+        finish_connection, handle_inbound_text, ConnectionIo, ConnectionShutdownChannels,
+        FrameAuthority, RegistrationChannels,
+    };
     use super::super::send::InterruptibleSink;
     use waddle_xmpp::registry::LocalSocketIo;
     use waddle_xmpp::stream_management::{DetachedSession, DEFAULT_MAX_UNACKED_QUEUE_SIZE};
@@ -1802,7 +1813,7 @@ async fn assert_replay_gap_rollback_endpoint_custody(queue_before_rollback: bool
             .expect("record into claimed session");
     }
 
-    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
+    let (tx, mut rx) = waddle_xmpp::registry::SocketOutboundEndpoint::channel(1);
     let mut pending_tx = Some(tx);
     let adopted_generation = conn.occupancy_session;
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -1923,6 +1934,104 @@ async fn assert_replay_gap_rollback_endpoint_custody(queue_before_rollback: bool
             1,
             "fresh bind arrives before the old frame drains"
         );
+
+        if exercise_bind_response {
+            use axum::extract::ws::Message as WebSocketMessage;
+
+            // Exercise the same frame, registration, and response-writing path
+            // as /ws while the accepted old frame is still on its receiver.
+            let bind = Element::builder("bind", waddle_xmpp::ns::BIND)
+                .append(
+                    Element::builder("resource", waddle_xmpp::ns::BIND)
+                        .append("web")
+                        .build(),
+                )
+                .build();
+            let request = element_to_xml(
+                Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "blocked-bind")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+                    .append(bind)
+                    .build(),
+            );
+            let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut socket = Box::pin(futures::sink::unfold(
+                captured.clone(),
+                |captured, frame: WebSocketMessage| async move {
+                    captured.lock().expect("captured frames").push(frame);
+                    Ok::<_, std::io::Error>(captured)
+                },
+            ));
+            let mut reader = futures::stream::pending::<Result<WebSocketMessage, std::io::Error>>();
+            let mut force_detach_rx = None;
+            let stayed_open = handle_inbound_text(
+                &request,
+                "example.com",
+                &state,
+                &mut conn,
+                RegistrationChannels {
+                    pending_tx: &mut pending_tx,
+                    force_detach_rx: &mut force_detach_rx,
+                },
+                ConnectionIo {
+                    sender: &mut socket,
+                    receiver: &mut reader,
+                },
+                FrameAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await;
+
+            let frames: Vec<Element> = captured
+                .lock()
+                .expect("captured frames")
+                .iter()
+                .filter_map(|frame| match frame {
+                    WebSocketMessage::Text(xml) => Some(xml.parse().expect("server XML")),
+                    _ => None,
+                })
+                .collect();
+            let bind_succeeded = frames.iter().any(|frame| {
+                frame.is("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                    && frame.attr("id") == Some("blocked-bind")
+                    && frame.attr("type") == Some("result")
+            });
+            let exact_route_published = conn.registry_owner.as_ref().is_some_and(|owner| {
+                state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .entry_if_owner(&jid, owner)
+                    .is_some_and(|entry| {
+                        entry.binding_ref().is_some()
+                            && entry.binding_ref() == conn.binding_ref.as_ref()
+                    })
+            });
+            assert!(
+                !bind_succeeded || exact_route_published,
+                "a successful bind requires its exact route; queued={}, frames={frames:?}",
+                rx.len()
+            );
+            if stayed_open && !bind_succeeded {
+                assert!(
+                    !conn.phase.is_ready(),
+                    "a rejected bind must not make the connection ready"
+                );
+                assert!(
+                    frames.iter().any(|frame| {
+                        frame.is("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                            && frame.attr("id") == Some("blocked-bind")
+                            && frame.attr("type") == Some("error")
+                    }),
+                    "an open stream must respond to the bind request: {frames:?}"
+                );
+            }
+            return;
+        }
 
         conn.phase = ConnectionPhase::ready(jid.clone(), false);
         let fresh = register_bound_connection_after_frame(

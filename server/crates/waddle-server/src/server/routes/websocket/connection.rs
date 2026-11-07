@@ -3004,7 +3004,7 @@ mod tests {
     async fn post_upgrade_admission_revocation_sends_websocket_close() {
         let mut socket = UpgradeCloseSink::default();
 
-        close_revoked_upgraded_socket(&mut socket).await;
+        close_unstarted_upgraded_socket(&mut socket).await;
 
         assert_eq!(socket.sent, vec![Message::Close(None)]);
         assert!(socket.closed);
