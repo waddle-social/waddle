@@ -38,7 +38,7 @@ if "${tool}" == "cargo" and sys.argv[1:2] == ["ndk"]:
 if "${tool}" == "flutter" and sys.argv[1:3] == ["build", "apk"]:
     from pathlib import Path
     from zipfile import ZipFile
-    apk = Path("build/app/outputs/flutter-apk/app-debug.apk")
+    apk = Path("build/app/outputs/flutter-apk/app-profile.apk")
     apk.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(apk, "w") as output:
         output.writestr("lib/arm64-v8a/libwaddle_flutter_runtime.so", b"arm64")
@@ -174,14 +174,14 @@ describe("standalone verification contracts", () => {
       chmodSync(sdkPlugin, 0o755);
     }
   }, 60_000);
-  test("APK command labels the alternative debug app and permits upgrades", () => {
+  test("APK command builds the alternative profile app and permits upgrades", () => {
     const h = harness("flutter-ci.sh");
     expect(h.run("apk").exitCode).toBe(0);
     expect(h.calls()[0].args).toEqual([
-      "build", "apk", "--debug", "--no-pub", "--target-platform", "android-arm64,android-x64",
+      "build", "apk", "--profile", "--no-pub", "--target-platform", "android-arm64,android-x64",
       "--build-number", "30000000", "--build-name", "pr-abcdef123456",
     ]);
-    expect(readFileSync(join(h.directory, "apps/flutter/build/artifacts/waddle-flutter.apk"))).toEqual(readFileSync(join(h.directory, "apps/flutter/build/app/outputs/flutter-apk/app-debug.apk")));
+    expect(readFileSync(join(h.directory, "apps/flutter/build/artifacts/waddle-flutter.apk"))).toEqual(readFileSync(join(h.directory, "apps/flutter/build/app/outputs/flutter-apk/app-profile.apk")));
   });
   test("wrong package, missing Rust ABI and wrong signer cannot be promoted for upload", () => {
     for (const failure of ["FLUTTER_TEST_BAD_PACKAGE", "FLUTTER_TEST_MISSING_ABI", "FLUTTER_TEST_BAD_CERT"]) {

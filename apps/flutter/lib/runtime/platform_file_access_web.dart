@@ -30,7 +30,11 @@ Future<void> openPrivateFile(
   });
 }
 
-Future<Uint8List> readLocalFileUri(String uri) => Future.error(
+Future<Uint8List> readLocalFileUri(
+  String uri, {
+  required int maxBytes,
+  void Function()? validate,
+}) => Future.error(
   UnsupportedError(
     'The browser must provide the dropped or pasted file bytes.',
   ),

@@ -110,7 +110,7 @@ jobs:
         if: ${{ !cancelled() && steps.sdk.outcome == 'success' && steps.pub.outcome == 'success' }}
         run: nix develop .#flutter --command bash scripts/build-flutter-rust.sh --android
       - id: apk
-        name: Build independent Flutter debug APK
+        name: Build independent Flutter profile APK
         if: ${{ !cancelled() && steps.native.outcome == 'success' && steps.pub.outcome == 'success' }}
         run: nix develop .#flutter --command bash scripts/flutter-ci.sh apk
       - id: apk_artifact

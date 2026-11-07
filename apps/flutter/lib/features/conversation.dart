@@ -6,6 +6,10 @@ import 'package:flutter/services.dart';
 
 import '../bridge.dart';
 import '../design.dart';
+import '../page_coverage_observer.dart';
+import 'gif_picker.dart';
+import 'message_media.dart';
+import 'verified_image.dart';
 
 /// Presentation only. Native conversation view models retain ownership of
 /// delivery, encryption, history cursors, read markers and XMPP action IDs.
@@ -30,7 +34,8 @@ class ConversationScreen extends StatefulWidget {
 }
 
 class _ConversationScreenState extends State<ConversationScreen>
-    with WidgetsBindingObserver, RouteAware, RestorationMixin {
+    with WidgetsBindingObserver, RouteAware, RestorationMixin
+    implements PopupCoverageAware {
   static int _nextViewId = 0;
   final _restorableDraft = RestorableTextEditingController();
   final _restorableMentions = RestorableString('[]');
@@ -39,8 +44,13 @@ class _ConversationScreenState extends State<ConversationScreen>
   TextEditingController get _draft => _restorableDraft.value;
   final _scroll = ScrollController();
   final _focus = FocusNode();
-  final _imageBytes = <String, Future<Uint8List?>>{};
-  final _avatarBytes = <String, Future<Uint8List?>>{};
+  final _images = VerifiedImageCache();
+  final _avatarBytes = <String, Uint8List>{};
+  final _avatarPending = <String, Future<Uint8List?>>{};
+  final _avatarFailed = <String>{};
+  late int _accountGeneration;
+  late bool _connected;
+  int _avatarEpoch = 0;
   Map<String, dynamic>? _reply;
   Map<String, dynamic>? _edit;
   String? _error;
@@ -48,7 +58,13 @@ class _ConversationScreenState extends State<ConversationScreen>
   bool _startingCall = false;
   bool _opening = true;
   bool _openedOnce = false;
+  bool _openStarted = false;
   bool _active = true;
+  bool _searchOpen = false;
+  bool _popupCovered = false;
+  bool _foreground = true;
+  bool? _reportedVisible;
+  int _visibilityRevision = 0;
   bool _atNewest = true;
   String? _mentionQuery;
   List<Map<String, dynamic>> _mentions = [];
@@ -70,6 +86,8 @@ class _ConversationScreenState extends State<ConversationScreen>
     'atNewestEdge': _atNewest,
     if (widget.threadId != null) 'threadId': widget.threadId,
   };
+
+  bool get _canRead => _active && !_popupCovered && _foreground;
 
   Map<String, dynamic> get _data {
     final value = widget.bridge.conversation(widget.jid);
@@ -123,6 +141,10 @@ class _ConversationScreenState extends State<ConversationScreen>
   @override
   void initState() {
     super.initState();
+    _accountGeneration = widget.bridge.generation;
+    _connected = widget.bridge.topic('connection')['state'] == 'ready';
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     widget.bridge.addListener(_bridgeChanged);
     _scroll.addListener(_onScroll);
@@ -135,14 +157,8 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _active && _openedOnce) {
-      unawaited(_command('conversation.visibility', {'visible': true}));
-      _readNewest();
-    } else if (state == AppLifecycleState.paused && _active && _openedOnce) {
-      // System document/image pickers pause this activity. Keep the native
-      // model alive so their result remains attached to the same upload.
-      unawaited(_command('conversation.visibility', {'visible': false}));
-    }
+    _foreground = state == AppLifecycleState.resumed;
+    _syncVisibility();
   }
 
   @override
@@ -161,9 +177,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   @override
   void didPushNext() {
     _active = false;
-    if (_openedOnce) {
-      unawaited(_command('conversation.visibility', {'visible': false}));
-    }
+    _syncVisibility();
   }
 
   @override
@@ -172,18 +186,50 @@ class _ConversationScreenState extends State<ConversationScreen>
     unawaited(_open());
   }
 
+  @override
+  void didChangePopupCoverage(bool covered) {
+    _popupCovered = covered;
+    _syncVisibility();
+  }
+
+  void _syncVisibility() {
+    final revision = ++_visibilityRevision;
+    if (!mounted || !_openStarted) return;
+    if (!_canRead) {
+      if (_reportedVisible != false) {
+        _reportedVisible = false;
+        unawaited(_command('conversation.visibility', {'visible': false}));
+      }
+      return;
+    }
+    if (_reportedVisible == true) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || revision != _visibilityRevision || !_canRead) return;
+      _reportedVisible = true;
+      unawaited(_command('conversation.visibility', {'visible': true}));
+      _readNewest();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
   Future<void> _open() async {
     if (!mounted || !_active) {
       return;
     }
     setState(() => _opening = true);
-    await _command('conversation.open');
+    _openStarted = true;
+    final opening = _command('conversation.open', {
+      'atNewestEdge': _canRead && _atNewest,
+    });
+    _reportedVisible = true;
+    _syncVisibility();
+    await opening;
     _openedOnce = _openedOnce || _error == null;
     if (!mounted || !_active) {
       return;
     }
     setState(() => _opening = false);
-    await _command('conversation.visibility', {'visible': true});
+    _syncVisibility();
     _readNewest();
     if (widget.group) {
       unawaited(_refreshRoomCallState());
@@ -213,7 +259,10 @@ class _ConversationScreenState extends State<ConversationScreen>
       'call.roomState',
     };
     try {
-      final result = await widget.bridge.invoke(method, {..._args, ...values});
+      final arguments = {..._args, ...values};
+      final result = quiet.contains(method)
+          ? await widget.bridge.invokeQuiet(method, arguments)
+          : await widget.bridge.invoke(method, arguments);
       if (mounted &&
           _error != null &&
           _error == previousError &&
@@ -222,11 +271,11 @@ class _ConversationScreenState extends State<ConversationScreen>
       }
       return result;
     } on PlatformException catch (error) {
-      if (mounted) {
+      if (mounted && !quiet.contains(method)) {
         setState(() => _error = error.message ?? error.code);
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && !quiet.contains(method)) {
         setState(() => _error = error.toString());
       }
     }
@@ -234,7 +283,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   void _readNewest() {
-    if (_active) {
+    if (_canRead && _openedOnce) {
       unawaited(_command('conversation.read', {'atNewestEdge': _atNewest}));
     }
   }
@@ -427,6 +476,22 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   void _bridgeChanged() {
+    final generation = widget.bridge.generation;
+    final connected = widget.bridge.topic('connection')['state'] == 'ready';
+    if (generation != _accountGeneration) {
+      _accountGeneration = generation;
+      _images.clear();
+      _avatarBytes.clear();
+      _avatarFailed.clear();
+      _avatarPending.clear();
+      _avatarEpoch++;
+    }
+    if (connected != _connected) {
+      _connected = connected;
+      _avatarEpoch++;
+      _avatarPending.clear();
+      if (connected) _avatarFailed.clear();
+    }
     if (mounted && _active && widget.group) {
       final rooms = _maps(widget.bridge.home['rooms']);
       final room = rooms.firstWhere(
@@ -1374,22 +1439,31 @@ class _ConversationScreenState extends State<ConversationScreen>
     if (jid == widget.bridge.session['jid'] && ownAvatar is Uint8List) {
       return avatar(ownAvatar);
     }
+    final cached = _avatarBytes[jid];
+    if (cached != null || !_connected || _avatarFailed.contains(jid)) {
+      return avatar(cached);
+    }
     return FutureBuilder<Uint8List?>(
-      future: _avatarBytes.putIfAbsent(jid, () async {
+      future: _avatarPending.putIfAbsent(jid, () async {
+        final epoch = _avatarEpoch;
         try {
-          final value = await widget.bridge.invoke('profile.avatarBytes', {
+          final value = await widget.bridge.invokeQuiet('profile.avatarBytes', {
             'jid': jid,
           });
-          if (value is Uint8List) {
-            return value;
-          }
-          if (value is List) {
-            return Uint8List.fromList(value.cast<int>());
-          }
+          final bytes = value is Uint8List
+              ? value
+              : value is List
+              ? Uint8List.fromList(value.cast<int>())
+              : null;
+          if (epoch == _avatarEpoch && bytes != null) _avatarBytes[jid] = bytes;
+          if (epoch == _avatarEpoch && bytes == null) _avatarFailed.add(jid);
+          return epoch == _avatarEpoch ? bytes : null;
         } catch (_) {
-          // An unavailable avatar uses initials and does not prevent reading.
+          if (epoch == _avatarEpoch) _avatarFailed.add(jid);
+          return null;
+        } finally {
+          if (epoch == _avatarEpoch) _avatarPending.remove(jid);
         }
-        return null;
       }),
       builder: (context, snapshot) => avatar(snapshot.data),
     );
@@ -1398,11 +1472,14 @@ class _ConversationScreenState extends State<ConversationScreen>
   Widget _attachment(Map<String, dynamic> message, Map<String, dynamic> file) {
     final name = _str(file['name'], 'Attachment');
     final mime = _str(file['mimeType']);
-    final id = '${message['id']}/${file['id'] ?? name}';
+    final index = int.tryParse(_str(file['id'])) ?? -1;
+    final id =
+        '${widget.bridge.generation}/${widget.jid}/${message['id']}/'
+        '$index/${file['contentRevision'] ?? jsonEncode(file)}';
     final values = {
       'targetId': message['id'],
       'fileId': file['id'],
-      'index': _maps(message['files']).indexOf(file),
+      'index': index,
     };
     final isImage = mime.startsWith('image/');
     return Padding(
@@ -1415,59 +1492,25 @@ class _ConversationScreenState extends State<ConversationScreen>
                 image: true,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: file['encrypted'] != true && file['url'] != null
-                      ? Image.network(
-                          _str(file['url']),
-                          fit: BoxFit.contain,
-                          height: 220,
-                          semanticLabel: name,
-                          errorBuilder: (_, error, stack) => _fileTile(
-                            name,
-                            Icons.broken_image_outlined,
-                            () => _command('conversation.fileOpen', values),
-                          ),
-                        )
-                      : FutureBuilder<Uint8List?>(
-                          // Native code decrypts XEP-0448 files into memory. Never hand an
-                          // encrypted source URL directly to Image.network.
-                          future: _imageBytes.putIfAbsent(id, () async {
-                            final value = await _command(
-                              'conversation.fileBytes',
-                              values,
-                            );
-                            if (value is Uint8List) {
-                              return value;
-                            }
-                            if (value is List) {
-                              return Uint8List.fromList(value.cast<int>());
-                            }
-                            return null;
-                          }),
-                          builder: (context, snapshot) {
-                            if (snapshot.hasData) {
-                              return Image.memory(
-                                snapshot.data!,
-                                fit: BoxFit.contain,
-                                height: 220,
-                                semanticLabel: name,
-                              );
-                            }
-                            if (snapshot.connectionState !=
-                                ConnectionState.done) {
-                              return const SizedBox(
-                                height: 100,
-                                child: Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                              );
-                            }
-                            return _fileTile(
-                              name,
-                              Icons.image_outlined,
-                              () => _command('conversation.fileOpen', values),
-                            );
-                          },
-                        ),
+                  child: VerifiedImage(
+                    key: ValueKey(id),
+                    name: name,
+                    cache: _images,
+                    cacheKey: id,
+                    connected: _connected,
+                    onOpen: () => _command('conversation.fileOpen', values),
+                    fetch: () async {
+                      final value = await widget.bridge.invokeQuiet(
+                        'conversation.fileBytes',
+                        {..._args, ...values},
+                      );
+                      if (value is Uint8List) return value;
+                      if (value is List) {
+                        return Uint8List.fromList(value.cast<int>());
+                      }
+                      throw StateError('Image bytes are unavailable.');
+                    },
+                  ),
                 ),
               ),
             )
@@ -1556,14 +1599,7 @@ class _ConversationScreenState extends State<ConversationScreen>
     final body = _str(message['body']);
     final spans = _maps(message['markup']);
     if (spans.isEmpty) {
-      final loneImage = Uri.tryParse(body.trim());
-      if (loneImage != null &&
-          loneImage.scheme == 'https' &&
-          !body.trim().contains(RegExp(r'\s')) &&
-          RegExp(
-            r'\.(gif|png|jpe?g|webp)$',
-            caseSensitive: false,
-          ).hasMatch(loneImage.path)) {
+      if (isInlineImageUrl(body)) {
         return InkWell(
           onTap: () => _command('link.open', {'url': body.trim()}),
           child: ClipRRect(
@@ -2464,20 +2500,26 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   Future<void> _search() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => _SearchSheet(
-        title: 'Search messages',
-        search: (value) async =>
-            _maps(await _command('conversation.search', {'query': value})),
-        tile: (context, result) => ListTile(
-          title: Text(_str(result['body'])),
-          subtitle: Text(_str(result['author'], _str(result['from']))),
+    if (_searchOpen) return;
+    _searchOpen = true;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (context) => _SearchSheet(
+          title: 'Search messages',
+          search: (value) async =>
+              _maps(await _command('conversation.search', {'query': value})),
+          tile: (context, result) => ListTile(
+            title: Text(_str(result['body'])),
+            subtitle: Text(_str(result['author'], _str(result['from']))),
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _searchOpen = false;
+    }
   }
 
   Future<void> _members() async {
@@ -2854,28 +2896,14 @@ class _ConversationScreenState extends State<ConversationScreen>
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (context) => _SearchSheet(
-        title: 'Find a GIF',
-        search: (value) async =>
-            _maps(await _command('gif.search', {'query': value})),
-        tile: (context, gif) => ListTile(
-          leading: gif['previewUrl'] != null
-              ? Image.network(
-                  _str(gif['previewUrl']),
-                  width: 64,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, error, stack) =>
-                      const Icon(Icons.gif_box_outlined),
-                )
-              : const Icon(Icons.gif_box_outlined),
-          title: Text(_str(gif['title'], 'GIF')),
-          onTap: () async {
-            Navigator.pop(context);
-            await _sendImmediate('conversation.gif', {
-              'url': gif['originalUrl'],
-            });
-          },
+      builder: (context) => GifPickerSheet(
+        search: (value) async => _maps(
+          await widget.bridge.invokeQuiet('gif.search', {'query': value}),
         ),
+        onSelect: (url) {
+          Navigator.pop(context);
+          unawaited(_sendImmediate('conversation.gif', {'url': url}));
+        },
       ),
     );
   }

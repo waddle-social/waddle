@@ -11,8 +11,11 @@ Future<void> openPrivateFile(
   String mediaType, {
   required void Function() validate,
 }) => platform.openPrivateFile(bytes, name, mediaType, validate: validate);
-Future<Uint8List> readLocalFileUri(String uri) =>
-    platform.readLocalFileUri(uri);
+Future<Uint8List> readLocalFileUri(
+  String uri, {
+  required int maxBytes,
+  void Function()? validate,
+}) => platform.readLocalFileUri(uri, maxBytes: maxBytes, validate: validate);
 Future<void> clearPrivateFiles() => platform.clearPrivateFiles();
 
 Future<void> preparePrivateFiles() => platform.preparePrivateFiles();

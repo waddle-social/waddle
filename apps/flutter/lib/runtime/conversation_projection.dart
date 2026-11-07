@@ -8,6 +8,7 @@ Map<String, dynamic> _localAttachment(Map<String, dynamic> file) {
     'media_type': file['media_type'],
     'size': file['size'],
     'inline': file['disposition'] == 'inline',
+    'hashes': runtimeRows(file['hashes']),
     'encryption': encrypted.isEmpty
         ? null
         : {
@@ -31,7 +32,7 @@ Map<String, dynamic> _sharedAttachment(Map<String, dynamic> attachment) {
     'media_type': attachment['media_type'],
     'size': attachment['size'],
     'disposition': attachment['inline'] == true ? 'inline' : 'attachment',
-    'hashes': [],
+    'hashes': runtimeRows(attachment['hashes']),
     'encrypted': encryption.isEmpty
         ? null
         : {
@@ -53,6 +54,9 @@ List<Map<String, dynamic>> _filePresentation(
   for (var index = 0; index < files.length; index++)
     {
       'id': '$index',
+      'contentRevision': crypto.sha256
+          .convert(utf8.encode(jsonEncode(files[index])))
+          .toString(),
       'name': files[index]['name'],
       'mimeType': files[index]['media_type'],
       'size': files[index]['size'],

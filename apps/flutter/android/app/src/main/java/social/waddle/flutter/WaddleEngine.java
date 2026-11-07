@@ -24,6 +24,7 @@ public final class WaddleEngine {
             FlutterEngine engine = cache.get(ENGINE_ID);
             if (engine == null) {
                 engine = new FlutterEngine(context.getApplicationContext());
+                PlatformFileChannel.register(engine, context.getApplicationContext());
                 cache.put(ENGINE_ID, engine);
                 engine.getDartExecutor().executeDartEntrypoint(
                     DartExecutor.DartEntrypoint.createDefault(),

@@ -85,10 +85,19 @@ scripts/build-flutter-rust.sh --android
 scripts/flutter-ci.sh apk
 ```
 
-The verified APK is `apps/flutter/build/artifacts/waddle-flutter.apk`. This copy
-is preserved when the emulator smoke test rebuilds its test application. Debug builds
-use the committed public preview keystore for consistent upgrades across CI runs;
-it is not a production signing key. Release signing must be configured separately.
+The verified profile APK is `apps/flutter/build/artifacts/waddle-flutter.apk`.
+Profile mode uses ahead-of-time compilation and the committed public preview
+keystore for consistent upgrades across CI runs; it is not a production signing
+key. Release signing must be configured separately. The artifact is preserved
+when the emulator smoke test rebuilds its test application.
+
+GIF search uses the Waddle chat proxy for the default production account and
+the server origin for custom accounts. To configure a different proxy, add
+`--dart-define=WADDLE_GIF_PROXY_ORIGIN=https://gif.example` to the Flutter build.
+Use an HTTPS origin without credentials, a path, query or fragment; local web
+development may also use HTTP.
+Uploads are limited to 10 MiB of transmitted data, including the encryption tag;
+custom servers may impose a lower limit.
 For web:
 
 ```sh
@@ -98,7 +107,8 @@ scripts/flutter-ci.sh web
 
 Serve `apps/flutter/build/web` over HTTPS or localhost. The Flutter application
 and its Rust WASM assets must be served together. Do not copy the chat app's
-Vite-specific WASM glue into this app.
+Vite-specific WASM glue into this app. Cross-origin attachment hosts must allow
+the web app's origin to fetch image data so previews can verify integrity.
 
 ## Verification and delivery
 

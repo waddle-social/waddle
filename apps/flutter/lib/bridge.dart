@@ -4,7 +4,9 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 
-final waddleRoutes = RouteObserver<ModalRoute<void>>();
+import 'page_coverage_observer.dart';
+
+final waddleRoutes = PageCoverageObserver();
 
 typedef CommandInvoker =
     Future<dynamic> Function(String method, Map<String, dynamic> arguments);
@@ -49,6 +51,7 @@ class WaddleBridge extends ChangeNotifier {
   Map<String, dynamic> get home => topic('home');
   Map<String, dynamic> get login => topic('login');
   Map<String, dynamic> get call => topic('call');
+  int get generation => _generation;
   Map<String, dynamic> conversation(String jid) =>
       _conversations[jid] ?? const {};
   Stream<Map<String, dynamic>> get navigation => _navigation.stream;
@@ -134,15 +137,27 @@ class WaddleBridge extends ChangeNotifier {
   Future<dynamic> invoke(
     String method, [
     Map<String, dynamic> arguments = const {},
-  ]) async {
+  ]) => _invoke(method, arguments, reportError: true);
+
+  /// Runs a request whose caller owns its loading and error presentation.
+  Future<dynamic> invokeQuiet(
+    String method, [
+    Map<String, dynamic> arguments = const {},
+  ]) => _invoke(method, arguments, reportError: false);
+
+  Future<dynamic> _invoke(
+    String method,
+    Map<String, dynamic> arguments, {
+    required bool reportError,
+  }) async {
     if (_disposed) {
       throw StateError('Waddle bridge is closed');
     }
     try {
       return normalize(await _commandInvoker(method, arguments));
     } catch (error) {
-      _error = describeError(error);
-      if (!_disposed) {
+      if (reportError && !_disposed) {
+        _error = describeError(error);
         notifyListeners();
       }
       rethrow;

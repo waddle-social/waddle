@@ -591,6 +591,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _loading = true;
   bool _loaded = false;
   bool _saving = false;
+  bool _connected = false;
+  bool _fetching = false;
+  int _readyRevision = 0;
   String? _error;
   Map<String, dynamic> _profile = {};
   bool get _self =>
@@ -598,27 +601,54 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
+    widget.bridge.addListener(_connectionChanged);
+    _connectionChanged();
   }
 
   @override
   void dispose() {
+    widget.bridge.removeListener(_connectionChanged);
     for (final field in _fields.values) {
       field.dispose();
     }
     super.dispose();
   }
 
+  void _connectionChanged() {
+    final connected = widget.bridge.topic('connection')['state'] == 'ready';
+    if (connected == _connected) return;
+    _connected = connected;
+    if (connected) {
+      _readyRevision++;
+      if (!_loaded && !_fetching) unawaited(_load());
+    } else if (!_loaded && mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+  }
+
   Future<void> _load() async {
+    if (_fetching) return;
+    if (!_connected) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+      return;
+    }
+    final revision = _readyRevision;
+    _fetching = true;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final result = await widget.bridge.invoke('profile.load', {
+      final result = await widget.bridge.invokeQuiet('profile.load', {
         if (widget.jid != null) 'jid': widget.jid,
       });
-      if (!mounted) {
+      if (!mounted || !_connected || revision != _readyRevision) {
         return;
       }
       _profile = _map(result);
@@ -634,11 +664,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _loaded = true;
       });
     } catch (error) {
-      if (mounted) {
+      if (mounted && _connected && revision == _readyRevision) {
         setState(() {
           _loading = false;
           _error = error.toString();
         });
+      }
+    } finally {
+      _fetching = false;
+      if (mounted && _connected && !_loaded && revision != _readyRevision) {
+        unawaited(_load());
       }
     }
   }
@@ -1416,26 +1451,56 @@ class _CommunityAdminScreenState extends State<CommunityAdminScreen> {
   final _users = <Map<String, dynamic>>[];
   Timer? _timer;
   String? _cursor, _error;
-  bool _loading = false;
+  bool _loading = true;
+  bool _connected = false;
+  bool _waitingForConnection = true;
   int _ticket = 0;
   @override
   void initState() {
     super.initState();
-    _load();
+    widget.bridge.addListener(_connectionChanged);
+    _connectionChanged();
   }
 
   @override
   void dispose() {
+    widget.bridge.removeListener(_connectionChanged);
     _ticket++;
     _timer?.cancel();
     _query.dispose();
     super.dispose();
   }
 
+  void _connectionChanged() {
+    final connected = widget.bridge.topic('connection')['state'] == 'ready';
+    if (connected == _connected) return;
+    _connected = connected;
+    if (!connected) {
+      if (_loading) {
+        _ticket++;
+        _waitingForConnection = true;
+      }
+    } else if (_waitingForConnection) {
+      _timer?.cancel();
+      _waitingForConnection = false;
+      unawaited(_load());
+    }
+  }
+
   Future<void> _load({bool more = false}) async {
     if (more && (_cursor == null || _loading)) {
       return;
     }
+    if (!_connected) {
+      _ticket++;
+      _waitingForConnection = true;
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+      return;
+    }
+    _waitingForConnection = false;
     final ticket = ++_ticket;
     setState(() {
       _loading = true;
@@ -1443,7 +1508,7 @@ class _CommunityAdminScreenState extends State<CommunityAdminScreen> {
     });
     try {
       final page = _map(
-        await widget.bridge.invoke('admin.users', {
+        await widget.bridge.invokeQuiet('admin.users', {
           'prefix': _query.text.trim(),
           if (more) 'afterCursor': _cursor,
         }),
@@ -1465,6 +1530,7 @@ class _CommunityAdminScreenState extends State<CommunityAdminScreen> {
           _loading = false;
           _error = error.toString();
         });
+        _waitingForConnection = true;
       }
     }
   }

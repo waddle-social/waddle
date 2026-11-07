@@ -8,7 +8,11 @@ Future<void> openPrivateFile(
 }) => Future.error(
   UnsupportedError('File viewing is unavailable on this platform.'),
 );
-Future<Uint8List> readLocalFileUri(String uri) => Future.error(
+Future<Uint8List> readLocalFileUri(
+  String uri, {
+  required int maxBytes,
+  void Function()? validate,
+}) => Future.error(
   UnsupportedError('Local file access is unavailable on this platform.'),
 );
 Future<void> clearPrivateFiles() async {}

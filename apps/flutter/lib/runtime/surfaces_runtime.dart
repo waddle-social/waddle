@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import 'context.dart';
@@ -9,10 +10,23 @@ import 'context.dart';
 /// Presentation commands are translated into the shared Rust client's typed
 /// verbs. Dart retains only account-fenced caches and UI projections.
 class SurfaceRuntime {
-  SurfaceRuntime(this.context, {http.Client? httpClient})
-    : _http = httpClient ?? http.Client();
+  SurfaceRuntime(
+    this.context, {
+    http.Client? httpClient,
+    String? gifProxyOrigin,
+    bool? isWeb,
+    Uri? webUri,
+  }) : _http = httpClient ?? http.Client(),
+       _gifProxyOrigin =
+           gifProxyOrigin ??
+           const String.fromEnvironment('WADDLE_GIF_PROXY_ORIGIN'),
+       _isWeb = isWeb ?? kIsWeb,
+       _webUri = webUri ?? Uri.base;
   final RuntimeContext context;
   final http.Client _http;
+  final String _gifProxyOrigin;
+  final bool _isWeb;
+  final Uri _webUri;
   Map<String, dynamic> _profile = {};
   bool _profileLoaded = false, _disposed = false;
   final _avatars = <String, Map<String, Uint8List>>{};
@@ -577,26 +591,34 @@ class SurfaceRuntime {
   }
 
   Future<List<Map<String, dynamic>>> _gifSearch(String query) async {
-    final captured = context.generation;
-    final origin = Uri.tryParse('${context.session['serverOrigin'] ?? ''}');
-    if (origin == null ||
-        !['https', 'http'].contains(origin.scheme) ||
-        origin.host.isEmpty) {
-      throw StateError('GIF search is not configured for this account.');
-    }
-    final response = await _http
-        .get(
-          origin
-              .resolve('/api/giphy')
-              .replace(
-                queryParameters: {
-                  'limit': '24',
-                  if (query.trim().isNotEmpty) 'q': query.trim(),
-                },
-              ),
-        )
-        .timeout(const Duration(seconds: 15));
+    final captured = _owner;
     requireGeneration(context, captured);
+    final origin = _gifOrigin();
+    late final http.Response response;
+    try {
+      response = await _http
+          .get(
+            origin
+                .resolve('/api/giphy')
+                .replace(
+                  queryParameters: {
+                    'limit': '24',
+                    if (query.trim().isNotEmpty) 'q': query.trim(),
+                  },
+                ),
+          )
+          .timeout(const Duration(seconds: 15));
+    } catch (_) {
+      requireGeneration(context, captured);
+      if (_disposed) {
+        throw StateError('This controller is closed.');
+      }
+      throw StateError('GIF search is unavailable.');
+    }
+    requireGeneration(context, captured);
+    if (_disposed) {
+      throw StateError('This controller is closed.');
+    }
     if (response.statusCode == 404 || response.statusCode == 503) {
       throw StateError('GIF search is not configured on this server.');
     }
@@ -606,7 +628,12 @@ class SurfaceRuntime {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('GIF search is unavailable.');
     }
-    final result = runtimeMap(jsonDecode(response.body));
+    late final Map<String, dynamic> result;
+    try {
+      result = runtimeMap(jsonDecode(response.body));
+    } on FormatException {
+      throw StateError('The GIF search response was invalid.');
+    }
     if (result['data'] is! List) {
       throw StateError('The GIF search response was invalid.');
     }
@@ -627,6 +654,37 @@ class SurfaceRuntime {
               gif['originalUrl'] is String,
         )
         .toList();
+  }
+
+  Uri _gifOrigin() {
+    final configured = _gifProxyOrigin.trim();
+    if (configured.isNotEmpty) {
+      return _validGifOrigin(configured, originOnly: true);
+    }
+    if (_isWeb) {
+      return _validGifOrigin(_webUri.toString());
+    }
+    final authOrigin = _validGifOrigin(
+      '${context.session['serverOrigin'] ?? ''}',
+    );
+    return authOrigin.toString() == 'https://xmpp.waddle.social'
+        ? Uri.parse('https://waddle.chat')
+        : authOrigin;
+  }
+
+  Uri _validGifOrigin(String value, {bool originOnly = false}) {
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        (uri.scheme != 'https' && !(_isWeb && uri.scheme == 'http')) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        originOnly &&
+            (uri.path.isNotEmpty && uri.path != '/' ||
+                uri.hasQuery ||
+                uri.hasFragment)) {
+      throw StateError('GIF search is not configured for this account.');
+    }
+    return Uri.parse(uri.origin);
   }
 
   String _formKey(String service, String node, dynamic session) =>

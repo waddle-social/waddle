@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart' as crypto;
 
 import 'context.dart';
 
 part 'conversation_model.dart';
 part 'conversation_projection.dart';
+part 'conversation_raw_index.dart';
 
 /// Account-owned conversation orchestration, shared by native Rust and WASM.
 /// Widgets hold leases only; pending delivery survives navigation and reconnect.
@@ -19,7 +24,7 @@ class ConversationRuntime {
   final _deliveryWaiters = <String, Completer<void>>{};
   final _views = <String, _View>{};
   final _snapshots = <String, List<Map<String, dynamic>>>{};
-  final _raw = <String, List<Map<String, dynamic>>>{};
+  final _raw = <String, _RawConversation>{};
   final _outbox = <String, _Outbound>{};
   final _recent = <String, _Outbound>{};
   final _occupants = <String, Map<String, Map<String, dynamic>>>{};
@@ -30,7 +35,8 @@ class ConversationRuntime {
   final _joins = <String, Future<void>>{};
   final _joined = <String>{};
   final _sending = <String, Object?>{};
-  final _reads = <String, Future<void>>{};
+  final _reads = <String, Future<bool>>{};
+  final _readAgain = <String>{};
   String? _active;
   Object? _storeTransport;
   Future<void>? _storeReady;
@@ -170,7 +176,9 @@ class ConversationRuntime {
       case 'conversation.edit':
         return _edit(view, args);
       case 'conversation.reply':
-        view.reply = _item(view, _required(args, 'targetId'));
+        final reply = _item(view, _required(args, 'targetId'));
+        _target(view, reply, sameAuthor: true);
+        view.reply = reply;
         _emitComposer(view);
         return null;
       case 'conversation.cancelReply':
@@ -195,7 +203,7 @@ class ConversationRuntime {
         }
         return _verb('send_retraction', {
           'peer_jid': view.jid,
-          'target_stanza_id': _target(item),
+          'target_stanza_id': _target(view, item, sameAuthor: true),
           'audience': view.group ? 'muc' : 'direct',
         });
       case 'conversation.moderate':
@@ -204,7 +212,10 @@ class ConversationRuntime {
         }
         return _verb('send_moderation', {
           'room_jid': view.jid,
-          'target_stanza_id': _target(_item(view, _required(args, 'targetId'))),
+          'target_stanza_id': _target(
+            view,
+            _item(view, _required(args, 'targetId')),
+          ),
           'reason': args['reason'],
         });
       case 'conversation.pin':
@@ -216,6 +227,7 @@ class ConversationRuntime {
           {
             'room_jid': view.jid,
             'target_stanza_id': _target(
+              view,
               _item(view, _required(args, 'targetId')),
             ),
           },
@@ -285,6 +297,7 @@ class ConversationRuntime {
         _joined.clear();
         _serial.clear();
         _reads.clear();
+        _readAgain.clear();
         await _ensureStore();
         await _replay();
         if (!eventLease.currentConnection) {
@@ -307,6 +320,7 @@ class ConversationRuntime {
         _joined.clear();
         _joins.clear();
         _reads.clear();
+        _readAgain.clear();
         for (final row in _outbox.values) {
           if (!row.acked && !row.failed) {
             row.data['status'] = 'queued';
@@ -393,6 +407,7 @@ class ConversationRuntime {
     _joins.clear();
     _sending.clear();
     _reads.clear();
+    _readAgain.clear();
     _active = null;
     _storeTransport = null;
     _storeReady = null;
@@ -535,7 +550,7 @@ class ConversationRuntime {
       await _rpc('timeline_reset');
       for (final entry in _raw.entries.toList()) {
         for (final group in [false, true]) {
-          final records = entry.value
+          final records = entry.value.records
               .where((row) => row['_archived'] == group)
               .toList();
           if (records.isEmpty) {
@@ -699,7 +714,7 @@ class ConversationRuntime {
     final lease = _RuntimeLease(context);
     final now = DateTime.now().millisecondsSinceEpoch;
     final records = <Map<String, dynamic>>[];
-    final cache = _raw.putIfAbsent(jid, () => []);
+    final cache = _raw.putIfAbsent(jid, _RawConversation.new);
     for (final raw in messages) {
       final from = _string(raw['from']);
       final stamp = group
@@ -716,10 +731,13 @@ class ConversationRuntime {
           ).toIso8601String(),
       };
       records.add(record);
-      cache.add(record);
-    }
-    if (cache.length > 1600) {
-      cache.removeRange(0, cache.length - 1600);
+      cache.add(
+        record,
+        jid: jid,
+        group: group,
+        account: context.jid!,
+        ownNick: _selfNicks[jid],
+      );
     }
     await _ordered(jid, () async {
       final result = runtimeMap(
@@ -798,6 +816,7 @@ class ConversationRuntime {
     if (!_valid(view)) {
       throw StateError('The conversation is no longer active');
     }
+    _checkThread(view, view.thread);
     final text = body.trim();
     if (text.isEmpty && files.isEmpty) {
       throw ArgumentError('A message must contain text or a file');
@@ -826,11 +845,14 @@ class ConversationRuntime {
       if (current?['retracted'] == true) {
         reply = {...reply, 'body': 'Message removed'};
       }
-      final target = _target(reply);
+      final target = _target(view, reply, sameAuthor: true);
       final raw = _rawFor(view.jid, reply);
       final author = view.group
           ? _optional(raw['from']) ?? '${view.jid}/${reply['sender']}'
-          : _string(reply['author_id'], view.jid);
+          : _string(
+              reply['author_id'],
+              reply['own'] == true ? context.jid! : view.jid,
+            );
       options['reply'] = {'author_jid': author, 'message_id': target};
       final quoted = _string(
         reply['body'],
@@ -859,6 +881,7 @@ class ConversationRuntime {
       final thread =
           _optional(reply['thread']) ?? (!view.group ? target : view.thread);
       if (thread != null) {
+        _checkThread(view, thread);
         options['thread'] = {'id': thread, 'parent': null};
       }
       wire = '$prefix${composed.body}';
@@ -1082,7 +1105,7 @@ class ConversationRuntime {
       return;
     }
     if (type != 'deliveryAcked' &&
-        (row.data['reflected'] == true || _hasReflection(row))) {
+        (row.data['reflected'] == true || _reflection(row) != null)) {
       return;
     }
     if (type == 'deliveryFailed' && row.acked) {
@@ -1123,34 +1146,64 @@ class ConversationRuntime {
         row.id,
         error: StateError('Your reply was refused by the server'),
       );
+    } else if (type == 'deliveryAcked' && !row.group) {
+      // Direct messages do not reflect to the sending resource. Keep the
+      // acknowledged row for archive reconciliation, but release its waiter.
+      _completeDelivery(row.id);
     }
     _emitFor(row.jid);
   }
 
-  bool _hasReflection(_Outbound row) {
-    return (_snapshots[row.jid] ?? []).any((item) {
-      if (item['own'] != true || !_identities(item).contains(row.id)) {
-        return false;
-      }
-      if (row.group) {
-        return item['archive_id'] != null;
-      }
-      if (item['archive_id'] != null) {
-        return true;
-      }
-      return (_raw[row.jid] ?? []).any(
-        (raw) =>
-            bareJid(_string(raw['from'])) == bareJid(row.owner) &&
-            bareJid(_string(raw['to'])) == row.jid &&
-            _identities(raw).contains(row.id),
-      );
-    });
+  bool _matchesReflection(_Outbound row, Map<String, dynamic> item) {
+    if (row.owner != context.jid) {
+      return false;
+    }
+    if (item['own'] != true || !_identities(item).contains(row.id)) {
+      return false;
+    }
+    final author = _optional(item['author_id']);
+    final archive = _optional(item['archive_id']);
+    final boundArchive = _optional(row.data['reflection_archive_id']);
+    if (author != null && bareJid(author) != bareJid(row.owner) ||
+        row.group && archive == null ||
+        archive != null && item['id'] != archive ||
+        boundArchive != null &&
+            (archive != boundArchive ||
+                item['archive_by'] != row.data['reflection_archive_by'])) {
+      return false;
+    }
+    if (boundArchive != null && row.data['reflected'] == true) {
+      return true;
+    }
+    final raw = _raw[row.jid]?.lookup(
+      {...item, 'author_id': row.owner},
+      group: row.group,
+      jid: row.jid,
+      account: row.owner,
+    );
+    return raw != null &&
+        (raw['_archived'] != true || boundArchive != null) &&
+        (raw['origin_id'] == row.id || raw['id'] == row.id);
+  }
+
+  Map<String, dynamic>? _reflection(_Outbound row) {
+    final matches = (_snapshots[row.jid] ?? [])
+        .where((item) => _matchesReflection(row, item))
+        .toList();
+    return matches.length == 1 ? matches.single : null;
   }
 
   void _settleReflected(String jid) {
     var reflectedChanged = false;
     for (final row in [..._outbox.values, ..._recent.values]) {
-      if (row.jid == jid && _hasReflection(row)) {
+      final reflection = row.jid == jid ? _reflection(row) : null;
+      if (reflection != null) {
+        if (reflection['archive_id'] != null &&
+            row.data['reflection_archive_id'] == null) {
+          row.data['reflection_archive_id'] = reflection['archive_id'];
+          row.data['reflection_archive_by'] = reflection['archive_by'];
+          reflectedChanged = true;
+        }
         reflectedChanged |= row.data['reflected'] != true || row.failed;
         row.data['reflected'] = true;
         row.data['failed'] = false;
@@ -1158,31 +1211,43 @@ class ConversationRuntime {
         row.data['status'] = row.acked ? 'acked' : 'sent';
       }
     }
-    final items = _snapshots[jid] ?? const [];
     final settled = _outbox.values
         .where(
           (row) =>
               row.jid == jid &&
               row.acked &&
               !row.failed &&
-              items.any(
-                (item) =>
-                    item['own'] == true &&
-                    _identities(item).contains(row.id) &&
-                    (!row.group || item['archive_id'] != null),
-              ),
+              (_reflection(row) != null ||
+                  !row.group &&
+                      (_snapshots[jid] ?? []).any(
+                        (item) =>
+                            item['local_echo'] == true &&
+                            item['identity_kind'] == 'origin' &&
+                            item['own'] == true &&
+                            item['id'] == row.id,
+                      )),
         )
         .toList();
     for (final row in settled) {
       _outbox.remove(row.id);
       _recent[row.id] = row;
-      _completeDelivery(row.id);
     }
     while (_recent.length > 256) {
       _recent.remove(_recent.keys.first);
     }
     if (settled.isNotEmpty || reflectedChanged) {
-      _background(_persistOutbox());
+      final generation = context.generation;
+      _background(
+        _persistOutbox().then((_) {
+          for (final row in settled) {
+            if (context.generation == generation &&
+                context.jid == row.owner &&
+                !_outbox.containsKey(row.id)) {
+              _completeDelivery(row.id);
+            }
+          }
+        }),
+      );
     }
   }
 
@@ -1216,6 +1281,8 @@ class ConversationRuntime {
     final target =
         _optional(row['correction_id']) ??
         (throw StateError('The author-assigned edit identity is unavailable'));
+    _checkTarget(view, row, target, senderChosen: true, sameAuthor: true);
+    _checkThread(view, _optional(row['thread']));
     view.edit = row;
     final body = args['body'];
     if (body is! String) {
@@ -1334,8 +1401,8 @@ class ConversationRuntime {
           'jid': view.jid,
           'group': view.group,
           if (args['data'] != null) 'bytes': args['data'],
-          'name': args['name'] ?? 'image.png',
-          'media_type': args['mimeType'] ?? 'image/png',
+          if (args['name'] != null) 'name': args['name'],
+          if (args['mimeType'] != null) 'media_type': args['mimeType'],
           if (args['uri'] != null) 'uri': args['uri'],
         }),
       );
@@ -1372,7 +1439,7 @@ class ConversationRuntime {
     // from an overlapping read of the previous reaction set.
     await _ordered(view.jid, () async {
       final row = _item(view, _required(args, 'targetId'));
-      final target = _target(row);
+      final target = _target(view, row);
       final emoji = _required(args, 'emoji');
       final old = runtimeRows(row['reactions'])
           .where((row) => row['own'] == true)
@@ -1633,35 +1700,44 @@ class ConversationRuntime {
         view.thread != null ||
         view.loading ||
         view.paging ||
-        !_connected ||
-        _reads.containsKey(view.jid)) {
+        !_connected) {
+      return;
+    }
+    if (_reads.containsKey(view.jid)) {
+      _readAgain.add(view.jid);
       return;
     }
     final generation = context.generation;
     final work = _markRead(view);
-    _reads[view.jid] = work.then<void>(
-      (advanced) {
-        if (context.generation != generation ||
-            !identical(_reads[view.jid], work)) {
-          return;
-        }
-        _reads.remove(view.jid);
-        if (advanced && _valid(view)) {
-          _readVisible(view);
-        }
-      },
-      onError: (Object error, StackTrace _) {
-        if (context.generation != generation ||
-            !identical(_reads[view.jid], work)) {
-          return;
-        }
-        _reads.remove(view.jid);
-        if (_valid(view) && error is! AccountChanged) {
-          context.emit('error', {
-            'message': 'Read state could not be synchronized: $error',
-          });
-        }
-      },
+    _reads[view.jid] = work;
+    unawaited(
+      work.then<void>(
+        (advanced) {
+          if (context.generation != generation ||
+              !identical(_reads[view.jid], work)) {
+            return;
+          }
+          _reads.remove(view.jid);
+          final again = _readAgain.remove(view.jid);
+          final active = _views[_active];
+          if ((advanced || again) && active != null && active.jid == view.jid) {
+            _readVisible(active);
+          }
+        },
+        onError: (Object error, StackTrace _) {
+          if (context.generation != generation ||
+              !identical(_reads[view.jid], work)) {
+            return;
+          }
+          _reads.remove(view.jid);
+          _readAgain.remove(view.jid);
+          if (_valid(view) && error is! AccountChanged) {
+            context.emit('error', {
+              'message': 'Read state could not be synchronized: $error',
+            });
+          }
+        },
+      ),
     );
   }
 
@@ -1693,7 +1769,12 @@ class ConversationRuntime {
       }
     }
     final lease = _RuntimeLease(context);
-    final id = _target(target);
+    final String id;
+    try {
+      id = _target(view, target);
+    } on StateError {
+      return false;
+    }
     if (context.preferences['readReceiptsEnabled'] != false &&
         (view.group || target['marker_requested'] == true)) {
       await _verb('send_displayed', {
@@ -1778,14 +1859,15 @@ class ConversationRuntime {
   }
 
   Map<String, dynamic> _item(_View view, String id) {
-    final matches = (_snapshots[view.jid] ?? [])
-        .where(
-          (row) =>
-              row['id'] == id ||
-              row['origin_id'] == id ||
-              row['reference_id'] == id,
-        )
-        .toList();
+    final rows = _snapshots[view.jid] ?? [];
+    final canonical = rows.where((row) => row['id'] == id).toList();
+    final matches = canonical.isNotEmpty
+        ? canonical
+        : rows
+              .where(
+                (row) => row['origin_id'] == id || row['reference_id'] == id,
+              )
+              .toList();
     if (matches.length != 1) {
       throw StateError(
         'The message is no longer available or its identity is ambiguous',
@@ -1794,52 +1876,110 @@ class ConversationRuntime {
     return matches.single;
   }
 
-  String _target(Map<String, dynamic> row) =>
-      _optional(row['reference_id']) ??
-      (throw StateError('A trusted message identity is not available'));
+  bool _sameTargetAuthor(
+    _View view,
+    Map<String, dynamic> a,
+    Map<String, dynamic> b,
+  ) {
+    if ((a['own'] == true) != (b['own'] == true)) return false;
+    if (!view.group) return true;
+    final first = _optional(a['author_id']);
+    final second = _optional(b['author_id']);
+    if (first != null && second != null) {
+      return bareJid(first) == bareJid(second);
+    }
+    return a['sender'] == b['sender'];
+  }
+
+  void _checkTarget(
+    _View view,
+    Map<String, dynamic> row,
+    String target, {
+    bool senderChosen = false,
+    bool sameAuthor = false,
+  }) {
+    final rows = _snapshots[view.jid] ?? [];
+    final matching = rows.where((candidate) {
+      if (sameAuthor && !_sameTargetAuthor(view, row, candidate)) return false;
+      return view.group && !senderChosen
+          ? candidate['reference_id'] == target
+          : _identities(candidate).contains(target);
+    }).toList();
+    if (matching.length <= 1) return;
+    final equivalent = _equivalentArchives(view, rows);
+    if (matching.where((candidate) => !equivalent.contains(candidate)).length >
+        1) {
+      throw StateError('The message reference is ambiguous');
+    }
+  }
+
+  void _checkThread(_View view, String? thread) {
+    if (thread == null) return;
+    final root = (_snapshots[view.jid] ?? []).where((candidate) {
+      return view.group
+          ? candidate['reference_id'] == thread
+          : _identities(candidate).contains(thread);
+    }).firstOrNull;
+    if (root != null) _checkTarget(view, root, thread);
+  }
+
+  String _target(
+    _View view,
+    Map<String, dynamic> row, {
+    bool sameAuthor = false,
+  }) {
+    final target =
+        _optional(row['reference_id']) ??
+        (throw StateError('A trusted message identity is not available'));
+    _checkTarget(view, row, target, sameAuthor: sameAuthor);
+    return target;
+  }
 
   Map<String, dynamic> _rawFor(String jid, Map<String, dynamic> row) {
-    final ids = _identities(row);
-    for (final raw in (_raw[jid] ?? []).reversed) {
-      final source = _string(raw['from']);
-      final actorMatches =
-          _resource(source).isNotEmpty && bareJid(source) == jid
-          ? _resource(source) == row['sender']
-          : row['author_id'] != null && bareJid(source) == row['author_id'];
-      if (actorMatches &&
-          _identities(raw).intersection(ids).isNotEmpty &&
-          raw['replaces_id'] == null &&
-          raw['reaction_target_id'] == null &&
-          raw['retracts_id'] == null) {
-        return raw;
-      }
+    // A local echo and an archive can share the same string ID. Until the
+    // reflection is verified, its canonical content is the only safe source.
+    if (row['local_echo'] == true && row['identity_kind'] == 'origin') {
+      return {};
     }
-    if (row['own'] == true) {
-      final outbound =
-          _outbox[_string(row['origin_id'])] ??
-          _recent[_string(row['origin_id'])];
-      if (outbound != null) {
-        final fallback = runtimeMap(outbound.options['fallback']);
-        return {
-          'from': outbound.group ? '$jid/${row['sender']}' : outbound.owner,
-          '_author_stamp': outbound.owner,
-          'markup_spans': outbound.options['markup_spans'],
-          'reply_fallback_start': fallback['start'],
-          'reply_fallback_end': fallback['end'],
-          'is_sticker': outbound.options['sticker'] != null,
-        };
-      }
+    final pending = _outbox[_string(row['id'])] ?? _recent[_string(row['id'])];
+    if (row['own'] == true &&
+        pending != null &&
+        pending.jid == jid &&
+        pending.owner == context.jid &&
+        (_optional(pending.data['reflection_archive_id']) == null ||
+            pending.data['reflection_archive_id'] != row['archive_id'] ||
+            pending.data['reflection_archive_by'] != row['archive_by'])) {
+      return {};
     }
-    return {};
+    final group =
+        _views.values
+            .where((view) => view.jid == jid)
+            .map((view) => view.group)
+            .firstOrNull ??
+        _raw[jid]?.group ??
+        false;
+    var raw = _raw[jid]?.lookup(
+      row,
+      group: group,
+      jid: jid,
+      account: context.jid!,
+      preferArchived:
+          row['local_echo'] != true && row['identity_kind'] == 'stanza',
+    );
+    if (raw == null && row['own'] == true && row['author_id'] == null) {
+      raw = _raw[jid]?.lookup(
+        {...row, 'author_id': context.jid},
+        group: group,
+        jid: jid,
+        account: context.jid!,
+        preferArchived:
+            row['local_echo'] != true && row['identity_kind'] == 'stanza',
+      );
+    }
+    return raw ?? {};
   }
 
   List<Map<String, dynamic>> _files(String jid, Map<String, dynamic> row) {
-    final outbound =
-        _outbox[_string(row['origin_id'])] ??
-        _recent[_string(row['origin_id'])];
-    if (outbound != null) {
-      return runtimeRows(outbound.options['shared_files']);
-    }
     final raw = runtimeRows(_rawFor(jid, row)['shared_files']);
     return raw.isNotEmpty
         ? raw
@@ -1879,6 +2019,173 @@ class ConversationRuntime {
             _rawFor(jid, row)['call_thread'] != null;
       }).toList();
 
+  bool _sameValue(dynamic left, dynamic right) {
+    if (left is List && right is List) {
+      return left.length == right.length &&
+          Iterable.generate(
+            left.length,
+          ).every((index) => _sameValue(left[index], right[index]));
+    }
+    if (left is Map && right is Map) {
+      return left.length == right.length &&
+          left.keys.every(
+            (key) =>
+                right.containsKey(key) && _sameValue(left[key], right[key]),
+          );
+    }
+    return left == right;
+  }
+
+  bool _sameArchivedSend(_Outbound send, Map<String, dynamic> raw) {
+    final options = send.options;
+    final reply = runtimeMap(options['reply']);
+    final fallback = runtimeMap(options['fallback']);
+    final thread = runtimeMap(options['thread']);
+    if (send.group ||
+        !send.acked ||
+        send.failed ||
+        raw['_archived'] != true ||
+        raw['message_type'] != 'chat' ||
+        bareJid(_string(raw['from'])) != bareJid(send.owner) ||
+        bareJid(_string(raw['to'])) != send.jid ||
+        raw['id'] != send.id ||
+        raw['origin_id'] != send.id ||
+        _optional(raw['mam_id']) == null ||
+        options['sticker'] != null) {
+      return false;
+    }
+    // These fields are provided by the native archive DTO. Missing fields are
+    // ambiguous, not evidence that the archive represents this local send.
+    final expected = <String, dynamic>{
+      'body': send.data['wire_body'],
+      'subject': options['subject'],
+      'thread': thread['id'],
+      'parent_thread_id': thread['parent'],
+      'reply_to_id': reply['message_id'],
+      'reply_to_sender': reply['author_jid'],
+      'reply_fallback_start': fallback['start'],
+      'reply_fallback_end': fallback['end'],
+      'markup_spans': options['markup_spans'],
+      'references': options['references'],
+      'muc_user': false,
+      'is_sticker': false,
+      'is_retracted': false,
+      'replaces_id': null,
+      'retracts_id': null,
+      'moderation_target_id': null,
+      'reaction_target_id': null,
+      'call_thread': null,
+      'call_thread_ended': null,
+      'call_event': null,
+      'safety_scores': null,
+      'link_previews': <dynamic>[],
+    };
+    if (expected.entries.any(
+      (entry) =>
+          !raw.containsKey(entry.key) ||
+          !_sameValue(raw[entry.key], entry.value),
+    )) {
+      return false;
+    }
+    if (raw['shared_files'] is! List || options['shared_files'] is! List) {
+      return false;
+    }
+    final archived = runtimeRows(raw['shared_files']);
+    final sent = runtimeRows(options['shared_files']);
+    if (archived.length != (raw['shared_files'] as List).length ||
+        sent.length != (options['shared_files'] as List).length ||
+        archived.length != sent.length) {
+      return false;
+    }
+    const fields = [
+      'url',
+      'name',
+      'media_type',
+      'size',
+      'width',
+      'height',
+      'desc',
+      'disposition',
+      'hashes',
+      'encrypted',
+    ];
+    for (var index = 0; index < sent.length; index++) {
+      if (fields.any(
+        (field) =>
+            !archived[index].containsKey(field) ||
+            !_sameValue(archived[index][field], sent[index][field]),
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Set<Map<String, dynamic>> _equivalentArchives(
+    _View view,
+    List<Map<String, dynamic>> rows,
+  ) {
+    final hidden = <Map<String, dynamic>>{};
+    final locals = <String, List<Map<String, dynamic>>>{};
+    final archives = <String, List<Map<String, dynamic>>>{};
+    final trusted = <(String, String?), List<Map<String, dynamic>>>{};
+    final displayed = rows.toSet();
+    for (final row in _snapshots[view.jid] ?? rows) {
+      if (row['local_echo'] == true && row['identity_kind'] == 'origin') {
+        final id = _optional(row['id']);
+        if (id != null) locals.putIfAbsent(id, () => []).add(row);
+      } else if (row['local_echo'] != true &&
+          row['identity_kind'] == 'stanza' &&
+          row['own'] == true) {
+        final origin = _optional(row['origin_id']);
+        if (origin != null) archives.putIfAbsent(origin, () => []).add(row);
+        final archive = _optional(row['archive_id']);
+        if (archive != null) {
+          final key = (archive, _optional(row['archive_by']));
+          trusted.putIfAbsent(key, () => []).add(row);
+        }
+      }
+    }
+    for (final send in _recent.values) {
+      if (send.jid != view.jid || send.owner != context.jid) continue;
+      final local = locals[send.id];
+      if (view.group) {
+        final archive = _optional(send.data['reflection_archive_id']);
+        final candidates = archive == null
+            ? null
+            : trusted[(archive, _optional(send.data['reflection_archive_by']))];
+        if (send.acked &&
+            !send.failed &&
+            send.data['reflected'] == true &&
+            local?.length == 1 &&
+            candidates?.length == 1 &&
+            displayed.contains(local!.single) &&
+            displayed.contains(candidates!.single) &&
+            _matchesReflection(send, candidates.single)) {
+          hidden.add(local.single);
+        }
+        continue;
+      }
+      final candidates = archives[send.id];
+      if (local?.length != 1 ||
+          candidates?.length != 1 ||
+          !displayed.contains(local!.single) ||
+          !displayed.contains(candidates!.single)) {
+        continue;
+      }
+      final candidate = candidates.single;
+      final raw = _raw[view.jid]?.lookup(
+        candidate,
+        group: false,
+        jid: view.jid,
+        account: send.owner,
+        preferArchived: true,
+      );
+      if (raw != null && _sameArchivedSend(send, raw)) hidden.add(candidate);
+    }
+    return hidden;
+  }
+
   void _emitFor(String jid) {
     final view = _views[_active];
     if (view != null && view.jid == jid) {
@@ -1900,31 +2207,56 @@ class ConversationRuntime {
               )
               .toList();
     final rows = <Map<String, dynamic>>[];
+    final hiddenArchives = _equivalentArchives(view, stored);
     for (final row in stored) {
+      if (hiddenArchives.contains(row)) continue;
       final pending = _outbox.values
           .where(
             (send) =>
                 row['own'] == true &&
                 send.jid == view.jid &&
-                _identities(row).contains(send.id),
+                (row['id'] == send.id &&
+                        (_optional(send.data['reflection_archive_id']) ==
+                                null ||
+                            row['id'] != row['archive_id']) ||
+                    _matchesReflection(send, row)),
           )
           .firstOrNull;
       if (pending != null &&
           (!pending.acked ||
               pending.failed ||
-              pending.group && row['archive_id'] == null)) {
+              !_matchesReflection(pending, row))) {
         continue;
       }
-      rows.add(
-        _projectRow(
-          row,
-          _rawFor(view.jid, row),
-          _files(view.jid, row),
-          view.group,
-          context.jid!,
-          _pins[view.jid] ?? {},
-        ),
+      final projected = _projectRow(
+        row,
+        _rawFor(view.jid, row),
+        _files(view.jid, row),
+        view.group,
+        context.jid!,
+        _pins[view.jid] ?? {},
       );
+      final kind = _optional(row['identity_kind']);
+      if (kind != null) {
+        projected['presentationId'] = jsonEncode([
+          kind,
+          row['id'],
+          row['author_id'] ?? row['sender'],
+          row['own'],
+        ]);
+      }
+      final local = row['local_echo'] == true && kind == 'origin'
+          ? _recent[_string(row['id'])]
+          : null;
+      if (local != null &&
+          local.jid == view.jid &&
+          local.owner == context.jid) {
+        final preserved = _projectPending(local);
+        projected['files'] = preserved['files'];
+        projected['markup'] = preserved['markup'];
+        projected['sticker'] = local.options['sticker'] != null;
+      }
+      rows.add(projected);
     }
     for (final send in _outbox.values.where(
       (row) =>

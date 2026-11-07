@@ -5,17 +5,23 @@ import 'dart:typed_data';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
-Directory? _cache;
 Future<Directory>? _ready;
-Future<Directory> _directory() => _ready ??= () async {
-  final root = await getTemporaryDirectory();
-  final directory = Directory('${root.path}/waddle-open');
-  if (await directory.exists()) {
-    await directory.delete(recursive: true);
-  }
-  await directory.create(recursive: true);
-  return _cache = directory;
-}();
+Future<void> _cleanup = Future.value();
+Future<Directory> _directory() {
+  final existing = _ready;
+  if (existing != null) return existing;
+  final previousCleanup = _cleanup;
+  return _ready = () async {
+    await previousCleanup;
+    final root = await getTemporaryDirectory();
+    final directory = Directory('${root.path}/waddle-open');
+    if (await directory.exists()) {
+      await directory.delete(recursive: true);
+    }
+    await directory.create(recursive: true);
+    return directory;
+  }();
+}
 
 Future<void> openPrivateFile(
   Uint8List bytes,
@@ -46,7 +52,11 @@ Future<void> openPrivateFile(
   }
 }
 
-Future<Uint8List> readLocalFileUri(String value) async {
+Future<Uint8List> readLocalFileUri(
+  String value, {
+  required int maxBytes,
+  void Function()? validate,
+}) async {
   final uri = Uri.parse(value);
   if (uri.scheme.isNotEmpty && uri.scheme != 'file') {
     throw UnsupportedError(
@@ -54,26 +64,39 @@ Future<Uint8List> readLocalFileUri(String value) async {
     );
   }
   final file = uri.scheme == 'file' ? File.fromUri(uri) : File(value);
-  if (await file.length() > 100 * 1024 * 1024) {
+  if (await file.length() > maxBytes) {
     throw StateError('This attachment is too large.');
   }
-  return file.readAsBytes();
+  final bytes = BytesBuilder(copy: false);
+  await for (final chunk in file.openRead()) {
+    validate?.call();
+    if (bytes.length + chunk.length > maxBytes) {
+      throw StateError('This attachment is too large.');
+    }
+    bytes.add(chunk);
+  }
+  validate?.call();
+  return bytes.takeBytes();
 }
 
-Future<void> clearPrivateFiles() async {
-  if (_ready != null) {
+Future<void> clearPrivateFiles() {
+  final previous = _ready;
+  final previousCleanup = _cleanup;
+  _ready = null;
+  final cleanup = () async {
+    await previousCleanup;
+    Directory? cache;
     try {
-      await _ready;
+      if (previous != null) cache = await previous;
     } catch (_) {
       /* No cache was created. */
     }
-  }
-  final cache = _cache;
-  _cache = null;
-  _ready = null;
-  if (cache != null && await cache.exists()) {
-    await cache.delete(recursive: true);
-  }
+    if (cache != null && await cache.exists()) {
+      await cache.delete(recursive: true);
+    }
+  }();
+  _cleanup = cleanup.catchError((Object _) {});
+  return cleanup;
 }
 
 Future<void> preparePrivateFiles() async {
