@@ -18,7 +18,7 @@ use waddle_xmpp::pending_delivery::{
 };
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::registry::{ConnectionRegistry, UserRegistryActor};
-use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+use waddle_xmpp::stream_management::persistence::{PromotionAppendOutcome, SmPersistenceStorage};
 use waddle_xmpp::stream_management::{
     DetachedSessionSnapshot, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
     StreamManagementState,
@@ -99,8 +99,19 @@ async fn durable_inventory(fixture: IngressFixture) {
         .append_promotion_stanza(&session, &suffix)
         .await
         .unwrap();
+    let mut equivalent = suffix.clone();
+    equivalent.stanza_xml = equivalent.stanza_xml.replace('\'', "\"");
+    assert_ne!(equivalent.stanza_xml, suffix.stanza_xml);
+    assert_eq!(
+        registry
+            .append_promotion_stanza(&session, &equivalent)
+            .await
+            .expect("equivalent promotion retry"),
+        PromotionAppendOutcome::AlreadyRecorded,
+    );
     let entries = storage.list_unacked(&stream).await.unwrap();
     assert_eq!(entries[1].provenance, suffix.provenance);
+    assert_eq!(entries[1].stanza.wire(), suffix.stanza_xml);
     // An incremental append and a later full snapshot retain the same frame identity.
     let mut independent = storage.get_session(&stream).await.unwrap().unwrap();
     independent.stream_id = SmSessionId::new("provenance-incremental");

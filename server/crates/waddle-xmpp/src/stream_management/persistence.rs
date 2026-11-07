@@ -1192,7 +1192,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         let queue = guard.unacked.entry(stream.clone()).or_default();
         if let Some(existing) = queue.iter().find(|entry| entry.sequence == sequence) {
             if is_new
-                || existing.stanza.wire() != stanza.stanza.wire()
+                || existing.stanza.to_element() != stanza.stanza.to_element()
                 || existing.original_receipt_at.timestamp_millis()
                     != stanza.original_receipt_at.timestamp_millis()
                 || existing.ingress_receipts != stanza.ingress_receipts
