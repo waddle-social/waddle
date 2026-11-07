@@ -109,7 +109,7 @@ async fn try_locks(
         return Ok(LockAttempt::CatalogContended);
     }
     for lock in locks {
-        let acquired = match *lock {
+        let acquired: bool = match *lock {
             CatalogFenceLock::Exclusive(key) => {
                 sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
                     .bind(key)

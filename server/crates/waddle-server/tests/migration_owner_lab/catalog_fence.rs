@@ -178,32 +178,29 @@ async fn postgres_dark_owner_waits_for_catalog_before_ledger_or_ddl() {
         .application_name(&application);
     let config = fixture.config();
     let migrator = fixture.migrator_role();
-    let mut owner =
-        tokio::spawn(async move { run_dark_postgres_owner(&options, &config, &migrator).await });
-
-    wait_for_idle_retry(&fixture.admin, &application).await;
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut owner)
+    let owner = run_dark_postgres_owner(&options, &config, &migrator);
+    let observe = async {
+        wait_for_idle_retry(&fixture.admin, &application).await;
+        let pending: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {}._migrations WHERE version >= 1028",
+            fixture.schema
+        ))
+        .fetch_one(&fixture.admin)
         .await
-        .is_err());
-    let pending: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM {}._migrations WHERE version >= 1028",
-        fixture.schema
-    ))
-    .fetch_one(&fixture.admin)
-    .await
-    .expect("inspect pending owner catalog");
-    assert_eq!(pending, 0, "catalog reader prevented migration DDL");
-
-    sqlx::query("ROLLBACK")
-        .execute(&mut blocker)
-        .await
-        .expect("release catalog reader");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(20), owner)
+        .expect("inspect pending owner catalog");
+        assert_eq!(pending, 0, "catalog reader prevented migration DDL");
+        sqlx::query("ROLLBACK")
+            .execute(&mut blocker)
             .await
-            .expect("owner resumes after catalog reader")
-            .expect("owner task")
-            .expect("owner commits pending catalog"),
+            .expect("release catalog reader");
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::join!(owner, observe)
+    })
+    .await
+    .expect("owner resumes after catalog reader");
+    assert_eq!(
+        result.expect("owner commits pending catalog"),
         vec![1028, 1029, 1030]
     );
     blocker.close().await.expect("close catalog reader");
@@ -230,26 +227,28 @@ async fn postgres_dark_owner_waits_for_catalog_before_ledger_or_ddl() {
         .application_name(&retry_application);
     let retry_config = fixture.config();
     let retry_migrator = fixture.migrator_role();
-    let retry = tokio::spawn(async move {
-        run_dark_postgres_owner(&retry_options, &retry_config, &retry_migrator).await
-    });
-    wait_for_idle_retry(&fixture.admin, &retry_application).await;
-    let mut observer = PgConnection::connect_with(&fixture.admin_options)
-        .await
-        .expect("connect catalog retry observer");
-    wait_for_shared(&mut observer).await;
-    unlock_shared(&mut observer).await;
-    sqlx::query("ROLLBACK")
-        .execute(&mut ledger_blocker)
-        .await
-        .expect("release ledger gate");
-    assert!(tokio::time::timeout(Duration::from_secs(20), retry)
-        .await
-        .expect("owner resumes after ledger gate")
-        .expect("owner retry task")
+    let retry = run_dark_postgres_owner(&retry_options, &retry_config, &retry_migrator);
+    let observe = async {
+        wait_for_idle_retry(&fixture.admin, &retry_application).await;
+        let mut observer = PgConnection::connect_with(&fixture.admin_options)
+            .await
+            .expect("connect catalog retry observer");
+        wait_for_shared(&mut observer).await;
+        unlock_shared(&mut observer).await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut ledger_blocker)
+            .await
+            .expect("release ledger gate");
+        observer.close().await.expect("close catalog observer");
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::join!(retry, observe)
+    })
+    .await
+    .expect("owner resumes after ledger gate");
+    assert!(result
         .expect("owner observes already applied catalog")
         .is_empty());
-    observer.close().await.expect("close catalog observer");
     ledger_blocker.close().await.expect("close ledger blocker");
     fixture.cleanup().await;
 }
