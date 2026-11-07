@@ -9,14 +9,18 @@ frame-occurrence custody. Neither dark candidate selects serving.
 
 ## Scope
 
-1. Add a closed, production-compiled PubSub v2 profile diagnostic on the
-   exact pinned pool. One bounded READ COMMITTED read-only transaction takes
+1. Add a closed, production-compiled PubSub relation-inventory diagnostic on
+   the exact pinned pool. One bounded READ COMMITTED read-only transaction takes
    the shared catalog fence first, then verifies pinned lineage, complete
-   V1030 ledger, epoch/manifest catalog and epoch, followed by the PubSub
-   role, owner, relation and function profile. Contention retries only after
-   acknowledged rollback. Return an observation only: no raw connection,
-   transaction, pool, SQL callback or reusable proof may escape. Keep the
-   legacy SQLite and owner-startup paths unchanged.
+   V1030 ledger, epoch/manifest catalog and epoch, followed by exact pinned
+   schema/name/OID, S-owner, regular persistent heap and inheritance/RLS
+   checks for the 12 PubSub relations. Lock those static relation names and
+   recheck their identities after any wait. This path uses raw catalog fields:
+   it does not run the v2 role/ACL/function graph, deparse expressions, or
+   read application rows. Contention retries only after acknowledged
+   rollback. Return an observation only: no raw connection, transaction,
+   pool, SQL callback or reusable proof may escape. Keep the legacy SQLite
+   and owner-startup paths unchanged.
 2. Add a separate immutable frame-occurrence identity to dark SM custody.
    Preserve the effect/resource key as the source obligation. Bind each frame
    UUID to exact serialized bytes, receipt time, complete provenance,
@@ -24,10 +28,11 @@ frame-occurrence custody. Neither dark candidate selects serving.
    resource, binding, claim, session and generation. Exact-key retry preserves
    the original result; conflicting reuse fails. An ambiguous commit or
    failed readback retains the UUID and bytes as Unknown without a fresh
-   identity or deletion. If the current persistence adapter remains
-   test-support-only, report that boundary rather than claiming live custody.
+   identity or deletion. The current PostgreSQL adapter remains fixture-only
+   and supports known-occurrence readback, not autonomous crash inventory.
 3. Test actual PubSub diagnostic selection, same-backend ordering, stale
-   pins, role drift, cancellation and bounded waits on PostgreSQL 17. Test
+   relation pins, owner/kind drift, cancellation, catalog-fence contention
+   and bounded waits on PostgreSQL 17. Test
    candidate frame identity, two frames from one obligation, byte-exact
    readback, ordering and wrap, stale generation, quota and lost-COMMIT
    uncertainty. Preserve SQLite behavior where supported.
@@ -43,6 +48,9 @@ SM selector is unsafe while other countable producers share its stream.
 The v3 quiescence handoff is an operator procedure, not independent proof or
 a continuously held fence. This group must not relax either startup refusal
 or wire a production SM producer, ACK, pending, resume or GC selector.
+Full hostile-safe v2 PubSub ACL/function/column/constraint proof, SM crash
+inventory, attempt-state fencing and arbitrary raw-writer lock ordering are
+separate gates before either candidate can become serving authority.
 
 The exact integrated head needs formatting, strict scoped Clippy, focused
 PostgreSQL/SQLite tests, and independent adversarial review. GitHub Actions
