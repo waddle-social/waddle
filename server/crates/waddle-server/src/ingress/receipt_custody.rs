@@ -4,9 +4,9 @@
 //! or terminalizes a message, and its admission guard outlives the caller.
 #[cfg(feature = "test-support")]
 use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 #[cfg(feature = "test-support")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -17,6 +17,13 @@ use waddle_xmpp::ingress::MessageKey;
 
 use super::execute::ProvenReceiptBatch;
 use super::EffectReceiptKey;
+#[cfg(feature = "test-support")]
+use crate::clustering::singleton_lease::GuardBackend;
+use crate::clustering::singleton_lease::LeaseGrant;
+use crate::db::physical_attestation::{
+    CustodiedReceiptAttempt, PinnedReceiptAuthority, PinnedReceiptCommit, ReceiptOperation,
+    ReceiptReadback,
+};
 use crate::db::Database;
 use crate::ingress_uow::EffectReceiptRepository;
 
@@ -32,6 +39,17 @@ struct Batch {
     next: usize,
     completion: oneshot::Sender<()>,
     _admission: OwnedRwLockReadGuard<bool>,
+    pinned: Option<Vec<PinnedReceiptWork>>,
+}
+
+struct PinnedReceiptWork {
+    operation: ReceiptOperation,
+    original: Option<CustodiedReceiptAttempt>,
+}
+
+struct PinnedSelection {
+    authority: PinnedReceiptAuthority,
+    grant: LeaseGrant,
 }
 
 #[derive(Default)]
@@ -40,10 +58,13 @@ struct Queue {
     incomplete: bool,
     batches: VecDeque<Batch>,
     outstanding_batches: usize,
+    retained_batches: usize,
     outstanding_receipts: usize,
     worker: Option<JoinHandle<()>>,
     #[cfg(feature = "test-support")]
     test_capacity: Option<(usize, usize)>,
+    unresolved: Vec<PinnedReceiptWork>,
+    pinned_admitted: HashSet<uuid::Uuid>,
 }
 
 struct Shared {
@@ -55,6 +76,7 @@ struct Shared {
     notify: Notify,
     #[cfg(feature = "test-support")]
     probes: Mutex<HashMap<MessageKey, Arc<ReceiptCustodyProbe>>>,
+    pinned: OnceLock<PinnedSelection>,
 }
 
 pub(super) struct ReceiptCustody {
@@ -78,6 +100,7 @@ impl ReceiptCustody {
                 notify: Notify::new(),
                 #[cfg(feature = "test-support")]
                 probes: Mutex::new(HashMap::new()),
+                pinned: OnceLock::new(),
             }),
             joining: tokio::sync::Mutex::new(()),
         }
@@ -89,6 +112,40 @@ impl ReceiptCustody {
 
     pub(super) fn has_fatal_fence(&self) -> bool {
         self.shared.fatal_fence.get().is_some()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn select_pinned(
+        &self,
+        authority: PinnedReceiptAuthority,
+        grant: LeaseGrant,
+    ) -> bool {
+        let queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if queue.closed || queue.worker.is_some() || grant.generation() <= 0 {
+            return false;
+        }
+        self.shared
+            .pinned
+            .set(PinnedSelection { authority, grant })
+            .is_ok()
+    }
+
+    pub(super) fn can_retain(&self) -> bool {
+        if self.pinned_selected() {
+            return true;
+        }
+        self.shared
+            .database
+            .attested_pg_writer_capability()
+            .is_none()
+    }
+
+    pub(super) fn pinned_selected(&self) -> bool {
+        self.shared.pinned.get().is_some()
     }
 
     #[cfg(feature = "test-support")]
@@ -107,12 +164,7 @@ impl ReceiptCustody {
         let Some(fatal_fence) = self.shared.fatal_fence.get() else {
             return Err(());
         };
-        if self
-            .shared
-            .database
-            .attested_pg_writer_capability()
-            .is_some()
-        {
+        if !self.can_retain() {
             return Err(());
         }
         let mut queue = self
@@ -132,7 +184,10 @@ impl ReceiptCustody {
             || queue.closed
             || self.shared.force_stop.is_cancelled()
             || fatal_fence.is_cancelled()
-            || queue.outstanding_batches >= max_batches
+            || queue
+                .outstanding_batches
+                .saturating_add(queue.retained_batches)
+                >= max_batches
             || receipt_count > max_receipts
             || queue.worker.as_ref().is_some_and(JoinHandle::is_finished)
         {
@@ -144,6 +199,43 @@ impl ReceiptCustody {
         if !*admission {
             return Err(());
         }
+        // The full set, including stable operation IDs, is owned before the
+        // executor can reach its next cancellable await.
+        let pinned = self.shared.pinned.get().map(|_| {
+            receipts
+                .iter()
+                .map(|key| PinnedReceiptWork {
+                    operation: receipt_operation(message, key),
+                    original: None,
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(work) = &pinned {
+            let mut ids = HashSet::new();
+            if work.iter().any(|item| {
+                !ids.insert(item.operation.operation_id)
+                    || queue.pinned_admitted.contains(&item.operation.operation_id)
+            }) {
+                return Err(());
+            }
+            queue.pinned_admitted.extend(ids);
+        }
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = self
+            .shared
+            .probes
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .get(&message)
+        {
+            if let Some(work) = &pinned {
+                *probe
+                    .operations
+                    .lock()
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) =
+                    work.iter().map(|item| item.operation).collect();
+            }
+        }
         let (completion, receiver) = oneshot::channel();
         queue.outstanding_batches += 1;
         queue.outstanding_receipts = receipt_count;
@@ -153,6 +245,7 @@ impl ReceiptCustody {
             next: 0,
             completion,
             _admission: admission,
+            pinned,
         });
         if queue.worker.is_none() {
             queue.worker = Some(tokio::spawn(run(Arc::clone(&self.shared))));
@@ -185,6 +278,14 @@ impl ReceiptCustody {
             pause_effect: AtomicBool::new(false),
             effect_reached: Notify::new(),
             effect_release: Notify::new(),
+            operations: Mutex::new(Vec::new()),
+            record_attempts: AtomicUsize::new(0),
+            readbacks: AtomicUsize::new(0),
+            original: Mutex::new(None),
+            pause_pinned: AtomicBool::new(false),
+            pinned_ready: Notify::new(),
+            pinned_resume: Mutex::new(None),
+            pinned_backends: Mutex::new(None),
         });
         self.shared
             .probes
@@ -219,6 +320,26 @@ impl ReceiptCustody {
             .test_capacity = Some((batches, receipts));
     }
 
+    #[cfg(feature = "test-support")]
+    pub(super) fn test_unresolved(&self) -> Vec<ReceiptCustodyUnresolved> {
+        self.shared
+            .queue
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .unresolved
+            .iter()
+            .map(|work| {
+                let observed = work.original.as_ref();
+                ReceiptCustodyUnresolved {
+                    operation: work.operation,
+                    attempted: observed.is_some(),
+                    backend_pid: observed.and_then(|attempt| attempt.backend_pid),
+                    backend: observed.and_then(|attempt| attempt.backend),
+                }
+            })
+            .collect()
+    }
+
     /// A timed-out caller puts the handle back, so a later drain can join it.
     pub(super) async fn join(&self) -> bool {
         let _joining = self.joining.lock().await;
@@ -245,9 +366,8 @@ impl ReceiptCustody {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if !result {
             queue.incomplete = true;
-            queue.batches.clear();
+            retain_stopped_batches(&mut queue);
             queue.outstanding_batches = 0;
-            queue.outstanding_receipts = 0;
         }
         result && !queue.incomplete
     }
@@ -277,7 +397,7 @@ async fn run(shared: Arc<Shared>) {
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         queue.incomplete = true;
-        queue.batches.clear();
+        retain_stopped_batches(&mut queue);
         return;
     };
     let mut workers = tokio::task::JoinSet::new();
@@ -296,9 +416,31 @@ async fn run(shared: Arc<Shared>) {
         .lock()
         .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     queue.incomplete |= failed || queue.outstanding_batches > 0;
-    queue.batches.clear();
+    retain_stopped_batches(&mut queue);
     queue.outstanding_batches = 0;
-    queue.outstanding_receipts = 0;
+}
+
+fn retain_stopped_batches(queue: &mut Queue) {
+    while let Some(batch) = queue.batches.pop_front() {
+        if let Some(receipts) = batch.pinned {
+            for (index, work) in receipts.into_iter().enumerate() {
+                // A positive readback in an earlier position still leaves
+                // that receipt's original backend fenced independently.
+                if index < batch.next && work.original.is_none() {
+                    queue.pinned_admitted.remove(&work.operation.operation_id);
+                    continue;
+                }
+                let (backend_pid, backend) = work
+                    .original
+                    .as_ref()
+                    .map(|attempt| (attempt.backend_pid, attempt.backend))
+                    .unwrap_or((None, None));
+                tracing::warn!(operation_id = %work.operation.operation_id, ?backend_pid, ?backend,
+                    "pinned receipt continuation stopped unresolved");
+                queue.unresolved.push(work);
+            }
+        }
+    }
 }
 
 async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
@@ -315,7 +457,6 @@ async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
                 .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if shared.force_stop.is_cancelled() || fatal_fence.is_cancelled() {
                 queue.incomplete |= queue.outstanding_batches > 0;
-                queue.batches.clear();
                 return;
             }
             match queue.batches.pop_front() {
@@ -345,7 +486,11 @@ async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
             .filter(|probe| probe.pause_attempts.load(Ordering::SeqCst))
         {
             probe.reached.notify_one();
-            probe.release.notified().await;
+            tokio::select! {
+                _ = probe.release.notified() => {},
+                _ = shared.force_stop.cancelled() => {},
+                _ = fatal_fence.cancelled() => {},
+            }
         }
         if shared.force_stop.is_cancelled() || fatal_fence.is_cancelled() {
             shared
@@ -356,29 +501,50 @@ async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
                 .push_front(batch);
             continue;
         }
-        let key = &batch.receipts[batch.next];
-        let result = tokio::time::timeout(
-            ATTEMPT_BUDGET,
-            EffectReceiptRepository::record_receipt_pooled(
-                &shared.database,
-                batch.message,
-                key.kind,
-                &key.semantic_identity_hash,
-            ),
-        )
-        .await;
-        let succeeded = matches!(result, Ok(Ok(())));
+        let succeeded = if let Some(work) = batch.pinned.as_mut() {
+            let Some(selection) = shared.pinned.get() else {
+                shared.force_stop.cancel();
+                shared
+                    .queue
+                    .lock()
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+                    .batches
+                    .push_front(batch);
+                continue;
+            };
+            pinned_attempt(
+                selection,
+                &mut work[batch.next],
+                #[cfg(feature = "test-support")]
+                probe.as_deref(),
+            )
+            .await
+        } else {
+            let key = &batch.receipts[batch.next];
+            let result = tokio::time::timeout(
+                ATTEMPT_BUDGET,
+                EffectReceiptRepository::record_receipt_pooled(
+                    &shared.database,
+                    batch.message,
+                    key.kind,
+                    &key.semantic_identity_hash,
+                ),
+            )
+            .await;
+            matches!(result, Ok(Ok(())))
+        };
         #[cfg(feature = "test-support")]
         let succeeded = succeeded
-            && !probe
-                .as_ref()
-                .is_some_and(|probe| probe.lose_ack.swap(false, Ordering::SeqCst));
+            && (batch.pinned.is_some()
+                || !probe
+                    .as_ref()
+                    .is_some_and(|probe| probe.lose_ack.swap(false, Ordering::SeqCst)));
         if succeeded {
             batch.next += 1;
         } else {
-            // A COMMIT error or timeout is not evidence of rollback. Retrying
-            // the same immutable insert cannot re-execute the effect.
-            tracing::debug!("proven ingress receipt remains unresolved; retrying exact insert");
+            // Legacy retries the exact insert. Pinned custody instead retains
+            // the first attempt and retries only its exact journal lookup.
+            tracing::debug!("proven ingress receipt remains unresolved");
             // The delay belongs to this batch, not the shared queue. Other
             // workers can continue with independent receipt identities.
             tokio::select! {
@@ -394,7 +560,24 @@ async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
                 .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if batch.next == batch.receipts.len() {
                 queue.outstanding_batches -= 1;
-                queue.outstanding_receipts -= batch.receipts.len();
+                let mut retained = 0;
+                if let Some(work) = batch.pinned {
+                    for item in work {
+                        if item.original.is_some() {
+                            // Positive readback establishes the journal row,
+                            // not termination of the original backend.
+                            queue.unresolved.push(item);
+                            retained += 1;
+                        } else {
+                            queue.pinned_admitted.remove(&item.operation.operation_id);
+                        }
+                    }
+                }
+                queue.outstanding_receipts -= batch.receipts.len() - retained;
+                if retained > 0 {
+                    queue.retained_batches += 1;
+                    queue.incomplete = true;
+                }
                 let _ = batch.completion.send(());
             } else {
                 queue.batches.push_back(batch);
@@ -404,8 +587,132 @@ async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
     }
 }
 
-/// Test-only barriers around each exact insert and optional lost acknowledgement.
+/// Versioned derivation from the durable effect-intent identity. Reconstructing
+/// an ID after restart does not fence an original backend or authorize replay.
+pub(crate) fn receipt_operation(message: MessageKey, key: &EffectReceiptKey) -> ReceiptOperation {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"waddle.p21.receipt-operation.v1\0");
+    digest.update(message.to_storage().as_bytes());
+    digest.update(key.kind.to_storage().to_be_bytes());
+    digest.update(key.semantic_identity_hash);
+    let hash = digest.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    // RFC 9562 UUIDv8 with the IETF variant; these bits also rule out nil.
+    id[6] = (id[6] & 0x0f) | 0x80;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    ReceiptOperation {
+        operation_id: uuid::Uuid::from_bytes(id),
+        message,
+        kind: key.kind,
+        semantic_identity_hash: key.semantic_identity_hash,
+    }
+}
+
+async fn pinned_attempt(
+    selection: &PinnedSelection,
+    work: &mut PinnedReceiptWork,
+    #[cfg(feature = "test-support")] probe: Option<&ReceiptCustodyProbe>,
+) -> bool {
+    if work.original.is_some() {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = probe {
+            probe.readbacks.fetch_add(1, Ordering::SeqCst);
+        }
+        return matches!(
+            selection.authority.readback(&work.operation).await,
+            Ok(ReceiptReadback::Committed { .. })
+        );
+    }
+    #[cfg(feature = "test-support")]
+    if let Some(probe) = probe {
+        probe.record_attempts.fetch_add(1, Ordering::SeqCst);
+    }
+    #[cfg(feature = "test-support")]
+    let mut attempt = if let Some(probe) =
+        probe.filter(|probe| probe.pause_pinned.swap(false, Ordering::SeqCst))
+    {
+        let (ready, observed) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        *probe
+            .pinned_resume
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(resume);
+        let future = selection.authority.record_for_custody(
+            &selection.grant,
+            &work.operation,
+            Some((ready, release)),
+        );
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => result,
+            pair = observed => {
+                if let Ok(pair) = pair {
+                    *probe.pinned_backends.lock()
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(pair);
+                    probe.pinned_ready.notify_one();
+                }
+                future.await
+            }
+        }
+    } else {
+        selection
+            .authority
+            .record_for_custody(&selection.grant, &work.operation, None)
+            .await
+    };
+    #[cfg(not(feature = "test-support"))]
+    let attempt = selection
+        .authority
+        .record_for_custody(&selection.grant, &work.operation, None)
+        .await;
+    #[cfg(feature = "test-support")]
+    if probe.is_some_and(|probe| probe.lose_ack.swap(false, Ordering::SeqCst))
+        && matches!(&attempt.result, Ok(PinnedReceiptCommit::Committed { .. }))
+    {
+        attempt.result = Ok(PinnedReceiptCommit::Indeterminate {
+            operation_id: work.operation.operation_id,
+            backend_pid: attempt.backend_pid,
+            backend: attempt.backend,
+        });
+    }
+    if matches!(&attempt.result, Ok(PinnedReceiptCommit::Committed { .. })) {
+        return true;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some(probe) = probe {
+        *probe
+            .original
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) =
+            Some(ReceiptCustodyUnresolved {
+                operation: work.operation,
+                attempted: true,
+                backend_pid: attempt.backend_pid,
+                backend: attempt.backend,
+            });
+    }
+    // Every other result, including a failure before PID observation, is
+    // retained verbatim. Only positive exact readback can complete receipt
+    // observation; absence never authorizes another write attempt.
+    work.original = Some(attempt);
+    false
+}
+
+/// Test-only snapshot of an operation whose original backend remains unfenced.
 #[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiptCustodyUnresolved {
+    pub operation: ReceiptOperation,
+    pub attempted: bool,
+    pub backend_pid: Option<i32>,
+    pub backend: Option<GuardBackend>,
+}
+
+#[cfg(feature = "test-support")]
+/// Test-only barriers around each exact insert and optional lost acknowledgement.
 pub struct ReceiptCustodyProbe {
     reached: Notify,
     release: Notify,
@@ -414,10 +721,61 @@ pub struct ReceiptCustodyProbe {
     pause_effect: AtomicBool,
     effect_reached: Notify,
     effect_release: Notify,
+    operations: Mutex<Vec<ReceiptOperation>>,
+    record_attempts: AtomicUsize,
+    readbacks: AtomicUsize,
+    original: Mutex<Option<ReceiptCustodyUnresolved>>,
+    pause_pinned: AtomicBool,
+    pinned_ready: Notify,
+    pinned_resume: Mutex<Option<oneshot::Sender<()>>>,
+    pinned_backends: Mutex<Option<(GuardBackend, GuardBackend)>>,
 }
 
 #[cfg(feature = "test-support")]
 impl ReceiptCustodyProbe {
+    pub fn operations(&self) -> Vec<ReceiptOperation> {
+        self.operations
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone()
+    }
+
+    pub fn pinned_counts(&self) -> (usize, usize) {
+        (
+            self.record_attempts.load(Ordering::SeqCst),
+            self.readbacks.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn original_attempt(&self) -> Option<ReceiptCustodyUnresolved> {
+        *self
+            .original
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    }
+
+    pub fn pause_in_pinned_transaction(&self) {
+        self.pause_pinned.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn wait_in_pinned_transaction(&self) -> Option<(GuardBackend, GuardBackend)> {
+        self.pinned_ready.notified().await;
+        *self
+            .pinned_backends
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    }
+
+    pub fn release_pinned_transaction(&self) {
+        if let Some(resume) = self
+            .pinned_resume
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .take()
+        {
+            let _ = resume.send(());
+        }
+    }
     pub async fn wait_for_attempt(&self) {
         self.reached.notified().await;
     }

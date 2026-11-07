@@ -963,6 +963,11 @@ async fn execute_effects_inner(
     if receipt_unresolved {
         return report;
     }
+    // The dark pinned receipt selector authorizes only receipt continuation.
+    // Terminalization remains on its existing, separately gated path.
+    if custody.is_some_and(ReceiptCustody::pinned_selected) {
+        return report;
+    }
     if let Some(key) = decision.message_key {
         #[cfg(test)]
         test_hooks::before_terminalization(key).await;

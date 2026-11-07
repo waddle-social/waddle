@@ -3,6 +3,10 @@
 #[path = "../src/test_support/postgres_proxy.rs"]
 pub mod postgres_proxy;
 
+#[cfg(feature = "test-support")]
+#[path = "ingress_support.rs"]
+pub mod ingress_support;
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;

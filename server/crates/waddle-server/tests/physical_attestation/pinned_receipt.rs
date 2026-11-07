@@ -1001,6 +1001,436 @@ async fn pinned_receipt_holds_fences_and_recovers_only_positive_results() {
     fixture.cleanup().await;
 }
 
+async fn live_call_decision(
+    ingress: &crate::ingress_support::IngressFixture,
+    name: &str,
+) -> (
+    waddle_server::ingress::IngressDecision,
+    waddle_server::ingress::IngressDecision,
+    waddle_xmpp::ingress::PlannedDmCallState,
+) {
+    use waddle_server::ingress::commit::commit_submission;
+    use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+    use waddle_server::ingress::effects::{Effect, PlanSuppressionPolicy};
+    use waddle_server::ingress::{ExternalEffect, PlannedEffect};
+    use waddle_xmpp::ingress::{
+        DmCallThreadKey, IngressEffectIntent, PendingDmCallOffer, PlannedDmCallState,
+    };
+
+    let mut submission = ingress.submission(Some(name), "call offer");
+    let state = PlannedDmCallState {
+        key: DmCallThreadKey::new(
+            submission.sender.to_bare(),
+            "bob@example.com".parse().expect("peer"),
+            xmpp_parsers::jingle::SessionId(name.into()),
+        ),
+        pending: Some(PendingDmCallOffer {
+            media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            initiator: submission.sender.to_bare(),
+            started: chrono::Utc::now(),
+        }),
+        active: None,
+        projected: Default::default(),
+    };
+    let intent = IngressEffectIntent::DmCallThreadState {
+        sequence: 0,
+        state: Box::new(state.clone()),
+    };
+    submission.plan.intents = vec![intent.clone()];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(ExternalEffect::Direct(
+        ExternalDirectEffect::DmCallThreadState {
+            state: Box::new(state.clone()),
+            receipt: Some(Box::new(intent)),
+        },
+    )))
+    .with_suppression(PlanSuppressionPolicy::Always)];
+    let decision = commit_submission(&ingress.uow, &submission, 1)
+        .await
+        .expect("commit real call intent");
+    submission.plan.intents.clear();
+    submission.plan.plan.clear();
+    let recovered = commit_submission(&ingress.uow, &submission, 1)
+        .await
+        .expect("reconstruct the committed intent");
+    assert_eq!(
+        decision.external_receipts[0],
+        recovered.external_receipts[0]
+    );
+    (decision, recovered, state)
+}
+
+async fn live_ingress_fixture(fixture: &Fixture) -> crate::ingress_support::IngressFixture {
+    let db = Database::from_config(
+        "pinned receipt live producer fixture",
+        &DatabaseConfig::new(
+            DatabaseDriver::Postgres,
+            url_with_schema(&fixture.base_url, &fixture.target),
+        ),
+    )
+    .await
+    .expect("owner fixture database");
+    // Produce and recover the real decision while the registered V1009
+    // guard is still installed. The candidate guard installed by `setup`
+    // has a different prelock contract from this legacy producer UOW.
+    waddle_server::db::MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("prepare registered ingress migrations");
+    crate::ingress_support::IngressFixture::existing(
+        db,
+        waddle_server::config::LineageConfig {
+            deployment_uuid: Some(fixture.lineage.deployment_uuid),
+            action: None,
+        },
+    )
+    .await
+}
+
+fn live_receipt_authority(
+    fixture: &Fixture,
+    ingress: &crate::ingress_support::IngressFixture,
+) -> waddle_server::ingress::IngressAuthority {
+    waddle_server::test_support::quiescent_pinned_receipt_ingress(
+        ingress.db.clone(),
+        waddle_server::config::LineageConfig {
+            deployment_uuid: Some(fixture.lineage.deployment_uuid),
+            action: None,
+        },
+    )
+}
+
+#[test]
+fn receipt_operation_id_is_versioned_and_reconstructable() {
+    use waddle_server::ingress::EffectReceiptKey;
+    use waddle_server::test_support::receipt_operation_from_intent;
+
+    let message = MessageKey::from_storage(
+        Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("UUID"),
+    );
+    let key = EffectReceiptKey {
+        kind: EffectReceiptKind::from_storage(17),
+        semantic_identity_hash: [0xab; 32],
+    };
+    let operation = receipt_operation_from_intent(message, &key);
+    assert_eq!(
+        operation.operation_id.to_string(),
+        "e6f7218d-fac3-81eb-905b-bfe1e957986f"
+    );
+    assert_eq!(operation, receipt_operation_from_intent(message, &key));
+    assert_ne!(
+        operation.operation_id,
+        receipt_operation_from_intent(
+            message,
+            &EffectReceiptKey {
+                semantic_identity_hash: [0xac; 32],
+                ..key
+            }
+        )
+        .operation_id,
+    );
+}
+
+#[tokio::test]
+async fn live_executor_retains_pinned_attempt_past_its_five_second_budget() {
+    use waddle_server::ingress::{Deps, ImmediateSink};
+    use waddle_server::test_support::{
+        bind_receipt_custody_fatal_fence, receipt_custody_probe, receipt_operation_from_intent,
+        select_pinned_receipt_custody, websocket_state,
+    };
+    use waddle_xmpp::registry::ConnectionRegistry;
+
+    let _guard = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let ingress = live_ingress_fixture(&fixture).await;
+    let (decision, recovered, state) = live_call_decision(&ingress, "pinned-slow").await;
+    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
+    let authority = live_receipt_authority(&fixture, &ingress);
+    assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
+    let socket = websocket_state().await;
+    bind_receipt_custody_fatal_fence(&authority, &socket);
+    let registry = ConnectionRegistry::new();
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&socket);
+    let message = decision.message_key.expect("canonical message");
+    let probe = receipt_custody_probe(&authority, message, false);
+    probe.stop_pausing_attempts();
+    probe.pause_in_pinned_transaction();
+    let mut execution = Box::pin(authority.execute(&decision, &ImmediateSink, &deps));
+    let pair = tokio::select! {
+        pair = probe.wait_in_pinned_transaction() => pair.expect("backend observations"),
+        _ = &mut execution => panic!("executor completed before transaction pause"),
+    };
+    assert_same_transaction(&fixture, pair.0, pair.1).await;
+    let operations = probe.operations();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(
+        operations[0],
+        receipt_operation_from_intent(
+            recovered.message_key.expect("recovered message"),
+            &recovered.external_receipts[0][0],
+        )
+    );
+    assert!(!operations[0].operation_id.is_nil());
+    assert!(socket
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .contains_key(&state.key));
+    drop(execution);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_same_transaction(&fixture, pair.0, pair.1).await;
+    let visible: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM {}.p21_receipt_operation_results WHERE operation_id=$1)",
+        fixture.target,
+    ))
+    .bind(operations[0].operation_id)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("journal visibility");
+    assert!(
+        !visible,
+        "the transaction is still pending six seconds after caller cancellation"
+    );
+    let terminal: bool = sqlx::query_scalar(&format!(
+        "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",
+        fixture.target,
+    ))
+    .bind(message.to_storage())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("message frontier");
+    assert!(!terminal);
+    probe.release_pinned_transaction();
+    assert!(authority.drain_and_join(Duration::from_secs(10)).await);
+    let visible: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM {}.p21_receipt_operation_results WHERE operation_id=$1)",
+        fixture.target,
+    ))
+    .bind(operations[0].operation_id)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("committed journal");
+    assert!(visible);
+    assert_eq!(probe.pinned_counts(), (1, 0));
+    drop(deps);
+    drop(socket);
+    drop(authority);
+    ingress.close().await;
+    drop(leases);
+    sql(&fixture, &format!("DROP OWNED BY {api}; DROP ROLE {api}")).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn live_executor_positive_readback_retains_original_backend_and_capacity() {
+    use waddle_server::ingress::{Deps, ExternalOutcome, ImmediateSink};
+    use waddle_server::test_support::{
+        bind_receipt_custody_fatal_fence, receipt_custody_capacity, receipt_custody_probe,
+        receipt_custody_unresolved, select_pinned_receipt_custody, websocket_state,
+    };
+    use waddle_xmpp::registry::ConnectionRegistry;
+
+    let _guard = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let ingress = live_ingress_fixture(&fixture).await;
+    let (decision, _, state) = live_call_decision(&ingress, "pinned-lost-ack").await;
+    let (next, _, _) = live_call_decision(&ingress, "pinned-capacity").await;
+    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
+    let authority = live_receipt_authority(&fixture, &ingress);
+    assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
+    let socket = websocket_state().await;
+    bind_receipt_custody_fatal_fence(&authority, &socket);
+    receipt_custody_capacity(&authority, 1, 1);
+    let registry = ConnectionRegistry::new();
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&socket);
+    let message = decision.message_key.expect("canonical message");
+    let probe = receipt_custody_probe(&authority, message, true);
+    let mut execution = Box::pin(authority.execute(&decision, &ImmediateSink, &deps));
+    tokio::select! {
+        _ = probe.wait_for_attempt() => {},
+        _ = &mut execution => panic!("completed before custody admission"),
+    }
+    let operation = probe.operations()[0];
+    probe.release_attempt();
+    tokio::time::timeout(Duration::from_secs(4), probe.wait_for_attempt())
+        .await
+        .expect("readback follows lost acknowledgement");
+    let original = probe.original_attempt().expect("retained original attempt");
+    assert_eq!(original.operation, operation);
+    assert!(original.attempted);
+    assert_eq!(
+        original.backend_pid,
+        original.backend.map(|backend| backend.pid)
+    );
+    assert!(original.backend.is_some());
+    assert_eq!(probe.pinned_counts(), (1, 0));
+    let terminal: bool = sqlx::query_scalar(&format!(
+        "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",
+        fixture.target,
+    ))
+    .bind(message.to_storage())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("message frontier");
+    assert!(!terminal);
+    socket
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .remove(&state.key);
+    probe.release_attempt();
+    let report = tokio::time::timeout(Duration::from_secs(5), &mut execution)
+        .await
+        .expect("positive exact readback");
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(probe.pinned_counts(), (1, 1));
+    let terminal: bool = sqlx::query_scalar(&format!(
+        "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",
+        fixture.target,
+    ))
+    .bind(message.to_storage())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("message frontier after readback");
+    assert!(
+        !terminal,
+        "the dark receipt path does not run legacy terminalization"
+    );
+    let unresolved = receipt_custody_unresolved(&authority);
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].operation, operation);
+    assert_eq!(unresolved[0].backend, original.backend);
+    assert!(!socket
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .contains_key(&state.key));
+    let report = authority.execute(&next, &ImmediateSink, &deps).await;
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert!(!report.receipt_failures.is_empty());
+    drop(execution);
+    assert!(
+        !authority.drain_and_join(Duration::from_secs(10)).await,
+        "positive readback does not retire the original backend fence"
+    );
+    drop(deps);
+    drop(socket);
+    drop(authority);
+    ingress.close().await;
+    drop(leases);
+    sql(&fixture, &format!("DROP OWNED BY {api}; DROP ROLE {api}")).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
+    use waddle_server::ingress::{Deps, ImmediateSink};
+    use waddle_server::test_support::{
+        bind_receipt_custody_fatal_fence, receipt_custody_probe, receipt_custody_unresolved,
+        select_pinned_receipt_custody, websocket_state,
+    };
+    use waddle_xmpp::registry::ConnectionRegistry;
+
+    let _guard = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let ingress = live_ingress_fixture(&fixture).await;
+    let (decision, _, state) = live_call_decision(&ingress, "pinned-unknown").await;
+    let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
+    let authority = live_receipt_authority(&fixture, &ingress);
+    assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
+    let socket = websocket_state().await;
+    bind_receipt_custody_fatal_fence(&authority, &socket);
+    let registry = ConnectionRegistry::new();
+    let mut deps = Deps::new(&registry, "example.com");
+    deps.web_socket_state = Some(&socket);
+    let message = decision.message_key.expect("canonical message");
+    let probe = receipt_custody_probe(&authority, message, false);
+    let mut execution = Box::pin(authority.execute(&decision, &ImmediateSink, &deps));
+    tokio::select! {
+        _ = probe.wait_for_attempt() => {},
+        _ = &mut execution => panic!("completed before custody admission"),
+    }
+    let operation = probe.operations()[0];
+    assert!(socket
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .contains_key(&state.key));
+    // The proof and immutable operation are already retained; cancel before
+    // checkout, then prevent the first pinned checkout from acquiring S.
+    drop(execution);
+    let mut catalog = fixture.admin.begin().await.expect("catalog holder");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog)
+        .await
+        .expect("hold catalog exclusive");
+    probe.release_attempt();
+    tokio::time::timeout(Duration::from_secs(7), probe.wait_for_attempt())
+        .await
+        .expect("unknown first attempt switches to readback");
+    let original = probe.original_attempt().expect("original attempt retained");
+    assert_eq!(original.operation, operation);
+    assert!(original.attempted);
+    assert_eq!(original.backend_pid, None);
+    assert_eq!(original.backend, None);
+    assert_eq!(probe.pinned_counts(), (1, 0));
+    let terminal: bool = sqlx::query_scalar(&format!(
+        "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",
+        fixture.target,
+    ))
+    .bind(message.to_storage())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("message frontier");
+    assert!(!terminal);
+    catalog.commit().await.expect("release catalog fence");
+    socket
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .remove(&state.key);
+    probe.release_attempt();
+    tokio::time::timeout(Duration::from_secs(7), probe.wait_for_attempt())
+        .await
+        .expect("absent readback remains pending");
+    assert_eq!(probe.pinned_counts(), (1, 1));
+    assert!(!socket
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .contains_key(&state.key));
+    let visible: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM {}.p21_receipt_operation_results WHERE operation_id=$1)",
+        fixture.target,
+    ))
+    .bind(operation.operation_id)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("absent journal row");
+    assert!(!visible);
+    assert!(!authority.drain_and_join(Duration::from_millis(250)).await);
+    assert!(!authority.drain_and_join(Duration::from_secs(10)).await);
+    let unresolved = receipt_custody_unresolved(&authority);
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].operation, operation);
+    assert!(unresolved[0].attempted);
+    assert_eq!(unresolved[0].backend_pid, None);
+    assert_eq!(unresolved[0].backend, None);
+    assert_eq!(probe.pinned_counts(), (1, 1));
+    drop(deps);
+    drop(socket);
+    drop(authority);
+    ingress.close().await;
+    drop(leases);
+    sql(&fixture, &format!("DROP OWNED BY {api}; DROP ROLE {api}")).await;
+    fixture.cleanup().await;
+}
+
 async fn lose_commit_reply(
     listener: tokio::net::TcpListener,
     upstream: sqlx::postgres::PgConnectOptions,

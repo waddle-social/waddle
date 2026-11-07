@@ -211,6 +211,45 @@ pub fn receipt_custody_capacity(authority: &IngressAuthority, batches: usize, re
     authority.receipt_custody_test_capacity(batches, receipts);
 }
 
+/// Inspect retained pinned operations and their original backend observations.
+#[cfg(feature = "test-support")]
+pub fn receipt_custody_unresolved(
+    authority: &IngressAuthority,
+) -> Vec<crate::ingress::ReceiptCustodyUnresolved> {
+    authority.receipt_custody_test_unresolved()
+}
+
+/// Build the real ingress executor without its owner-side GC task. The
+/// existing database and lineage must already be prepared by the fixture.
+#[cfg(feature = "test-support")]
+pub fn quiescent_pinned_receipt_ingress(
+    database: Database,
+    lineage: LineageConfig,
+) -> IngressAuthority {
+    IngressAuthority::for_pinned_receipt_test(database, lineage)
+}
+
+/// Select the pinned receipt worker for the real executor in a dark fixture.
+#[cfg(feature = "test-support")]
+pub async fn select_pinned_receipt_custody(
+    authority: &IngressAuthority,
+    pinned: crate::db::physical_attestation::PinnedReceiptAuthority,
+    grant: crate::clustering::singleton_lease::LeaseGrant,
+) -> bool {
+    authority
+        .select_pinned_receipt_for_test(pinned, grant)
+        .await
+}
+
+/// Reconstruct the versioned operation identity from a recovered intent key.
+#[cfg(feature = "test-support")]
+pub fn receipt_operation_from_intent(
+    message: waddle_xmpp::ingress::MessageKey,
+    key: &crate::ingress::EffectReceiptKey,
+) -> crate::db::physical_attestation::ReceiptOperation {
+    crate::ingress::receipt_operation_for_test(message, key)
+}
+
 /// Whether both the authority and its receipt worker carry this reserved lane.
 #[cfg(feature = "test-support")]
 pub fn receipt_custody_shares_ingress_lane(
