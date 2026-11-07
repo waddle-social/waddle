@@ -17,3 +17,12 @@ default build and trigger four dead-code diagnostics.
 This is a build-quality gate only. It does not activate provisional endpoint
 publication, change WebSocket routing, or complete #2046's release matrix.
 GitHub Actions and workflow files remain disabled until final qualification.
+
+## Verification boundary
+
+The seven private helpers are absent from the default build, and the focused
+binding activation test still passes. Default strict Clippy now reaches
+`waddle-server` and reports 37 further diagnostics, including dormant pinned
+MAM, actor endpoint and I/O code plus one type-complexity warning. Those paths
+need a separate product and architecture decision before any feature gating.
+The full default strict Clippy release gate remains open.

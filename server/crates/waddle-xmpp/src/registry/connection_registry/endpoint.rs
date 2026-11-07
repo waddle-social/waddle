@@ -187,6 +187,7 @@ impl BindingAdmission {
         self.owner == owner && self.binding_ref.as_ref() == binding_ref
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     fn activate(&mut self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
         if !self.matches(owner, Some(binding_ref)) {
             return false;
@@ -231,6 +232,7 @@ impl BindingOutboundEndpoint {
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn activate(
         &self,
         owner: LocalConnectionBindingId,
@@ -467,6 +469,7 @@ impl BindingOutboundEndpoint {
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn is_provisional(&self) -> bool {
         self.admission
             .lock()

@@ -574,6 +574,7 @@ impl ConnectionEntry {
     /// Atomically activate this exact local binding candidate. A sealed
     /// binding cannot be reactivated. Only the provisional wrapper exposes
     /// the resulting entry to publication APIs.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn activate_binding(
         &self,
         owner: LocalConnectionBindingId,
@@ -618,6 +619,7 @@ impl ConnectionEntry {
         self.endpoint.actor_custody()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(in crate::registry) fn is_provisional(&self) -> bool {
         self.endpoint.is_provisional()
     }
@@ -1005,6 +1007,7 @@ impl ActorProvisionalConnectionEntry {
         self.entry.actor_custody()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(in crate::registry) fn entry_for_publication(&self) -> ConnectionEntry {
         self.entry.clone()
     }
@@ -1013,6 +1016,7 @@ impl ActorProvisionalConnectionEntry {
         self.entry.same_exact_local_binding(entry)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(in crate::registry) fn is_provisional(&self) -> bool {
         self.entry.is_provisional()
     }
