@@ -352,7 +352,7 @@ class ConversationRuntime {
         if (jid.isEmpty || jid == bareJid(context.jid!)) {
           return;
         }
-        _incomingTyping(jid, raw);
+        _incomingTyping(jid, group, raw);
         final pin = runtimeMap(raw['pin_event']);
         if (pin.isNotEmpty && from == jid && group) {
           final ids = _pins.putIfAbsent(jid, () => <String>{});
@@ -1582,9 +1582,9 @@ class ConversationRuntime {
     }
   }
 
-  void _incomingTyping(String jid, Map<String, dynamic> raw) {
+  void _incomingTyping(String jid, bool group, Map<String, dynamic> raw) {
     final sender = _string(raw['from']);
-    if (sender.isEmpty || bareJid(sender) == bareJid(context.jid!)) {
+    if (sender.isEmpty || _fromSelf(jid, group, sender)) {
       return;
     }
     final names = _typing.putIfAbsent(jid, () => {});
@@ -1606,6 +1606,23 @@ class ConversationRuntime {
       }
     });
     _emitFor(jid);
+  }
+
+  /// Whether [sender] is this account. In 1:1 that is our bare JID (our other
+  /// devices' states arrive as XEP-0280 carbons). A room reflects our own
+  /// XEP-0085 states back from `room/ourNick` (XEP-0045), so there it is our
+  /// self-presence nick (status 110), or an occupant whose disclosed real JID
+  /// is ours: another of our devices under a different nick.
+  bool _fromSelf(String jid, bool group, String sender) {
+    final own = bareJid(context.jid!);
+    if (!group) {
+      return bareJid(sender) == own;
+    }
+    if (_resource(sender) == _selfNicks[jid]) {
+      return true;
+    }
+    final real = _optional(_occupants[jid]?[sender]?['muc_jid']);
+    return real != null && bareJid(real) == own;
   }
 
   void _readVisible(_View view) {
