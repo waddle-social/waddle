@@ -52,6 +52,8 @@ mod pinned_mam;
 pub(crate) use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
 #[cfg(feature = "test-support")]
 pub use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
+mod pinned_pubsub;
+pub use pinned_pubsub::{PinnedPubSubProfile, PinnedPubSubProfileError, PinnedPubSubProfileJob};
 mod preflight;
 pub use preflight::{
     attest_dark_catalog_pinned, DarkPhysicalAttestationError, DarkPhysicalAttestationPins,

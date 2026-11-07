@@ -7,6 +7,9 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 use crate::db::lineage::PgIdentity;
+use crate::db::physical_attestation::{
+    PinnedPubSubProfile, PinnedPubSubProfileError, PinnedPubSubProfileJob,
+};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
 impl DatabasePubSubStorage {
@@ -94,6 +97,24 @@ impl DatabasePubSubStorage {
         profile: &super::RestrictedServingProfileV2,
     ) -> Result<(), super::PubSubRuntimeAttachError> {
         super::runtime_attach::verify_restricted_v2(db, profile).await
+    }
+
+    /// Start the pinned, read-only v2 diagnostic without attaching a store.
+    /// The owned job continues to rollback if its receiver is dropped.
+    pub fn start_pinned_restricted_profile_v2(
+        profile: &PinnedPubSubProfile,
+    ) -> Result<PinnedPubSubProfileJob, PinnedPubSubProfileError> {
+        profile.start()
+    }
+
+    /// Pause the same diagnostic after its checks for backend observation.
+    #[cfg(feature = "test-support")]
+    pub fn start_pinned_restricted_profile_v2_paused_for_test(
+        profile: &PinnedPubSubProfile,
+        ready: tokio::sync::oneshot::Sender<(i32, bool, bool)>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<PinnedPubSubProfileJob, PinnedPubSubProfileError> {
+        profile.start_paused_for_test(ready, release)
     }
 
     pub fn database(&self) -> Database {
