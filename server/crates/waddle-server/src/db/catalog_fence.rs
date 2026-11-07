@@ -141,30 +141,42 @@ async fn try_locks(
         return Ok(LockAttempt::CatalogContended);
     }
     for lock in locks {
-        let acquired: bool = match *lock {
-            CatalogFenceLock::Exclusive(key) => {
-                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
-                    .bind(key)
-                    .fetch_one(&mut *connection)
-                    .await?
-            }
-            CatalogFenceLock::Shared(key) => {
-                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
-                    .bind(key)
-                    .fetch_one(&mut *connection)
-                    .await?
-            }
-            CatalogFenceLock::SharedPair(first, second) => {
-                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1, $2)")
-                    .bind(first)
-                    .bind(second)
-                    .fetch_one(&mut *connection)
-                    .await?
-            }
-        };
-        if !acquired {
+        if !try_catalog_fence_lock(tx, *lock).await? {
             return Ok(LockAttempt::GateContended);
         }
     }
     Ok(LockAttempt::Acquired)
+}
+
+/// Try a subordinate gate on an already catalog-fenced transaction. A caller
+/// that sees contention must roll back before retrying the whole operation.
+pub(crate) async fn try_catalog_fence_lock(
+    tx: &mut Transaction<'_>,
+    lock: CatalogFenceLock,
+) -> Result<bool, DatabaseError> {
+    let connection = tx.postgres_connection().ok_or_else(|| {
+        DatabaseError::QueryFailed("catalog mutation fencing requires PostgreSQL".to_owned())
+    })?;
+    let acquired = match lock {
+        CatalogFenceLock::Exclusive(key) => {
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(key)
+                .fetch_one(&mut *connection)
+                .await?
+        }
+        CatalogFenceLock::Shared(key) => {
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                .bind(key)
+                .fetch_one(&mut *connection)
+                .await?
+        }
+        CatalogFenceLock::SharedPair(first, second) => {
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1, $2)")
+                .bind(first)
+                .bind(second)
+                .fetch_one(&mut *connection)
+                .await?
+        }
+    };
+    Ok(acquired)
 }

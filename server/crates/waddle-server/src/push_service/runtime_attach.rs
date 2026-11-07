@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
+
+pub(crate) const CUSTODY_GATE: CatalogFenceLock =
+    CatalogFenceLock::Exclusive(super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY);
 
 const MARKER_TABLE: &str = "push_service_schema_marker";
 pub(super) const VAPID_TABLE_NAME: &str = "push_service_vapid_keys";
@@ -1036,13 +1039,21 @@ pub(crate) async fn lock_runtime_attach_relations_tx(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<(), PushServiceAttachError> {
-    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
     tx.execute(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
         crate::db_params![super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY],
     )
     .await?;
 
+    lock_runtime_attach_relations_after_gate_tx(tx, schema).await
+}
+
+/// Lock Push relations after the caller has acquired the Push schema gate.
+pub(crate) async fn lock_runtime_attach_relations_after_gate_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PushServiceAttachError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
     // SUE blocks concurrent regular and concurrent index builds while
     // allowing ordinary Push Service row writers to proceed.
     for table in TABLES {

@@ -9,7 +9,7 @@ pub(crate) use backend::{bind_postgres, rewrite_positional_for_postgres};
 pub mod blocking;
 pub mod bootstrap;
 mod catalog_fence;
-pub(crate) use catalog_fence::CatalogFenceLock;
+pub(crate) use catalog_fence::{try_catalog_fence_lock, CatalogFenceLock};
 pub mod lineage;
 mod migrations;
 pub mod physical_attestation;
