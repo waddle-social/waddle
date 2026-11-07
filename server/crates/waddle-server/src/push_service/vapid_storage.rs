@@ -236,7 +236,7 @@ impl VapidStorage {
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
         let mut tx = db
-            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+            .begin_catalog_fenced_with_idle_bound(&[CatalogFenceLock::Exclusive(
                 super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY,
             )])
             .await
