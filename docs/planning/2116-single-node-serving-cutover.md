@@ -407,10 +407,11 @@ The pilot must keep every bypass closed: R cannot directly invoke the old
 unjournaled or unguarded receipt functions or write their relations. Its new
 fixed API and slot/lease schema need independent provisioned pins, catalog
 bounds before decoding attacker-controlled definitions, and both writer versus
-takeover race orders. It must retain the operation and original backend
-identity across an uncertain COMMIT, close uncertain pooled sessions, and use
-positive exact-key journal readback. Absence never proves rollback. SQLite
-receipt behavior remains unchanged.
+takeover race orders. It must retain the operation, record the original backend
+when observed, close uncertain pooled sessions, and use positive exact-key
+journal readback. Absence never proves rollback. Cancellation-safe original
+primary/backend custody remains a serving selection gate. SQLite receipt
+behavior remains unchanged.
 
 This is a disposable dark proof. The selected serving path also needs old
 login/backend and privileged-mutator cutoff, all other ingress writers,
