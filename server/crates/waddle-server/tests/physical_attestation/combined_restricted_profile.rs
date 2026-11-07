@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use futures::FutureExt;
-use sqlx::postgres::{types::Oid, PgConnectOptions, PgPool};
+use sqlx::postgres::types::Oid;
+use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 use waddle_server::config::LineageConfig;
@@ -50,10 +51,10 @@ use waddle_xmpp::pending_delivery::{
 use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenceStorage};
 
 use super::{test_url, CATALOG_GRANT_LOCK};
-use pinned_pubsub_profile::{exercise_pinned_pubsub, pinned_pubsub_profile};
+use pinned_pubsub_inventory::{exercise_pinned_pubsub, pinned_pubsub_inventory};
 
-#[path = "pinned_pubsub_profile.rs"]
-mod pinned_pubsub_profile;
+#[path = "pinned_pubsub_inventory.rs"]
+mod pinned_pubsub_inventory;
 
 const RELATION_GUARD: &str =
     include_str!("../../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
@@ -815,16 +816,16 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         effect_relation_oid: pins[0],
         mam_relation_oids: [pins[1], pins[2]],
     };
-    let pinned = pinned_pubsub_profile(
+    let pinned = pinned_pubsub_inventory(
         &admin,
         &runtime_options,
         &config,
         installation_operation,
         (&runtime, &installer, &definer),
-        &v2,
+        serving_profile.helper_relation_oids,
     )
     .await?;
-    exercise_pinned_pubsub(&admin, &runtime, &pinned, &v2).await?;
+    exercise_pinned_pubsub(&admin, &runtime, &owner, &definer, &pinned).await?;
     let owner_role = PgRoleName::new(&owner)?;
     DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
     #[cfg(feature = "clustering")]
@@ -1011,7 +1012,7 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         .execute(&admin)
         .await?;
     ensure!(
-        DatabasePubSubStorage::start_pinned_restricted_profile_v2(&pinned)?
+        DatabasePubSubStorage::start_pinned_relation_inventory(&pinned.inventory)?
             .finish()
             .await
             .is_err(),

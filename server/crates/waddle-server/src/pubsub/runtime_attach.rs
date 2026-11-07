@@ -410,6 +410,11 @@ const TABLES: &[Table] = &[
     },
 ];
 
+#[cfg(feature = "test-support")]
+pub(super) fn relation_names_for_test() -> Vec<&'static str> {
+    TABLES.iter().map(|table| table.name).collect()
+}
+
 pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError> {
     verify_with_profile(db, None, None).await
 }
@@ -456,50 +461,45 @@ async fn verify_with_profile(
         .await
         .map_err(|_| PubSubRuntimeAttachError::ReadBounds)?;
     capability.attest_transaction(&mut tx).await?;
-    verify_profile_on_transaction(
-        &mut tx,
-        identity,
-        capability.definer_role().as_str(),
-        profile,
-        v2,
-    )
-    .await?;
-    tx.rollback().await?;
-    Ok(())
-}
-
-/// Compose the existing v2 diagnostic with an already pinned transaction.
-/// The caller retains ownership of the transaction and all earlier barriers.
-pub(crate) async fn verify_pinned_restricted_v2_tx(
-    tx: &mut Transaction<'_>,
-    identity: &crate::db::lineage::PgIdentity,
-    definer: &str,
-    profile: &RestrictedServingProfileV2,
-) -> Result<(), PubSubRuntimeAttachError> {
-    verify_profile_on_transaction(tx, identity, definer, Some(&profile.v1), Some(profile)).await
-}
-
-async fn verify_profile_on_transaction(
-    tx: &mut Transaction<'_>,
-    identity: &crate::db::lineage::PgIdentity,
-    definer: &str,
-    profile: Option<&RestrictedServingProfileV1>,
-    v2: Option<&RestrictedServingProfileV2>,
-) -> Result<(), PubSubRuntimeAttachError> {
     if profile.is_some() {
-        verify_active_schema(tx, identity).await?;
+        verify_active_schema(&mut tx, identity).await?;
         // Retained temporary types cannot intercept casts or catalog helpers.
         tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
             .await?;
     }
     if let Some(profile) = v2 {
-        verify_restricted_v2_graph_tx(tx, identity, definer, profile).await?;
+        verify_restricted_v2_graph_tx(
+            &mut tx,
+            identity,
+            capability.definer_role().as_str(),
+            profile,
+        )
+        .await?;
     }
-    lock_runtime_attach_relations_with_profile_tx(tx, identity, definer, profile).await?;
-    verify_runtime_attach_with_profile_tx(tx, identity, definer, profile).await?;
+    lock_runtime_attach_relations_with_profile_tx(
+        &mut tx,
+        identity,
+        capability.definer_role().as_str(),
+        profile,
+    )
+    .await?;
+    verify_runtime_attach_with_profile_tx(
+        &mut tx,
+        identity,
+        capability.definer_role().as_str(),
+        profile,
+    )
+    .await?;
     if let Some(profile) = v2 {
-        verify_restricted_v2_graph_tx(tx, identity, definer, profile).await?;
+        verify_restricted_v2_graph_tx(
+            &mut tx,
+            identity,
+            capability.definer_role().as_str(),
+            profile,
+        )
+        .await?;
     }
+    tx.rollback().await?;
     Ok(())
 }
 
