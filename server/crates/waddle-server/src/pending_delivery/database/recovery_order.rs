@@ -64,6 +64,9 @@ pub(super) async fn initialize_postgres_stage(
 ) -> Result<(), PendingStorageError> {
     let mut tx = begin_postgres(db, schema).await?;
     let result = tokio::time::timeout(INITIALIZATION_BUDGET, async {
+        let oid = super::schema::lock_postgres_owner_relation(&mut tx, schema, "pending_delivery", true, super::schema::OwnerRelationLock::Schema).await?
+            .ok_or_else(|| PendingStorageError::Other("pending relation missing".to_owned()))?;
+        super::schema::verify_postgres_recovery_function_dependencies(&mut tx, schema, oid).await?;
         initialize_postgres(&mut tx, schema).await?;
         let table = schema.relation("pending_delivery");
         tx.execute(&format!("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_notification_recovery_ordinal ON {table} (notification_recovery_ordinal)"), ()).await.map_err(other)?;
@@ -92,7 +95,7 @@ async fn initialize_postgres(
         None => {
             // Adding the new identity column populates existing rows atomically.
             // Its native sequence survives deletion and is never reset here.
-            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN notification_recovery_ordinal BIGINT GENERATED ALWAYS AS IDENTITY (CACHE 1 NO CYCLE)"), ()).await.map_err(other)?;
+            tx.execute(&format!("ALTER TABLE ONLY {table} ADD COLUMN notification_recovery_ordinal BIGINT GENERATED ALWAYS AS IDENTITY (CACHE 1 NO CYCLE)"), ()).await.map_err(other)?;
         }
         Some("a") => {}
         Some(_) => {

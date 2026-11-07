@@ -76,7 +76,7 @@ impl PostgresOwnerSchema {
         // hostile operator from an earlier writable search-path entry.
         let name = {
             let mut rows = tx
-                .query("SELECT pg_catalog.current_schema()::text", ())
+                .query("SELECT pg_catalog.current_schema()::pg_catalog.text", ())
                 .await
                 .map_err(owner_error)?;
             rows.next()
@@ -154,6 +154,161 @@ impl PostgresOwnerSchema {
             .map_err(owner_error)?;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum OwnerRelationLock {
+    Schema,
+    Mutation,
+    Read,
+}
+
+/// Inspect before taking a name-based lock, then recheck the same OID and
+/// inheritance state after locking. The lock remains on this fenced backend
+/// until transaction end. An absent name may be created with plain CREATE;
+/// a concurrent uncooperative creator must fail rather than be adopted.
+pub(super) async fn lock_postgres_owner_relation(
+    tx: &mut Transaction<'_>,
+    schema: &PostgresOwnerSchema,
+    table: &'static str,
+    required: bool,
+    mode: OwnerRelationLock,
+) -> Result<Option<i64>, PendingStorageError> {
+    async fn identity(
+        tx: &mut Transaction<'_>,
+        schema: &PostgresOwnerSchema,
+        table: &'static str,
+    ) -> Result<Option<(i64, bool)>, PendingStorageError> {
+        let mut rows = tx
+            .query(
+                "SELECT c.oid::pg_catalog.int8, c.relkind = 'r' AND c.relpersistence = 'p' \
+               AND NOT c.relispartition AND c.relam = 2::pg_catalog.oid \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i \
+                   WHERE i.inhrelid = c.oid OR i.inhparent = c.oid) \
+             FROM pg_catalog.pg_class c WHERE c.relnamespace = ?::pg_catalog.int8::pg_catalog.oid \
+               AND c.relname = ?",
+                crate::db_params![schema.oid, table],
+            )
+            .await
+            .map_err(owner_error)?;
+        match rows.next().await.map_err(owner_error)? {
+            Some(row) => Ok(Some((
+                row.get(0).map_err(owner_error)?,
+                row.get(1).map_err(owner_error)?,
+            ))),
+            None => Ok(None),
+        }
+    }
+    let oid = match identity(tx, schema, table).await? {
+        Some((oid, true)) => oid,
+        None if !required => return Ok(None),
+        _ => {
+            return Err(owner_error(format!(
+                "pending-delivery owner refused relation {table}"
+            )))
+        }
+    };
+    let lock = match mode {
+        OwnerRelationLock::Schema => "ACCESS EXCLUSIVE",
+        OwnerRelationLock::Mutation => "SHARE UPDATE EXCLUSIVE",
+        OwnerRelationLock::Read => "ACCESS SHARE",
+    };
+    tx.execute(
+        &format!("LOCK TABLE ONLY {} IN {lock} MODE", schema.relation(table)),
+        (),
+    )
+    .await
+    .map_err(owner_error)?;
+    if identity(tx, schema, table).await? != Some((oid, true)) {
+        return Err(owner_error(format!(
+            "pending-delivery owner relation changed while locking {table}"
+        )));
+    }
+    let direct = {
+        let mut rows = tx
+            .query(
+                "SELECT NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) \
+             FROM pg_catalog.pg_class c WHERE c.oid = ?::pg_catalog.int8::pg_catalog.oid",
+                crate::db_params![oid],
+            )
+            .await
+            .map_err(owner_error)?;
+        match rows.next().await.map_err(owner_error)? {
+            Some(row) => row.get::<bool>(0).map_err(owner_error)?,
+            None => false,
+        }
+    };
+    if !direct {
+        return Err(owner_error(format!(
+            "pending-delivery owner refused policies or rules on {table}"
+        )));
+    }
+    Ok(Some(oid))
+}
+
+async fn verify_postgres_direct_mutation(
+    tx: &mut Transaction<'_>,
+    oid: i64,
+    pending_rows: bool,
+) -> Result<(), PendingStorageError> {
+    // UPDATE OF the ordinal cannot fire on the reset's three claim columns.
+    // Every DELETE trigger, every other UPDATE trigger, every marker INSERT
+    // trigger and every incoming FK is refused, including internal triggers.
+    let mut rows = tx
+        .query(
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint f \
+                   WHERE f.contype = 'f' AND f.confrelid = c.oid) \
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND \
+             CASE WHEN ? = 1 THEN (t.tgtype & 8) <> 0 OR \
+               ((t.tgtype & 16) <> 0 AND NOT (t.tgtype = 19 AND EXISTS ( \
+                 SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid \
+                   AND a.attname = 'notification_recovery_ordinal' AND NOT a.attisdropped \
+                   AND t.tgattr::pg_catalog.text = a.attnum::pg_catalog.text))) \
+               ELSE (t.tgtype & 4) <> 0 END) \
+         FROM pg_catalog.pg_class c WHERE c.oid = ?::pg_catalog.int8::pg_catalog.oid",
+            crate::db_params![if pending_rows { 1i64 } else { 0i64 }, oid],
+        )
+        .await
+        .map_err(owner_error)?;
+    let safe = match rows.next().await.map_err(owner_error)? {
+        Some(row) => row.get::<bool>(0).map_err(owner_error)?,
+        None => false,
+    };
+    if !safe {
+        return Err(owner_error(
+            "pending-delivery owner refused executable mutation side effects",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn verify_postgres_recovery_function_dependencies(
+    tx: &mut Transaction<'_>,
+    schema: &PostgresOwnerSchema,
+    table_oid: i64,
+) -> Result<(), PendingStorageError> {
+    let mut rows = tx.query(
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d \
+          LEFT JOIN pg_catalog.pg_trigger t ON d.classid = 'pg_catalog.pg_trigger'::pg_catalog.regclass \
+             AND t.oid = d.objid \
+          WHERE d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.refobjid = p.oid \
+            AND NOT COALESCE((d.classid = 'pg_catalog.pg_trigger'::pg_catalog.regclass \
+              AND t.tgrelid = ?::pg_catalog.int8::pg_catalog.oid \
+              AND t.tgname = 'pending_notification_recovery_ordinal_immutable'), false)) \
+         FROM pg_catalog.pg_proc p WHERE p.pronamespace = ?::pg_catalog.int8::pg_catalog.oid \
+           AND p.proname = 'pending_notification_recovery_ordinal_immutable' AND p.pronargs = 0",
+        crate::db_params![table_oid, schema.oid],
+    ).await.map_err(owner_error)?;
+    if let Some(row) = rows.next().await.map_err(owner_error)? {
+        if !row.get::<bool>(0).map_err(owner_error)? {
+            return Err(owner_error(
+                "pending recovery function has dependencies outside its target trigger",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn begin_postgres_stage<'a>(
@@ -241,19 +396,47 @@ async fn initialize_postgres_base(
 ) -> Result<(), PendingStorageError> {
     let table = schema.relation("pending_delivery");
     let markers = schema.relation("pending_delivery_startup_migrations");
-    tx.execute(
-        &format!(
-            "CREATE TABLE IF NOT EXISTS {table} (\
+    let pending_exists = lock_postgres_owner_relation(
+        tx,
+        schema,
+        "pending_delivery",
+        false,
+        OwnerRelationLock::Schema,
+    )
+    .await?
+    .is_some();
+    let markers_exist = lock_postgres_owner_relation(
+        tx,
+        schema,
+        "pending_delivery_startup_migrations",
+        false,
+        OwnerRelationLock::Schema,
+    )
+    .await?
+    .is_some();
+    if !pending_exists {
+        tx.execute(
+            &format!(
+                "CREATE TABLE {table} (\
         row_id TEXT PRIMARY KEY, recipient_jid TEXT NOT NULL, original_receipt_at BIGINT NOT NULL, \
         payload_kind TEXT NOT NULL, archive_stanza_by TEXT, archive_stanza_id TEXT, \
         transient_xml TEXT, flushed_in_session TEXT, outbound_sequence INTEGER, \
         notification_outboxed_at_ms BIGINT, claimed_at_ms BIGINT, claim_token TEXT, \
         claim_offered INTEGER NOT NULL DEFAULT 0)"
-        ),
-        (),
+            ),
+            (),
+        )
+        .await
+        .map_err(owner_error)?;
+    }
+    lock_postgres_owner_relation(
+        tx,
+        schema,
+        "pending_delivery",
+        true,
+        OwnerRelationLock::Schema,
     )
-    .await
-    .map_err(owner_error)?;
+    .await?;
     tx.execute(
         &format!("GRANT SELECT (row_id) ON {table} TO pg_monitor"),
         (),
@@ -272,7 +455,7 @@ async fn initialize_postgres_base(
         ("pair_sequence", "BIGINT"),
     ] {
         tx.execute(
-            &format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS \"{name}\" {definition}"),
+            &format!("ALTER TABLE ONLY {table} ADD COLUMN IF NOT EXISTS \"{name}\" {definition}"),
             (),
         )
         .await
@@ -287,7 +470,24 @@ async fn initialize_postgres_base(
     ] {
         tx.execute(&format!("CREATE {}", definition.replace("{table}", &table)), ()).await.map_err(owner_error)?;
     }
-    tx.execute(&format!("CREATE TABLE IF NOT EXISTS {markers} (name TEXT PRIMARY KEY, completed_at BIGINT NOT NULL)"), ()).await.map_err(owner_error)?;
+    if !markers_exist {
+        tx.execute(
+            &format!(
+                "CREATE TABLE {markers} (name TEXT PRIMARY KEY, completed_at BIGINT NOT NULL)"
+            ),
+            (),
+        )
+        .await
+        .map_err(owner_error)?;
+    }
+    lock_postgres_owner_relation(
+        tx,
+        schema,
+        "pending_delivery_startup_migrations",
+        true,
+        OwnerRelationLock::Schema,
+    )
+    .await?;
     widen_postgres_owner_column(
         tx,
         schema,
@@ -303,29 +503,42 @@ async fn widen_postgres_owner_column(
     table: &'static str,
     column: &'static str,
 ) -> Result<(), PendingStorageError> {
-    let needs_widen = {
+    let current_type = {
         let mut rows = tx.query(
-            "SELECT a.atttypid <> 'pg_catalog.int8'::pg_catalog.regtype \
+            "SELECT a.atttypid = 'pg_catalog.int4'::pg_catalog.regtype, \
+                    a.atttypid = 'pg_catalog.int8'::pg_catalog.regtype \
              FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.oid = ?::bigint::oid AND c.relname = ? AND a.attname = ? AND NOT a.attisdropped",
             crate::db_params![schema.oid, table, column],
         ).await.map_err(owner_error)?;
         match rows.next().await.map_err(owner_error)? {
-            Some(row) => row.get::<bool>(0).map_err(owner_error)?,
-            None => false,
+            Some(row) => Some((
+                row.get::<bool>(0).map_err(owner_error)?,
+                row.get::<bool>(1).map_err(owner_error)?,
+            )),
+            None => None,
         }
     };
-    if needs_widen {
+    let (is_int4, is_int8) = current_type.ok_or_else(|| {
+        PendingStorageError::Other(format!(
+            "pending-delivery owner requires {table}.{column} column"
+        ))
+    })?;
+    if is_int4 {
         tx.execute(
             &format!(
-                "ALTER TABLE {} ALTER COLUMN \"{column}\" TYPE BIGINT",
+                "ALTER TABLE ONLY {} ALTER COLUMN \"{column}\" TYPE BIGINT",
                 schema.relation(table)
             ),
             (),
         )
         .await
         .map_err(owner_error)?;
+    } else if !is_int8 {
+        return Err(PendingStorageError::Other(format!(
+            "pending-delivery owner refused non-integer {table}.{column} conversion"
+        )));
     }
     Ok(())
 }
@@ -344,8 +557,12 @@ async fn initialize_postgres_receipts(
     .await?;
     let result = async {
         let table = schema.relation("pending_delivery_sm_promotions");
-        tx.execute(&format!("CREATE TABLE IF NOT EXISTS {table} (origin_stream_id TEXT NOT NULL, sequence BIGINT NOT NULL, created_at_ms BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (origin_stream_id, sequence))"), ()).await.map_err(owner_error)?;
-        tx.execute(&format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS created_at_ms BIGINT NOT NULL DEFAULT 0"), ()).await.map_err(owner_error)?;
+        let exists = lock_postgres_owner_relation(&mut tx, schema, "pending_delivery_sm_promotions", false, OwnerRelationLock::Schema).await?.is_some();
+        if !exists {
+            tx.execute(&format!("CREATE TABLE {table} (origin_stream_id TEXT NOT NULL, sequence BIGINT NOT NULL, created_at_ms BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (origin_stream_id, sequence))"), ()).await.map_err(owner_error)?;
+        }
+        lock_postgres_owner_relation(&mut tx, schema, "pending_delivery_sm_promotions", true, OwnerRelationLock::Schema).await?;
+        tx.execute(&format!("ALTER TABLE ONLY {table} ADD COLUMN IF NOT EXISTS created_at_ms BIGINT NOT NULL DEFAULT 0"), ()).await.map_err(owner_error)?;
         Ok(())
     }.await;
     finish_postgres_stage(tx, result, "receipts").await
@@ -363,12 +580,18 @@ async fn reset_postgres_claims(
     .await?;
     let result = async {
         let markers = schema.relation("pending_delivery_startup_migrations");
+        let marker_oid = lock_postgres_owner_relation(&mut tx, schema, "pending_delivery_startup_migrations", true, OwnerRelationLock::Mutation).await?
+            .ok_or_else(|| owner_error("pending marker relation missing"))?;
         let done = {
             let mut rows = tx.query(&format!("SELECT 1 FROM {markers} WHERE name = ? LIMIT 1"), crate::db_params![V1014_CLAIM_RESET_MARKER]).await.map_err(owner_error)?;
             rows.next().await.map_err(owner_error)?.is_some()
         };
         if done { return Ok(0); }
-        let released = tx.execute(&format!("UPDATE {} SET flushed_in_session = NULL, outbound_sequence = NULL, claimed_at_ms = NULL", schema.relation("pending_delivery")), ()).await.map_err(owner_error)?;
+        verify_postgres_direct_mutation(&mut tx, marker_oid, false).await?;
+        let pending_oid = lock_postgres_owner_relation(&mut tx, schema, "pending_delivery", true, OwnerRelationLock::Mutation).await?
+            .ok_or_else(|| owner_error("pending relation missing"))?;
+        verify_postgres_direct_mutation(&mut tx, pending_oid, true).await?;
+        let released = tx.execute(&format!("UPDATE ONLY {} SET flushed_in_session = NULL, outbound_sequence = NULL, claimed_at_ms = NULL", schema.relation("pending_delivery")), ()).await.map_err(owner_error)?;
         tx.execute(&format!("INSERT INTO {markers} (name, completed_at) VALUES (?, ?) ON CONFLICT (name) DO NOTHING"), crate::db_params![V1014_CLAIM_RESET_MARKER, chrono::Utc::now().timestamp_millis()]).await.map_err(owner_error)?;
         Ok(released)
     }.await;
@@ -415,6 +638,14 @@ async fn cleanup_postgres_legacy_mam(
     let markers = schema.relation("pending_delivery_startup_migrations");
     let mut tx = begin_postgres_read_stage(db, schema).await?;
     let result = async {
+        lock_postgres_owner_relation(
+            &mut tx,
+            schema,
+            "pending_delivery_startup_migrations",
+            true,
+            OwnerRelationLock::Read,
+        )
+        .await?;
         let mut rows = tx
             .query(
                 &format!("SELECT 1 FROM {markers} WHERE name = ? LIMIT 1"),
@@ -435,6 +666,7 @@ async fn cleanup_postgres_legacy_mam(
     loop {
         let mut tx = begin_postgres_read_stage(db, schema).await?;
         let result = async {
+            lock_postgres_owner_relation(&mut tx, schema, "pending_delivery", true, OwnerRelationLock::Read).await?;
             let (sql, params) = if let Some(after) = &after {
                 (format!("SELECT row_id, transient_xml FROM {table} WHERE payload_kind = 'transient' AND transient_xml IS NOT NULL AND transient_xml LIKE '%urn:xmpp:mam:2%' AND row_id > ? ORDER BY row_id LIMIT ?"), crate::db_params![after, LEGACY_MAM_CLEANUP_SELECT_BATCH])
             } else {
@@ -465,10 +697,20 @@ async fn cleanup_postgres_legacy_mam(
         }
         let mut tx = begin_postgres_stage(db, schema, &[]).await?;
         let result = async {
+            let oid = lock_postgres_owner_relation(
+                &mut tx,
+                schema,
+                "pending_delivery",
+                true,
+                OwnerRelationLock::Mutation,
+            )
+            .await?
+            .ok_or_else(|| owner_error("pending relation missing"))?;
+            verify_postgres_direct_mutation(&mut tx, oid, true).await?;
             let placeholders = vec!["?"; ids.len()].join(", ");
             let params = ids.into_iter().map(Value::from).collect::<Vec<_>>();
             tx.execute(
-                &format!("DELETE FROM {table} WHERE row_id IN ({placeholders})"),
+                &format!("DELETE FROM ONLY {table} WHERE row_id IN ({placeholders})"),
                 params,
             )
             .await
@@ -479,6 +721,16 @@ async fn cleanup_postgres_legacy_mam(
     }
     let mut tx = begin_postgres_stage(db, schema, &[]).await?;
     let result = async {
+        let oid = lock_postgres_owner_relation(
+            &mut tx,
+            schema,
+            "pending_delivery_startup_migrations",
+            true,
+            OwnerRelationLock::Mutation,
+        )
+        .await?
+        .ok_or_else(|| owner_error("pending marker relation missing"))?;
+        verify_postgres_direct_mutation(&mut tx, oid, false).await?;
         tx.execute(
             &format!(
                 "INSERT INTO {} (name, completed_at) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",

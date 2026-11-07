@@ -34,6 +34,10 @@ pub enum PendingRuntimeAttachError {
     },
     #[error("pending-delivery relation {table} is not an ordinary table")]
     InvalidTable { table: &'static str },
+    #[error("PostgreSQL pending-delivery relation {table} is not permanent")]
+    NonPermanentTable { table: &'static str },
+    #[error("pending-delivery relation {relation} participates in PostgreSQL inheritance")]
+    InheritedRelation { relation: String },
     #[error("pending-delivery relation {table} has an invalid column {column}")]
     InvalidColumn {
         table: &'static str,
@@ -188,6 +192,8 @@ async fn verify_transaction(
         if active.as_deref() != Some(expected) {
             return Err(PendingRuntimeAttachError::ActiveSchemaMismatch);
         }
+        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await?;
         expected.clone()
     } else {
         let mut databases = tx.query("PRAGMA database_list", ()).await?;
@@ -229,16 +235,24 @@ async fn verify_transaction(
         }
         "main".to_owned()
     };
+    if db.driver() == DatabaseDriver::Postgres {
+        verify_postgres_inheritance(tx, &schema_name).await?;
+    }
     let quoted = format!("\"{}\"", schema_name.replace('"', "\"\""));
     for (table, columns) in [
         ("pending_delivery", "row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session, outbound_sequence, notification_outboxed_at_ms, claimed_at_ms, claim_token, claim_offered, origin_stream_id, inbound_seq, pair_sequence, notification_recovery_ordinal"),
         ("pending_delivery_sm_promotions", "origin_stream_id, sequence, created_at_ms"),
         ("pending_delivery_startup_migrations", "name, completed_at"),
     ] {
+        if db.driver() == DatabaseDriver::Postgres {
+            verify_table(tx, db.driver(), &schema_name, table).await?;
+        }
         tx.query(&format!("SELECT {columns} FROM {quoted}.\"{table}\" WHERE 1 = 0"), ())
             .await
             .map_err(|source| PendingRuntimeAttachError::Relation { relation: table, source })?;
-        verify_table(tx, db.driver(), &schema_name, table).await?;
+        if db.driver() == DatabaseDriver::Sqlite {
+            verify_table(tx, db.driver(), &schema_name, table).await?;
+        }
     }
     if db.driver() == DatabaseDriver::Sqlite {
         tx.query("SELECT singleton, last_ordinal FROM main.pending_notification_recovery_counter WHERE 1 = 0", ())
@@ -298,24 +312,74 @@ async fn verify_transaction(
     Ok(())
 }
 
+async fn verify_postgres_inheritance(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PendingRuntimeAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT DISTINCT relation.relname::text \
+             FROM pg_catalog.pg_inherits inheritance \
+             JOIN pg_catalog.pg_class relation \
+               ON relation.oid = inheritance.inhparent OR relation.oid = inheritance.inhrelid \
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+             WHERE namespace.nspname = ? \
+               AND relation.relname IN ( \
+                 'pending_delivery', 'pending_delivery_sm_promotions', \
+                 'pending_delivery_startup_migrations' \
+               ) \
+             ORDER BY relation.relname::text LIMIT 1",
+            crate::db_params![schema],
+        )
+        .await?;
+    if let Some(row) = rows.next().await? {
+        return Err(PendingRuntimeAttachError::InheritedRelation {
+            relation: row.get(0)?,
+        });
+    }
+    Ok(())
+}
+
 async fn verify_table(
     tx: &mut Transaction<'_>,
     driver: DatabaseDriver,
     schema: &str,
     table: &'static str,
 ) -> Result<(), PendingRuntimeAttachError> {
-    let mut rows = match driver {
-        DatabaseDriver::Postgres => tx.query(
-            "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r'",
-            crate::db_params![schema, table],
-        ).await?,
-        DatabaseDriver::Sqlite => tx.query(
-            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
-            crate::db_params![table],
-        ).await?,
-    };
-    if rows.next().await?.is_none() {
-        return Err(PendingRuntimeAttachError::InvalidTable { table });
+    match driver {
+        DatabaseDriver::Postgres => {
+            let mut rows = tx
+                .query(
+                    "SELECT c.relkind = 'r', c.relpersistence = 'p' \
+                     FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = ? AND c.relname = ?",
+                    crate::db_params![schema, table],
+                )
+                .await?;
+            match rows.next().await? {
+                Some(row) => {
+                    if !row.get::<bool>(0)? {
+                        return Err(PendingRuntimeAttachError::InvalidTable { table });
+                    }
+                    if !row.get::<bool>(1)? {
+                        return Err(PendingRuntimeAttachError::NonPermanentTable { table });
+                    }
+                }
+                None => return Err(PendingRuntimeAttachError::InvalidTable { table }),
+            }
+        }
+        DatabaseDriver::Sqlite => {
+            let mut rows = tx
+                .query(
+                    "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+                    crate::db_params![table],
+                )
+                .await?;
+            if rows.next().await?.is_none() {
+                return Err(PendingRuntimeAttachError::InvalidTable { table });
+            }
+        }
     }
     Ok(())
 }
@@ -709,6 +773,7 @@ async fn verify_postgres_recovery(
         "SELECT a.attidentity::text, s.seqtypid = 'pg_catalog.int8'::pg_catalog.regtype \
                   AND s.seqstart = 1 AND s.seqincrement = 1 AND s.seqmin = 1 \
                   AND s.seqmax = 9223372036854775807 AND s.seqcache = 1 AND NOT s.seqcycle \
+                  AND seq.relpersistence = 'p' \
          FROM pg_catalog.pg_class t JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
          JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attname = 'notification_recovery_ordinal' AND NOT a.attisdropped \
          JOIN pg_catalog.pg_depend d ON d.refobjid = t.oid AND d.refobjsubid = a.attnum \
