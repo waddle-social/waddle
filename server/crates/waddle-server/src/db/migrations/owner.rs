@@ -17,7 +17,7 @@ use super::MigrationRunner;
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, LINEAGE_ADVISORY_LOCK_KEY};
 use crate::db::physical_attestation::{quote_identifier, PgRoleName};
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_substrate::supported_protocol_epoch;
 
 mod epoch_acl;
@@ -245,8 +245,14 @@ async fn run_on_fresh_session(
         .ok_or(DarkMigrationOwnerError::MissingPostgresIdentity)?;
     let schema = &expected.schema.name.0;
     let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
-    let mut tx = db.begin().await?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+    // The owner changes migration and role-dependent catalog state. Join the
+    // same catalog-first protocol as lineage and the registered runner before
+    // any role/catalog preflight, ledger read, or DDL on this backend.
+    let mut tx = db
+        .begin_catalog_fenced(&[
+            CatalogFenceLock::Exclusive(LINEAGE_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Exclusive(MIGRATION_LEDGER_ADVISORY_LOCK_KEY),
+        ])
         .await?;
     tx.execute(
         "SELECT pg_catalog.set_config('lock_timeout', ?, true), \
@@ -268,18 +274,9 @@ async fn run_on_fresh_session(
         i64::from(expected.schema.oid),
     )
     .await?;
-    // Lock lineage adoption before migrations. Neither check reads the epoch
-    // or a protected table, and the runner never opens another connection.
-    for lock in [
-        LINEAGE_ADVISORY_LOCK_KEY,
-        MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
-    ] {
-        tx.query(
-            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-            crate::db_params![lock],
-        )
-        .await?;
-    }
+    // Catalog, lineage, and ledger locks remain held through the migration
+    // transaction's actual PostgreSQL end. Contended attempts were rolled
+    // back and retried before this role and lineage preflight began.
     let lineage_config = LineageConfig {
         deployment_uuid: Some(config.expected.deployment_uuid),
         action: None,

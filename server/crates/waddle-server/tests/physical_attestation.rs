@@ -4729,10 +4729,6 @@ async fn same_id_installers_with_repeatable_read_default_converge_after_lock_wai
         .execute(&mut blocker)
         .await
         .expect("hold lineage lock");
-    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut blocker)
-        .await
-        .expect("blocker pid");
     let prefix = format!("attestor_race_{}", uuid::Uuid::new_v4().simple());
     let first_name = format!("{prefix}_a");
     let second_name = format!("{prefix}_b");
@@ -4751,14 +4747,17 @@ async fn same_id_installers_with_repeatable_read_default_converge_after_lock_wai
     let second =
         tokio::spawn(async move { install(&second_options, second_config, operation).await });
     tokio::time::timeout(Duration::from_secs(4), async {
+        let mut seen = [false, false];
         loop {
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE application_name = ANY($1) AND $2 = ANY(pg_catalog.pg_blocking_pids(pid))")
-                .bind(vec![first_name.clone(), second_name.clone()]).bind(blocker_pid)
-                .fetch_one(&fixture.admin).await.expect("observe waiting installers");
-            if count == 2 { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let names: Vec<String> = sqlx::query_scalar("SELECT application_name FROM pg_catalog.pg_stat_activity WHERE application_name = ANY($1) AND query LIKE '%pg_try_advisory_xact_lock%'")
+                .bind(vec![first_name.clone(), second_name.clone()])
+                .fetch_all(&fixture.admin).await.expect("observe retrying installers");
+            seen[0] |= names.contains(&first_name);
+            seen[1] |= names.contains(&second_name);
+            if seen.into_iter().all(|value| value) { break; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-    }).await.expect("both installers must queue before release");
+    }).await.expect("both installers must attempt before release");
     sqlx::query("COMMIT")
         .execute(&mut blocker)
         .await
@@ -4912,10 +4911,6 @@ async fn cancelled_lock_wait_is_indeterminate_and_same_id_retry_converges() {
         .execute(&mut blocker)
         .await
         .expect("hold lineage lock");
-    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut blocker)
-        .await
-        .expect("blocker pid");
     let application = format!("attestor_cancel_{}", uuid::Uuid::new_v4().simple());
     let options = fixture
         .installer_options
@@ -4926,17 +4921,25 @@ async fn cancelled_lock_wait_is_indeterminate_and_same_id_retry_converges() {
     let pending = tokio::spawn(async move { install(&options, config, operation).await });
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name=$1 AND $2 = ANY(pg_catalog.pg_blocking_pids(pid)))")
-                .bind(&application).bind(blocker_pid).fetch_one(&fixture.admin).await.expect("observe cancelled waiter");
-            if waiting { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name=$1 AND query LIKE '%pg_try_advisory_xact_lock%')")
+                .bind(&application).fetch_one(&fixture.admin).await.expect("observe retrying installer");
+            if active { break; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-    }).await.expect("installer must wait on the identified lock");
+    }).await.expect("installer must attempt before cancellation");
     pending.abort();
     assert!(pending
         .await
         .expect_err("installer task cancelled")
         .is_cancelled());
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name=$1)")
+                .bind(&application).fetch_one(&fixture.admin).await.expect("check cancelled backend");
+            if !active { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("cancelled installer backend must terminate");
     sqlx::query("COMMIT")
         .execute(&mut blocker)
         .await

@@ -4,8 +4,8 @@ use crate::db::physical_attestation::{
     quote_identifier, validate_identifier, AttestedPostgresWriterCapability, PgRoleName,
 };
 use crate::db::{
-    verify_room_observation_migration_v1023_in_transaction, Database, DatabaseDriver,
-    DatabaseError, Transaction,
+    verify_room_observation_migration_v1023_in_transaction, CatalogFenceLock, Database,
+    DatabaseDriver, DatabaseError, Transaction,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,14 +95,18 @@ pub async fn initialize_room_observations(db: &Database) -> Result<(), Observati
     let driver = db.driver();
     let mut tx = match driver {
         DatabaseDriver::Sqlite => db.begin_immediate().await?,
-        DatabaseDriver::Postgres => db.begin().await?,
+        DatabaseDriver::Postgres => {
+            db.begin_catalog_fenced(&[
+                CatalogFenceLock::Shared(ROOM_OBSERVATION_OWNER_GATE_LOCK),
+                CatalogFenceLock::Exclusive(ROOM_OBSERVATION_SCHEMA_LOCK),
+            ])
+            .await?
+        }
     };
     if driver == DatabaseDriver::Postgres {
-        // Legacy initialization cooperates with owner preparation and the
-        // read-only verifier before it takes the DDL lock.
+        // The transaction already holds catalog-X, the shared owner gate,
+        // and the exclusive schema gate before any schema work begins.
         tx.execute("SET LOCAL lock_timeout = '5s'", ()).await?;
-        owner_gate_lock(&mut tx, true).await?;
-        schema_lock(&mut tx, false).await?;
     }
     apply_room_observation_schema(&mut tx).await?;
     tx.commit().await?;
@@ -644,16 +648,18 @@ pub async fn prepare_dark_room_observation_schema(
         .as_ref()
         .ok_or(RoomObservationSchemaError::IdentityMismatch)?;
     validate_expected_identity(identity)?;
-    let mut tx = db.begin().await?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+    let mut tx = db
+        .begin_catalog_fenced(&[
+            CatalogFenceLock::Exclusive(crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Exclusive(crate::db::MIGRATION_LEDGER_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Exclusive(ROOM_OBSERVATION_OWNER_GATE_LOCK),
+            CatalogFenceLock::Exclusive(ROOM_OBSERVATION_SCHEMA_LOCK),
+        ])
         .await?;
     set_transaction_timeouts(&mut tx).await?;
     set_target_search_path(&mut tx, &identity.schema.name.0).await?;
-    lineage_lock(&mut tx, false).await?;
     verify_room_observation_migration_v1023_in_transaction(&mut tx, &identity.schema.name.0)
         .await?;
-    owner_gate_lock(&mut tx, false).await?;
-    schema_lock(&mut tx, false).await?;
     lock_data_tables(&mut tx, identity).await?;
     verify_owner_boundary(&mut tx, identity, designated_migrator.as_str()).await?;
     verify_owner_lineage(&mut tx, expected, identity).await?;
@@ -1877,7 +1883,7 @@ async fn verify_schema_acl(
         )
     });
     let query = format!(
-            "SELECT pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'USAGE') \
+        "SELECT pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'USAGE') \
                AND NOT pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'CREATE') \
                AND pg_catalog.has_schema_privilege(definer.oid, namespace.oid, 'USAGE') \
                AND NOT pg_catalog.has_schema_privilege(definer.oid, namespace.oid, 'CREATE') \

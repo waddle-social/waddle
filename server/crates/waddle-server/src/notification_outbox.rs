@@ -39,6 +39,9 @@ pub(crate) mod runtime_attach;
 #[path = "notification_outbox/runtime_attach_tests.rs"]
 mod runtime_attach_tests;
 mod schema;
+pub(crate) const fn outbox_schema_gate() -> (i32, i32) {
+    schema::OUTBOX_SCHEMA_GATE
+}
 #[cfg(test)]
 mod test_support;
 mod types;

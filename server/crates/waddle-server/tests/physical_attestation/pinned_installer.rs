@@ -10,9 +10,60 @@ use super::{
     test_url, Fixture, CATALOG_GRANT_LOCK,
 };
 use waddle_server::db::physical_attestation::{
-    inspect_pinned_installation, prepare_pinned_install, DarkInstallationStatus,
-    DarkInstallerError, DarkInstallerPins,
+    inspect_pinned_installation, install, prepare_pinned_install, DarkInstallationStatus,
+    DarkInstallerError, DarkInstallerPins, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
+
+async fn wait_for_installer_attempt(fixture: &Fixture, application: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name=$1 AND query LIKE '%pg_try_advisory_xact_lock%')",
+            )
+            .bind(application)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observe installer retry");
+            if active {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("installer attempted advisory locks");
+}
+
+async fn assert_no_installer_advisory_lock(fixture: &Fixture) {
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks l \
+         JOIN pg_catalog.pg_stat_activity a ON a.pid=l.pid \
+         WHERE a.usename=$1 AND l.locktype='advisory' AND l.granted)",
+    )
+    .bind(&fixture.installer)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect installer advisory locks");
+    assert!(!held, "installer acquired a lower lock before catalog-X");
+}
+
+async fn try_catalog_reader(connection: &mut PgConnection) -> bool {
+    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .fetch_one(connection)
+        .await
+        .expect("try catalog reader")
+}
+
+async fn release_catalog_reader(connection: &mut PgConnection) {
+    let released: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .fetch_one(connection)
+        .await
+        .expect("release catalog reader");
+    assert!(released);
+}
 
 async fn installer_pins(fixture: &Fixture) -> DarkInstallerPins {
     sqlx::query(&format!(
@@ -78,6 +129,171 @@ async fn commit_prepared(fixture: &Fixture, pins: DarkInstallerPins) -> DarkInst
         .commit()
         .await
         .expect("commit and verify installer")
+}
+
+#[tokio::test]
+async fn pinned_installer_holds_catalog_fence_until_transaction_end() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let pins = installer_pins(&fixture).await;
+    sqlx::query(&format!(
+        "ALTER ROLE {} IN DATABASE {} SET default_transaction_isolation = 'repeatable read'",
+        fixture.installer, fixture.database_name
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("set repeatable-read default");
+    let mut reader = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("catalog reader");
+    assert!(try_catalog_reader(&mut reader).await);
+    let application = format!("pinned_catalog_{}", uuid::Uuid::new_v4().simple());
+    let options = installer_options(&fixture).application_name(&application);
+    let config = fixture.config();
+    let task = tokio::spawn(async move { prepare_pinned_install(&options, &config, pins).await });
+    wait_for_installer_attempt(&fixture, &application).await;
+    assert!(!task.is_finished());
+    assert_no_installer_advisory_lock(&fixture).await;
+    let visible: i64 = sqlx::query_scalar(
+        "SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc \
+         WHERE pronamespace=$1 AND proname='read_physical_identity'",
+    )
+    .bind(sqlx::postgres::types::Oid(pins.trusted_schema_oid))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("check no function before catalog fence");
+    assert_eq!(visible, 0);
+    release_catalog_reader(&mut reader).await;
+    let prepared = tokio::time::timeout(Duration::from_secs(4), task)
+        .await
+        .expect("prepare after reader release")
+        .expect("join installer")
+        .expect("prepare installer");
+    let backend_pid = prepared.fence().backend_pid;
+    let holds_both: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.count(*) = 2 FROM pg_catalog.pg_locks \
+         WHERE pid=$1 AND locktype='advisory' AND objsubid=1 AND mode='ExclusiveLock' \
+           AND granted AND (classid::pg_catalog.int8 << 32 | objid::pg_catalog.int8) = ANY($2)",
+    )
+    .bind(backend_pid)
+    .bind(vec![
+        CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+        6_841_445_497_037_937_993_i64,
+    ])
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect prepared catalog and lineage fences");
+    assert!(holds_both);
+    assert!(!try_catalog_reader(&mut reader).await);
+    drop(prepared);
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while !try_catalog_reader(&mut reader).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("prepared drop eventually releases catalog fence");
+    release_catalog_reader(&mut reader).await;
+    assert!(matches!(
+        commit_prepared(&fixture, pins).await,
+        DarkInstallationStatus::Committed { .. }
+    ));
+    drop(reader);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn pinned_installer_yields_catalog_while_lineage_is_contended() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let pins = installer_pins(&fixture).await;
+    let mut blocker = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("lineage blocker");
+    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+        .bind(6_841_445_497_037_937_993_i64)
+        .execute(&mut blocker)
+        .await
+        .expect("hold lineage lock");
+    let application = format!("pinned_lineage_{}", uuid::Uuid::new_v4().simple());
+    let options = installer_options(&fixture).application_name(&application);
+    let config = fixture.config();
+    let task = tokio::spawn(async move { prepare_pinned_install(&options, &config, pins).await });
+    wait_for_installer_attempt(&fixture, &application).await;
+    let mut reader = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("catalog reader");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !try_catalog_reader(&mut reader).await {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("installer releases catalog while lineage is blocked");
+    let released: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+        .bind(6_841_445_497_037_937_993_i64)
+        .fetch_one(&mut blocker)
+        .await
+        .expect("release lineage blocker");
+    assert!(released);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!task.is_finished(), "reader still holds catalog fence");
+    assert_no_installer_advisory_lock(&fixture).await;
+    release_catalog_reader(&mut reader).await;
+    let prepared = tokio::time::timeout(Duration::from_secs(4), task)
+        .await
+        .expect("prepare after locks release")
+        .expect("join installer")
+        .expect("prepare installer");
+    assert!(matches!(
+        prepared.commit().await.expect("commit and read back"),
+        DarkInstallationStatus::Committed { .. }
+    ));
+    drop(reader);
+    drop(blocker);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn legacy_installer_takes_catalog_before_lineage_and_ddl() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let mut reader = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("catalog reader");
+    assert!(try_catalog_reader(&mut reader).await);
+    let application = format!("legacy_catalog_{}", uuid::Uuid::new_v4().simple());
+    let options = fixture
+        .installer_options
+        .clone()
+        .application_name(&application);
+    let config = fixture.config();
+    let operation_id = fixture.operation_id;
+    let task = tokio::spawn(async move { install(&options, config, operation_id).await });
+    wait_for_installer_attempt(&fixture, &application).await;
+    assert!(!task.is_finished());
+    assert_no_installer_advisory_lock(&fixture).await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+         WHERE n.nspname=$1 AND p.proname='read_physical_identity'",
+    )
+    .bind(&fixture.trusted)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("check no function while reader holds catalog");
+    assert_eq!(count, 0);
+    release_catalog_reader(&mut reader).await;
+    tokio::time::timeout(Duration::from_secs(4), task)
+        .await
+        .expect("install after reader release")
+        .expect("join installer")
+        .expect("commit and read back");
+    drop(reader);
+    fixture.cleanup().await;
 }
 
 #[tokio::test]

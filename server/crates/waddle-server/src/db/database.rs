@@ -69,6 +69,18 @@ pub enum DatabaseError {
     #[error("migration lock rollback was not acknowledged; reconcile the original backend")]
     MigrationLockRollbackUnconfirmed,
 
+    #[error("catalog mutation fence remained contended")]
+    CatalogMutationFenceContended,
+
+    #[error("catalog mutation's subordinate advisory lock remained contended")]
+    CatalogMutationGateContended,
+
+    #[error("catalog mutation fence acquisition timed out")]
+    CatalogMutationLockTimeout,
+
+    #[error("catalog mutation rollback was not acknowledged; reconcile the original backend")]
+    CatalogMutationRollbackUnconfirmed,
+
     #[error("Internal database error: {0}")]
     Internal(#[from] sqlx::Error),
 

@@ -8,6 +8,8 @@ mod backend;
 pub(crate) use backend::{bind_postgres, rewrite_positional_for_postgres};
 pub mod blocking;
 pub mod bootstrap;
+mod catalog_fence;
+pub(crate) use catalog_fence::CatalogFenceLock;
 pub mod lineage;
 mod migrations;
 pub mod physical_attestation;
@@ -67,6 +69,9 @@ macro_rules! db_params {
 
 #[cfg(test)]
 mod cancelled_begin_tests;
+
+#[cfg(test)]
+mod catalog_fence_tests;
 
 #[cfg(test)]
 mod tests;
