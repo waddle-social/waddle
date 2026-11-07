@@ -71,6 +71,9 @@ macro_rules! db_params {
 mod cancelled_begin_tests;
 
 #[cfg(test)]
+mod catalog_fence_tests;
+
+#[cfg(test)]
 mod tests;
 
 mod database;
