@@ -1,7 +1,7 @@
 # P2.1 lineage catalog-fence group
 
-Status: draft dark implementation plan. Restricted startup continues to refuse
-with `UnconvertedStores` before listeners or effectful workers.
+Status: lineage mutator slice implemented. Restricted startup continues to
+refuse with `UnconvertedStores` before listeners or effectful workers.
 
 ## Bounded scope
 
@@ -44,16 +44,16 @@ fencing remain open.
 
 ## Verification
 
-Use PostgreSQL 17 tests to hold a shared catalog reader while each lineage
-mutator starts, prove no lineage lock or DDL precedes catalog acquisition,
-exercise catalog-first contention and a lineage-only blocker with bounded
-rollback/retry and fresh READ COMMITTED snapshots, and verify cancellation
-retains no false completion claim or reusable uncertain checkout. Cover both
-winner orders, a second connection, actual commit/rollback visibility, and
-single-connection pool progress alongside the existing migration runner.
-Include a session-fenced `REINDEX CONCURRENTLY` with a held old snapshot to
-prove retries do not strand an active snapshot; refresh pins after its index
-identity changes. Re-run focused SQLite lineage enrollment/adoption tests. Run
-formatting, scoped strict Clippy, diff checks and independent exact-head
-review. GitHub Actions and workflow files remain disabled until #2046 is
-complete.
+Focused PostgreSQL 17 integration tests cover all three mutators behind a
+held catalog reader, actual DDL/row visibility after release, dual-lock
+evidence at a relation wait, lineage-only contention with acknowledged clean
+retry boundaries, and concurrent enrollment/adoption outcomes. Focused SQLite
+lineage tests cover 14 enrollment/adoption and malformed-state cases.
+
+Cancellation at each transaction edge, lost COMMIT response, pool-hook
+contention, the acquisition deadline under saturation, both controlled winner
+orders, and a lineage-specific session-fenced `REINDEX CONCURRENTLY` with an
+old snapshot are not established by these tests. The migration runner has its
+own catalog-fence and REINDEX witnesses; those do not prove this lineage path.
+The broader cutoff remains open. GitHub Actions and workflow files remain
+disabled until #2046 is complete.
