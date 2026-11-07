@@ -1335,15 +1335,10 @@ async fn create_websocket_state(
         .await
         .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?
     } else {
-        // Never provision (write) a key into an unattested database. The
-        // node is permanently unready in this state, so an ephemeral,
-        // unpersisted signer only has to keep the object graph valid.
-        VapidStorage::load_or_ephemeral(
-            state.db_pool.global().clone(),
-            server_config.session_key.as_bytes(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to load VAPID signer: {error}"))?
+        // This permanently unready node needs only a placeholder signer.
+        // Creating it must not access the unattested database or environment.
+        VapidStorage::generate_ephemeral_signer()
+            .map_err(|error| anyhow::anyhow!("failed to create VAPID placeholder: {error}"))?
     };
     // Rate-limit outbound sends: global semaphore caps concurrent
     // requests at 64; per-(endpoint, urgency) leaky bucket spaces

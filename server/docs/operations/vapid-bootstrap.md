@@ -6,13 +6,23 @@ bootstrap input used the first time a deployment has no stored key.
 
 ## What the process does
 
-On boot, `VapidStorage::load_or_provision` chooses one path:
+On PostgreSQL, `VapidStorage::load_or_provision` selects the key in one
+transaction under the catalog and Push schema fences:
 
-1. If `WADDLE_VAPID_PRIVATE_KEY` is set, parse it, initialize the signer, and
-   persist the sealed key. Any parse, signer, or persistence failure fails
-   boot and leaves no stored key. The variable stays set.
-2. Otherwise, load the latest non-retired sealed key.
-3. Otherwise, generate a fresh P-256 key and persist it.
+1. If exactly one active key exists, authenticate and reuse it. If the
+   environment variable is set, its public key must match the stored key.
+2. If no key has ever been stored, use the environment key when supplied,
+   otherwise generate a fresh P-256 key and persist it.
+3. Fail closed for malformed input, a mismatched key, multiple active keys,
+   retired-only history, invalid stored material, or inconsistent markers.
+   Adding another row is not a rotation procedure.
+
+The signer is returned only after the database acknowledges COMMIT. A lost
+acknowledgement leaves the commit outcome indeterminate: inspect or retry
+through the same fenced path, which rereads durable state before deciding
+whether to create a key. A failed boot alone does not prove that no key was
+stored. SQLite retains its legacy behavior: an environment key is persisted
+when supplied; otherwise the latest active key is loaded or a key generated.
 
 The running process does not clear the variable. Database and telemetry
 threads may already be reading the environment, and clearing it would not
@@ -38,7 +48,8 @@ key. Leaving the bootstrap variable in the spec keeps the private key in
 every new pod's environment.
 
 1. Confirm the process became ready after the boot that persisted the key.
-   A failed boot did not store a key; keep the variable until a boot succeeds.
+   Keep the variable until a boot succeeds; an unacknowledged commit can have
+   stored the key even if that boot failed.
 2. Delete `WADDLE_VAPID_PRIVATE_KEY` from the Deployment, Helm values, secret,
    or other env source.
 3. Roll the workload so new processes start without the variable.

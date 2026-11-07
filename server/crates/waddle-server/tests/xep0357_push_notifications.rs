@@ -113,16 +113,13 @@ async fn env_var_bootstrap_persists_without_mutating_environment() {
         encoded,
     );
 
-    // The read-only loader ignores bootstrap inputs and proves the env-supplied
-    // key is durably available without clearing a process-global variable.
-    let signer2 = VapidStorage::load_or_ephemeral(db, ROOT_KEY)
+    let connection = db.guard().await.expect("inspect stored bootstrap key");
+    let mut rows = connection
+        .query("SELECT kid, public_key FROM push_service_vapid_keys", ())
         .await
-        .expect("reload");
-    assert_eq!(
-        signer2.current_kid(),
-        kid,
-        "env-supplied key survived to the next boot via the DB"
-    );
+        .expect("read stored bootstrap key");
+    let row = rows.next().await.expect("read row").expect("stored row");
+    assert_eq!(row.get::<String>(0).expect("stored kid"), kid.to_string());
 
     // Verify the persisted public key matches what the env-supplied scalar
     // produces.
@@ -132,12 +129,34 @@ async fn env_var_bootstrap_persists_without_mutating_environment() {
         .to_encoded_point(false)
         .as_bytes()
         .to_vec();
-    let got_pk = signer2
-        .current_public_key()
-        .to_encoded_point(false)
-        .as_bytes()
-        .to_vec();
+    let got_pk: Vec<u8> = row.get(1).expect("stored public key");
     assert_eq!(got_pk, expected_pk);
+}
+
+#[tokio::test]
+async fn failed_lineage_placeholder_does_not_touch_storage_or_bootstrap_environment() {
+    if !run_in_subprocess(
+        "failed_lineage_placeholder_does_not_touch_storage_or_bootstrap_environment",
+        Some("not-a-valid-vapid-key"),
+    ) {
+        return;
+    }
+    let db = fresh_db("vapid-placeholder").await;
+    let _signer = VapidStorage::generate_ephemeral_signer().expect("stateless placeholder");
+    let connection = db.guard().await.expect("inspect SQLite schema");
+    let mut rows = connection
+        .query(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'push_service_vapid_keys'",
+            (),
+        )
+        .await
+        .expect("inspect VAPID table");
+    let row = rows.next().await.expect("read count").expect("count row");
+    assert_eq!(row.get::<i64>(0).expect("table count"), 0);
+    assert_eq!(
+        env::var(VAPID_ENV_VAR).as_deref(),
+        Ok("not-a-valid-vapid-key")
+    );
 }
 
 #[tokio::test]
@@ -151,14 +170,18 @@ async fn env_var_persist_failure_retains_bootstrap_without_storing_key() {
     }
 
     let db = fresh_db("vapid-env-persist-failure").await;
-    // The read-only loader initializes the schema without inserting a key.
-    drop(
-        VapidStorage::load_or_ephemeral(db.clone(), ROOT_KEY)
-            .await
-            .expect("initialize VAPID storage"),
-    );
     {
         let connection = db.guard().await.expect("SQLite fixture connection");
+        connection
+            .execute(
+                "CREATE TABLE push_service_vapid_keys (\
+                   kid TEXT NOT NULL PRIMARY KEY, sealed_private_key TEXT NOT NULL, \
+                   public_key BLOB NOT NULL, root_key_version INTEGER NOT NULL, \
+                   created_at_ms INTEGER NOT NULL, retired_at_ms INTEGER)",
+                (),
+            )
+            .await
+            .expect("create VAPID fixture schema");
         connection
             .execute(
                 "CREATE TRIGGER reject_vapid_insert BEFORE INSERT ON push_service_vapid_keys \

@@ -91,13 +91,9 @@ const CURRENT_ROOT_KEY_VERSION: u32 = 1;
 
 /// Durable VAPID keypair storage for the Push Service component.
 ///
-/// Construct via [`Self::load_or_provision`], which executes the boot
-/// lifecycle:
-///   1. If `WADDLE_VAPID_PRIVATE_KEY` env var is set: parse, initialize
-///      the signer and persist. Fail boot loudly on any error. Retain the
-///      environment variable on both success and failure.
-///   2. Else read the latest non-retired row.
-///   3. Else generate a fresh P-256 keypair and persist.
+/// Construct via [`Self::load_or_provision`]. PostgreSQL selects or creates
+/// the first key under one fenced transaction; SQLite retains its legacy
+/// environment, latest-key, then generation order.
 pub struct VapidStorage {
     db: Database,
     cipher: VapidKeyCipher,
@@ -149,28 +145,9 @@ impl VapidStorage {
         Ok(Arc::new(signer))
     }
 
-    /// Read-only variant for a node whose startup lineage attestation failed
-    /// (#1652): never write into an unattested database — not the env-var
-    /// bootstrap persist, not a fresh-keypair persist. The node is
-    /// permanently unready in that state, so when no key exists an
-    /// ephemeral, unpersisted signer is enough to keep the push-service
-    /// object graph constructible.
-    pub async fn load_or_ephemeral(
-        db: Database,
-        root_key: &[u8],
-    ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
-        let storage = Self::try_new(db.clone(), root_key)
-            .await
-            .map_err(|source| VapidLoadError::DbWrite {
-                stage: VapidDbWriteStage::Initialize,
-                source: Box::new(source),
-            })?;
-        if let Some((kid, secret_key)) = storage.load_latest().await? {
-            return Ok(Arc::new(
-                InProcessVapidSigner::try_new(kid, secret_key)
-                    .map_err(|source| VapidLoadError::SignerInit { source })?,
-            ));
-        }
+    /// Create a placeholder for a permanently unready node after lineage
+    /// attestation fails. This does not access storage or the environment.
+    pub fn generate_ephemeral_signer() -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
         let kid = Kid::new();
         let secret_key = p256::SecretKey::random(&mut OsRng);
         Ok(Arc::new(
@@ -183,6 +160,17 @@ impl VapidStorage {
         db: Database,
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
+        if db.driver() == DatabaseDriver::Postgres {
+            if db.uses_attested_postgres_pool() {
+                return Err(VapidLoadError::DbWrite {
+                    stage: VapidDbWriteStage::Initialize,
+                    source: Box::new(XmppError::internal(
+                        "attested VAPID runtime handles must use load_attested",
+                    )),
+                });
+            }
+            return Self::load_or_provision_postgres(&db, root_key).await;
+        }
         let storage = Self::try_new(db.clone(), root_key)
             .await
             .map_err(|source| VapidLoadError::DbWrite {
@@ -237,6 +225,254 @@ impl VapidStorage {
         storage
             .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
             .await?;
+        Ok(Arc::new(signer))
+    }
+
+    async fn load_or_provision_postgres(
+        db: &Database,
+        root_key: &[u8],
+    ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
+        let mut tx = db
+            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+                super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY,
+            )])
+            .await
+            .map_err(pg_provision_error)?;
+        tx.execute("SET LOCAL lock_timeout = '3s'", ())
+            .await
+            .map_err(pg_provision_error)?;
+        tx.execute("SET LOCAL statement_timeout = '30000ms'", ())
+            .await
+            .map_err(pg_provision_error)?;
+
+        let mut rows = tx
+            .query(
+                "SELECT pg_catalog.current_schema()::text, NOT pg_catalog.pg_is_in_recovery()",
+                (),
+            )
+            .await
+            .map_err(pg_provision_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(pg_provision_error)?
+            .ok_or(VapidLoadError::InvalidStorageState)?;
+        let schema = row
+            .get::<Option<String>>(0)
+            .map_err(pg_provision_error)?
+            .ok_or(VapidLoadError::InvalidStorageState)?;
+        if !row.get::<bool>(1).map_err(pg_provision_error)? {
+            return Err(VapidLoadError::InvalidStorageState);
+        }
+        drop(rows);
+        crate::db::physical_attestation::validate_identifier(&schema, "VAPID schema")
+            .map_err(|_| VapidLoadError::InvalidStorageState)?;
+        super::owner::verify_no_temp_push_relations_tx(&mut tx)
+            .await
+            .map_err(|_| VapidLoadError::InvalidStorageState)?;
+        super::owner::lock_existing_push_relations_tx(&mut tx, &schema)
+            .await
+            .map_err(pg_provision_error)?;
+
+        let table_exists = super::runtime_attach::vapid_relation_exists_tx(
+            &mut tx,
+            &schema,
+            super::runtime_attach::VAPID_TABLE_NAME,
+        )
+        .await
+        .map_err(pg_provision_error)?;
+        let vapid_marker_exists = super::runtime_attach::vapid_relation_exists_tx(
+            &mut tx,
+            &schema,
+            super::runtime_attach::VAPID_MARKER_TABLE_NAME,
+        )
+        .await
+        .map_err(pg_provision_error)?;
+        let push_marker_exists = super::runtime_attach::vapid_relation_exists_tx(
+            &mut tx,
+            &schema,
+            "push_service_schema_marker",
+        )
+        .await
+        .map_err(pg_provision_error)?;
+        if vapid_marker_exists && (!table_exists || !push_marker_exists) {
+            return Err(VapidLoadError::InvalidStorageState);
+        }
+
+        let identity = if push_marker_exists || vapid_marker_exists {
+            Some(live_identity_for_markers_tx(&mut tx, &schema).await?)
+        } else {
+            None
+        };
+        if let Some(identity) = &identity {
+            if push_marker_exists {
+                // An incomplete marker is expected after a raw initializer,
+                // but malformed or foreign marker data is never accepted.
+                super::runtime_attach::verify_marker_shape_and_data_tx(&mut tx, identity)
+                    .await
+                    .map_err(|_| VapidLoadError::InvalidStorageState)?;
+            }
+        }
+        let marked_kid = if vapid_marker_exists {
+            super::runtime_attach::verify_vapid_marker_shape_tx(&mut tx, &schema)
+                .await
+                .map_err(|_| VapidLoadError::InvalidStorageState)?;
+            let identity = identity
+                .as_ref()
+                .ok_or(VapidLoadError::InvalidStorageState)?;
+            Some(
+                super::runtime_attach::verify_vapid_marker_data_tx(&mut tx, identity)
+                    .await
+                    .map_err(|_| VapidLoadError::InvalidStorageState)?,
+            )
+        } else {
+            None
+        };
+        let bootstrap = match env::var(VAPID_ENV_VAR) {
+            Ok(raw) => Some(parse_env_scalar(Zeroizing::new(raw).as_str())?),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(VapidLoadError::InvalidBootstrapEnvironment);
+            }
+        };
+
+        if !table_exists {
+            // DDL and any first insert invalidate a completed Push marker in
+            // this same transaction. Only the owner phase may restore it.
+            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+                .await
+                .map_err(pg_provision_error)?;
+            let quoted_schema = crate::db::physical_attestation::quote_identifier(&schema);
+            tx.execute(
+                &format!(
+                    "CREATE TABLE {quoted_schema}.push_service_vapid_keys (\
+                       kid TEXT NOT NULL PRIMARY KEY, sealed_private_key TEXT NOT NULL, \
+                       public_key BYTEA NOT NULL, root_key_version BIGINT NOT NULL, \
+                       created_at_ms BIGINT NOT NULL, retired_at_ms BIGINT)"
+                ),
+                (),
+            )
+            .await
+            .map_err(pg_provision_error)?;
+            tx.execute(
+                &format!(
+                    "CREATE INDEX idx_push_service_vapid_keys_active \
+                     ON {quoted_schema}.push_service_vapid_keys (retired_at_ms, created_at_ms)"
+                ),
+                (),
+            )
+            .await
+            .map_err(pg_provision_error)?;
+        }
+        if vapid_marker_exists {
+            super::runtime_attach::verify_vapid_table_shape_tx(&mut tx, &schema)
+                .await
+                .map_err(|_| VapidLoadError::InvalidStorageState)?;
+        } else if super::runtime_attach::verify_raw_vapid_table_shape_tx(&mut tx, &schema)
+            .await
+            .map_err(|_| VapidLoadError::InvalidStorageState)?
+        {
+            // Old raw initialization created this index if absent. Only
+            // repair it after validating the remaining table shape; never
+            // repair an owner-marked relation here.
+            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+                .await
+                .map_err(pg_provision_error)?;
+            let quoted_schema = crate::db::physical_attestation::quote_identifier(&schema);
+            tx.execute(
+                &format!(
+                    "CREATE INDEX idx_push_service_vapid_keys_active \
+                     ON {quoted_schema}.push_service_vapid_keys (retired_at_ms, created_at_ms)"
+                ),
+                (),
+            )
+            .await
+            .map_err(pg_provision_error)?;
+            if super::runtime_attach::verify_raw_vapid_table_shape_tx(&mut tx, &schema)
+                .await
+                .map_err(|_| VapidLoadError::InvalidStorageState)?
+            {
+                return Err(VapidLoadError::InvalidStorageState);
+            }
+        }
+
+        let active_count = super::runtime_attach::count_active_vapid_keys_tx(&mut tx, &schema)
+            .await
+            .map_err(pg_provision_error)?;
+        if active_count > 1 {
+            return Err(VapidLoadError::MultipleActiveKeys);
+        }
+        let record = super::runtime_attach::select_vapid_active_key_tx(&mut tx, &schema)
+            .await
+            .map_err(pg_provision_error)?;
+        if let Some(marked_kid) = marked_kid {
+            if record.as_ref().map(|record| record.kid.as_str()) != Some(marked_kid.as_str()) {
+                return Err(VapidLoadError::InvalidStorageState);
+            }
+        }
+        let cipher = VapidKeyCipher::new(root_key);
+        let signer = if let Some(record) = record {
+            let (kid, secret_key) = decode_persisted_key(&cipher, &record)
+                .map_err(|_| VapidLoadError::InvalidStoredKey)?;
+            if bootstrap.as_ref().is_some_and(|key| {
+                key.public_key().to_encoded_point(false).as_bytes() != record.public_key.as_slice()
+            }) {
+                return Err(VapidLoadError::BootstrapKeyMismatch);
+            }
+            InProcessVapidSigner::try_new(kid, secret_key)
+                .map_err(|source| VapidLoadError::SignerInit { source })?
+        } else {
+            if super::runtime_attach::count_vapid_keys_tx(&mut tx, &schema)
+                .await
+                .map_err(pg_provision_error)?
+                != 0
+            {
+                return Err(VapidLoadError::RotationRequired);
+            }
+            let secret_key = bootstrap.unwrap_or_else(|| p256::SecretKey::random(&mut OsRng));
+            let kid = Kid::new();
+            let scalar_bytes = Zeroizing::new(secret_key.to_bytes());
+            let public_bytes = secret_key
+                .public_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec();
+            let signer = InProcessVapidSigner::try_new(kid, secret_key)
+                .map_err(|source| VapidLoadError::SignerInit { source })?;
+            let sealed = cipher
+                .seal(&scalar_bytes[..], AAD_LABEL, kid.as_bytes())
+                .map_err(|source| VapidLoadError::DbWrite {
+                    stage: VapidDbWriteStage::SealPrivateKey,
+                    source: Box::new(source),
+                })?;
+            super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+                .await
+                .map_err(pg_provision_error)?;
+            let quoted_schema = crate::db::physical_attestation::quote_identifier(&schema);
+            tx.execute(
+                &format!(
+                    "INSERT INTO {quoted_schema}.push_service_vapid_keys \
+                     (kid, sealed_private_key, public_key, root_key_version, created_at_ms) \
+                     VALUES (?, ?, ?, ?, ?)"
+                ),
+                crate::db_params![
+                    kid.to_string(),
+                    sealed,
+                    public_bytes,
+                    i64::from(CURRENT_ROOT_KEY_VERSION),
+                    chrono::Utc::now().timestamp_millis(),
+                ],
+            )
+            .await
+            .map_err(pg_provision_error)?;
+            signer
+        };
+        // The catalog-fenced transaction discards its checkout when COMMIT is
+        // cancelled or unacknowledged. A later call must reacquire both fences
+        // and read durable state; it cannot infer rollback from socket closure.
+        tx.commit()
+            .await
+            .map_err(|_| VapidLoadError::CommitIndeterminate)?;
         Ok(Arc::new(signer))
     }
 
@@ -465,6 +701,65 @@ impl VapidStorage {
     }
 }
 
+fn pg_provision_error(source: impl std::error::Error + Send + Sync + 'static) -> VapidLoadError {
+    VapidLoadError::DbWrite {
+        stage: VapidDbWriteStage::FencedProvision,
+        source: Box::new(source),
+    }
+}
+
+/// Read marker identity from the same fenced backend, never a pool checkout
+/// that could name a different database or schema.
+async fn live_identity_for_markers_tx(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<crate::db::lineage::PgIdentity, VapidLoadError> {
+    use crate::db::lineage::{
+        PgDatabaseIdentity, PgDatabaseName, PgIdentity, PgSchemaIdentity, PgSchemaName,
+    };
+
+    let mut rows = tx
+        .query(
+            "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+               database.oid::bigint, database.datname::text, namespace.oid::bigint, \
+               namespace.nspname::text \
+             FROM pg_catalog.pg_namespace namespace \
+             JOIN pg_catalog.pg_database database \
+               ON database.datname = pg_catalog.current_database() \
+             WHERE namespace.nspname = ? AND namespace.nspname = pg_catalog.current_schema()",
+            crate::db_params![schema],
+        )
+        .await
+        .map_err(pg_provision_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(pg_provision_error)?
+        .ok_or(VapidLoadError::InvalidStorageState)?;
+    let system_identifier = row
+        .get::<String>(0)
+        .map_err(pg_provision_error)?
+        .parse()
+        .map_err(|_| VapidLoadError::InvalidStorageState)?;
+    let database_oid = u32::try_from(row.get::<i64>(1).map_err(pg_provision_error)?)
+        .map_err(|_| VapidLoadError::InvalidStorageState)?;
+    let database_name = row.get::<String>(2).map_err(pg_provision_error)?;
+    let schema_oid = u32::try_from(row.get::<i64>(3).map_err(pg_provision_error)?)
+        .map_err(|_| VapidLoadError::InvalidStorageState)?;
+    let schema_name = row.get::<String>(4).map_err(pg_provision_error)?;
+    Ok(PgIdentity {
+        system_identifier,
+        database: PgDatabaseIdentity {
+            oid: database_oid,
+            name: PgDatabaseName(database_name),
+        },
+        schema: PgSchemaIdentity {
+            oid: schema_oid,
+            name: PgSchemaName(schema_name),
+        },
+    })
+}
+
 /// Owner-phase implementation. The caller holds the existing Push schema
 /// advisory lock and has proved that the Push Service owner marker is ready.
 pub(super) async fn prepare_vapid_owner_tx(
@@ -663,6 +958,13 @@ fn validate_persisted_key(
     cipher: &VapidKeyCipher,
     record: &super::runtime_attach::VapidKeyRecord,
 ) -> Result<(), VapidRuntimeAttachError> {
+    decode_persisted_key(cipher, record).map(|_| ())
+}
+
+fn decode_persisted_key(
+    cipher: &VapidKeyCipher,
+    record: &super::runtime_attach::VapidKeyRecord,
+) -> Result<(Kid, p256::SecretKey), VapidRuntimeAttachError> {
     if record.root_key_version != i64::from(CURRENT_ROOT_KEY_VERSION) {
         return Err(VapidRuntimeAttachError::UnknownRootKeyVersion);
     }
@@ -679,7 +981,7 @@ fn validate_persisted_key(
     if secret_key.public_key().to_encoded_point(false).as_bytes() != record.public_key.as_slice() {
         return Err(VapidRuntimeAttachError::PublicKeyMismatch);
     }
-    Ok(())
+    Ok((kid, secret_key))
 }
 
 /// AES-256-GCM sealing for VAPID private keys.
