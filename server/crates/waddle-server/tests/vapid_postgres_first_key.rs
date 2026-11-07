@@ -9,6 +9,7 @@ pub mod postgres_proxy;
 use std::ffi::OsString;
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
 use tokio::sync::Notify;
 use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
@@ -160,7 +162,7 @@ async fn pg17_vapid_subprocess_entry() {
     let url = std::env::var(CHILD_URL).expect("fixture URL");
     let schema = std::env::var(CHILD_SCHEMA).ok();
     let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url);
-    if schema.is_some() || mode == "commit_unknown" {
+    if schema.is_some() || matches!(mode.as_str(), "commit_unknown" | "fence_error") {
         config.pool_size = 1;
     }
     let db = Database::from_config("VAPID PostgreSQL public-entry test", &config)
@@ -238,6 +240,13 @@ async fn pg17_vapid_subprocess_entry() {
             _ => panic!("marker identity check did not fail on the denied function"),
         },
         "commit_unknown" => assert!(matches!(result, Err(VapidLoadError::CommitIndeterminate))),
+        "fence_error" => assert!(matches!(
+            result,
+            Err(VapidLoadError::DbWrite {
+                stage: VapidDbWriteStage::FencedProvision,
+                ..
+            })
+        )),
         _ => panic!("unknown VAPID test mode"),
     }
 }
@@ -824,4 +833,216 @@ async fn pg17_commit_reply_timeout_is_indeterminate_and_retry_reuses_committed_k
     assert_eq!(committed_kid, retried_kid);
     assert_eq!(f.count().await, 1);
     f.cleanup().await;
+}
+
+async fn hold_catalog_lock_reply(
+    listener: tokio::net::TcpListener,
+    target: PgConnectOptions,
+    held: Arc<Notify>,
+    release: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let (client, _) = listener.accept().await?;
+    let server = postgres_proxy::connect_local_postgres(&target).await?;
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = tokio::io::split(server);
+    let catalog_query_seen = Arc::new(AtomicBool::new(false));
+    let response_held = Arc::new(AtomicBool::new(false));
+    let mut upstream_release = release.clone();
+    let downstream_seen = Arc::clone(&catalog_query_seen);
+    let upstream_held = Arc::clone(&response_held);
+    let upstream = async move {
+        let mut buffer = [0_u8; 8192];
+        let mut tail = Vec::new();
+        loop {
+            if upstream_held.load(Ordering::SeqCst) {
+                let _ = upstream_release.changed().await;
+                return Ok::<(), std::io::Error>(());
+            }
+            let count = client_read.read(&mut buffer).await?;
+            if count == 0 {
+                // Keep the server side open even after client cancellation.
+                let _ = upstream_release.changed().await;
+                return Ok(());
+            }
+            if upstream_held.load(Ordering::SeqCst) {
+                let _ = upstream_release.changed().await;
+                return Ok(());
+            }
+            let mut scan = tail;
+            scan.extend_from_slice(&buffer[..count]);
+            let needle = b"pg_try_advisory_xact_lock(";
+            if scan.windows(needle.len()).any(|part| part == needle) {
+                catalog_query_seen.store(true, Ordering::SeqCst);
+            }
+            server_write.write_all(&buffer[..count]).await?;
+            tail = scan[scan.len().saturating_sub(needle.len() - 1)..].to_vec();
+        }
+    };
+    let mut downstream_release = release;
+    let downstream = async move {
+        loop {
+            let tag = server_read.read_u8().await?;
+            let length = server_read.read_u32().await?;
+            if !(4..=1_048_576).contains(&length) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid PostgreSQL response length",
+                ));
+            }
+            let mut body = vec![0; (length - 4) as usize];
+            server_read.read_exact(&mut body).await?;
+            let acquired =
+                body.len() == 7 && body[..6] == [0, 1, 0, 0, 0, 1] && matches!(body[6], 1 | b't');
+            if downstream_seen.load(Ordering::SeqCst) && tag == b'D' && acquired {
+                response_held.store(true, Ordering::SeqCst);
+                held.notify_one();
+                let _ = downstream_release.changed().await;
+                return Ok(());
+            }
+            client_write.write_u8(tag).await?;
+            client_write.write_u32(length).await?;
+            client_write.write_all(&body).await?;
+        }
+    };
+    tokio::select! { result = upstream => result, result = downstream => result }
+}
+
+async fn assert_catalog_locked(admin: &PgPool, expected_locked: bool) {
+    let available: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .fetch_one(admin)
+        .await
+        .expect("probe catalog fence");
+    assert_eq!(!available, expected_locked);
+}
+
+async fn exercise_pre_fence_idle_cap(url: &str, initial_idle: &str) {
+    let f = Fixture::new(url).await;
+    let target = PgConnectOptions::from_str(url).expect("PostgreSQL options");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    let held = Arc::new(Notify::new());
+    let (release, release_receiver) = watch::channel(false);
+    let proxy = tokio::spawn(hold_catalog_lock_reply(
+        listener,
+        target,
+        Arc::clone(&held),
+        release_receiver,
+    ));
+    let scoped = url_with_options(
+        url,
+        &format!(
+            "-c search_path={} -c idle_in_transaction_session_timeout={initial_idle}",
+            f.schema
+        ),
+    );
+    let mut proxy_url = postgres_proxy::local_proxy_url(&scoped, port).expect("proxy URL");
+    let application = format!("vapid_idle_{}", uuid::Uuid::new_v4().simple());
+    proxy_url
+        .query_pairs_mut()
+        .append_pair("application_name", &application);
+    let mut child = spawn_child(proxy_url.as_str(), "fence_error", None);
+    if tokio::time::timeout(Duration::from_secs(10), held.notified())
+        .await
+        .is_err()
+    {
+        if child.try_wait().expect("poll VAPID process").is_none() {
+            child.kill().expect("terminate stalled VAPID process");
+        }
+        let output = child.wait_with_output().expect("read VAPID process output");
+        proxy.abort();
+        panic!(
+            "proxy did not hold catalog response; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let pid: i32 = sqlx::query_scalar(
+        "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&application)
+    .fetch_one(&f.admin)
+    .await
+    .expect("identify fenced backend");
+    assert_catalog_locked(&f.admin, true).await;
+    let mut child_wait = tokio::task::spawn_blocking(move || {
+        finish_child_with_timeout(child, Duration::from_secs(25));
+    });
+    if initial_idle == "0" {
+        // The client times out first. The proxy deliberately retains the
+        // server socket, so socket closure is not evidence of lock release.
+        tokio::time::timeout(Duration::from_secs(25), &mut child_wait)
+            .await
+            .expect("client deadline")
+            .expect("VAPID process wait");
+        let still_present: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+        )
+        .bind(pid)
+        .fetch_one(&f.admin)
+        .await
+        .expect("inspect original backend");
+        assert!(still_present, "backend must still be held by the proxy");
+        assert_catalog_locked(&f.admin, true).await;
+    }
+    let backend_deadline = if initial_idle == "0" {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(8)
+    };
+    tokio::time::timeout(backend_deadline, async {
+        loop {
+            let present: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+            )
+            .bind(pid)
+            .fetch_one(&f.admin)
+            .await
+            .expect("inspect idle backend");
+            if !present {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("server idle transaction bound releases backend");
+    assert_catalog_locked(&f.admin, false).await;
+    release.send(true).expect("release held proxy sockets");
+    tokio::time::timeout(Duration::from_secs(5), proxy)
+        .await
+        .expect("proxy ends")
+        .expect("join proxy")
+        .expect("proxy I/O");
+    if initial_idle != "0" {
+        tokio::time::timeout(Duration::from_secs(8), &mut child_wait)
+            .await
+            .expect("tight-timeout client exits")
+            .expect("VAPID process wait");
+    }
+    let absent: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NULL")
+        .bind(format!("{}.push_service_vapid_keys", f.schema))
+        .fetch_one(&f.admin)
+        .await
+        .expect("check no key mutation before fence acknowledgement");
+    assert!(absent);
+    run_child(&f.url, "reuse", None);
+    assert_eq!(f.count().await, 1);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn pg17_catalog_lock_reply_stall_respects_idle_transaction_caps() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let target = PgConnectOptions::from_str(&url).expect("PostgreSQL options");
+    if postgres_proxy::ensure_local_target(&target).is_err() {
+        eprintln!("skipping plaintext proxy witness for nonlocal PostgreSQL target");
+        return;
+    }
+    exercise_pre_fence_idle_cap(&url, "0").await;
+    exercise_pre_fence_idle_cap(&url, "2000ms").await;
 }
