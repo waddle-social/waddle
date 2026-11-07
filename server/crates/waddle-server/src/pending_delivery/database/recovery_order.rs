@@ -1,7 +1,7 @@
 //! Monotone physical insertion metadata for bounded notification recovery laps.
 
 use super::{DatabaseDriver, PendingRowId, PendingStorageError};
-use crate::db::{Database, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseError, Transaction};
 
 const INITIALIZATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const BACKFILL_BATCH: i64 = 128;
@@ -12,6 +12,10 @@ pub(super) const SQLITE_IMMUTABLE_TRIGGER: &str = "CREATE TRIGGER pending_notifi
 pub(super) const SQLITE_MONOTONE_TRIGGER: &str = "CREATE TRIGGER pending_notification_recovery_counter_monotone BEFORE UPDATE OF last_ordinal ON pending_notification_recovery_counter WHEN NEW.last_ordinal < OLD.last_ordinal BEGIN SELECT RAISE(ABORT, 'pending recovery counter cannot rewind'); END";
 
 pub(super) async fn initialize(db: &Database) -> Result<(), PendingStorageError> {
+    if db.driver() == DatabaseDriver::Postgres {
+        let schema = super::schema::capture_postgres_schema(db).await?;
+        return initialize_postgres_stage(db, &schema).await;
+    }
     tokio::time::timeout(INITIALIZATION_BUDGET, initialize_inner(db))
         .await
         .map_err(|_| {
@@ -22,21 +26,24 @@ pub(super) async fn initialize(db: &Database) -> Result<(), PendingStorageError>
 }
 
 async fn begin(db: &Database) -> Result<Transaction<'_>, PendingStorageError> {
-    let mut tx = db.begin_immediate().await.map_err(other)?;
-    if tx.driver() == DatabaseDriver::Postgres {
-        // Fresh catalog reads are required after waiting for another initializer.
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-            .await
-            .map_err(other)?;
-        tx.execute("SET LOCAL lock_timeout = '5s'", ())
-            .await
-            .map_err(other)?;
-        tx.execute("SET LOCAL statement_timeout = '25s'", ())
-            .await
-            .map_err(other)?;
-        tx.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext('pending_notification_recovery_ordinal'))", ()).await.map_err(other)?;
+    if db.driver() == DatabaseDriver::Postgres {
+        let schema = super::schema::capture_postgres_schema(db).await?;
+        return begin_postgres(db, &schema).await;
     }
-    Ok(tx)
+    db.begin_immediate().await.map_err(other)
+}
+
+async fn begin_postgres<'a>(
+    db: &'a Database,
+    schema: &super::schema::PostgresOwnerSchema,
+) -> Result<Transaction<'a>, PendingStorageError> {
+    let (first, second) = schema.recovery_gate;
+    super::schema::begin_postgres_stage(
+        db,
+        schema,
+        &[CatalogFenceLock::ExclusivePair(first, second)],
+    )
+    .await
 }
 
 fn other(error: DatabaseError) -> PendingStorageError {
@@ -45,19 +52,38 @@ fn other(error: DatabaseError) -> PendingStorageError {
 
 async fn initialize_inner(db: &Database) -> Result<(), PendingStorageError> {
     let mut tx = begin(db).await?;
-    if tx.driver() == DatabaseDriver::Postgres {
-        initialize_postgres(&mut tx).await?;
-    } else {
-        initialize_sqlite(&mut tx).await?;
-    }
+    initialize_sqlite(&mut tx).await?;
     tx.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_notification_recovery_ordinal ON pending_delivery (notification_recovery_ordinal)", ()).await.map_err(other)?;
     tx.execute("CREATE INDEX IF NOT EXISTS idx_pending_notification_recovery_due ON pending_delivery (notification_recovery_ordinal) WHERE payload_kind = 'archived' AND flushed_in_session IS NULL AND notification_outboxed_at_ms IS NULL", ()).await.map_err(other)?;
     tx.commit().await.map_err(other)
 }
 
-async fn initialize_postgres(tx: &mut Transaction<'_>) -> Result<(), PendingStorageError> {
+pub(super) async fn initialize_postgres_stage(
+    db: &Database,
+    schema: &super::schema::PostgresOwnerSchema,
+) -> Result<(), PendingStorageError> {
+    let mut tx = begin_postgres(db, schema).await?;
+    let result = tokio::time::timeout(INITIALIZATION_BUDGET, async {
+        let oid = super::schema::lock_postgres_owner_relation(&mut tx, schema, "pending_delivery", true, super::schema::OwnerRelationLock::Schema).await?
+            .ok_or_else(|| PendingStorageError::Other("pending relation missing".to_owned()))?;
+        super::schema::verify_postgres_recovery_function_dependencies(&mut tx, schema, oid).await?;
+        initialize_postgres(&mut tx, schema).await?;
+        let table = schema.relation("pending_delivery");
+        tx.execute(&format!("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_notification_recovery_ordinal ON {table} (notification_recovery_ordinal)"), ()).await.map_err(other)?;
+        tx.execute(&format!("CREATE INDEX IF NOT EXISTS idx_pending_notification_recovery_due ON {table} (notification_recovery_ordinal) WHERE payload_kind = 'archived' AND flushed_in_session IS NULL AND notification_outboxed_at_ms IS NULL"), ()).await.map_err(other)?;
+        Ok(())
+    }).await.unwrap_or_else(|_| Err(PendingStorageError::Other("pending recovery metadata initialization timed out".to_owned())));
+    super::schema::finish_postgres_stage(tx, result, "recovery_ordinal").await
+}
+
+async fn initialize_postgres(
+    tx: &mut Transaction<'_>,
+    schema: &super::schema::PostgresOwnerSchema,
+) -> Result<(), PendingStorageError> {
+    let table = schema.relation("pending_delivery");
+    let function = schema.relation("pending_notification_recovery_ordinal_immutable");
     let identity = {
-        let mut rows = tx.query("SELECT attidentity::text FROM pg_attribute WHERE attrelid = 'pending_delivery'::regclass AND attname = 'notification_recovery_ordinal' AND NOT attisdropped", ()).await.map_err(other)?;
+        let mut rows = tx.query("SELECT attidentity::text FROM pg_catalog.pg_attribute WHERE attrelid = ?::pg_catalog.regclass AND attname = 'notification_recovery_ordinal' AND NOT attisdropped", crate::db_params![table.clone()]).await.map_err(other)?;
         rows.next()
             .await
             .map_err(other)?
@@ -69,7 +95,7 @@ async fn initialize_postgres(tx: &mut Transaction<'_>) -> Result<(), PendingStor
         None => {
             // Adding the new identity column populates existing rows atomically.
             // Its native sequence survives deletion and is never reset here.
-            tx.execute("ALTER TABLE pending_delivery ADD COLUMN notification_recovery_ordinal BIGINT GENERATED ALWAYS AS IDENTITY (CACHE 1 NO CYCLE)", ()).await.map_err(other)?;
+            tx.execute(&format!("ALTER TABLE ONLY {table} ADD COLUMN notification_recovery_ordinal BIGINT GENERATED ALWAYS AS IDENTITY (CACHE 1 NO CYCLE)"), ()).await.map_err(other)?;
         }
         Some("a") => {}
         Some(_) => {
@@ -78,9 +104,16 @@ async fn initialize_postgres(tx: &mut Transaction<'_>) -> Result<(), PendingStor
             ))
         }
     }
-    tx.execute(&format!("CREATE OR REPLACE FUNCTION pending_notification_recovery_ordinal_immutable() RETURNS trigger LANGUAGE plpgsql AS $${POSTGRES_IMMUTABLE_BODY}$$"), ()).await.map_err(other)?;
-    tx.execute("DROP TRIGGER IF EXISTS pending_notification_recovery_ordinal_immutable ON pending_delivery", ()).await.map_err(other)?;
-    tx.execute("CREATE TRIGGER pending_notification_recovery_ordinal_immutable BEFORE UPDATE OF notification_recovery_ordinal ON pending_delivery FOR EACH ROW EXECUTE FUNCTION pending_notification_recovery_ordinal_immutable()", ()).await.map_err(other)?;
+    tx.execute(&format!("CREATE OR REPLACE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $${POSTGRES_IMMUTABLE_BODY}$$"), ()).await.map_err(other)?;
+    tx.execute(
+        &format!(
+            "DROP TRIGGER IF EXISTS pending_notification_recovery_ordinal_immutable ON {table}"
+        ),
+        (),
+    )
+    .await
+    .map_err(other)?;
+    tx.execute(&format!("CREATE TRIGGER pending_notification_recovery_ordinal_immutable BEFORE UPDATE OF notification_recovery_ordinal ON {table} FOR EACH ROW EXECUTE FUNCTION {function}()"), ()).await.map_err(other)?;
     Ok(())
 }
 

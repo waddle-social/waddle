@@ -1,10 +1,14 @@
 //! Read-only validation of an owner-prepared pending-delivery database.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
 use super::{recovery_order, schema};
+
+const POSTGRES_INSPECTION_WAIT: Duration = Duration::from_secs(60);
+const POSTGRES_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum PendingRuntimeAttachError {
@@ -20,6 +24,8 @@ pub enum PendingRuntimeAttachError {
     SqliteMemoryPoolMustBeSingleConnection,
     #[error("could not verify the PostgreSQL {setting} bound for pending-delivery attachment")]
     InvalidTimeoutSetting { setting: &'static str },
+    #[error("pending-delivery PostgreSQL attachment inspection timed out")]
+    InspectionTimeout,
     #[error("failed to inspect pending-delivery relation {relation}: {source}")]
     Relation {
         relation: &'static str,
@@ -28,6 +34,10 @@ pub enum PendingRuntimeAttachError {
     },
     #[error("pending-delivery relation {table} is not an ordinary table")]
     InvalidTable { table: &'static str },
+    #[error("PostgreSQL pending-delivery relation {table} is not permanent")]
+    NonPermanentTable { table: &'static str },
+    #[error("pending-delivery relation {relation} participates in PostgreSQL inheritance")]
+    InheritedRelation { relation: String },
     #[error("pending-delivery relation {table} has an invalid column {column}")]
     InvalidColumn {
         table: &'static str,
@@ -85,6 +95,23 @@ async fn verify_snapshot(
     } else {
         None
     };
+    if db.driver() == DatabaseDriver::Postgres {
+        let mut tx = db
+            .begin_catalog_fenced_read_only_with_idle_bound(&[])
+            .await?;
+        let result = tokio::time::timeout(
+            POSTGRES_INSPECTION_WAIT,
+            verify_transaction(db, &mut tx, capability, require_runtime_writes),
+        )
+        .await
+        .unwrap_or(Err(PendingRuntimeAttachError::InspectionTimeout));
+        // Finish every read, including failed and timed-out inspections, on
+        // the fenced backend. An unacknowledged end discards the checkout.
+        if !tx.rollback_bounded_discard(POSTGRES_ROLLBACK_WAIT).await {
+            return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+        }
+        return result;
+    }
     let mut tx = db.begin().await?;
     // A pooled external SQLite connection may have a longer busy timeout than
     // the native pool. Tighten its lock wait during inspection and restore it
@@ -124,17 +151,8 @@ async fn verify_transaction(
     require_runtime_writes: bool,
 ) -> Result<(), PendingRuntimeAttachError> {
     let schema_name = if let Some(capability) = capability {
-        // Refuse an inherited snapshot, then open a capability-bound snapshot.
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (),
-        )
-        .await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (),
-        )
-        .await?;
+        // The catalog-S transaction is READ COMMITTED and remains on this
+        // backend through relation locks, attestation and every inspection.
         crate::db::read_only_timeout::bound_postgres_waits(tx)
             .await
             .map_err(|error| match error {
@@ -147,17 +165,15 @@ async fn verify_transaction(
             })?;
         let expected = &capability.identity().schema.name.0;
         let quoted = format!("\"{}\"", expected.replace('"', "\"\""));
-        // The pool checks the physical connection on checkout. Lock each
-        // qualified table before the first repeatable-read snapshot: an owner
-        // could otherwise commit table DDL after attestation pins the snapshot
-        // but before the later SELECT takes its relation lock.
+        // The pool hook runs before catalog-S. This transaction then holds
+        // catalog-S before any named relation lock or attestation.
         for table in [
             "pending_delivery",
             "pending_delivery_sm_promotions",
             "pending_delivery_startup_migrations",
         ] {
             tx.execute(
-                &format!("LOCK TABLE {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
+                &format!("LOCK TABLE ONLY {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
                 (),
             )
             .await
@@ -176,6 +192,8 @@ async fn verify_transaction(
         if active.as_deref() != Some(expected) {
             return Err(PendingRuntimeAttachError::ActiveSchemaMismatch);
         }
+        tx.execute("SET LOCAL search_path = pg_catalog, pg_temp", ())
+            .await?;
         expected.clone()
     } else {
         let mut databases = tx.query("PRAGMA database_list", ()).await?;
@@ -217,16 +235,24 @@ async fn verify_transaction(
         }
         "main".to_owned()
     };
+    if db.driver() == DatabaseDriver::Postgres {
+        verify_postgres_inheritance(tx, &schema_name).await?;
+    }
     let quoted = format!("\"{}\"", schema_name.replace('"', "\"\""));
     for (table, columns) in [
         ("pending_delivery", "row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id, transient_xml, flushed_in_session, outbound_sequence, notification_outboxed_at_ms, claimed_at_ms, claim_token, claim_offered, origin_stream_id, inbound_seq, pair_sequence, notification_recovery_ordinal"),
         ("pending_delivery_sm_promotions", "origin_stream_id, sequence, created_at_ms"),
         ("pending_delivery_startup_migrations", "name, completed_at"),
     ] {
+        if db.driver() == DatabaseDriver::Postgres {
+            verify_table(tx, db.driver(), &schema_name, table).await?;
+        }
         tx.query(&format!("SELECT {columns} FROM {quoted}.\"{table}\" WHERE 1 = 0"), ())
             .await
             .map_err(|source| PendingRuntimeAttachError::Relation { relation: table, source })?;
-        verify_table(tx, db.driver(), &schema_name, table).await?;
+        if db.driver() == DatabaseDriver::Sqlite {
+            verify_table(tx, db.driver(), &schema_name, table).await?;
+        }
     }
     if db.driver() == DatabaseDriver::Sqlite {
         tx.query("SELECT singleton, last_ordinal FROM main.pending_notification_recovery_counter WHERE 1 = 0", ())
@@ -286,24 +312,74 @@ async fn verify_transaction(
     Ok(())
 }
 
+async fn verify_postgres_inheritance(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), PendingRuntimeAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT DISTINCT relation.relname::text \
+             FROM pg_catalog.pg_inherits inheritance \
+             JOIN pg_catalog.pg_class relation \
+               ON relation.oid = inheritance.inhparent OR relation.oid = inheritance.inhrelid \
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+             WHERE namespace.nspname = ? \
+               AND relation.relname IN ( \
+                 'pending_delivery', 'pending_delivery_sm_promotions', \
+                 'pending_delivery_startup_migrations' \
+               ) \
+             ORDER BY relation.relname::text LIMIT 1",
+            crate::db_params![schema],
+        )
+        .await?;
+    if let Some(row) = rows.next().await? {
+        return Err(PendingRuntimeAttachError::InheritedRelation {
+            relation: row.get(0)?,
+        });
+    }
+    Ok(())
+}
+
 async fn verify_table(
     tx: &mut Transaction<'_>,
     driver: DatabaseDriver,
     schema: &str,
     table: &'static str,
 ) -> Result<(), PendingRuntimeAttachError> {
-    let mut rows = match driver {
-        DatabaseDriver::Postgres => tx.query(
-            "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r'",
-            crate::db_params![schema, table],
-        ).await?,
-        DatabaseDriver::Sqlite => tx.query(
-            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
-            crate::db_params![table],
-        ).await?,
-    };
-    if rows.next().await?.is_none() {
-        return Err(PendingRuntimeAttachError::InvalidTable { table });
+    match driver {
+        DatabaseDriver::Postgres => {
+            let mut rows = tx
+                .query(
+                    "SELECT c.relkind = 'r', c.relpersistence = 'p' \
+                     FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = ? AND c.relname = ?",
+                    crate::db_params![schema, table],
+                )
+                .await?;
+            match rows.next().await? {
+                Some(row) => {
+                    if !row.get::<bool>(0)? {
+                        return Err(PendingRuntimeAttachError::InvalidTable { table });
+                    }
+                    if !row.get::<bool>(1)? {
+                        return Err(PendingRuntimeAttachError::NonPermanentTable { table });
+                    }
+                }
+                None => return Err(PendingRuntimeAttachError::InvalidTable { table }),
+            }
+        }
+        DatabaseDriver::Sqlite => {
+            let mut rows = tx
+                .query(
+                    "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+                    crate::db_params![table],
+                )
+                .await?;
+            if rows.next().await?.is_none() {
+                return Err(PendingRuntimeAttachError::InvalidTable { table });
+            }
+        }
     }
     Ok(())
 }
@@ -637,27 +713,32 @@ async fn verify_indexes(
             DatabaseDriver::Postgres => {
                 let mut rows = tx
                     .query(
-                        "SELECT x.indisunique, pg_catalog.pg_get_indexdef(x.indexrelid) \
+                        "SELECT x.indisunique, CASE WHEN pg_catalog.octet_length(pg_catalog.pg_get_indexdef(x.indexrelid)) <= 16384 \
+                         THEN pg_catalog.pg_get_indexdef(x.indexrelid) ELSE NULL END \
                      FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid \
                      JOIN pg_catalog.pg_class t ON t.oid = x.indrelid \
                      JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
                      WHERE n.nspname = ? AND t.relname = 'pending_delivery' AND i.relname = ? \
-                       AND x.indisvalid AND x.indisready AND x.indislive",
+                       AND x.indisvalid AND x.indisready AND x.indislive \
+                       AND COALESCE(pg_catalog.pg_column_size(x.indexprs), 0) <= 16384 \
+                       AND COALESCE(pg_catalog.pg_column_size(x.indpred), 0) <= 16384",
                         crate::db_params![schema, index.name],
                     )
                     .await?;
                 match rows.next().await? {
                     Some(row) => {
                         let unique: bool = row.get(0)?;
-                        let definition: String = row.get(1)?;
+                        let definition: Option<String> = row.get(1)?;
                         unique == index.unique
-                            && definition
-                                .split_once(" USING ")
-                                .map(|(_, suffix)| {
-                                    normalize_sql(&format!("USING {suffix}"))
-                                        == normalize_sql(index.postgres_suffix)
-                                })
-                                .unwrap_or(false)
+                            && definition.as_deref().is_some_and(|definition| {
+                                definition
+                                    .split_once(" USING ")
+                                    .map(|(_, suffix)| {
+                                        normalize_sql(&format!("USING {suffix}"))
+                                            == normalize_sql(index.postgres_suffix)
+                                    })
+                                    .unwrap_or(false)
+                            })
                     }
                     None => false,
                 }
@@ -692,6 +773,7 @@ async fn verify_postgres_recovery(
         "SELECT a.attidentity::text, s.seqtypid = 'pg_catalog.int8'::pg_catalog.regtype \
                   AND s.seqstart = 1 AND s.seqincrement = 1 AND s.seqmin = 1 \
                   AND s.seqmax = 9223372036854775807 AND s.seqcache = 1 AND NOT s.seqcycle \
+                  AND seq.relpersistence = 'p' \
          FROM pg_catalog.pg_class t JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
          JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attname = 'notification_recovery_ordinal' AND NOT a.attisdropped \
          JOIN pg_catalog.pg_depend d ON d.refobjid = t.oid AND d.refobjsubid = a.attnum \
@@ -728,7 +810,8 @@ async fn verify_postgres_recovery(
          JOIN pg_catalog.pg_language l ON l.oid = p.prolang \
          WHERE n.nspname = ? AND r.relname = 'pending_delivery' \
            AND t.tgname = 'pending_notification_recovery_ordinal_immutable' \
-           AND p.proname = 'pending_notification_recovery_ordinal_immutable'",
+           AND p.proname = 'pending_notification_recovery_ordinal_immutable' \
+           AND pg_catalog.octet_length(p.prosrc) <= 4096",
         crate::db_params![schema],
     ).await?;
     let valid = match rows.next().await? {

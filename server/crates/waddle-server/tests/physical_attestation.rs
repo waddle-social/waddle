@@ -7484,6 +7484,10 @@ mod owner_rejection_roles;
 mod shared_correctness;
 
 #[cfg(feature = "test-support")]
+#[path = "physical_attestation/pending_catalog_edge.rs"]
+mod pending_catalog_edge;
+
+#[cfg(feature = "test-support")]
 #[path = "physical_attestation/pending_attach.rs"]
 mod pending_attach;
 

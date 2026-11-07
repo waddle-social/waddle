@@ -170,13 +170,15 @@ impl DatabasePendingDeliveryStorage {
     ///
     /// PostgreSQL requires the main lane of a physically attested pool; SQLite
     /// keeps using the supplied database, including a one-connection private
-    /// in-memory database. The checks describe a read-only snapshot, not future
-    /// schema state, writer readiness, deleted-row allocator high-water marks,
-    /// or quiescence of privileged DDL. SQLite temporary objects are inspected
+    /// in-memory database. PostgreSQL checks run on one READ COMMITTED backend
+    /// under the shared cooperative catalog fence. The checkout hook precedes
+    /// that fence. The checks do not establish future schema state, writer
+    /// readiness, deleted-row allocator high-water marks, or quiescence of
+    /// uncooperative privileged DDL. SQLite temporary objects are inspected
     /// only on the connection used for verification; its lock wait is capped
-    /// at five seconds without relaxing tighter settings. PostgreSQL lock and
-    /// statement waits are bounded as well. Neither establishes a total or
-    /// network deadline. This API is deliberately not wired into normal startup.
+    /// at five seconds without relaxing tighter settings. PostgreSQL inspection
+    /// and server waits are bounded; checkout and network completion are not a
+    /// single end-to-end deadline. This API is not wired into normal startup.
     pub async fn attach_existing(
         db: Database,
         quota: QuotaPolicy,
