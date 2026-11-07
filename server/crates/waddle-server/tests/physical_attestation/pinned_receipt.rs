@@ -1079,6 +1079,19 @@ async fn live_ingress_fixture(fixture: &Fixture) -> crate::ingress_support::Ingr
     .await
 }
 
+fn live_receipt_authority(
+    fixture: &Fixture,
+    ingress: &crate::ingress_support::IngressFixture,
+) -> waddle_server::ingress::IngressAuthority {
+    waddle_server::test_support::quiescent_pinned_receipt_ingress(
+        ingress.db.clone(),
+        waddle_server::config::LineageConfig {
+            deployment_uuid: Some(fixture.lineage.deployment_uuid),
+            action: None,
+        },
+    )
+}
+
 #[test]
 fn receipt_operation_id_is_versioned_and_reconstructable() {
     use waddle_server::ingress::EffectReceiptKey;
@@ -1124,7 +1137,7 @@ async fn live_executor_retains_pinned_attempt_past_its_five_second_budget() {
     let fixture = Fixture::new(url).await;
     let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let ingress = live_ingress_fixture(&fixture).await;
-    let authority = ingress.authority().await;
+    let authority = live_receipt_authority(&fixture, &ingress);
     assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
     let socket = websocket_state().await;
     bind_receipt_custody_fatal_fence(&authority, &socket);
@@ -1216,7 +1229,7 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
     let fixture = Fixture::new(url).await;
     let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let ingress = live_ingress_fixture(&fixture).await;
-    let authority = ingress.authority().await;
+    let authority = live_receipt_authority(&fixture, &ingress);
     assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
     let socket = websocket_state().await;
     bind_receipt_custody_fatal_fence(&authority, &socket);
@@ -1262,6 +1275,18 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
         .expect("positive exact readback");
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(probe.pinned_counts(), (1, 1));
+    let terminal: bool = sqlx::query_scalar(&format!(
+        "SELECT terminal_at IS NOT NULL FROM {}.ingress_messages WHERE message_key=$1",
+        fixture.target,
+    ))
+    .bind(message.to_storage())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("message frontier after readback");
+    assert!(
+        !terminal,
+        "the dark receipt path does not run legacy terminalization"
+    );
     let unresolved = receipt_custody_unresolved(&authority);
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].operation, operation);
@@ -1303,7 +1328,7 @@ async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
     let fixture = Fixture::new(url).await;
     let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
     let ingress = live_ingress_fixture(&fixture).await;
-    let authority = ingress.authority().await;
+    let authority = live_receipt_authority(&fixture, &ingress);
     assert!(select_pinned_receipt_custody(&authority, pinned, grant).await);
     let socket = websocket_state().await;
     bind_receipt_custody_fatal_fence(&authority, &socket);

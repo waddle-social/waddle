@@ -219,6 +219,16 @@ pub fn receipt_custody_unresolved(
     authority.receipt_custody_test_unresolved()
 }
 
+/// Build the real ingress executor without its owner-side GC task. The
+/// existing database and lineage must already be prepared by the fixture.
+#[cfg(feature = "test-support")]
+pub fn quiescent_pinned_receipt_ingress(
+    database: Database,
+    lineage: LineageConfig,
+) -> IngressAuthority {
+    IngressAuthority::for_pinned_receipt_test(database, lineage)
+}
+
 /// Select the pinned receipt worker for the real executor in a dark fixture.
 #[cfg(feature = "test-support")]
 pub async fn select_pinned_receipt_custody(

@@ -406,6 +406,18 @@ impl IngressAuthority {
         crate::db::lineage::enroll(&database, &lineage)
             .await
             .expect("enroll test ingress lineage");
+        Self::fixture_without_gc(database, lineage)
+    }
+
+    /// Assemble the real executor over an existing lineage without starting
+    /// GC. Dark pinned receipt fixtures must keep owner-side mutators quiescent.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn for_pinned_receipt_test(database: Database, lineage: LineageConfig) -> Self {
+        Self::fixture_without_gc(database, lineage)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn fixture_without_gc(database: Database, lineage: LineageConfig) -> Self {
         let uow = IngressUnitOfWork::open(database.clone(), lineage)
             .expect("open test ingress unit of work");
         let recovery = RecoveryBinding::default();
