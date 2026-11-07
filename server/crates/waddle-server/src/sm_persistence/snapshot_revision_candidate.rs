@@ -468,7 +468,7 @@ fn operation(
             Ok(serde_json::json!([
                 frame.stream_id.as_str(),
                 frame.sequence,
-                super::codec::serialize_stanza(&frame.stanza).map_err(storage)?,
+                frame.stanza.wire(),
                 frame.original_receipt_at.timestamp(),
                 frame.original_receipt_at.timestamp_subsec_nanos(),
                 super::codec::encode_ingress_receipts(&frame.ingress_receipts),

@@ -4613,7 +4613,7 @@ fn cutover_sm_unacked(
         ingress_receipts: Vec::new(),
         stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
         sequence,
-        stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
+        stanza: Box::new(waddle_xmpp::Stanza::Message(message)).into(),
         original_receipt_at: chrono::Utc::now(),
     }
 }

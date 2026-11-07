@@ -17,7 +17,7 @@ fn append(stream: &SmSessionId) -> PersistedIngressAppend {
         },
         accepting_stream: stream.clone(),
         sequence: 12,
-        payload: *fixture_unacked(stream.as_str(), 12).stanza,
+        payload: fixture_unacked(stream.as_str(), 12).stanza.into_stanza(),
         original_receipt_at: stale_caller_supplied_time(),
         disposition: IngressCustodyDisposition::Pending,
         appended_at: stale_caller_supplied_time(),

@@ -15,7 +15,7 @@ use super::Rows;
 use super::SmSessionId;
 use super::{
     decode_session, decode_session_principal, decode_unacked, serialize_presence_payloads,
-    serialize_stanza, show_wire_str,
+    show_wire_str,
 };
 use super::{info, instrument};
 use super::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
@@ -934,7 +934,7 @@ pub(crate) async fn append_unacked_in_transaction(
 fn unacked_insert_statement(
     stanza: &PersistedUnackedStanza,
 ) -> Result<(&'static str, Vec<crate::db::Value>), SmPersistenceError> {
-    let xml = serialize_stanza(&stanza.stanza)?;
+    let xml = stanza.stanza.wire();
     let receipt_ms = stanza.original_receipt_at.timestamp_millis();
     Ok((
         "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) VALUES (?, ?, ?, ?, ?, ?)",

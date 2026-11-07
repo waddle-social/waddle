@@ -508,7 +508,7 @@ async fn fenced_delta_is_atomic_and_rejects_a_captured_stolen_fence() {
         accepting_stream: session.stream_id.clone(),
         sequence: 3,
         appended_at: stale_caller_supplied_time(),
-        payload: *stanza.stanza.clone(),
+        payload: stanza.stanza.as_ref().clone(),
         original_receipt_at: stanza.original_receipt_at,
         disposition: IngressCustodyDisposition::Pending,
     };
@@ -618,7 +618,7 @@ async fn fenced_delta_is_atomic_and_rejects_a_captured_stolen_fence() {
     let stanza = fixture_unacked(session.stream_id.as_str(), 4);
     let mut duplicate = proof.clone();
     duplicate.sequence = 4;
-    duplicate.payload = *stanza.stanza.clone();
+    duplicate.payload = stanza.stanza.as_ref().clone();
     let request = PersistedDetachedAppend {
         session: session.clone(),
         stanza,

@@ -1,6 +1,5 @@
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::PromotionCaptureCustody;
-use crate::Stanza;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -59,34 +58,14 @@ pub(super) fn parse_xml_to_persisted_unacked(
     ingress_receipts: Vec<super::super::SmIngressFrameReceipt>,
     provenance: super::super::SmFrameProvenance,
 ) -> Result<super::super::persistence::PersistedUnackedStanza, SmRegistryError> {
-    let element: minidom::Element = stanza_xml.parse().map_err(|e: minidom::Error| {
-        SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
-    })?;
-    let stanza = match element.name() {
-        "message" => Stanza::Message(
-            xmpp_parsers::message::Message::try_from(element)
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        ),
-        "iq" => Stanza::Iq(Box::new(
-            xmpp_parsers::iq::Iq::try_from(element)
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        )),
-        "presence" => Stanza::Presence(
-            xmpp_parsers::presence::Presence::try_from(element)
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        ),
-        other => {
-            return Err(SmRegistryError::Internal(format!(
-                "unknown unacked stanza element '{other}'"
-            )));
-        }
-    };
+    let stanza = super::super::persistence::SmReplayPayload::from_wire(stanza_xml.to_owned())
+        .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
     Ok(super::super::persistence::PersistedUnackedStanza {
         provenance,
         ingress_receipts,
         stream_id: SmSessionId::new(stream_id.to_string()),
         sequence,
-        stanza: Box::new(stanza),
+        stanza,
         original_receipt_at,
     })
 }
@@ -131,22 +110,11 @@ pub(super) fn persisted_to_detached(
             matches
         })
         .map(|row| {
-            let element: minidom::Element = match &*row.stanza {
-                crate::Stanza::Message(m) => m.clone().into(),
-                crate::Stanza::Iq(iq) => (**iq).clone().into(),
-                crate::Stanza::Presence(p) => p.clone().into(),
-            };
-            let mut buf = Vec::new();
-            element
-                .write_to(&mut buf)
-                .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
-            let xml = String::from_utf8(buf)
-                .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
             Ok(DetachedUnackedStanza {
                 provenance: row.provenance.clone(),
                 ingress_receipts: row.ingress_receipts.clone(),
                 sequence: row.sequence,
-                stanza_xml: xml,
+                stanza_xml: row.stanza.wire().to_owned(),
                 original_receipt_at: row.original_receipt_at,
             })
         })
@@ -232,7 +200,7 @@ mod tests {
             ingress_receipts: Vec::new(),
             stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
             sequence,
-            stanza: Box::new(crate::Stanza::Message(message)),
+            stanza: Box::new(crate::Stanza::Message(message)).into(),
             original_receipt_at: chrono::Utc::now(),
         }
     }

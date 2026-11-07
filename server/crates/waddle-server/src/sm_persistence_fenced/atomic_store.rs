@@ -1,9 +1,9 @@
 //! Fenced snapshot and ingress allocation writes share one transaction.
 
 use super::{
-    serialize_presence_payloads, serialize_stanza, show_wire_str, KeyedSnapshotOutcome,
-    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PostgresFencedSmPersistence,
-    SmClaimFence, SmPersistenceError, SmPersistenceStorage,
+    serialize_presence_payloads, show_wire_str, KeyedSnapshotOutcome, PersistedIngressAppend,
+    PersistedSession, PersistedUnackedStanza, PostgresFencedSmPersistence, SmClaimFence,
+    SmPersistenceError, SmPersistenceStorage,
 };
 use crate::sm_persistence::ingress_append::NewDeliveryAuthorization;
 
@@ -128,7 +128,7 @@ impl PostgresFencedSmPersistence {
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
         for stanza in &unacked {
-            let xml = serialize_stanza(&stanza.stanza)?;
+            let xml = stanza.stanza.wire();
             let receipt_ms = stanza.original_receipt_at.timestamp_millis();
             tx.execute(
                 "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \

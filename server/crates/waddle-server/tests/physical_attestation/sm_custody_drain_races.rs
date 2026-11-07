@@ -51,7 +51,7 @@ fn earlier_frame(stream: &SmSessionId, sequence: u32) -> PersistedUnackedStanza 
     PersistedUnackedStanza {
         stream_id: stream.clone(),
         sequence,
-        stanza: Box::new(Stanza::Message(message)),
+        stanza: Box::new(Stanza::Message(message)).into(),
         original_receipt_at: now() - chrono::Duration::seconds(i64::from(13 - sequence)),
         ingress_receipts: Vec::new(),
         provenance: if sequence == 11 {
@@ -215,7 +215,7 @@ async fn exercise(
     let late = PersistedUnackedStanza {
         stream_id: stream.clone(),
         sequence: 13,
-        stanza: Box::new(Stanza::Message(c.frame.payload.clone())),
+        stanza: Box::new(Stanza::Message(c.frame.payload.clone())).into(),
         original_receipt_at: c.frame.received_at,
         ingress_receipts: vec![SmIngressFrameReceipt {
             message_key: c.frame.key.message_key,
@@ -229,7 +229,7 @@ async fn exercise(
         accepting_stream: stream.clone(),
         sequence: late.sequence,
         appended_at: now(),
-        payload: *late.stanza.clone(),
+        payload: late.stanza.as_ref().clone(),
         original_receipt_at: late.original_receipt_at,
         disposition: IngressCustodyDisposition::Pending,
     };

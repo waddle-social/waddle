@@ -4405,7 +4405,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
             ingress_receipts: Vec::new(),
             stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
             sequence: 1,
-            stanza: Box::new(Stanza::Message(queued)),
+            stanza: Box::new(Stanza::Message(queued)).into(),
             original_receipt_at: now - chrono::Duration::seconds(130),
         })
         .await

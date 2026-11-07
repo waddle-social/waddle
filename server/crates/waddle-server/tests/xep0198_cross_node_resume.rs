@@ -20,6 +20,7 @@
 
 #![cfg(feature = "clustering")]
 
+pub mod ingress_support;
 mod replay_bytes_support;
 
 use std::sync::Arc;
@@ -270,6 +271,40 @@ async fn cross_node_resume_preserves_production_replay_bytes_and_original_delay(
         payloads.retry_appends(&registry).await;
         payloads.complete_resume_and_detach(&registry).await;
     }
+}
+
+#[tokio::test]
+async fn fenced_snapshot_and_detached_drains_preserve_captured_bytes() {
+    let Some(fixture) = ingress_support::IngressFixture::postgres("literal_fenced_replay").await
+    else {
+        return;
+    };
+    let config = DatabaseConfig::new(DatabaseDriver::Postgres, fixture.db.database_url())
+        .with_control_plane_pool(waddle_server::db::DEFAULT_CONTROL_PLANE_POOL_SIZE);
+    let db = Database::from_config("literal fenced replay", &config)
+        .await
+        .expect("isolated database with control-plane pool");
+    PostgresClaimStore::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("claim schema");
+    let (bare, full) = alice_jid();
+    let payloads = replay_bytes_support::ReplayBytesFixture::new("stream-literal-bytes", full);
+    let (source, _) = node_registry(&db, node_identity(), None).await;
+    let expected = payloads.store_literal_snapshot_and_appends(&source).await;
+    drop(source);
+    let (successor, _) = node_registry(&db, node_identity(), None).await;
+    let outcome = successor
+        .attempt_cross_node_resume("stream-literal-bytes", &bare, HANDSHAKE_BUDGET)
+        .await
+        .expect("cross-node resume");
+    let CrossNodeResumeOutcome::Claimed(session) = outcome else {
+        panic!("expected a durable cross-node claim");
+    };
+    assert_eq!(session.stanzas_to_resend(0), expected);
+    drop(successor);
+    drop(db);
+    fixture.close().await;
 }
 
 #[tokio::test]

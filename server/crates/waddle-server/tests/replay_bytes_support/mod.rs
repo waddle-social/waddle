@@ -7,11 +7,13 @@ use chrono::{DateTime, TimeZone, Utc};
 use jid::FullJid;
 use minidom::Element;
 use waddle_xmpp::parser::element_to_string;
+use waddle_xmpp::stream_management::persistence::SmReplayPayload;
 use waddle_xmpp::stream_management::{
-    stamp_replay_delay, DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion,
-    SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, SmSessionRegistry,
-    StreamManagementState,
+    stamp_replay_delay, DetachedSession, DetachedSessionSnapshot, InMemorySmSessionRegistry,
+    SmClaimCompletion, SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome,
+    SmSessionRegistry, StreamManagementState,
 };
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 use waddle_xmpp::xep::xep0203::{build_delay_element, DelayInfo};
 use waddle_xmpp::xep::NS_DELAY;
 use waddle_xmpp::xep::{build_link_metadata_element, LinkMetadata};
@@ -163,6 +165,75 @@ impl ReplayBytesFixture {
                 .expect("read original queue")
                 .expect("original session"),
         );
+    }
+
+    /// Exercise a real live queue snapshot followed by both detached drain
+    /// append APIs. The literal frames intentionally use XML spellings that a
+    /// parse/serialize cycle may normalize.
+    pub async fn store_literal_snapshot_and_appends(
+        &self,
+        registry: &Arc<InMemorySmSessionRegistry>,
+    ) -> Vec<String> {
+        let mut large = Message::new(Some(self.session.jid.clone().into()));
+        large.bodies.insert(Lang::new(), "a".repeat(300 * 1024));
+        let wire = vec![
+            "<message xmlns='jabber:client' id='m'><body>one &amp; two</body></message>".to_owned(),
+            "<presence xmlns='jabber:client'><status>ready</status></presence>".to_owned(),
+            "<iq xmlns='jabber:client' type='result' id='q'/>".to_owned(),
+            element_to_string(&Stanza::Message(large).to_element()).expect("serialize large frame"),
+            "<message xmlns='jabber:client' id='keyed'><body>retained</body></message>".to_owned(),
+        ];
+        assert!(wire[3].len() > 256 * 1024);
+        let mut live = StreamManagementState::new();
+        live.enable(self.session.stream_id.clone(), true, Some(300));
+        for frame in &wire[..3] {
+            let _ = live.record_outbound_with_provenance(
+                frame.clone(),
+                self.receipt,
+                SmEvictionPath::Batch,
+                Default::default(),
+            );
+        }
+        let mut session = live
+            .to_detached_session(DetachedSessionSnapshot {
+                user_id: self.session.user_id.clone(),
+                jid: self.session.jid.clone(),
+                occupancy_session: self.session.occupancy_session,
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .expect("resumable snapshot");
+        session.promotion_custody =
+            waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
+        registry.store_session(session).await.expect("snapshot");
+        let large = SmReplayPayload::from_wire(wire[3].clone()).expect("large replay frame");
+        assert!(registry
+            .record_replay_for_detached_stream_at(&self.session.stream_id, 4, &large, self.receipt)
+            .await
+            .expect("unkeyed drained append"));
+        let keyed = SmReplayPayload::from_wire(wire[4].clone()).expect("keyed replay frame");
+        assert!(matches!(
+            registry
+                .record_keyed_replay_for_detached_stream_at(
+                    &self.session.stream_id,
+                    5,
+                    &keyed,
+                    self.receipt,
+                    self.keys[0].clone(),
+                    Default::default(),
+                )
+                .await
+                .expect("keyed drained append"),
+            SmKeyedAppendOutcome::Appended { .. }
+        ));
+        wire
     }
 
     pub async fn retry_appends(&self, registry: &Arc<InMemorySmSessionRegistry>) {

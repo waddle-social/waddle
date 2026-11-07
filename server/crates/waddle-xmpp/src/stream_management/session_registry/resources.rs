@@ -479,6 +479,28 @@ impl InMemorySmSessionRegistry {
         key: SmIngressAppendKey,
         provenance: super::super::SmFrameProvenance,
     ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
+        let replay = Box::new(stanza.clone()).into();
+        self.record_keyed_replay_for_detached_stream_at(
+            stream_id,
+            sequence,
+            &replay,
+            original_receipt_at,
+            key,
+            provenance,
+        )
+        .await
+    }
+
+    /// Keep the exact frame captured by a detaching transport with its ledger claim.
+    pub async fn record_keyed_replay_for_detached_stream_at(
+        self: &Arc<Self>,
+        stream_id: &str,
+        sequence: u32,
+        replay: &super::super::persistence::SmReplayPayload,
+        original_receipt_at: DateTime<Utc>,
+        key: SmIngressAppendKey,
+        provenance: super::super::SmFrameProvenance,
+    ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::SmKeyedAppendOutcome;
         match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { accepting_stream } => {
@@ -490,12 +512,12 @@ impl InMemorySmSessionRegistry {
             stream_id.to_owned(),
             key,
             false,
-            stanza,
+            replay.as_ref(),
             original_receipt_at,
             move |session| {
-                session.record_detached_outbound_at_with_provenance(
+                session.record_detached_replay_at_with_provenance(
                     sequence,
-                    stanza,
+                    replay,
                     original_receipt_at,
                     provenance,
                 )
@@ -595,7 +617,7 @@ impl InMemorySmSessionRegistry {
         };
         let sequence = entry.sequence;
         let mut delta =
-            super::append::prepare_detached_append(&previous_sequences, &updated, &entry, stanza)?;
+            super::append::prepare_detached_append(&previous_sequences, &updated, &entry)?;
         delta.ingress_append = Some(PersistedIngressAppend {
             key,
             accepting_stream: accepting_stream.clone(),
@@ -685,6 +707,24 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired(),
             Some(sequence),
             stanza,
+            original_receipt_at,
+        )
+        .await
+    }
+
+    /// Append the already captured replay bytes at the transport's sequence.
+    pub async fn record_replay_for_detached_stream_at(
+        &self,
+        stream_id: &str,
+        sequence: u32,
+        replay: &super::super::persistence::SmReplayPayload,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Result<bool, SmRegistryError> {
+        self.append_detached_frame(
+            stream_id,
+            |session| !session.is_expired(),
+            Some(sequence),
+            super::append::DetachedPayload::Replay(replay),
             original_receipt_at,
         )
         .await

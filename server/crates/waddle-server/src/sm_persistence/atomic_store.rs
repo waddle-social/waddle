@@ -1,7 +1,7 @@
 use super::{
-    ingress_append, serialize_presence_payloads, serialize_stanza, show_wire_str,
-    DatabaseSmPersistence, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, SmPersistenceError, SmSessionId,
+    ingress_append, serialize_presence_payloads, show_wire_str, DatabaseSmPersistence,
+    KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PersistedUnackedStanza,
+    SmPersistenceError, SmSessionId,
 };
 use crate::sm_persistence::codec::encode_session_principal;
 
@@ -338,7 +338,7 @@ pub(super) async fn apply_snapshot_in_transaction(
     .map_err(|e| SnapshotApplyError::Storage(SmPersistenceError::Other(e.to_string())))?;
 
     for stanza in prepared.unacked {
-        let xml = serialize_stanza(&stanza.stanza).map_err(SnapshotApplyError::Storage)?;
+        let xml = stanza.stanza.wire();
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
         tx.execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts, provenance) \

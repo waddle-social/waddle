@@ -695,7 +695,7 @@ async fn ready_detached_roster_resource_is_persisted_while_a_remote_reply_stalls
         .await;
     assert_eq!(entry.stream_id, detached_stream);
     assert_eq!(entry.sequence, 1);
-    let Stanza::Iq(push) = *entry.stanza else {
+    let Stanza::Iq(push) = entry.stanza.into_stanza() else {
         panic!("durable roster IQ")
     };
     let Iq::Set {

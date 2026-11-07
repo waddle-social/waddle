@@ -1283,7 +1283,7 @@ impl SmPersistenceStorage for MislabelingStore {
                 ingress_receipts: Vec::new(),
                 stream_id: SmSessionId::new("attacker-stream"),
                 sequence: 99,
-                stanza: Box::new(chat_stanza(&to, "leaked secret")),
+                stanza: Box::new(chat_stanza(&to, "leaked secret")).into(),
                 original_receipt_at: chrono::Utc::now(),
             });
         }
@@ -1813,7 +1813,7 @@ async fn xep0198_expired_claim_promotion_rehydrates_durable_only_unacked_stanzas
             ingress_receipts: Vec::new(),
             stream_id: SmSessionId::new(stream_id),
             sequence: 12,
-            stanza: Box::new(chat_stanza(&jid, "durable only")),
+            stanza: Box::new(chat_stanza(&jid, "durable only")).into(),
             original_receipt_at: second_receipt,
         })
         .await

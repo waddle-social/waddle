@@ -258,10 +258,8 @@ pub(crate) fn decode_unacked(row: &Row) -> Result<PersistedUnackedStanza, SmPers
 
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid receipt timestamp".into()))?;
-    let element: xmpp_parsers::minidom::Element = stanza_xml
-        .parse()
-        .map_err(|e: xmpp_parsers::minidom::Error| SmPersistenceError::Other(e.to_string()))?;
-    let stanza = parse_stanza(element)?;
+    let stanza =
+        waddle_xmpp::stream_management::persistence::SmReplayPayload::from_wire(stanza_xml)?;
 
     Ok(PersistedUnackedStanza {
         provenance: decode_provenance(row, 5),
@@ -271,7 +269,7 @@ pub(crate) fn decode_unacked(row: &Row) -> Result<PersistedUnackedStanza, SmPers
         )?,
         stream_id: SmSessionId::new(stream_id),
         sequence,
-        stanza: Box::new(stanza),
+        stanza,
         original_receipt_at,
     })
 }
@@ -298,10 +296,8 @@ pub(super) fn decode_unacked_join_row(
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
-    let element: xmpp_parsers::minidom::Element = stanza_xml
-        .parse()
-        .map_err(|e: xmpp_parsers::minidom::Error| SmPersistenceError::Other(e.to_string()))?;
-    let stanza = parse_stanza(element)?;
+    let stanza =
+        waddle_xmpp::stream_management::persistence::SmReplayPayload::from_wire(stanza_xml)?;
     let sequence =
         u32::try_from(sequence_i64).map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     Ok(PersistedUnackedStanza {
@@ -312,7 +308,7 @@ pub(super) fn decode_unacked_join_row(
         )?,
         stream_id: SmSessionId::new(stream_id),
         sequence,
-        stanza: Box::new(stanza),
+        stanza,
         original_receipt_at,
     })
 }

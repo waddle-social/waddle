@@ -560,6 +560,43 @@ async fn write_response_batch_requests_ack_every_threshold_not_once_per_batch() 
     assert_eq!(conn.sm_state.queue_len(), 12);
 }
 
+#[tokio::test]
+async fn batch_retains_the_exact_frames_written_to_the_socket() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state
+        .enable("batch-wire".to_string(), true, Some(300));
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(vec![]);
+    let frames = vec![
+        countable_message(1),
+        element_to_xml(Element::builder("presence", "jabber:client").build()),
+        element_to_xml(
+            Element::builder("iq", "jabber:client")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "query")
+                .build(),
+        ),
+    ];
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    let replay: Vec<_> = conn
+        .sm_state
+        .stanzas_to_resend(0)
+        .into_iter()
+        .map(|frame| frame.stanza_xml)
+        .collect();
+    assert_eq!(replay, sink_texts(&sink));
+}
+
 /// Issue #1089 acceptance: inbound `<a/>` acks are processed between
 /// chunks of a large outbound batch, so a healthy client's acks drain
 /// the unacked queue mid-flood and `waddle_sm_unacked_evicted_total`

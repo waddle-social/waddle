@@ -15,13 +15,17 @@ use crate::Stanza;
 
 use super::{DetachedSession, InMemorySmSessionRegistry, SmRegistryError};
 
+pub(super) enum DetachedPayload<'a> {
+    Stanza(&'a Stanza),
+    Replay(&'a super::super::persistence::SmReplayPayload),
+}
+
 /// Describe the one new entry and exact evictions, including an explicitly
 /// sequenced entry that is itself too old to fit the bounded replay window.
 pub(super) fn prepare_detached_append(
     previous_sequences: &[u32],
     updated: &DetachedSession,
     entry: &super::DetachedUnackedStanza,
-    stanza: &Stanza,
 ) -> Result<PersistedDetachedAppend, SmRegistryError> {
     let sequence = entry.sequence;
     let retained: HashSet<_> = updated
@@ -44,7 +48,8 @@ pub(super) fn prepare_detached_append(
             ingress_receipts: entry.ingress_receipts.clone(),
             stream_id: SmSessionId::new(&updated.stream_id),
             sequence,
-            stanza: Box::new(stanza.clone()),
+            stanza: super::super::persistence::SmReplayPayload::from_wire(entry.stanza_xml.clone())
+                .map_err(|error| SmRegistryError::Internal(error.to_string()))?,
             original_receipt_at: entry.original_receipt_at,
         },
         evicted_sequences,
@@ -217,6 +222,24 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
+        self.append_detached_frame(
+            stream_id,
+            predicate,
+            sequence,
+            DetachedPayload::Stanza(stanza),
+            original_receipt_at,
+        )
+        .await
+    }
+
+    pub(super) async fn append_detached_frame(
+        &self,
+        stream_id: &str,
+        predicate: impl Fn(&DetachedSession) -> bool,
+        sequence: Option<u32>,
+        payload: DetachedPayload<'_>,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Result<bool, SmRegistryError> {
         let lock = self.stream_lock(stream_id)?;
         let guard = lock.lock_owned().await;
         let session_id = SmSessionId::new(stream_id);
@@ -231,26 +254,47 @@ impl InMemorySmSessionRegistry {
             .collect();
         let mut updated = previous;
         let entry = match sequence {
-            Some(sequence) => match updated.record_detached_outbound_at_with_provenance(
-                sequence,
-                stanza,
-                original_receipt_at,
-                Default::default(),
-            ) {
-                Some(entry) => entry,
-                None => return Ok(true),
+            Some(sequence) => {
+                let entry = match payload {
+                    DetachedPayload::Replay(replay) => updated
+                        .record_detached_replay_at_with_provenance(
+                            sequence,
+                            replay,
+                            original_receipt_at,
+                            Default::default(),
+                        ),
+                    DetachedPayload::Stanza(stanza) => updated
+                        .record_detached_outbound_at_with_provenance(
+                            sequence,
+                            stanza,
+                            original_receipt_at,
+                            Default::default(),
+                        ),
+                };
+                match entry {
+                    Some(entry) => entry,
+                    None => return Ok(true),
+                }
+            }
+            None => match payload {
+                DetachedPayload::Stanza(stanza) => updated
+                    .record_detached_outbound_with_provenance(
+                        stanza,
+                        original_receipt_at,
+                        Default::default(),
+                    ),
+                DetachedPayload::Replay(replay) => updated.record_detached_replay_with_provenance(
+                    replay,
+                    original_receipt_at,
+                    Default::default(),
+                ),
             },
-            None => updated.record_detached_outbound_with_provenance(
-                stanza,
-                original_receipt_at,
-                Default::default(),
-            ),
         };
         // The operation guard covers ownership recovery and storage. Moving it
         // into the storage task keeps cancellation from exposing an unresolved
         // commit to the next writer; the stale mark makes that writer reload.
         let _guard = if let Some(storage) = &self.persistence {
-            let append = prepare_detached_append(&previous_sequences, &updated, &entry, stanza)?;
+            let append = prepare_detached_append(&previous_sequences, &updated, &entry)?;
             let fence = self.detached_append_fence_locked(&updated).await;
             self.mark_snapshot_stale(&session_id)?;
             let storage = std::sync::Arc::clone(storage);

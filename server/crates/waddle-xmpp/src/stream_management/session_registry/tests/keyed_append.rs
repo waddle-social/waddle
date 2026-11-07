@@ -708,7 +708,7 @@ async fn keyed_append_confirmation_retries_unseen_durable_entry_before_deletion(
         stream_id: stream.clone(),
         ingress_receipts: Vec::new(),
         sequence: durable.outbound_count,
-        stanza: Box::new(stanza()),
+        stanza: Box::new(stanza()).into(),
         original_receipt_at: receipt,
     });
     storage
@@ -1215,9 +1215,8 @@ fn self_evicted_detached_entry_retains_exact_provenance_for_storage() {
         .unacked_stanzas
         .iter()
         .any(|entry| entry.sequence == 1));
-    let delta =
-        super::super::append::prepare_detached_append(&previous, &session, &entry, &payload)
-            .expect("detached delta");
+    let delta = super::super::append::prepare_detached_append(&previous, &session, &entry)
+        .expect("detached delta");
     assert_eq!(delta.stanza.provenance, provenance);
     assert!(delta.evicted_sequences.contains(&1));
 }

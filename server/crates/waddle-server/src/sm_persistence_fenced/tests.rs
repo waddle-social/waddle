@@ -95,7 +95,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(stream_id),
         sequence,
-        stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
+        stanza: Box::new(waddle_xmpp::Stanza::Message(message)).into(),
         original_receipt_at: stale_caller_supplied_time(),
     }
 }
@@ -672,7 +672,9 @@ async fn drained_batch_withholds_only_conflicting_proofs_under_the_fence() {
         accepting_stream: session.stream_id.clone(),
         sequence,
         appended_at: Utc::now(),
-        payload: *fixture_unacked(session.stream_id.as_str(), sequence).stanza,
+        payload: fixture_unacked(session.stream_id.as_str(), sequence)
+            .stanza
+            .into_stanza(),
         original_receipt_at: stale_caller_supplied_time(),
         disposition: IngressCustodyDisposition::Pending,
     };

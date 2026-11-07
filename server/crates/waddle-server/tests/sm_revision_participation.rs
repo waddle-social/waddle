@@ -13,7 +13,7 @@ use waddle_xmpp::auth::{
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, PersistedDetachedAppend, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, SmAckWindow, SmAcknowledgementMode,
+    PersistedUnackedStanza, SmAckWindow, SmAcknowledgementMode, SmReplayPayload,
 };
 use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
 use waddle_xmpp::tombstone::TombstoneTarget;
@@ -66,7 +66,7 @@ fn frame(stream: &SmSessionId, sequence: u32) -> PersistedUnackedStanza {
     PersistedUnackedStanza {
         stream_id: stream.clone(),
         sequence,
-        stanza: Box::new(Stanza::Message(message)),
+        stanza: Box::new(Stanza::Message(message)).into(),
         original_receipt_at: chrono::Utc::now(),
         ingress_receipts: Vec::new(),
         provenance: Default::default(),
@@ -110,7 +110,11 @@ async fn exercise(db: Database, second_db: Database) {
     let b = RevisionedSmStorage::new(second_db);
     let principal = principal();
     let initial = session("revision-stream");
-    let initial_frames = vec![frame(&initial.stream_id, 1)];
+    let first_wire = "<message xmlns='jabber:client' id='frame-1' from='bob@example.com/phone' to='alice@example.com/web'><body>frame-1</body></message>";
+    let second_wire = "<message xmlns='jabber:client' id='frame-2' from='bob@example.com/phone' to='alice@example.com/web'><body>frame-2</body></message>";
+    let mut first_frame = frame(&initial.stream_id, 1);
+    first_frame.stanza = SmReplayPayload::from_wire(first_wire.to_owned()).expect("first frame");
+    let initial_frames = vec![first_frame];
     let create = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Create {
@@ -134,14 +138,17 @@ async fn exercise(db: Database, second_db: Database) {
     assert_eq!(capture.revision.value(), 1);
     assert_eq!(capture.unacked.len(), 1);
     assert_eq!(capture.unacked[0].sequence, 1);
+    assert_eq!(capture.unacked[0].stanza.wire(), first_wire);
 
     // A different connection's successful append invalidates the older full
     // snapshot, preserving the new frame and counters.
     let mut appended = capture.session.clone();
     appended.outbound_count = 2;
+    let mut second_frame = frame(&initial.stream_id, 2);
+    second_frame.stanza = SmReplayPayload::from_wire(second_wire.to_owned()).expect("second frame");
     let append = PersistedDetachedAppend {
         session: appended,
-        stanza: frame(&initial.stream_id, 2),
+        stanza: second_frame,
         evicted_sequences: Vec::new(),
         ingress_append: None,
         new_delivery: false,
@@ -155,6 +162,10 @@ async fn exercise(db: Database, second_db: Database) {
     };
     let append_result = a.apply(&append_request).await.expect("append");
     assert_eq!(append_result.effect, Effect::Appended);
+    assert_eq!(
+        a.readback(&append_request).await.expect("append receipt"),
+        Readback::Applied(append_result),
+    );
     let stale = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Snapshot {
@@ -173,6 +184,8 @@ async fn exercise(db: Database, second_db: Database) {
         .await
         .expect("post-append capture");
     assert_eq!(current.session.outbound_count, 2);
+    assert_eq!(current.unacked[0].stanza.wire(), first_wire);
+    assert_eq!(current.unacked[1].stanza.wire(), second_wire);
     assert_eq!(
         current
             .unacked
@@ -260,6 +273,12 @@ async fn exercise(db: Database, second_db: Database) {
             Readback::Unconfirmed => panic!("snapshot receipt missing"),
         }
     );
+    let after_snapshot = a
+        .capture(&initial.stream_id)
+        .await
+        .expect("snapshot capture");
+    assert_eq!(after_snapshot.unacked[0].stanza.wire(), first_wire);
+    assert_eq!(after_snapshot.unacked[1].stanza.wire(), second_wire);
     let different = Request {
         id: snapshot.id,
         mutation: Mutation::Snapshot {
