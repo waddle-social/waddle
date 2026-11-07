@@ -207,7 +207,10 @@ pub(super) async fn verify_functions_and_triggers(
             "API owner function inventory",
         ));
     }
-    let guarded: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    let mut guarded: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    if guarded_receipt {
+        guarded.extend(["singleton_candidate_slot", "singleton_candidate_leases"]);
+    }
     let mut names = names;
     if receipt_journal {
         names.push("waddle_p21_record_effect_receipt");

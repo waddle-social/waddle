@@ -447,6 +447,78 @@ async fn pinned_receipt_holds_fences_and_recovers_only_positive_results() {
     }
     drop(runtime);
 
+    // A second callable definer with lease-only UPDATE authority must make
+    // the pinned profile fail. The outsider has no guarded-table writes, so
+    // the older ingress-only alternate-definer scan would miss this bypass.
+    let rogue = format!("{}.p21_rogue_lease_renew(uuid)", fixture.target);
+    for table in EPOCH_GUARDED_TABLES {
+        let can_write: bool = sqlx::query_scalar(
+            "SELECT pg_catalog.has_table_privilege($1,$2::pg_catalog.regclass,\
+             'INSERT,UPDATE,DELETE,TRUNCATE') OR \
+             pg_catalog.has_any_column_privilege($1,$2::pg_catalog.regclass,'INSERT,UPDATE')",
+        )
+        .bind(&fixture.outsider)
+        .bind(format!("{}.{}", fixture.target, table))
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("inspect outsider guarded-table grants");
+        assert!(!can_write, "outsider must have no old guarded DML");
+    }
+    sql(&fixture, &format!(
+        "GRANT USAGE,CREATE ON SCHEMA {s} TO {outsider}; \
+         GRANT SELECT (incarnation),UPDATE (expires_at) ON {s}.singleton_candidate_leases TO {outsider}; \
+         CREATE FUNCTION {s}.p21_rogue_lease_renew(p_incarnation uuid) RETURNS void \
+             LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,pg_temp \
+             AS $rogue$ UPDATE {s}.singleton_candidate_leases \
+                SET expires_at=pg_catalog.clock_timestamp()+interval '10 minutes' \
+                WHERE incarnation=p_incarnation $rogue$; \
+         ALTER FUNCTION {rogue} OWNER TO {outsider}; \
+         REVOKE CREATE ON SCHEMA {s} FROM {outsider}; \
+         GRANT EXECUTE ON FUNCTION {rogue} TO {runtime}",
+        s = fixture.target,
+        outsider = fixture.outsider,
+        runtime = fixture.runtime,
+    ))
+    .await;
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime login for rogue lease helper");
+    sqlx::query(&format!(
+        "SELECT {}.p21_rogue_lease_renew($1)",
+        fixture.target
+    ))
+    .bind(grant.identity().incarnation())
+    .execute(&mut runtime)
+    .await
+    .expect("runtime can call alternate lease mutator");
+    drop(runtime);
+    let renewed: bool = sqlx::query_scalar(&format!(
+        "SELECT expires_at > pg_catalog.clock_timestamp()+interval '9 minutes' \
+         FROM {}.singleton_candidate_leases WHERE incarnation=$1",
+        fixture.target
+    ))
+    .bind(grant.identity().incarnation())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect rogue lease mutation");
+    assert!(renewed, "alternate definer can forge live lease freshness");
+    assert!(matches!(
+        authority.readback(&operations[0]).await,
+        Err(PinnedReceiptError::Profile(
+            waddle_server::db::physical_attestation::RestrictedIngressProfileError::Mismatch(
+                "alternate callable definer authority"
+            )
+        ))
+    ));
+    sql(&fixture, &format!(
+        "DROP FUNCTION {rogue}; \
+         REVOKE SELECT (incarnation),UPDATE (expires_at) ON {s}.singleton_candidate_leases FROM {outsider}; \
+         REVOKE USAGE ON SCHEMA {s} FROM {outsider}",
+        s = fixture.target,
+        outsider = fixture.outsider,
+    ))
+    .await;
+
     let trigger = format!("{}.waddle_ingress_protocol_epoch_guard()", fixture.target);
     let (original_source, compression, physical, logical): (String, Option<String>, i32, i32) =
         sqlx::query_as(
