@@ -7,7 +7,9 @@ use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 use waddle_server::config::{IngressConfig, LineageConfig};
-use waddle_server::db::physical_attestation::{attested_pool, PgRoleName};
+use waddle_server::db::physical_attestation::{
+    attested_pool, PgRoleName, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+};
 use waddle_server::db::{
     grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
     DarkMigrationOwnerConfig, DarkMigrationOwnerError, Database, DatabasePool,
@@ -20,6 +22,9 @@ use super::{
     prepare_candidate_application_fixture, test_url, url_with_search_path, Fixture,
     CATALOG_GRANT_LOCK,
 };
+
+const LINEAGE_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_993;
+const LEDGER_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_992;
 
 async fn guarded<'a>(database: &'a Database, schema: &str) -> Transaction<'a> {
     let mut tx = database
@@ -465,6 +470,7 @@ async fn owner_grant_and_attested_ingress_lab() {
         OwnerRejectionGrantState::Missing
     );
 
+    exercise_catalog_fence(&fixture, &owner_options, &config, &migrator_role).await;
     exercise_epoch_barrier(&fixture, &owner_options, &config, &migrator_role).await;
 
     let hostile_owner =
@@ -780,6 +786,255 @@ async fn wait_relation_waiter(
     })
     .await
     .expect("relation waiter before timeout")
+}
+
+async fn wait_idle_retry(admin: &PgPool, application: &str) -> i32 {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name=$1 AND state='idle' AND xact_start IS NULL \
+                   AND backend_xmin IS NULL AND query='ROLLBACK'",
+            )
+            .bind(application)
+            .fetch_optional(admin)
+            .await
+            .expect("observe acknowledged retry rollback");
+            if let Some(pid) = pid {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("owner attempt rolls back before retry")
+}
+
+async fn assert_advisory_lock(admin: &PgPool, pid: i32, key: i64, mode: &str) {
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
+         WHERE pid=$1 AND locktype='advisory' AND granted AND mode=$2 \
+           AND classid=(($3::pg_catalog.int8 >> 32) & 4294967295)::pg_catalog.oid \
+           AND objid=($3::pg_catalog.int8 & 4294967295)::pg_catalog.oid \
+           AND objsubid=1)",
+    )
+    .bind(pid)
+    .bind(mode)
+    .bind(key)
+    .fetch_one(admin)
+    .await
+    .expect("inspect exact owner backend advisory lock");
+    assert!(held, "backend {pid} must hold {mode} on {key}");
+}
+
+fn spawn_owner_entry(
+    owner: PgConnectOptions,
+    runtime: PgConnectOptions,
+    config: DarkMigrationOwnerConfig,
+    migrator: PgRoleName,
+    grant: bool,
+) -> tokio::task::JoinHandle<Result<OwnerRejectionGrantState, OwnerRejectionGrantError>> {
+    tokio::spawn(async move {
+        if grant {
+            grant_dark_owner_rejection_runtime_access(&owner, &runtime, &config, &migrator)
+                .await
+                .map(|()| OwnerRejectionGrantState::Granted)
+        } else {
+            inspect_dark_owner_rejection_runtime_access(&owner, &runtime, &config, &migrator).await
+        }
+    })
+}
+
+async fn exercise_catalog_fence(
+    fixture: &Fixture,
+    owner_options: &PgConnectOptions,
+    config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
+) {
+    let version: i32 = sqlx::query_scalar(
+        "SELECT pg_catalog.current_setting('server_version_num')::pg_catalog.int4",
+    )
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("PostgreSQL version");
+    assert!((170_000..180_000).contains(&version), "PG17 is required");
+
+    for grant in [false, true] {
+        let mut coordinator = PgConnection::connect_with(&fixture.admin_options)
+            .await
+            .expect("catalog and epoch coordinator");
+        sqlx::query("BEGIN")
+            .execute(&mut coordinator)
+            .await
+            .expect("begin epoch barrier");
+        sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .execute(&mut coordinator)
+            .await
+            .expect("hold catalog-X");
+        let epoch = format!("{}.ingress_protocol_epoch", fixture.target);
+        let held_mode = if grant {
+            "ACCESS SHARE"
+        } else {
+            "ACCESS EXCLUSIVE"
+        };
+        sqlx::query(&format!("LOCK TABLE ONLY {epoch} IN {held_mode} MODE"))
+            .execute(&mut coordinator)
+            .await
+            .expect("hold epoch barrier");
+
+        // A pre-fence role check would refuse this deliberately invalid role.
+        sqlx::query(&format!("ALTER ROLE {} CREATEROLE", migrator.as_str()))
+            .execute(&fixture.admin)
+            .await
+            .expect("temporarily invalidate migrator role");
+        let application = format!("owner-catalog-{}", Uuid::new_v4().simple());
+        let task = spawn_owner_entry(
+            owner_options.clone().application_name(&application),
+            fixture.runtime_options.clone(),
+            config.clone(),
+            migrator.clone(),
+            grant,
+        );
+        let idle_pid = wait_idle_retry(&fixture.admin, &application).await;
+        assert!(!task.is_finished(), "the role check must follow catalog");
+        let held: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_locks \
+             WHERE pid=$1 AND locktype='advisory' AND granted",
+        )
+        .bind(idle_pid)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("inspect failed catalog attempt");
+        assert_eq!(held, 0, "failed catalog try releases all gates");
+        let runtime_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+             WHERE usename=$1 AND application_name LIKE 'waddle-owner-rejection-%' \
+               AND xact_start IS NOT NULL)",
+        )
+        .bind(&fixture.runtime)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("inspect separate runtime correlation session");
+        assert!(runtime_live, "runtime session precedes the owner checkout");
+        sqlx::query(&format!("ALTER ROLE {} NOCREATEROLE", migrator.as_str()))
+            .execute(&fixture.admin)
+            .await
+            .expect("restore migrator role while fenced");
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(&mut coordinator)
+            .await
+            .expect("release catalog fence");
+        assert!(unlocked);
+        let wait_mode = if grant {
+            "AccessExclusiveLock"
+        } else {
+            "AccessShareLock"
+        };
+        let pid = wait_relation_waiter(&fixture.admin, &application, &epoch, wait_mode).await;
+        let advisory_mode = if grant { "ExclusiveLock" } else { "ShareLock" };
+        for key in [
+            CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+            LINEAGE_ADVISORY_LOCK_KEY,
+            LEDGER_ADVISORY_LOCK_KEY,
+        ] {
+            assert_advisory_lock(&fixture.admin, pid, key, advisory_mode).await;
+        }
+        sqlx::query("ROLLBACK")
+            .execute(&mut coordinator)
+            .await
+            .expect("release epoch barrier");
+        let expected = if grant {
+            OwnerRejectionGrantState::Granted
+        } else {
+            OwnerRejectionGrantState::Missing
+        };
+        assert_eq!(
+            task.await.expect("join owner entry").expect("owner entry"),
+            expected
+        );
+    }
+
+    // A ledger-only blocker forces a lower-gate failure after catalog and
+    // lineage have been acquired. A competing catalog-X can make progress
+    // while the ledger remains held, proving the failed transaction ended.
+    for grant in [false, true] {
+        let mut blocker = PgConnection::connect_with(&fixture.admin_options)
+            .await
+            .expect("ledger blocker");
+        sqlx::query("BEGIN")
+            .execute(&mut blocker)
+            .await
+            .expect("begin ledger blocker");
+        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+            .bind(LEDGER_ADVISORY_LOCK_KEY)
+            .execute(&mut blocker)
+            .await
+            .expect("hold ledger-X");
+        let application = format!("owner-ledger-{}", Uuid::new_v4().simple());
+        let task = spawn_owner_entry(
+            owner_options.clone().application_name(&application),
+            fixture.runtime_options.clone(),
+            config.clone(),
+            migrator.clone(),
+            grant,
+        );
+        wait_idle_retry(&fixture.admin, &application).await;
+        assert!(!task.is_finished(), "ledger blocker prevents completion");
+        let mut observer = PgConnection::connect_with(&fixture.admin_options)
+            .await
+            .expect("independent catalog observer");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let acquired: bool =
+                    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock($1)")
+                        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                        .fetch_one(&mut observer)
+                        .await
+                        .expect("try catalog-X");
+                if acquired {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("lower contention releases catalog-X or catalog-S");
+        let pid = wait_idle_retry(&fixture.admin, &application).await;
+        let held: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_locks \
+             WHERE pid=$1 AND locktype='advisory' AND granted",
+        )
+        .bind(pid)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("inspect retried owner gates");
+        assert_eq!(held, 0, "rollback also releases the lineage gate");
+        sqlx::query("ROLLBACK")
+            .execute(&mut blocker)
+            .await
+            .expect("release ledger blocker");
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(&mut observer)
+            .await
+            .expect("release observer catalog fence");
+        assert!(unlocked);
+        assert_eq!(
+            task.await
+                .expect("join retried entry")
+                .expect("retry succeeds"),
+            OwnerRejectionGrantState::Granted
+        );
+    }
+    sqlx::query(&format!(
+        "REVOKE SELECT, INSERT ON {}.ingress_owner_rejections FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("reset scoped fixture grant");
 }
 
 fn spawn_grant(

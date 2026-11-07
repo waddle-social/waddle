@@ -16,7 +16,7 @@ use crate::db::lineage::{self, LINEAGE_ADVISORY_LOCK_KEY};
 use crate::db::migrations::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
 use crate::db::migrations::{migration_checksum, waddle};
 use crate::db::physical_attestation::{quote_identifier, validate_identifier, PgRoleName};
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 /// Result of a fresh owner-side observation, not an admission capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,13 +189,22 @@ async fn run_on_connection(
         .map_err(|_| OwnerRejectionGrantError::SchemaIdentifier)?;
     let quoted = quote_identifier(schema);
     let runtime = quote_identifier(config.runtime.as_str());
-    let mut tx = db.begin().await?;
-    let transaction_mode = if grant {
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE"
+    // Take the fence and subordinate gates on the actual owner transaction,
+    // before role or catalog preflight. The runtime correlation session was
+    // opened first, so no second hooked checkout is needed while fenced.
+    let mut tx = if grant {
+        db.begin_catalog_fenced(&[
+            CatalogFenceLock::Exclusive(LINEAGE_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Exclusive(MIGRATION_LEDGER_ADVISORY_LOCK_KEY),
+        ])
+        .await?
     } else {
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY"
+        db.begin_catalog_fenced_read_only(&[
+            CatalogFenceLock::Shared(LINEAGE_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Shared(MIGRATION_LEDGER_ADVISORY_LOCK_KEY),
+        ])
+        .await?
     };
-    tx.execute(transaction_mode, ()).await?;
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| OwnerRejectionGrantError::Bounds)?;
@@ -212,16 +221,6 @@ async fn run_on_connection(
         i64::from(identity.schema.oid),
     )
     .await?;
-    for key in [
-        LINEAGE_ADVISORY_LOCK_KEY,
-        MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
-    ] {
-        tx.execute(
-            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-            crate::db_params![key],
-        )
-        .await?;
-    }
     // Catalog-only physical preflight does not lock lineage, ledger or
     // guarded relations. The dedicated owner session must take this barrier
     // before any such read; mutation uses AX, observation alone uses AS.

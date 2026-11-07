@@ -1,4 +1,4 @@
-//! Catalog-first acquisition for single-backend owner mutations.
+//! Catalog-first acquisition for single-backend owner transactions.
 
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(15);
 const LOCK_RETRY: Duration = Duration::from_millis(20);
 const ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
-/// A transaction-scoped advisory gate after the exclusive catalog fence.
+/// A transaction-scoped advisory gate after the catalog fence.
 /// Callers supply these in their established lock order.
 #[derive(Clone, Copy)]
 pub(crate) enum CatalogFenceLock {
@@ -23,6 +23,12 @@ enum LockAttempt {
     Acquired,
     CatalogContended,
     GateContended,
+}
+
+#[derive(Clone, Copy)]
+enum CatalogFenceMode {
+    Exclusive,
+    SharedReadOnly,
 }
 
 impl Database {
@@ -40,6 +46,26 @@ impl Database {
         &self,
         locks: &[CatalogFenceLock],
     ) -> Result<Transaction<'_>, DatabaseError> {
+        self.begin_catalog_fenced_with_mode(CatalogFenceMode::Exclusive, locks)
+            .await
+    }
+
+    /// Begin a fresh READ COMMITTED, READ ONLY PostgreSQL transaction with
+    /// catalog-S before the supplied advisory gates. It has the same checkout,
+    /// rollback, and single-backend requirements as the exclusive form.
+    pub(crate) async fn begin_catalog_fenced_read_only(
+        &self,
+        locks: &[CatalogFenceLock],
+    ) -> Result<Transaction<'_>, DatabaseError> {
+        self.begin_catalog_fenced_with_mode(CatalogFenceMode::SharedReadOnly, locks)
+            .await
+    }
+
+    async fn begin_catalog_fenced_with_mode(
+        &self,
+        mode: CatalogFenceMode,
+        locks: &[CatalogFenceLock],
+    ) -> Result<Transaction<'_>, DatabaseError> {
         if self.driver() != DatabaseDriver::Postgres {
             return Err(DatabaseError::QueryFailed(
                 "catalog mutation fencing requires PostgreSQL".to_owned(),
@@ -52,13 +78,14 @@ impl Database {
             let mut tx = tokio::time::timeout_at(deadline, self.begin_discard_postgres_on_drop())
                 .await
                 .map_err(|_| DatabaseError::CatalogMutationLockTimeout)??;
-            let outcome = match tokio::time::timeout_at(deadline, try_locks(&mut tx, locks)).await {
-                Ok(Ok(LockAttempt::Acquired)) if tokio::time::Instant::now() < deadline => {
-                    return Ok(tx);
-                }
-                Ok(result) => result,
-                Err(_) => Err(DatabaseError::CatalogMutationLockTimeout),
-            };
+            let outcome =
+                match tokio::time::timeout_at(deadline, try_locks(&mut tx, mode, locks)).await {
+                    Ok(Ok(LockAttempt::Acquired)) if tokio::time::Instant::now() < deadline => {
+                        return Ok(tx);
+                    }
+                    Ok(result) => result,
+                    Err(_) => Err(DatabaseError::CatalogMutationLockTimeout),
+                };
 
             if !tx.rollback_bounded_discard(ROLLBACK_WAIT).await {
                 return Err(DatabaseError::CatalogMutationRollbackUnconfirmed);
@@ -82,26 +109,31 @@ impl Database {
 
 async fn try_locks(
     tx: &mut Transaction<'_>,
+    mode: CatalogFenceMode,
     locks: &[CatalogFenceLock],
 ) -> Result<LockAttempt, DatabaseError> {
     // Two utility statements both reject a transaction already used at either
     // isolation level, then leave every subsequent statement READ COMMITTED.
     // Neither statement obtains a data snapshot.
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
-        (),
-    )
-    .await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-        (),
-    )
-    .await?;
+    let (initial_mode, final_mode, try_catalog) = match mode {
+        CatalogFenceMode::Exclusive => (
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+            "SELECT pg_catalog.pg_try_advisory_xact_lock($1)",
+        ),
+        CatalogFenceMode::SharedReadOnly => (
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+            "SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)",
+        ),
+    };
+    tx.execute(initial_mode, ()).await?;
+    tx.execute(final_mode, ()).await?;
 
     let connection = tx.postgres_connection().ok_or_else(|| {
         DatabaseError::QueryFailed("catalog mutation fencing requires PostgreSQL".to_owned())
     })?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+    let acquired: bool = sqlx::query_scalar(try_catalog)
         .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
         .fetch_one(&mut *connection)
         .await?;
