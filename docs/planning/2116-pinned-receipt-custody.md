@@ -1,7 +1,7 @@
 # P2.1 dark pinned receipt custody
 
-Status: implementation plan for #2116 and #2046. Both restricted-startup
-refusals remain active; this work cannot enable serving.
+Status: dark, test-selected implementation for #2116 and #2046. Both
+restricted-startup refusals remain active; this work cannot enable serving.
 
 ## Scope
 
@@ -50,12 +50,22 @@ checkout or nest another transaction for receipt work.
 
 ## Verification
 
-Use PostgreSQL 17 actual-entry tests for same backend/XID, catalog and lower
-gate contention, role/ACL/catalog drift, exact operation reuse/conflict,
-positive-only readback and absent=unknown, cancellation before and during
-the transaction, bounded supervisor capacity/drain, and no premature effect
-terminalization. Cover the S NOLOGIN/migrator SET ROLE fixture or keep the
-provisioning premise explicit. Run affected SQLite/legacy regressions,
-formatting, strict scoped Clippy and an independent exact-head review. Record
-baseline lint limits separately. Exact-release CI and deployment remain open
-until #2046 is complete and `cuenv sync -A` restores the workflows.
+The PostgreSQL 17 actual-producer fixture commits and reconstructs an effect
+intent under the registered guard before installing the candidate restricted
+receipt profile. It then exercises the real executor handoff to the pinned
+receipt pool, same-backend/XID observation, caller cancellation beyond five
+seconds, exact positive readback after simulated acknowledgement loss, an
+absent-row unknown outcome, capacity retention, and refusal to terminalize
+through the legacy path. The existing pinned authority fixture separately
+covers catalog/subordinate contention, role and catalog drift, actual COMMIT
+reply loss, exact operation conflict, and positive-only reconciliation. The
+SQLite receipt journal regression and ordinary live-receipt regression protect
+their existing paths. These are dark tests, not one shared main-pool serving
+proof. The S NOLOGIN/migrator SET ROLE graph remains a provisioning and
+quiescence premise, not a runtime guarantee of this selector.
+
+Process-crash restart cannot retire a surviving original backend or release
+its retained capacity yet. Other stores, old writers, provider role changes,
+full role graph, production SM custody, terminalization, serving activation,
+exact-release CI and deployment remain open. GitHub Actions/workflow files
+remain disabled until #2046 is complete and `cuenv sync -A` restores them.
