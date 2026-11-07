@@ -81,7 +81,7 @@ async fn pg17_prepared_custody_reader_classifies_and_acknowledges_rollback() {
     DatabasePubSubStorage::initialize_owner(owner_db.clone(), identity)
         .await
         .expect("prepare PubSub");
-    prepare_core_push_outbox_vapid_owner(&owner_db, identity, &[7_u8; 32])
+    let _prepared = prepare_core_push_outbox_vapid_owner(&owner_db, identity, &[7_u8; 32])
         .await
         .expect("prepare Push, outbox, ancestry, and VAPID");
     DatabasePushRegistrationStore::initialize_owner(owner_db.clone())
