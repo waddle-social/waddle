@@ -22,9 +22,12 @@ use super::{
 
 mod catalog;
 mod catalog_preflight;
+mod guarded_receipt;
 mod manifest;
 mod receipt_authority;
 mod receipt_catalog;
+pub(crate) use guarded_receipt::verify_guarded_receipt_profile;
+pub use guarded_receipt::GuardedReceiptOperationPins;
 pub use receipt_authority::{
     ReceiptAuthorityError, ReceiptCommit, ReceiptOperation, ReceiptOperationAuthority,
     ReceiptOperationPins, ReceiptReadback,
@@ -122,7 +125,7 @@ async fn inspect_profile_on_connection(
     epoch_oid: u32,
 ) -> Result<RestrictedIngressProfileObservation> {
     inspect_profile_with_receipt_journal(
-        connection, schema, schema_oid, runtime, api_owner, epoch_oid, false,
+        connection, schema, schema_oid, runtime, api_owner, epoch_oid, false, false,
     )
     .await
 }
@@ -135,6 +138,7 @@ async fn inspect_profile_with_receipt_journal(
     api_owner: &str,
     epoch_oid: u32,
     receipt_journal: bool,
+    guarded_receipt: bool,
 ) -> Result<RestrictedIngressProfileObservation> {
     let row = sqlx::query(
         "SELECT pg_catalog.current_setting('server_version_num')::integer, \
@@ -163,6 +167,7 @@ async fn inspect_profile_with_receipt_journal(
         .execute(&mut *connection)
         .await?;
     let manifest = manifest::load()?;
+    catalog_preflight::bound(connection, schema).await?;
     let before = catalog::verify_roles_and_tables(
         connection, schema, schema_oid, runtime, api_owner, epoch_oid,
     )
@@ -194,6 +199,7 @@ async fn inspect_profile_with_receipt_journal(
         runtime,
         api_owner,
         receipt_journal,
+        guarded_receipt,
         &manifest,
     )
     .await?;

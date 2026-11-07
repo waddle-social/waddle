@@ -111,6 +111,7 @@ pub(super) async fn verify_functions_and_triggers(
     runtime: &str,
     api: &str,
     receipt_journal: bool,
+    guarded_receipt: bool,
     manifest: &Manifest,
 ) -> Result<()> {
     let function_sql = r#"
@@ -198,7 +199,8 @@ pub(super) async fn verify_functions_and_triggers(
                 .iter()
                 .filter(|f| f.owner == "api")
                 .count()
-                + 2 * usize::from(receipt_journal),
+                + 2 * usize::from(receipt_journal)
+                + usize::from(guarded_receipt),
         )
     {
         return Err(RestrictedIngressProfileError::Mismatch(
@@ -210,6 +212,9 @@ pub(super) async fn verify_functions_and_triggers(
     if receipt_journal {
         names.push("waddle_p21_record_effect_receipt");
         names.push("waddle_p21_lookup_receipt_operation");
+    }
+    if guarded_receipt {
+        names.push("waddle_p21_guarded_record_effect_receipt");
     }
     let alternate: bool = sqlx::query_scalar(r#"
         SELECT EXISTS (

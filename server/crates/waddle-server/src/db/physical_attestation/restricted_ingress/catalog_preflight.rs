@@ -12,6 +12,45 @@ use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
 
 const PREFLIGHT_SQL: &str = include_str!("preflight.sql");
 const EXPRESSION_DEPENDENCIES_SQL: &str = include_str!("expression_dependencies.sql");
+const INVENTORY_BOUNDS: &str = include_str!("inventory_bounds.sql");
+const PHYSICAL_BOUNDS: &str = include_str!("physical_bounds.sql");
+const STORAGE_BOUNDS: &str = include_str!("storage_bounds.sql");
+
+/// Bound inventories first, then raw variable-length inputs before any ACL
+/// expansion, catalog JSON aggregation, expression deparsing, or SQLx decoding.
+/// Both queries run under the caller's cooperative catalog mutation fence.
+pub(super) async fn bound(connection: &mut PgConnection, schema: &str) -> Result<()> {
+    for statement in [INVENTORY_BOUNDS, PHYSICAL_BOUNDS, STORAGE_BOUNDS] {
+        let valid: bool = sqlx::query_scalar(statement)
+            .bind(schema)
+            .fetch_one(&mut *connection)
+            .await?;
+        if !valid {
+            return Err(RestrictedIngressProfileError::Mismatch(
+                "bounded catalog inventory/storage",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn verify_expression_dependencies(
+    connection: &mut PgConnection,
+    schema: &str,
+    tables: &[&str],
+) -> Result<()> {
+    let unsafe_dependency: bool = sqlx::query_scalar(EXPRESSION_DEPENDENCIES_SQL)
+        .bind(schema)
+        .bind(tables)
+        .fetch_one(&mut *connection)
+        .await?;
+    if unsafe_dependency {
+        return Err(RestrictedIngressProfileError::Mismatch(
+            "expression dependency preflight",
+        ));
+    }
+    Ok(())
+}
 
 pub(super) async fn verify(
     connection: &mut PgConnection,
@@ -49,16 +88,7 @@ pub(super) async fn verify(
     // Deparsing a Const can invoke its type's output function. Besides exact
     // built-in column types/collations, reject user-defined dependencies of
     // defaults, constraints and indexes before calling any deparser.
-    let unsafe_dependency: bool = sqlx::query_scalar(EXPRESSION_DEPENDENCIES_SQL)
-        .bind(schema)
-        .bind(&tables)
-        .fetch_one(&mut *connection)
-        .await?;
-    if unsafe_dependency {
-        return Err(RestrictedIngressProfileError::Mismatch(
-            "expression dependency preflight",
-        ));
-    }
+    verify_expression_dependencies(connection, schema, &tables).await?;
 
     let expected = expected_shape(manifest, schema, &tables)?;
     let observed: Value = sqlx::query_scalar(PREFLIGHT_SQL)
