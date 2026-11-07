@@ -1,14 +1,14 @@
 //! Physical PostgreSQL witnesses for the Pending Delivery catalog edge.
 
 use super::{
-    attested_pool, install, test_url, url_with_schema, Database, DatabaseConfig, DatabaseDriver,
-    Duration, Fixture, CATALOG_GRANT_LOCK,
+    attested_pool, install, lose_commit_reply_proxy, postgres_proxy, test_url, url_with_schema,
+    Database, DatabaseConfig, DatabaseDriver, Duration, Fixture, CATALOG_GRANT_LOCK,
 };
 use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use waddle_server::pending_delivery::{
     bootstrap_pending_delivery_owner_schema, DatabasePendingDeliveryStorage,
 };
-use waddle_xmpp::pending_delivery::QuotaPolicy;
+use waddle_xmpp::pending_delivery::{storage::PendingStorageError, QuotaPolicy};
 
 const RECEIPT_KEY: i64 = 7_305_784_319_670_198;
 const RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";
@@ -311,5 +311,74 @@ async fn pending_read_attachment_waits_at_catalog_before_relation_locks() {
         .expect("read-only grants are sufficient");
     drop(storage);
     drop(owner);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn pending_owner_lost_commit_ack_is_typed_and_discards_the_backend() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("local proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    let held = std::sync::Arc::new(tokio::sync::Notify::new());
+    let disconnect = std::sync::Arc::new(tokio::sync::Notify::new());
+    let proxy = tokio::spawn(lose_commit_reply_proxy(
+        listener,
+        fixture.admin_options.clone(),
+        held.clone(),
+        disconnect.clone(),
+    ));
+    let mut url =
+        postgres_proxy::local_proxy_url(&url_with_schema(&fixture.base_url, &fixture.target), port)
+            .expect("local PostgreSQL proxy URL");
+    url.query_pairs_mut()
+        .append_pair("application_name", "pending_lost_commit");
+    let owner = tokio::spawn(async move {
+        DatabasePendingDeliveryStorage::open(Some(url.as_str()), QuotaPolicy::Unlimited).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), held.notified())
+        .await
+        .expect("base COMMIT acknowledgement held");
+    let pid: i32 = sqlx::query_scalar(
+        "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = 'pending_lost_commit'",
+    )
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("original backend");
+    let phase_state: (bool, bool) = sqlx::query_as(
+        "SELECT pg_catalog.to_regclass(pg_catalog.format('%I.%I', $1, 'pending_delivery')) IS NOT NULL, \
+                pg_catalog.to_regclass(pg_catalog.format('%I.%I', $1, 'pending_delivery_sm_promotions')) IS NOT NULL",
+    )
+    .bind(&fixture.target)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("independently observe committed base and absent later phase");
+    assert_eq!(phase_state, (true, false));
+    disconnect.notify_one();
+    proxy.await.expect("proxy task").expect("proxy I/O");
+    assert!(matches!(
+        owner.await.expect("owner task"),
+        Err(PendingStorageError::OwnerBootstrapCommitIndeterminate { stage: "base" })
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let gone: bool = sqlx::query_scalar(
+                "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+            )
+            .bind(pid)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observe original backend");
+            if gone {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("unconfirmed checkout was discarded");
     fixture.cleanup().await;
 }
