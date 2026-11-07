@@ -120,6 +120,12 @@ pub enum PendingStorageError {
     #[error("pending_delivery storage error: {0}")]
     Other(String),
 
+    /// The owner sent COMMIT but did not receive its acknowledgement. A
+    /// later marker check cannot establish the outcome of this particular
+    /// attempt; no pending-delivery store was returned to the caller.
+    #[error("pending-delivery owner bootstrap commit is indeterminate at {stage}")]
+    OwnerBootstrapCommitIndeterminate { stage: &'static str },
+
     #[error("pending delivery store does not support tombstone snapshots")]
     TombstoneSnapshotUnsupported,
 
