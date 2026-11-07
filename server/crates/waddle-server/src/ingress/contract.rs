@@ -115,6 +115,37 @@ impl IngressAuthority {
     }
 
     #[cfg(feature = "test-support")]
+    pub(crate) fn receipt_custody_test_unresolved(&self) -> Vec<super::ReceiptCustodyUnresolved> {
+        self.receipt_custody.test_unresolved()
+    }
+
+    /// Test-only selection over the actual live executor. Matching lineage is
+    /// a fixture check, not a restricted-serving or shared-pool claim.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn select_pinned_receipt_for_test(
+        &self,
+        authority: crate::db::physical_attestation::PinnedReceiptAuthority,
+        grant: crate::clustering::singleton_lease::LeaseGrant,
+    ) -> bool {
+        if self.clustered || self.database.driver() != DatabaseDriver::Postgres {
+            return false;
+        }
+        let Ok(transaction) = self.uow.begin().await else {
+            return false;
+        };
+        let matches = match transaction.lineage() {
+            crate::ingress_uow::IngressLineage::Attested(lineage) => {
+                authority.matches_lineage(lineage)
+            }
+            crate::ingress_uow::IngressLineage::Ephemeral => false,
+        };
+        if transaction.commit().await.is_err() || !matches {
+            return false;
+        }
+        self.receipt_custody.select_pinned(authority, grant)
+    }
+
+    #[cfg(feature = "test-support")]
     pub(crate) fn receipt_custody_shares_ingress_lane(&self, database: &Database) -> bool {
         self.database.shares_ingress_lane(database)
             && self.receipt_custody.shares_ingress_lane(database)
@@ -679,12 +710,14 @@ impl IngressAuthority {
         }
         let mut execution_deps = deps.clone();
         execution_deps.ingress_delivery_stop = Some(self.force_stop.clone());
-        // A missing lifecycle fence, a clustered node, or an attested pool
-        // keeps the existing path. The continuation requires the bound fatal
-        // fence and an acknowledged insert on the ordinary standalone pool.
+        if self.receipt_custody.pinned_selected() && !self.receipt_custody.has_fatal_fence() {
+            return ExecutionReport::new(deps.delivery_execution_context.into());
+        }
+        // A missing lifecycle fence or clustered node keeps the existing
+        // path. A pinned receipt selector is available only to dark tests.
         if self.clustered
             || !self.receipt_custody.has_fatal_fence()
-            || self.database.attested_pg_writer_capability().is_some()
+            || !self.receipt_custody.can_retain()
         {
             return execute::execute_effects(
                 &self.uow,

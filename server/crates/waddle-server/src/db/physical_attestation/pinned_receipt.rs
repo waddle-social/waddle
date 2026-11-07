@@ -1,4 +1,4 @@
-//! Closed, unselected pinned-pool receipt transactions.
+//! Closed pinned-pool receipt transactions. Selection remains test-only.
 //!
 //! Privileged catalog mutators and old backends must independently honor the
 //! catalog fence or be quiescent. A caller must preserve the full operation
@@ -81,6 +81,16 @@ pub struct PinnedReceiptAuthority {
     pins: GuardedReceiptOperationPins,
 }
 
+/// Observation of the original attempt, even when it returned an error.
+/// None means the checkout or observation did not supply that identity; it
+/// does not mean that no backend exists or that a transaction rolled back.
+#[derive(Debug)]
+pub(crate) struct CustodiedReceiptAttempt {
+    pub result: Result<PinnedReceiptCommit, PinnedReceiptError>,
+    pub backend_pid: Option<i32>,
+    pub backend: Option<GuardBackend>,
+}
+
 enum Action<'a> {
     Record(&'a LeaseGrant),
     Readback,
@@ -123,8 +133,47 @@ impl PinnedReceiptAuthority {
         grant: &LeaseGrant,
         operation: &ReceiptOperation,
     ) -> Result<PinnedReceiptCommit, PinnedReceiptError> {
-        self.record_with_deadline(grant, operation, DEADLINE, None)
-            .await
+        let mut backend_pid = None;
+        let mut backend = None;
+        self.record_with_deadline(
+            grant,
+            operation,
+            DEADLINE,
+            None,
+            &mut backend_pid,
+            &mut backend,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn matches_lineage(&self, lineage: &crate::db::lineage::AttestedLineage) -> bool {
+        &self.pool.writer_capability.config.lineage == lineage
+    }
+
+    pub(crate) async fn record_for_custody(
+        &self,
+        grant: &LeaseGrant,
+        operation: &ReceiptOperation,
+        pause: Pause,
+    ) -> CustodiedReceiptAttempt {
+        let mut backend_pid = None;
+        let mut backend = None;
+        let result = self
+            .record_with_deadline(
+                grant,
+                operation,
+                DEADLINE,
+                pause,
+                &mut backend_pid,
+                &mut backend,
+            )
+            .await;
+        CustodiedReceiptAttempt {
+            result,
+            backend_pid,
+            backend,
+        }
     }
 
     #[cfg(feature = "test-support")]
@@ -136,8 +185,17 @@ impl PinnedReceiptAuthority {
         ready: tokio::sync::oneshot::Sender<(GuardBackend, GuardBackend)>,
         resume: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<PinnedReceiptCommit, PinnedReceiptError> {
-        self.record_with_deadline(grant, operation, timeout, Some((ready, resume)))
-            .await
+        let mut backend_pid = None;
+        let mut backend = None;
+        self.record_with_deadline(
+            grant,
+            operation,
+            timeout,
+            Some((ready, resume)),
+            &mut backend_pid,
+            &mut backend,
+        )
+        .await
     }
 
     async fn record_with_deadline(
@@ -146,20 +204,20 @@ impl PinnedReceiptAuthority {
         operation: &ReceiptOperation,
         timeout: Duration,
         pause: Pause,
+        backend_pid: &mut Option<i32>,
+        backend: &mut Option<GuardBackend>,
     ) -> Result<PinnedReceiptCommit, PinnedReceiptError> {
         validate(operation)?;
         if grant.generation() <= 0 {
             return Err(PinnedReceiptError::Binding);
         }
-        let mut backend_pid = None;
-        let mut backend = None;
         let outcome = tokio::time::timeout(
             timeout,
             self.run(
                 operation,
                 Action::Record(grant),
-                &mut backend_pid,
-                &mut backend,
+                backend_pid,
+                backend,
                 pause,
             ),
         )
@@ -171,8 +229,8 @@ impl PinnedReceiptAuthority {
             }),
             Ok(Ok(Outcome::CommitUnknown)) | Err(_) => Ok(PinnedReceiptCommit::Indeterminate {
                 operation_id: operation.operation_id,
-                backend_pid,
-                backend,
+                backend_pid: *backend_pid,
+                backend: *backend,
             }),
             Ok(Err(error)) => Err(error),
             Ok(Ok(Outcome::Readback(_))) => Err(PinnedReceiptError::Binding),

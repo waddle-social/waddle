@@ -34,7 +34,9 @@ pub mod nested;
 pub mod principal;
 mod receipt_custody;
 #[cfg(feature = "test-support")]
-pub use receipt_custody::ReceiptCustodyProbe;
+pub(crate) use receipt_custody::receipt_operation as receipt_operation_for_test;
+#[cfg(feature = "test-support")]
+pub use receipt_custody::{ReceiptCustodyProbe, ReceiptCustodyUnresolved};
 pub(crate) mod room_manifest_replay;
 pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;

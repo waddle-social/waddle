@@ -46,6 +46,7 @@ pub use pinned_entry::DarkPinnedEntryError;
 mod pinned_selected_entry;
 pub use pinned_selected_entry::{PinnedSelectedEntry, PinnedSelectedEntryError};
 mod pinned_receipt;
+pub(crate) use pinned_receipt::CustodiedReceiptAttempt;
 pub use pinned_receipt::{PinnedReceiptAuthority, PinnedReceiptCommit, PinnedReceiptError};
 mod pinned_mam;
 #[cfg(not(feature = "test-support"))]
