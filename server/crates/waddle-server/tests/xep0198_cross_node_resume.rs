@@ -279,7 +279,11 @@ async fn fenced_snapshot_and_detached_drains_preserve_captured_bytes() {
     else {
         return;
     };
-    let db = fixture.db.clone();
+    let config = DatabaseConfig::new(DatabaseDriver::Postgres, fixture.db.database_url())
+        .with_control_plane_pool(waddle_server::db::DEFAULT_CONTROL_PLANE_POOL_SIZE);
+    let db = Database::from_config("literal fenced replay", &config)
+        .await
+        .expect("isolated database with control-plane pool");
     PostgresClaimStore::new(db.clone())
         .ensure_schema()
         .await
