@@ -773,24 +773,23 @@ async fn verify_attested_room_observation_schema_inner(
     validate_identifier(designated_migrator.as_str(), "room observation migrator")
         .map_err(|_| RoomObservationSchemaError::UnsafeOwner)?;
 
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    // READ COMMITTED is intentional: the following shared advisory-lock
-    // statement may wait for owner preparation. REPEATABLE READ could pin a
-    // stale snapshot before that wait and then inspect the old marker.
+    // The checkout hook finishes before catalog-S. Every subordinate gate is
+    // tried in the owner's order, including the migration ledger gate that
+    // the verifier's ledger check otherwise acquires implicitly.
+    let mut tx = db
+        .begin_catalog_fenced_read_only(&[
+            CatalogFenceLock::Shared(crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Exclusive(crate::db::MIGRATION_LEDGER_ADVISORY_LOCK_KEY),
+            CatalogFenceLock::Shared(ROOM_OBSERVATION_OWNER_GATE_LOCK),
+            CatalogFenceLock::Shared(ROOM_OBSERVATION_SCHEMA_LOCK),
+        ])
+        .await?;
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| RoomObservationSchemaError::Database)?;
     set_target_search_path(&mut tx, &identity.schema.name.0).await?;
-    lineage_lock(&mut tx, true).await?;
     verify_room_observation_migration_v1023_in_transaction(&mut tx, &identity.schema.name.0)
         .await?;
-    owner_gate_lock(&mut tx, true).await?;
-    schema_lock(&mut tx, true).await?;
     for table in std::iter::once(&OWNER_STATE_CONTRACT).chain(DATA_TABLES.iter()) {
         let qualified = qualified_table(&identity.schema.name.0, table.name);
         tx.execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
@@ -843,39 +842,6 @@ async fn verify_attested_room_observation_schema_inner(
 #[path = "schema_tests.rs"]
 mod tests;
 
-async fn schema_lock(tx: &mut Transaction<'_>, shared: bool) -> Result<(), DatabaseError> {
-    let sql = if shared {
-        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)"
-    } else {
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)"
-    };
-    let mut rows = tx
-        .query(sql, crate::db_params![ROOM_OBSERVATION_SCHEMA_LOCK])
-        .await?;
-    rows.next().await?.ok_or(DatabaseError::QueryFailed(
-        "room observation schema lock returned no row".to_owned(),
-    ))?;
-    Ok(())
-}
-
-async fn lineage_lock(tx: &mut Transaction<'_>, shared: bool) -> Result<(), DatabaseError> {
-    let sql = if shared {
-        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)"
-    } else {
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)"
-    };
-    let mut rows = tx
-        .query(
-            sql,
-            crate::db_params![crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY],
-        )
-        .await?;
-    rows.next().await?.ok_or(DatabaseError::QueryFailed(
-        "room observation lineage lock returned no row".to_owned(),
-    ))?;
-    Ok(())
-}
-
 async fn lock_data_tables(
     tx: &mut Transaction<'_>,
     identity: &PgIdentity,
@@ -886,21 +852,6 @@ async fn lock_data_tables(
             .await
             .map_err(|_| RoomObservationSchemaError::InvalidSchemaShape)?;
     }
-    Ok(())
-}
-
-async fn owner_gate_lock(tx: &mut Transaction<'_>, shared: bool) -> Result<(), DatabaseError> {
-    let sql = if shared {
-        "SELECT pg_catalog.pg_advisory_xact_lock_shared(?)"
-    } else {
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)"
-    };
-    let mut rows = tx
-        .query(sql, crate::db_params![ROOM_OBSERVATION_OWNER_GATE_LOCK])
-        .await?;
-    rows.next().await?.ok_or(DatabaseError::QueryFailed(
-        "room observation owner gate returned no row".to_owned(),
-    ))?;
     Ok(())
 }
 

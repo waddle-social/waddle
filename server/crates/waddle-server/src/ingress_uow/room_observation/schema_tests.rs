@@ -341,6 +341,12 @@ impl Fixture {
         .map_err(|error| anyhow::anyhow!("completed schema verification failed: {error:?}"))?;
         assert_eq!(complete.physical_identity(), &identity);
         assert_eq!(complete.revision(), ROOM_OBSERVATION_SCHEMA_REVISION);
+        self.verify_reader_catalog_and_ledger_contention(
+            runtime_database,
+            &lineage,
+            &designated_migrator,
+        )
+        .await?;
 
         let stored_ledger: (String, Option<String>) = sqlx::query_as(&format!(
             "SELECT description, checksum FROM {}._migrations WHERE version = 1023",
@@ -1705,6 +1711,84 @@ impl Fixture {
             .await?;
         catalog_blocker.close().await?;
         initialization.await??;
+        Ok(())
+    }
+
+    async fn verify_reader_catalog_and_ledger_contention(
+        &self,
+        runtime_database: &Database,
+        lineage: &AttestedLineage,
+        designated_migrator: &PgRoleName,
+    ) -> Result<()> {
+        for (gate_key, catalog_blocked) in [
+            (CATALOG_MUTATION_ADVISORY_LOCK_KEY, true),
+            (crate::db::MIGRATION_LEDGER_ADVISORY_LOCK_KEY, false),
+        ] {
+            let admin_options = PgConnectOptions::from_str(&url_with_options(&self.base_url, ""))?;
+            let mut gate = PgConnection::connect_with(&admin_options).await?;
+            sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+                .bind(gate_key)
+                .execute(&mut gate)
+                .await?;
+
+            let runtime_database = runtime_database.clone();
+            let lineage = lineage.clone();
+            let designated_migrator = designated_migrator.clone();
+            let started_at = activity_checkpoint(&self.admin).await?;
+            let verifier = tokio::spawn(async move {
+                verify_attested_room_observation_schema(
+                    &runtime_database,
+                    &lineage,
+                    &designated_migrator,
+                )
+                .await
+            });
+            let backend_pid = wait_for_catalog_try_and_rollback(&self.admin, &started_at).await?;
+            let verifier_pending = !verifier.is_finished();
+            let marker_complete = marker_exists(&self.admin, &self.target).await?;
+            let catalog_x_available: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&self.admin)
+                    .await?;
+            let lineage_x_available: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(lineage::LINEAGE_ADVISORY_LOCK_KEY)
+                    .fetch_one(&self.admin)
+                    .await?;
+            let owner_x_available: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
+                    .fetch_one(&self.admin)
+                    .await?;
+            let schema_x_available: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(ROOM_OBSERVATION_SCHEMA_LOCK)
+                    .fetch_one(&self.admin)
+                    .await?;
+            if !verifier_pending
+                || !marker_complete
+                || catalog_x_available == catalog_blocked
+                || !lineage_x_available
+                || !owner_x_available
+                || !schema_x_available
+            {
+                verifier.abort();
+                let _ = verifier.await;
+                sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+                    .bind(gate_key)
+                    .execute(&mut gate)
+                    .await?;
+                gate.close().await?;
+                bail!("room-observation reader fence probe failed for backend {backend_pid}");
+            }
+            sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+                .bind(gate_key)
+                .execute(&mut gate)
+                .await?;
+            gate.close().await?;
+            verifier.await??;
+        }
         Ok(())
     }
 
