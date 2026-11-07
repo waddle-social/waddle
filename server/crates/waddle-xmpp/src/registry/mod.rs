@@ -27,7 +27,7 @@ pub use connection_registry::{
     ArchiveDispatchRefusalReason, BindingAdmissionState, BroadcastOutcome, ConnectionBindGuard,
     ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachInterruption,
     ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
-    LiveResumeControl, LocalConnectionBindingId, LocalIoRelinquishment,
+    LiveResumeControl, LocalBindingPermit, LocalConnectionBindingId, LocalIoRelinquishment,
     LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo, OutboundStanza,
     OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
     PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,

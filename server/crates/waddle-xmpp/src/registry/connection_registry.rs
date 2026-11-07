@@ -18,6 +18,7 @@ use crate::Stanza;
 mod actor_outbound;
 mod archive_dispatch;
 mod binding;
+mod binding_permit;
 mod connections;
 pub(super) mod endpoint;
 mod live_resume;
@@ -35,6 +36,7 @@ pub use actor_outbound::{
 };
 pub use archive_dispatch::{ArchiveDispatchRefusal, ArchiveDispatchRefusalReason};
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
+pub use binding_permit::LocalBindingPermit;
 pub use endpoint::{ActorSocketOutboundEndpoint, BindingAdmissionState, SocketOutboundEndpoint};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};
@@ -229,3 +231,6 @@ impl fmt::Debug for ConnectionRegistry {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod binding_permit_tests;

@@ -306,6 +306,7 @@ pub struct ConnectionEntry {
     // The current v4 remote registration carries only the physical source.
     // A mirror must not fabricate a source binding attempt from its own ID.
     binding_ref: Option<BindingRef>,
+    pub(super) binding_permit: Arc<super::binding_permit::BindingPermitState>,
     // Present only when supplied by this node's physical transport owner.
     local_io_relinquishment: Option<super::LocalIoRelinquishment>,
     pub(super) archive_dispatch:
@@ -504,6 +505,7 @@ impl ConnectionEntry {
             binding_id,
             connection_ref,
             binding_ref,
+            binding_permit: Arc::new(Default::default()),
             local_io_relinquishment: None,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
@@ -583,10 +585,17 @@ impl ConnectionEntry {
     /// Atomically seal this exact local binding against future queue
     /// acceptance. Enqueue and reserved-permit commits hold the same admission
     /// lock, so a commit is ordered wholly before or after this transition.
-    /// Returns false for an owner or binding-attempt mismatch. This dark
-    /// primitive is not wired into registration or cleanup.
+    /// Returns false for an owner or binding-attempt mismatch. A successful
+    /// seal also revokes the exact local pre-write permit.
     pub fn seal_binding(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
-        self.endpoint.seal(owner, binding_ref)
+        let sealed = self
+            .binding_permit
+            .revoke_on_success(|| self.endpoint.seal(owner, binding_ref).then_some(()))
+            .is_some();
+        if sealed {
+            self.binding_permit.notify_revoked();
+        }
+        sealed
     }
 
     /// Legacy replacements are unchanged. Every path that removes an actor
@@ -601,6 +610,7 @@ impl ConnectionEntry {
         self.binding_id == other.binding_id
             && self.connection_ref == other.connection_ref
             && self.binding_ref == other.binding_ref
+            && Arc::ptr_eq(&self.binding_permit, &other.binding_permit)
             && self.endpoint.same_binding(&other.endpoint)
     }
 
@@ -683,6 +693,63 @@ impl ConnectionEntry {
         self.force_detach_tx.clone()
     }
 
+    /// Preserve ordinary queue and acknowledgement behavior, but when the
+    /// socket's own control proves this exact local JID/binding, serialize a
+    /// successful queue reservation with its pre-write permit revocation.
+    /// Unverified or remote entries use the existing raw offer unchanged.
+    pub fn try_force_detach_for_jid(
+        &self,
+        jid: &jid::FullJid,
+        request: ForceDetachRequest,
+    ) -> Result<(), ForceDetachOfferError> {
+        let Some(binding) = self.binding_ref.as_ref() else {
+            return self.try_force_detach_raw(request);
+        };
+        if !self.is_locally_hosted()
+            || request.requester_bare_jid != jid.to_bare()
+            || request.target_binding.as_ref() != Some(binding)
+        {
+            return self.try_force_detach_raw(request);
+        }
+        let Some(control) = self.resume_control.get() else {
+            return self.try_force_detach_raw(request);
+        };
+        let Some(reservation) = control.with_exact_binding(jid, binding, || {
+            self.binding_permit
+                .revoke_on_ok(|| self.force_detach_tx.try_reserve())
+        }) else {
+            return self.try_force_detach_raw(request);
+        };
+        let reservation = match reservation {
+            Ok(reservation) => reservation,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err(ForceDetachOfferError::Full(Box::new(request)));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(ForceDetachOfferError::Closed(Box::new(request)));
+            }
+        };
+        self.binding_permit.notify_revoked();
+        reservation.send(request);
+        Ok(())
+    }
+
+    fn try_force_detach_raw(
+        &self,
+        request: ForceDetachRequest,
+    ) -> Result<(), ForceDetachOfferError> {
+        self.force_detach_tx
+            .try_send(request)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(request) => {
+                    ForceDetachOfferError::Full(Box::new(request))
+                }
+                mpsc::error::TrySendError::Closed(request) => {
+                    ForceDetachOfferError::Closed(Box::new(request))
+                }
+            })
+    }
+
     /// Queue retirement before interrupting this captured connection's I/O.
     /// The caller must first verify requester identity, ownership, and any
     /// applicable stream or occupancy generation. Cleanup and acknowledgement
@@ -700,29 +767,73 @@ impl ConnectionEntry {
 
     fn try_force_detach_and_interrupt_after_offer(
         &self,
-        mut request: ForceDetachRequest,
+        request: ForceDetachRequest,
         after_offer: impl FnOnce(),
     ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
-        let Some(binding) = self.binding_ref.as_ref() else {
-            return Err(ForceDetachOfferError::NoLocalBinding(Box::new(request)));
-        };
-        request.target_binding = Some(binding.clone());
-        self.force_detach_tx
-            .try_send(request)
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(request) => {
-                    ForceDetachOfferError::Full(Box::new(request))
-                }
-                mpsc::error::TrySendError::Closed(request) => {
-                    ForceDetachOfferError::Closed(Box::new(request))
-                }
-            })?;
+        self.try_force_detach_and_revoke(request)?;
         after_offer();
+        // The successful offer above proves a local binding was present.
+        let Some(binding) = self.binding_ref.as_ref() else {
+            unreachable!("successful local detach offer requires a binding");
+        };
         Ok(if self.write_interruption.cancel_if_binding(binding) {
             ForceDetachInterruption::Stopped
         } else {
             ForceDetachInterruption::QueuedAfterRetirement
         })
+    }
+
+    /// Reserve a local detach and revoke its pre-write permit atomically.
+    /// A full or closed queue does not prove detachment. A receiver closing
+    /// after reservation still leaves an accepted but unconfirmed request;
+    /// callers must observe lifecycle shutdown separately.
+    pub fn try_force_detach_and_revoke(
+        &self,
+        request: ForceDetachRequest,
+    ) -> Result<(), ForceDetachOfferError> {
+        self.try_force_detach_and_revoke_after_reserve(request, || {})
+    }
+
+    fn try_force_detach_and_revoke_after_reserve(
+        &self,
+        mut request: ForceDetachRequest,
+        after_reserve: impl FnOnce(),
+    ) -> Result<(), ForceDetachOfferError> {
+        let Some(binding) = self.binding_ref.as_ref() else {
+            return Err(ForceDetachOfferError::NoLocalBinding(Box::new(request)));
+        };
+        request.target_binding = Some(binding.clone());
+        // try_reserve performs only the semaphore CAS, without waking the
+        // receiver. A successful reservation is the queue-offer decision;
+        // send and its potentially reentrant wake run after the cell unlocks.
+        let reservation = match self
+            .binding_permit
+            .revoke_on_ok(|| self.force_detach_tx.try_reserve())
+        {
+            Ok(reservation) => reservation,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err(ForceDetachOfferError::Full(Box::new(request)));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(ForceDetachOfferError::Closed(Box::new(request)));
+            }
+        };
+        // Wake parked writers before delivering the control message. Both
+        // notification and the receiver wake run without the permit cell.
+        self.binding_permit.notify_revoked();
+        after_reserve();
+        reservation.send(request);
+        Ok(())
+    }
+
+    /// Test receiver closure between successful reservation and delivery.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn try_force_detach_and_revoke_after_reserve_for_test(
+        &self,
+        request: ForceDetachRequest,
+        after_reserve: impl FnOnce(),
+    ) -> Result<(), ForceDetachOfferError> {
+        self.try_force_detach_and_revoke_after_reserve(request, after_reserve)
     }
 
     /// Pause the real interrupting path after its offer but before its stop.

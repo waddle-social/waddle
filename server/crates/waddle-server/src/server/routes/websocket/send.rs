@@ -270,6 +270,25 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: WebSocketWriteError,
 {
+    send_ws_message_with_binding(sender, message, failure_message, authority, None).await
+}
+
+/// Node admission, socket control, binding cell, and physical interruption
+/// gate are held in that order only for synchronous `start_send`.
+pub(super) async fn send_ws_message_with_binding<S, E>(
+    sender: &mut S,
+    message: Message,
+    failure_message: &'static str,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
+    binding: Option<(
+        &waddle_xmpp::registry::LocalBindingPermit,
+        &waddle_xmpp::registry::LiveResumeControl,
+    )>,
+) -> AuthoritySendOutcome
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: WebSocketWriteError,
+{
     let authoritative = || {
         authority.is_none_or(|(permit, shutdown)| {
             !shutdown.is_cancelled() && permit.revalidate().is_ok()
@@ -278,6 +297,9 @@ where
     if !authoritative() {
         return AuthoritySendOutcome::AuthorityRevoked;
     }
+    if binding.is_some_and(|(permit, _)| !permit.is_active()) {
+        return AuthoritySendOutcome::TransportClosed;
+    }
 
     // `futures::SinkExt` does not expose a portable `ready` future for every
     // Sink version we support. Poll the required `Sink::poll_ready` directly
@@ -285,14 +307,24 @@ where
     let ready_result = {
         let ready = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *sender).poll_ready(cx));
         tokio::pin!(ready);
-        match authority {
-            Some((permit, shutdown)) => tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => return AuthoritySendOutcome::AuthorityRevoked,
-                _ = permit.revoked() => return AuthoritySendOutcome::AuthorityRevoked,
-                result = tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()) => result,
-            },
-            None => tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()).await,
+        tokio::select! {
+            biased;
+            _ = async {
+                match authority {
+                    Some((permit, shutdown)) => tokio::select! {
+                        _ = shutdown.cancelled() => {},
+                        _ = permit.revoked() => {},
+                    },
+                    None => std::future::pending().await,
+                }
+            } => return AuthoritySendOutcome::AuthorityRevoked,
+            _ = async {
+                match binding {
+                    Some((permit, _)) => permit.revoked().await,
+                    None => std::future::pending().await,
+                }
+            } => return AuthoritySendOutcome::TransportClosed,
+            result = tokio::time::timeout(SEND_STALL_TIMEOUT, ready.as_mut()) => result,
         }
     };
     match ready_result {
@@ -315,18 +347,34 @@ where
     // independent shutdown token again, then hold the bound source and
     // lifecycle guards only across synchronous `start_send` so neither can
     // change between validation and local enqueue.
+    enum StartError<E> {
+        BindingRevoked,
+        Transport(E),
+    }
+    let start = || {
+        let result = match binding {
+            Some((permit, control)) => control.start_sm_enable_if_current(permit, || {
+                std::pin::Pin::new(&mut *sender).start_send(message)
+            }),
+            None => Some(std::pin::Pin::new(&mut *sender).start_send(message)),
+        };
+        result
+            .ok_or(StartError::BindingRevoked)?
+            .map_err(StartError::Transport)
+    };
     let start_send_result = match authority {
         Some((permit, shutdown)) => {
             if shutdown.is_cancelled() {
                 return AuthoritySendOutcome::AuthorityRevoked;
             }
-            permit.start_send_if_current(|| std::pin::Pin::new(&mut *sender).start_send(message))
+            permit.start_send_if_current(start)
         }
-        None => Ok(std::pin::Pin::new(&mut *sender).start_send(message)),
+        None => Ok(start()),
     };
     match start_send_result {
         Err(_revoked) => return AuthoritySendOutcome::AuthorityRevoked,
-        Ok(Err(error)) => {
+        Ok(Err(StartError::BindingRevoked)) => return AuthoritySendOutcome::TransportClosed,
+        Ok(Err(StartError::Transport(error))) => {
             log_write_failure(&error, failure_message);
             return AuthoritySendOutcome::TransportClosed;
         }

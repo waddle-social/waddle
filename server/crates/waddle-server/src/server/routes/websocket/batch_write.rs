@@ -13,7 +13,9 @@
 //! permits requesting acks at any time).
 
 use super::frame::ResponseFrame;
-use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
+use super::send::{
+    send_ws_message_with_authority, send_ws_message_with_binding, AuthoritySendOutcome,
+};
 use super::state::WsConnState;
 use super::stream_management::{apply_sm_ack_with_fence, is_countable_stanza};
 use super::{
@@ -325,6 +327,38 @@ where
                 written_frame_count,
             };
         }
+        // The response is tagged where SM enable succeeds, after enrollment
+        // has completed. Never race or cancel the claim/enrollment transaction.
+        let binding_permit = if frame.requires_local_binding() {
+            let captured = conn
+                .phase
+                .bound_jid()
+                .zip(conn.registry_owner.as_ref())
+                .zip(conn.binding_ref.as_ref())
+                .and_then(|((jid, owner), binding)| {
+                    state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .local_sm_enable_binding_permit_if_owner(
+                            jid,
+                            owner,
+                            binding,
+                            &conn.live_resume_control,
+                        )
+                })
+                .filter(|permit| &conn.connection_ref == permit.connection());
+            let Some(permit) = captured else {
+                return BatchWriteReport {
+                    outcome: BatchWriteOutcome::TransportClosed,
+                    accepted_frame_indices,
+                    written_frame_count,
+                };
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let frame_xml = frame.clone().into_serialized_xml();
         let current_should_record = should_record(conn, &frame_xml, policy);
         if current_should_record && conn.sm_state.needs_send_pause() {
@@ -422,14 +456,51 @@ where
         // Only the final carrier bears the ordered prefix's obligations. Settle
         // immediately after its write, before ACK cadence can drain or close.
         let replayed_receipts = frame.ingress_receipts().to_vec();
-        if let Err(outcome) = send_window_message(
-            sender,
-            Message::Text(frame_xml.into()),
-            "Failed to send WebSocket message",
-            authority,
-        )
-        .await
-        {
+        #[cfg(feature = "test-support")]
+        if let (Some(binding), Some(commit)) = (
+            binding_permit.as_ref(),
+            conn.pending_sm_enable_commit.as_ref(),
+        ) {
+            if matches!(
+                super::characterization_seams::hold_sm_enable_before_start(
+                    conn.phase.bound_jid(),
+                    commit.stream_id(),
+                    binding,
+                )
+                .await,
+                super::characterization_seams::SmEnableHoldOutcome::Refused,
+            ) {
+                return BatchWriteReport {
+                    outcome: BatchWriteOutcome::TransportClosed,
+                    accepted_frame_indices,
+                    written_frame_count,
+                };
+            }
+        }
+        let send_outcome = if let Some(binding) = binding_permit.as_ref() {
+            match send_ws_message_with_binding(
+                sender,
+                Message::Text(frame_xml.into()),
+                "Failed to send WebSocket message",
+                authority,
+                Some((binding, &conn.live_resume_control)),
+            )
+            .await
+            {
+                AuthoritySendOutcome::Sent => Ok(()),
+                AuthoritySendOutcome::TransportClosed => Err(SendWindowOutcome::TransportClosed),
+                AuthoritySendOutcome::AuthorityRevoked => Err(SendWindowOutcome::AuthorityRevoked),
+            }
+        } else {
+            send_window_message(
+                sender,
+                Message::Text(frame_xml.into()),
+                "Failed to send WebSocket message",
+                authority,
+            )
+            .await
+        };
+        if let Err(outcome) = send_outcome {
             return match outcome {
                 SendWindowOutcome::TransportClosed => {
                     accepted_frame_indices

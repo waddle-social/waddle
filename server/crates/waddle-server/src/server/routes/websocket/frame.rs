@@ -71,6 +71,8 @@ pub(crate) enum ResponseFrame {
     Stanza(Box<Stanza>),
     /// Typed non-stanza XML written at the websocket transport boundary.
     Element(Element),
+    /// An SM enable response needs the exact local binding at socket start.
+    SmEnabled(Element),
     /// Typed transport-only stream error emitted by the websocket adapter.
     StreamError(StreamErrorFrame),
     /// Origin of this exact retained frame, independent of completion receipts.
@@ -89,11 +91,21 @@ impl ResponseFrame {
     pub(crate) fn into_serialized_xml(self) -> String {
         match self {
             Self::Stanza(stanza) => stanza_to_xml(&stanza),
-            Self::Element(element) => element_to_xml(element),
+            Self::Element(element) | Self::SmEnabled(element) => element_to_xml(element),
             Self::StreamError(error) => error.into_serialized_xml(),
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
                 frame.into_serialized_xml()
             }
+        }
+    }
+
+    pub(crate) fn requires_local_binding(&self) -> bool {
+        match self {
+            Self::SmEnabled(_) => true,
+            Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
+                frame.requires_local_binding()
+            }
+            _ => false,
         }
     }
 
@@ -103,7 +115,7 @@ impl ResponseFrame {
             Self::Element(element) => {
                 element.name() == "close" && element.ns() == "urn:ietf:params:xml:ns:xmpp-framing"
             }
-            Self::StreamError(_) => false,
+            Self::SmEnabled(_) | Self::StreamError(_) => false,
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => {
                 frame.is_websocket_stream_close()
             }
@@ -130,7 +142,7 @@ impl ResponseFrame {
         match self {
             Self::Stanza(stanza) => Some(stanza),
             Self::Replay { frame, .. } | Self::Provenanced { frame, .. } => frame.stanza(),
-            Self::Element(_) | Self::StreamError(_) => None,
+            Self::Element(_) | Self::SmEnabled(_) | Self::StreamError(_) => None,
         }
     }
 

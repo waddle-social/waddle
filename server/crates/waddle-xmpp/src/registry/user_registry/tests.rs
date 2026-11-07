@@ -3172,3 +3172,55 @@ async fn legacy_unregister_and_reaper_release_failures_are_retried() {
         assert!(store.current_claim(&entity).await.expect("claim").is_none());
     }
 }
+
+#[tokio::test]
+async fn stale_actor_offer_revokes_only_the_proven_exact_local_binding() {
+    for matches_owner in [true, false] {
+        let jid = full("stale-proof", "phone");
+        let bare_jid = if matches_owner {
+            jid.to_bare()
+        } else {
+            bare("other-user")
+        };
+        let connections = crate::registry::ConnectionRegistry::new();
+        let (tx, _rx) = outbound_channel();
+        let entry = ConnectionEntry::new(tx);
+        let sm = crate::stream_management::StreamManagementState::new();
+        let control = crate::registry::LiveResumeControl::new(
+            sm.resume_checkpoint(),
+            entry.write_interruption.clone(),
+        );
+        assert!(entry.wire_resume_control(jid.clone(), control));
+        let mut requests = entry.take_force_detach_rx().expect("receiver");
+        let owner = connections
+            .register_socket_entry(jid.clone(), entry.clone())
+            .expect("publish");
+        let permit = connections
+            .local_binding_permit_if_owner(&jid, &owner)
+            .expect("permit");
+        let actor = UserActor::spawn(UserActor::new(jid.to_bare()));
+        let user = UserEntry {
+            actor_ref: actor,
+            claim: UserClaimLease {
+                owner: this_identity(),
+                epoch: ClaimEpoch(1),
+            },
+            resources: HashMap::from([(jid, entry)]),
+        };
+        let (result, acks) =
+            UserRegistryActor::new().issue_stale_retirement_force_detach(&bare_jid, &user);
+        assert!(matches!(result, StaleRetirementQueueResult::Queued));
+        assert_eq!(permit.is_active(), !matches_owner);
+        let request = requests.try_recv().expect("queued");
+        let expected = if matches_owner {
+            ForceDetachOutcome::NotPersisted
+        } else {
+            ForceDetachOutcome::IdentityMismatch
+        };
+        request.ack.send(expected).expect("ack");
+        assert_eq!(
+            acks.into_iter().next().expect("waiter").await.expect("ACK"),
+            expected
+        );
+    }
+}
