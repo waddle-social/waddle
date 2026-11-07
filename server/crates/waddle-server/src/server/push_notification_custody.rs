@@ -152,14 +152,10 @@ pub async fn verify_attested_push_notification_custody(
         let attempt = tokio::time::timeout_at(deadline, async {
             crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
                 .await
-                .map_err(|error| match error {
-                    crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting {
-                        ..
-                    } => PushNotificationCustodyError::ReadBounds,
-                    crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
-                        PushNotificationCustodyError::Database(error)
-                    }
-                })?;
+                .map_err(map_read_bounds)?;
+            crate::db::read_only_timeout::bound_postgres_idle_transaction(&mut tx)
+                .await
+                .map_err(map_read_bounds)?;
 
             // Each gate is tried in its original position, immediately before
             // that store's relation locks. A failed try restarts the entire
@@ -261,6 +257,19 @@ pub async fn verify_attested_push_notification_custody(
         });
     }
     Ok(evidence)
+}
+
+fn map_read_bounds(
+    error: crate::db::read_only_timeout::ReadOnlyTimeoutError,
+) -> PushNotificationCustodyError {
+    match error {
+        crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { .. } => {
+            PushNotificationCustodyError::ReadBounds
+        }
+        crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+            PushNotificationCustodyError::Database(error)
+        }
+    }
 }
 
 async fn lock_foundation_descendants_tx(
