@@ -5,6 +5,7 @@ use super::types::{storage, RevisionError};
 /// Install the unselected authority schema once using an owner connection. The
 /// retained generation and receipt rows intentionally outlive `sm_sessions`.
 /// Existing tables cause an error; this installer does not certify their shape.
+/// A candidate database prepared by an older version must be re-provisioned.
 /// Selecting this schema also requires a catalog/owner/privilege qualification
 /// on the serving pool, which is not supplied by this unselected module.
 pub async fn bootstrap_revisioned_sm_owner_schema(db: &Database) -> Result<(), RevisionError> {
@@ -31,6 +32,10 @@ pub async fn bootstrap_revisioned_sm_owner_schema(db: &Database) -> Result<(), R
             full_jid TEXT NOT NULL,
             revision BIGINT NOT NULL CHECK (revision >= 0),
             terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+            acknowledged_ordinal BIGINT NOT NULL CHECK (acknowledged_ordinal >= 0),
+            exposed_ordinal BIGINT NOT NULL CHECK (exposed_ordinal >= acknowledged_ordinal),
+            appended_ordinal BIGINT NOT NULL CHECK (appended_ordinal >= exposed_ordinal
+                AND appended_ordinal - acknowledged_ordinal < 2147483648),
             FOREIGN KEY (stream_id, generation)
                 REFERENCES sm_revision_generations (stream_id, generation)
         );

@@ -285,6 +285,15 @@ async fn exercise(db: Database, second_db: Database) {
         b.apply(&outstanding).await,
         Err(RevisionError::OutstandingCustody)
     ));
+    let expose = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Expose {
+            revision: &current.revision,
+            ordinal: current.frontier.exposed() + 1,
+        },
+    };
+    b.apply(&expose).await.expect("expose first frame");
+    let current = a.capture(&initial.stream_id).await.expect("after exposure");
     let ack = Request {
         id: Uuid::new_v4(),
         mutation: Mutation::Acknowledge {
@@ -460,6 +469,17 @@ async fn exercise(db: Database, second_db: Database) {
         a.apply(&stale_retire).await,
         Err(RevisionError::GenerationChanged)
     ));
+    let stale_exposure = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Expose {
+            revision: &current.revision,
+            ordinal: current.frontier.exposed() + 1,
+        },
+    };
+    assert!(matches!(
+        a.apply(&stale_exposure).await,
+        Err(RevisionError::GenerationChanged)
+    ));
 
     // A missing readback while the writer waits is not rollback proof. Hold
     // the actual database gate, start an operation on the other pool, observe
@@ -606,6 +626,73 @@ async fn exercise(db: Database, second_db: Database) {
         Readback::Applied(outcome)
     );
 
+    // A conflicting proof in a later snapshot cannot drop its counted frame
+    // or advance exposure. Only the independent custody proof is withheld.
+    let current = b
+        .capture(&two.stream_id)
+        .await
+        .expect("before withheld extension");
+    let mut extended_session = current.session.clone();
+    extended_session.outbound_count = 2;
+    let added = frame(&two.stream_id, 2);
+    let mut extended_frames = current.unacked.clone();
+    extended_frames.push(added.clone());
+    let mut withheld = first_proof.clone();
+    withheld.accepting_stream = two.stream_id.clone();
+    withheld.sequence = 2;
+    withheld.payload = (*added.stanza).clone();
+    withheld.original_receipt_at = added.original_receipt_at;
+    let drained = vec![withheld];
+    let extend = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Snapshot {
+            revision: &current.revision,
+            session: &extended_session,
+            unacked: &extended_frames,
+            drained: &drained,
+        },
+    };
+    let result = a.apply(&extend).await.expect("extend with withheld proof");
+    assert_eq!(
+        result.effect,
+        Effect::Snapshot {
+            withheld: vec![first_proof.key.clone()]
+        }
+    );
+    assert_eq!(
+        b.readback(&extend)
+            .await
+            .expect("withheld extension receipt"),
+        Readback::Applied(result)
+    );
+    let current = b
+        .capture(&two.stream_id)
+        .await
+        .expect("retained withheld frames");
+    assert_eq!(current.frontier.acknowledged(), 0);
+    assert_eq!(current.frontier.exposed(), 0);
+    assert_eq!(current.frontier.appended(), 2);
+    assert_eq!(
+        current
+            .unacked
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(matches!(
+        a.apply(&Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &current.revision,
+                h: 2,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        })
+        .await,
+        Err(RevisionError::AcknowledgementBeyondExposure)
+    ));
+
     let overflow_session = session("revision-overflow");
     let overflow_frames = vec![frame(&overflow_session.stream_id, 1)];
     let create_overflow = Request {
@@ -708,6 +795,7 @@ async fn exercise(db: Database, second_db: Database) {
     ));
 
     exercise_watermarks_and_coverage(&a, &b, &blocker_db, &principal).await;
+    exercise_exposure_frontier(&a, &b, &blocker_db, &principal).await;
 }
 
 #[tokio::test]
@@ -725,6 +813,7 @@ async fn sqlite_revision_participation_across_independent_pools() {
         .await
         .expect("second pool");
     exercise(a, b).await;
+    verify_exposure_after_reopen(&config).await;
 }
 
 #[tokio::test]
@@ -757,6 +846,7 @@ async fn postgres_revision_participation_across_independent_pools() {
         .await
         .expect("second pool");
     exercise(a, b).await;
+    verify_exposure_after_reopen(&config).await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
@@ -766,13 +856,72 @@ async fn postgres_revision_participation_across_independent_pools() {
 #[path = "../src/test_support/postgres_proxy.rs"]
 mod postgres_proxy;
 
-#[tokio::test]
-async fn postgres_revision_readback_after_backend_commit_reply_is_lost() {
+async fn apply_without_commit_reply(url: &str, scoped: &str, request: &Request<'_>) {
     use std::str::FromStr;
 
     use sqlx::postgres::PgConnectOptions;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("loopback proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    let upstream = PgConnectOptions::from_str(url).expect("upstream options");
+    let proxy = tokio::spawn(async move {
+        let (client, _) = listener.accept().await.expect("proxy client");
+        let server = postgres_proxy::connect_local_postgres(&upstream)
+            .await
+            .expect("local PostgreSQL upstream");
+        let (mut client_read, mut client_write) = client.into_split();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+        let forward = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+        });
+        loop {
+            let tag = server_read.read_u8().await.expect("server tag");
+            let length = server_read.read_u32().await.expect("server length");
+            assert!((4..=1_048_576).contains(&length));
+            let mut body = vec![0; usize::try_from(length - 4).expect("message length")];
+            server_read
+                .read_exact(&mut body)
+                .await
+                .expect("server body");
+            if tag == b'C' && body == b"COMMIT\0" {
+                break;
+            }
+            client_write.write_u8(tag).await.expect("forward tag");
+            client_write
+                .write_u32(length)
+                .await
+                .expect("forward length");
+            client_write.write_all(&body).await.expect("forward body");
+        }
+        forward.abort();
+        let _ = forward.await;
+        client_write.shutdown().await.expect("drop commit reply");
+    });
+    let proxy_url = postgres_proxy::local_proxy_url(scoped, port)
+        .expect("local proxy URL")
+        .to_string();
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, proxy_url);
+    config.pool_size = 1;
+    let proxied = RevisionedSmStorage::new(
+        Database::from_config("revision commit proxy", &config)
+            .await
+            .expect("proxied pool"),
+    );
+    assert!(
+        proxied.apply(request).await.is_err(),
+        "commit reply is lost"
+    );
+    tokio::time::timeout(Duration::from_secs(5), proxy)
+        .await
+        .expect("proxy completes")
+        .expect("proxy observed backend COMMIT");
+}
+
+#[tokio::test]
+async fn postgres_revision_readback_after_backend_commit_reply_is_lost() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
@@ -826,62 +975,7 @@ async fn postgres_revision_readback_after_backend_commit_reply_is_lost() {
             drained: &drained,
         },
     };
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("loopback proxy");
-    let port = listener.local_addr().expect("proxy address").port();
-    let upstream = PgConnectOptions::from_str(&url).expect("upstream options");
-    let proxy = tokio::spawn(async move {
-        let (client, _) = listener.accept().await.expect("proxy client");
-        let server = postgres_proxy::connect_local_postgres(&upstream)
-            .await
-            .expect("local PostgreSQL upstream");
-        let (mut client_read, mut client_write) = client.into_split();
-        let (mut server_read, mut server_write) = tokio::io::split(server);
-        let forward = tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
-        });
-        loop {
-            let tag = server_read.read_u8().await.expect("server tag");
-            let length = server_read.read_u32().await.expect("server length");
-            assert!((4..=1_048_576).contains(&length));
-            let mut body = vec![0; usize::try_from(length - 4).expect("message length")];
-            server_read
-                .read_exact(&mut body)
-                .await
-                .expect("server body");
-            if tag == b'C' && body == b"COMMIT\0" {
-                break;
-            }
-            client_write.write_u8(tag).await.expect("forward tag");
-            client_write
-                .write_u32(length)
-                .await
-                .expect("forward length");
-            client_write.write_all(&body).await.expect("forward body");
-        }
-        forward.abort();
-        let _ = forward.await;
-        client_write.shutdown().await.expect("drop commit reply");
-    });
-    let proxy_url = postgres_proxy::local_proxy_url(scoped.as_str(), port)
-        .expect("local proxy URL")
-        .to_string();
-    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, proxy_url);
-    config.pool_size = 1;
-    let proxied = RevisionedSmStorage::new(
-        Database::from_config("revision commit proxy", &config)
-            .await
-            .expect("proxied pool"),
-    );
-    assert!(
-        proxied.apply(&request).await.is_err(),
-        "commit reply is lost"
-    );
-    tokio::time::timeout(Duration::from_secs(5), proxy)
-        .await
-        .expect("proxy completes")
-        .expect("proxy observed backend COMMIT");
+    apply_without_commit_reply(&url, scoped.as_str(), &request).await;
     let expected = match direct.readback(&request).await.expect("exact readback") {
         Readback::Applied(result) => result,
         Readback::Unconfirmed => panic!("backend commit must have a receipt"),
@@ -917,7 +1011,36 @@ async fn postgres_revision_readback_after_backend_commit_reply_is_lost() {
         direct.readback(&different).await,
         Err(RevisionError::OperationIdentity)
     ));
-    drop(proxied);
+    let captured = direct
+        .capture(&session.stream_id)
+        .await
+        .expect("before exposure");
+    let exposure = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Expose {
+            revision: &captured.revision,
+            ordinal: captured.frontier.exposed() + 1,
+        },
+    };
+    apply_without_commit_reply(&url, scoped.as_str(), &exposure).await;
+    let exposed = match direct.readback(&exposure).await.expect("exposure readback") {
+        Readback::Applied(result) => result,
+        Readback::Unconfirmed => panic!("backend committed exposure must have a receipt"),
+    };
+    assert_eq!(exposed.effect, Effect::Exposed { ordinal: 1 });
+    assert_eq!(
+        direct.apply(&exposure).await.expect("retry exposure"),
+        exposed
+    );
+    assert_eq!(
+        direct
+            .capture(&session.stream_id)
+            .await
+            .expect("exposure persisted")
+            .frontier
+            .exposed(),
+        1
+    );
     drop(direct);
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -978,11 +1101,38 @@ async fn exercise_watermarks_and_coverage(
                 mode: SmAcknowledgementMode::PreserveResumability,
             },
         };
-        a.apply(&partial).await.expect("partial ACK of full gap");
-        let captured = b
+        assert!(matches!(
+            a.apply(&partial).await,
+            Err(RevisionError::AcknowledgementBeyondExposure)
+        ));
+        let expose = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &captured.revision,
+                ordinal: captured.frontier.exposed() + 1,
+            },
+        };
+        assert!(matches!(
+            a.apply(&expose).await,
+            Err(RevisionError::InvalidExposure)
+        ));
+        let covering = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &captured.revision,
+                h: fully_gapped.outbound_count,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        assert!(matches!(
+            b.apply(&covering).await,
+            Err(RevisionError::AcknowledgementBeyondExposure)
+        ));
+        let captured = a
             .capture(&fully_gapped.stream_id)
             .await
-            .expect("capture partial full gap");
+            .expect("capture unproved gap");
+        assert_eq!(captured.session.last_acked, last);
         assert_eq!(
             captured.session.replay_gap_through,
             Some(fully_gapped.outbound_count)
@@ -994,34 +1144,9 @@ async fn exercise_watermarks_and_coverage(
             },
         };
         assert!(matches!(
-            a.apply(&retire).await,
+            b.apply(&retire).await,
             Err(RevisionError::OutstandingCustody)
         ));
-        let covering = Request {
-            id: Uuid::new_v4(),
-            mutation: Mutation::Acknowledge {
-                revision: &captured.revision,
-                h: fully_gapped.outbound_count,
-                mode: SmAcknowledgementMode::PreserveResumability,
-            },
-        };
-        b.apply(&covering).await.expect("ACK covers full gap");
-        let captured = a
-            .capture(&fully_gapped.stream_id)
-            .await
-            .expect("capture covered gap");
-        assert_eq!(captured.session.last_acked, captured.session.outbound_count);
-        assert_eq!(captured.session.replay_gap_through, None);
-        let retire = Request {
-            id: Uuid::new_v4(),
-            mutation: Mutation::Retire {
-                revision: &captured.revision,
-            },
-        };
-        assert!(
-            matches!(b.apply(&retire).await, Err(RevisionError::Storage(_))),
-            "the ACK window still requires settlement evidence"
-        );
 
         let mut source = session(&format!("revision-gap-{label}"));
         source.last_acked = last;
@@ -1154,15 +1279,10 @@ async fn exercise_watermarks_and_coverage(
                 mode: SmAcknowledgementMode::PreserveResumability,
             },
         };
-        a.apply(&partial_ack).await.expect("partial ACK");
-        let captured = b
-            .capture(&source.stream_id)
-            .await
-            .expect("capture partial ACK");
-        assert_eq!(
-            captured.session.replay_gap_through,
-            source.replay_gap_through
-        );
+        assert!(matches!(
+            a.apply(&partial_ack).await,
+            Err(RevisionError::AcknowledgementBeyondExposure)
+        ));
         let covering_ack = Request {
             id: Uuid::new_v4(),
             mutation: Mutation::Acknowledge {
@@ -1171,12 +1291,18 @@ async fn exercise_watermarks_and_coverage(
                 mode: SmAcknowledgementMode::PreserveResumability,
             },
         };
-        b.apply(&covering_ack).await.expect("covering ACK");
+        assert!(matches!(
+            b.apply(&covering_ack).await,
+            Err(RevisionError::AcknowledgementBeyondExposure)
+        ));
         let captured = a
             .capture(&source.stream_id)
             .await
-            .expect("gap cleared by ACK");
-        assert_eq!(captured.session.replay_gap_through, None);
+            .expect("gap remains without exposure proof");
+        assert_eq!(
+            captured.session.replay_gap_through,
+            source.replay_gap_through
+        );
         assert_eq!(captured.unacked.len(), 2);
 
         // Simulate a storage corruption after a valid commit: an internal hole
@@ -1294,4 +1420,378 @@ async fn exercise_watermarks_and_coverage(
         a.apply(&request).await,
         Err(RevisionError::InvalidInput)
     ));
+}
+
+async fn exercise_exposure_frontier(
+    a: &RevisionedSmStorage,
+    b: &RevisionedSmStorage,
+    db: &Database,
+    principal: &AuthenticatedPrincipalRef,
+) {
+    for (label, last) in [("normal", 0_u32), ("wrapped", u32::MAX - 1)] {
+        let mut source = session(&format!("exposure-{label}"));
+        source.last_acked = last;
+        source.outbound_count = last.wrapping_add(3);
+        let frames = (1..=3)
+            .map(|distance| frame(&source.stream_id, last.wrapping_add(distance)))
+            .collect::<Vec<_>>();
+        let create = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Create {
+                generation: Uuid::new_v4(),
+                principal,
+                session: &source,
+                unacked: &frames,
+                drained: &[],
+            },
+        };
+        a.apply(&create).await.expect("create exposure fixture");
+        let initial = b
+            .capture(&source.stream_id)
+            .await
+            .expect("initial frontier");
+        let anchor = u64::from(last);
+        assert_eq!(initial.frontier.acknowledged(), anchor);
+        assert_eq!(initial.frontier.exposed(), anchor);
+        assert_eq!(initial.frontier.appended(), anchor + 3);
+        let premature = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &initial.revision,
+                h: last.wrapping_add(1),
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        assert!(matches!(
+            a.apply(&premature).await,
+            Err(RevisionError::AcknowledgementBeyondExposure)
+        ));
+        let skipped = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &initial.revision,
+                ordinal: anchor + 2,
+            },
+        };
+        assert!(matches!(
+            b.apply(&skipped).await,
+            Err(RevisionError::InvalidExposure)
+        ));
+        let first = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &initial.revision,
+                ordinal: anchor + 1,
+            },
+        };
+        let first_result = a.apply(&first).await.expect("expose first ordinal");
+        assert_eq!(
+            first_result.effect,
+            Effect::Exposed {
+                ordinal: anchor + 1
+            }
+        );
+        assert_eq!(
+            b.readback(&first).await.expect("exposure receipt"),
+            Readback::Applied(first_result.clone())
+        );
+        let mismatch = Request {
+            id: first.id,
+            mutation: Mutation::Expose {
+                revision: &initial.revision,
+                ordinal: anchor + 2,
+            },
+        };
+        assert!(matches!(
+            b.readback(&mismatch).await,
+            Err(RevisionError::OperationIdentity)
+        ));
+        assert!(matches!(
+            b.apply(&mismatch).await,
+            Err(RevisionError::OperationIdentity)
+        ));
+        let exposed = b.capture(&source.stream_id).await.expect("one exposure");
+        assert_eq!(exposed.frontier.exposed(), anchor + 1);
+        assert_eq!(exposed.frontier.appended(), anchor + 3);
+
+        // A replacement snapshot cannot disguise removal of the exposed frame
+        // as an evicted prefix, even if the proposed suffix is otherwise valid.
+        let mut missing_session = exposed.session.clone();
+        missing_session.replay_gap_through = Some(last.wrapping_add(1));
+        let without_exposed = exposed
+            .unacked
+            .iter()
+            .filter(|entry| entry.sequence != last.wrapping_add(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Snapshot {
+                revision: &exposed.revision,
+                session: &missing_session,
+                unacked: &without_exposed,
+                drained: &[],
+            },
+        };
+        assert!(matches!(
+            a.apply(&missing).await,
+            Err(RevisionError::InvalidInput)
+        ));
+
+        // Snapshot extension allocates a fourth frame without exposing it.
+        let mut extended = exposed.session.clone();
+        extended.outbound_count = last.wrapping_add(4);
+        let mut extended_frames = exposed.unacked.clone();
+        extended_frames.push(frame(&source.stream_id, extended.outbound_count));
+        let snapshot = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Snapshot {
+                revision: &exposed.revision,
+                session: &extended,
+                unacked: &extended_frames,
+                drained: &[],
+            },
+        };
+        b.apply(&snapshot).await.expect("extend snapshot");
+        let stale = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &exposed.revision,
+                ordinal: anchor + 2,
+            },
+        };
+        assert!(matches!(
+            a.apply(&stale).await,
+            Err(RevisionError::StaleRevision)
+        ));
+        let current = a
+            .capture(&source.stream_id)
+            .await
+            .expect("extended frontier");
+        assert_eq!(current.frontier.exposed(), anchor + 1);
+        assert_eq!(current.frontier.appended(), anchor + 4);
+        assert!(matches!(
+            a.apply(&Request {
+                id: Uuid::new_v4(),
+                mutation: Mutation::Acknowledge {
+                    revision: &current.revision,
+                    h: last.wrapping_add(2),
+                    mode: SmAcknowledgementMode::PreserveResumability,
+                },
+            })
+            .await,
+            Err(RevisionError::AcknowledgementBeyondExposure)
+        ));
+        let partial = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &current.revision,
+                h: last.wrapping_add(1),
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        b.apply(&partial).await.expect("ACK exposed prefix");
+        let current = a.capture(&source.stream_id).await.expect("partial ACK");
+        assert_eq!(current.frontier.acknowledged(), anchor + 1);
+        assert_eq!(current.frontier.exposed(), anchor + 1);
+        assert_eq!(current.unacked.len(), 3);
+        let repeated = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &current.revision,
+                ordinal: anchor + 1,
+            },
+        };
+        assert!(matches!(
+            b.apply(&repeated).await,
+            Err(RevisionError::InvalidExposure)
+        ));
+        for ordinal in (anchor + 2)..=(anchor + 4) {
+            let current = a.capture(&source.stream_id).await.expect("next capture");
+            let request = Request {
+                id: Uuid::new_v4(),
+                mutation: Mutation::Expose {
+                    revision: &current.revision,
+                    ordinal,
+                },
+            };
+            assert_eq!(
+                b.apply(&request).await.expect("next exposure").effect,
+                Effect::Exposed { ordinal }
+            );
+        }
+        let current = a.capture(&source.stream_id).await.expect("full exposure");
+        assert_eq!(current.frontier.exposed(), current.frontier.appended());
+        let ack = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &current.revision,
+                h: last.wrapping_add(4),
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        b.apply(&ack).await.expect("ACK full exposed prefix");
+        let current = a.capture(&source.stream_id).await.expect("after full ACK");
+        assert_eq!(current.frontier.acknowledged(), anchor + 4);
+        assert!(current.unacked.is_empty());
+        let retire = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Retire {
+                revision: &current.revision,
+            },
+        };
+        assert!(matches!(
+            a.apply(&retire).await,
+            Err(RevisionError::Storage(_))
+        ));
+        assert_eq!(
+            b.readback(&first)
+                .await
+                .expect("historical exposure receipt"),
+            Readback::Applied(first_result)
+        );
+    }
+
+    let mut source = session("exposure-restart");
+    source.outbound_count = 2;
+    let frames = vec![frame(&source.stream_id, 1), frame(&source.stream_id, 2)];
+    let create = Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Create {
+            generation: Uuid::new_v4(),
+            principal,
+            session: &source,
+            unacked: &frames,
+            drained: &[],
+        },
+    };
+    a.apply(&create).await.expect("create restart fixture");
+    let current = b.capture(&source.stream_id).await.expect("restart source");
+    a.apply(&Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Expose {
+            revision: &current.revision,
+            ordinal: 1,
+        },
+    })
+    .await
+    .expect("expose before restart");
+
+    let source = session("exposure-corruption");
+    let frames = vec![frame(&source.stream_id, 1)];
+    a.apply(&Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Create {
+            generation: Uuid::new_v4(),
+            principal,
+            session: &source,
+            unacked: &frames,
+            drained: &[],
+        },
+    })
+    .await
+    .expect("create corruption fixture");
+    let mut tx = db.begin_immediate().await.expect("corruption transaction");
+    tx.execute(
+        "UPDATE sm_revision_authority SET appended_ordinal = 2 WHERE stream_id = ?",
+        waddle_server::db_params![source.stream_id.as_str()],
+    )
+    .await
+    .expect("corrupt ordinal without violating SQL ordering checks");
+    tx.commit().await.expect("commit corruption fixture");
+    assert!(matches!(
+        b.capture(&source.stream_id).await,
+        Err(RevisionError::InvalidInput)
+    ));
+
+    let mut source = session("exposure-exhaustion");
+    source.last_acked = u32::MAX - 1;
+    source.outbound_count = u32::MAX;
+    let frames = vec![frame(&source.stream_id, u32::MAX)];
+    a.apply(&Request {
+        id: Uuid::new_v4(),
+        mutation: Mutation::Create {
+            generation: Uuid::new_v4(),
+            principal,
+            session: &source,
+            unacked: &frames,
+            drained: &[],
+        },
+    })
+    .await
+    .expect("create exhaustion fixture");
+    let mut tx = db.begin_immediate().await.expect("exhaustion transaction");
+    tx.execute(
+        "UPDATE sm_revision_authority SET acknowledged_ordinal = ?, exposed_ordinal = ?, appended_ordinal = ? WHERE stream_id = ?",
+        waddle_server::db_params![i64::MAX - 1, i64::MAX - 1, i64::MAX, source.stream_id.as_str()],
+    )
+    .await
+    .expect("seed consistent near-limit ordinals");
+    tx.commit().await.expect("commit near-limit fixture");
+    let current = b
+        .capture(&source.stream_id)
+        .await
+        .expect("near-limit capture");
+    let mut next = current.session.clone();
+    next.outbound_count = 0;
+    let append = PersistedDetachedAppend {
+        stanza: frame(&source.stream_id, 0),
+        session: next,
+        evicted_sequences: Vec::new(),
+        ingress_append: None,
+        new_delivery: false,
+    };
+    assert!(matches!(
+        a.apply(&Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Append {
+                revision: &current.revision,
+                append: &append,
+            },
+        })
+        .await,
+        Err(RevisionError::OrdinalExhausted)
+    ));
+    let unchanged = b
+        .capture(&source.stream_id)
+        .await
+        .expect("exhausted append rolled back");
+    assert_eq!(unchanged.revision.value(), current.revision.value());
+    assert_eq!(unchanged.unacked.len(), 1);
+}
+
+async fn verify_exposure_after_reopen(config: &DatabaseConfig) {
+    let db = Database::from_config("reopened frontier", config)
+        .await
+        .expect("reopen database");
+    let storage = RevisionedSmStorage::new(db);
+    let stream = SmSessionId::new("exposure-restart");
+    let current = storage.capture(&stream).await.expect("reopen frontier");
+    assert_eq!(current.frontier.acknowledged(), 0);
+    assert_eq!(current.frontier.exposed(), 1);
+    assert_eq!(current.frontier.appended(), 2);
+    assert!(matches!(
+        storage
+            .apply(&Request {
+                id: Uuid::new_v4(),
+                mutation: Mutation::Acknowledge {
+                    revision: &current.revision,
+                    h: 2,
+                    mode: SmAcknowledgementMode::PreserveResumability,
+                },
+            })
+            .await,
+        Err(RevisionError::AcknowledgementBeyondExposure)
+    ));
+    storage
+        .apply(&Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &current.revision,
+                h: 1,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        })
+        .await
+        .expect("ACK the exposed prefix after reopening");
 }

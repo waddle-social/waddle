@@ -56,6 +56,9 @@ pub(super) fn digest(request: &Request<'_>) -> Result<Vec<u8>, RevisionError> {
                 .transpose()?,
             append.new_delivery
         ]),
+        Mutation::Expose { revision, ordinal } => {
+            json!(["expose", revision_value(revision), ordinal])
+        }
         Mutation::Acknowledge { revision, h, mode } => json!([
             "acknowledge",
             revision_value(revision),

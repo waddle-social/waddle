@@ -17,6 +17,7 @@ use super::super::atomic_store::{
 };
 use super::super::{codec, ingress_append, promotion_inventory};
 use super::digest::digest;
+use super::frontier::ExposureFrontier;
 use super::types::{
     storage, ApplyResult, Capture, Effect, Mutation, Readback, Request, Revision, RevisionError,
 };
@@ -39,6 +40,7 @@ enum StoredEffect {
     Snapshot { withheld: Vec<usize> },
     Appended,
     AlreadyAllocated { accepting_stream: String },
+    Exposed { ordinal: u64 },
     Acknowledged,
     Retired,
 }
@@ -72,7 +74,7 @@ impl RevisionedSmStorage {
             tx.commit().await.map_err(storage)?;
             return Ok(result);
         }
-        let effect = match &request.mutation {
+        let (effect, frontier) = match &request.mutation {
             Mutation::Create {
                 generation,
                 principal,
@@ -81,8 +83,10 @@ impl RevisionedSmStorage {
                 drained,
             } => {
                 validate_snapshot(principal, session, unacked, drained)?;
-                create_generation(&mut tx, *generation, session).await?;
-                snapshot(&mut tx, principal, session, unacked, drained).await?
+                let frontier = ExposureFrontier::initial(session)?;
+                create_generation(&mut tx, *generation, session, frontier).await?;
+                let effect = snapshot(&mut tx, principal, session, unacked, drained).await?;
+                (effect, frontier)
             }
             Mutation::Snapshot {
                 revision,
@@ -94,20 +98,38 @@ impl RevisionedSmStorage {
                 validate_session(revision, session)?;
                 validate_snapshot(&revision.principal, session, unacked, drained)?;
                 validate_snapshot_extension(&current, session, unacked)?;
-                snapshot(&mut tx, &revision.principal, session, unacked, drained).await?
+                let advanced = session
+                    .outbound_count
+                    .wrapping_sub(current.session.outbound_count);
+                let frontier = current.frontier.extend(advanced)?;
+                let effect =
+                    snapshot(&mut tx, &revision.principal, session, unacked, drained).await?;
+                (effect, frontier)
             }
             Mutation::Append { revision, append } => {
                 let current = check_revision(&mut tx, revision).await?;
-                append_detached(&mut tx, revision, &current.session, append).await?
+                let effect = append_detached(&mut tx, revision, &current.session, append).await?;
+                let frontier = if matches!(&effect, StoredEffect::Appended) {
+                    current.frontier.extend(1)?
+                } else {
+                    current.frontier
+                };
+                (effect, frontier)
+            }
+            Mutation::Expose { revision, ordinal } => {
+                let current = check_revision(&mut tx, revision).await?;
+                let frontier = current.frontier.expose(*ordinal, &current.unacked)?;
+                (StoredEffect::Exposed { ordinal: *ordinal }, frontier)
             }
             Mutation::Acknowledge { revision, h, mode } => {
                 let current = check_revision(&mut tx, revision).await?;
+                let frontier = current.frontier.acknowledge(*h)?;
                 let driver = tx.driver();
                 promotion_inventory::acknowledge(&mut tx, &revision.stream, *h, driver, *mode)
                     .await
                     .map_err(storage)?;
                 clear_acknowledged_gap(&mut tx, &current.session, *h).await?;
-                StoredEffect::Acknowledged
+                (StoredEffect::Acknowledged, frontier)
             }
             Mutation::ConfirmAcknowledgement { .. } => return Err(RevisionError::Unsupported),
             Mutation::Tombstone { .. } => return Err(RevisionError::Unsupported),
@@ -140,13 +162,14 @@ impl RevisionedSmStorage {
                 )
                 .await
                 .map_err(storage)?;
-                StoredEffect::Retired
+                (StoredEffect::Retired, current.frontier)
             }
         };
         let expected = match &request.mutation {
             Mutation::Create { .. } => 0,
             Mutation::Snapshot { revision, .. }
             | Mutation::Append { revision, .. }
+            | Mutation::Expose { revision, .. }
             | Mutation::Acknowledge { revision, .. }
             | Mutation::ConfirmAcknowledgement { revision, .. }
             | Mutation::Tombstone { revision, .. }
@@ -157,9 +180,10 @@ impl RevisionedSmStorage {
             .checked_add(1)
             .ok_or(RevisionError::RevisionExhausted)?;
         let terminal = i64::from(matches!(&request.mutation, Mutation::Retire { .. }));
+        let (acknowledged, exposed, appended) = frontier.sql_values()?;
         let changed = tx.execute(
-            "UPDATE sm_revision_authority SET revision = ?, terminal = ? WHERE stream_id = ? AND generation = ? AND revision = ? AND terminal = 0",
-            crate::db_params![next, terminal, request.mutation.stream().as_str(), request.mutation.generation().to_string(), expected],
+            "UPDATE sm_revision_authority SET revision = ?, terminal = ?, acknowledged_ordinal = ?, exposed_ordinal = ?, appended_ordinal = ? WHERE stream_id = ? AND generation = ? AND revision = ? AND terminal = 0",
+            crate::db_params![next, terminal, acknowledged, exposed, appended, request.mutation.stream().as_str(), request.mutation.generation().to_string(), expected],
         ).await.map_err(storage)?;
         if changed != 1 {
             return Err(RevisionError::StaleRevision);
@@ -273,6 +297,12 @@ fn decode_result(
                 accepting_stream: SmSessionId::new(accepting_stream),
             }
         }
+        (
+            StoredEffect::Exposed { ordinal },
+            Mutation::Expose {
+                ordinal: requested, ..
+            },
+        ) if ordinal == requested => Effect::Exposed { ordinal: *ordinal },
         (StoredEffect::Acknowledged, Mutation::Acknowledge { .. }) => Effect::Acknowledged,
         (StoredEffect::Retired, Mutation::Retire { .. }) => Effect::Retired,
         _ => return Err(RevisionError::OperationIdentity),
@@ -289,7 +319,7 @@ async fn capture_locked(
 ) -> Result<Capture, RevisionError> {
     let mut rows = tx
         .query(
-            "SELECT generation, occupancy_session, full_jid, revision, terminal FROM sm_revision_authority WHERE stream_id = ?",
+            "SELECT generation, occupancy_session, full_jid, revision, terminal, acknowledged_ordinal, exposed_ordinal, appended_ordinal FROM sm_revision_authority WHERE stream_id = ?",
             crate::db_params![stream.as_str()],
         )
         .await
@@ -304,6 +334,9 @@ async fn capture_locked(
     let full_jid: String = row.get(2).map_err(storage)?;
     let value: i64 = row.get(3).map_err(storage)?;
     let terminal: i64 = row.get(4).map_err(storage)?;
+    let acknowledged: i64 = row.get(5).map_err(storage)?;
+    let exposed: i64 = row.get(6).map_err(storage)?;
+    let appended: i64 = row.get(7).map_err(storage)?;
     if terminal != 0 {
         return Err(RevisionError::Terminal);
     }
@@ -340,6 +373,7 @@ async fn capture_locked(
     }
     let raw_presence: Option<String> = row.get(18).map_err(storage)?;
     let session = codec::decode_session(&row).map_err(storage)?;
+    let frontier = ExposureFrontier::restored(acknowledged, exposed, appended, &session)?;
     if stored_occupancy.as_deref() != Some(occupancy.as_str())
         || session.occupancy_session.to_string() != occupancy
         || session.jid.to_string() != full_jid
@@ -394,6 +428,7 @@ async fn capture_locked(
         principal,
         session,
         unacked,
+        frontier,
     })
 }
 
@@ -422,6 +457,7 @@ async fn create_generation(
     tx: &mut Transaction<'_>,
     generation: Uuid,
     session: &PersistedSession,
+    frontier: ExposureFrontier,
 ) -> Result<(), RevisionError> {
     let stream = &session.stream_id;
     let mut rows = tx
@@ -453,9 +489,10 @@ async fn create_generation(
     if inserted != 1 {
         return Err(RevisionError::GenerationChanged);
     }
+    let (acknowledged, exposed, appended) = frontier.sql_values()?;
     let changed = tx.execute(
-        "INSERT INTO sm_revision_authority (stream_id, generation, occupancy_session, full_jid, revision, terminal) VALUES (?, ?, ?, ?, 0, 0) ON CONFLICT (stream_id) DO UPDATE SET generation = excluded.generation, occupancy_session = excluded.occupancy_session, full_jid = excluded.full_jid, revision = 0, terminal = 0 WHERE sm_revision_authority.terminal = 1",
-        crate::db_params![stream.as_str(), generation.to_string(), session.occupancy_session.to_string(), session.jid.to_string()],
+        "INSERT INTO sm_revision_authority (stream_id, generation, occupancy_session, full_jid, revision, terminal, acknowledged_ordinal, exposed_ordinal, appended_ordinal) VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?) ON CONFLICT (stream_id) DO UPDATE SET generation = excluded.generation, occupancy_session = excluded.occupancy_session, full_jid = excluded.full_jid, revision = 0, terminal = 0, acknowledged_ordinal = excluded.acknowledged_ordinal, exposed_ordinal = excluded.exposed_ordinal, appended_ordinal = excluded.appended_ordinal WHERE sm_revision_authority.terminal = 1",
+        crate::db_params![stream.as_str(), generation.to_string(), session.occupancy_session.to_string(), session.jid.to_string(), acknowledged, exposed, appended],
     ).await.map_err(storage)?;
     if changed != 1 {
         return Err(RevisionError::GenerationChanged);
