@@ -19,8 +19,9 @@ catalog-S. Preserve the SQLite initialization path and current startup policy.
   completed owner marker. Run protected work on that backend and commit only
   after the completed marker is durable. Preserve the legacy raw PostgreSQL
   constructor's accepted credential policy while fencing its actual DDL
-  backend; only strict owner preparation may publish a strict completion
-  marker. Do not substitute an i64 advisory key
+  backend. Validate any existing strict marker before raw mutation and leave
+  it incomplete afterward; only strict owner preparation may publish a
+  strict completion marker. Do not substitute an i64 advisory key
   for the two-integer gate. A contended lower gate requires acknowledged
   rollback and a fresh catalog transaction before retry. Unknown COMMIT must
   not be reported as success.
@@ -33,7 +34,11 @@ catalog-S. Preserve the SQLite initialization path and current startup policy.
 - Retain existing data and table shape across fresh, repeated, interrupted and
   legacy-schema preparation. A failed or cancelled preparation cannot publish
   a completed marker for partial work. A completed marker cannot be inferred
-  from a different physical schema.
+  from a different physical schema. A lost COMMIT acknowledgement returns a
+  typed indeterminate outcome and no store; a later marker=1 alone does not
+  attribute that particular attempt. Retry only after the old backend outcome
+  is resolved on the verified original primary and the catalog gate is
+  reacquired.
 
 ## Verification and boundaries
 

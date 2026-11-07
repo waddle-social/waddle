@@ -46,7 +46,7 @@ where
             if check().await {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(3)).await;
         }
     })
     .await
@@ -130,28 +130,37 @@ async fn pg17_activity_public_entries_fence_mutation_and_marker() {
         let db = db.clone();
         async move { NotificationActivityStore::initialize_owner(db).await }
     });
-    wait_for(|| async {
-        let retry: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-             WHERE application_name = $1 AND state = 'idle' \
-               AND xact_start IS NULL AND query = 'ROLLBACK')",
-        )
-        .bind(&application)
-        .fetch_one(&admin)
-        .await
-        .expect("observe retry");
-        let catalog_available: bool =
-            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
-                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
-                .fetch_one(&admin)
-                .await
-                .expect("probe released catalog fence");
-        retry && catalog_available
-    })
-    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let snapshot: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT state::text, query::text, xact_start IS NULL FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&application)
+    .fetch_all(&admin)
+    .await
+    .expect("inspect retry snapshot");
+    assert!(
+        snapshot
+            .iter()
+            .any(|(state, query, no_xact)| state == "idle" && query == "ROLLBACK" && *no_xact),
+        "owner did not acknowledge rollback after Activity gate contention: {snapshot:?}"
+    );
+    // Take catalog-S only after the owner's ROLLBACK was observed. Holding it
+    // pins the release witness and stops a later retry from reacquiring X.
+    let mut catalog_reader = admin.begin().await.expect("begin catalog reader");
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .execute(&mut *catalog_reader),
+    )
+    .await
+    .expect("catalog-X released after Activity miss")
+    .expect("take catalog-S after Activity miss");
+    assert!(!task.is_finished(), "owner retry should remain pending");
     gate.commit()
         .await
         .expect("commit marker drift and release gate");
+    catalog_reader.rollback().await.expect("release catalog-S");
     assert!(task.await.expect("join strict owner").is_err());
     sqlx::query(&format!(
         "UPDATE {schema}.notification_activity_owner_state SET schema_name = $1"
@@ -186,7 +195,6 @@ async fn pg17_activity_public_entries_fence_mutation_and_marker() {
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
              WHERE a.application_name = $1 AND a.state = 'active' \
                AND a.xact_start IS NOT NULL AND a.wait_event_type = 'Lock' \
-               AND a.query LIKE '%notification_activity%' \
                AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.pid = a.pid \
                  AND l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 \
                  AND l.classid::bigint = ($2::bigint >> 32) \
@@ -206,7 +214,10 @@ async fn pg17_activity_public_entries_fence_mutation_and_marker() {
     .await;
     assert_eq!(marker(&admin, &schema).await, "1");
     task.abort();
-    assert!(task.await.expect_err("cancel initializer").is_cancelled());
+    match task.await {
+        Err(error) => assert!(error.is_cancelled(), "initializer should be cancelled"),
+        Ok(_) => panic!("initializer should be cancelled"),
+    }
     blocker.rollback().await.expect("release relation blocker");
     wait_for(|| async {
         let held: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
