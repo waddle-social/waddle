@@ -488,7 +488,6 @@ void main() {
   ) async {
     final harness = _ConversationHarness()..snapshot();
     await _mount(tester, harness);
-    final viewId = harness.calls('conversation.open').single['viewId'];
     harness.commands.clear();
 
     await tester.tap(find.byTooltip('Search messages'));
@@ -498,6 +497,7 @@ void main() {
       harness.calls('conversation.visibility'),
       contains(containsPair('visible', false)),
     );
+    expect(harness.calls('conversation.open'), isEmpty);
     expect(harness.calls('conversation.close'), isEmpty);
     final searchInput = find.descendant(
       of: find.byType(SearchBar),
@@ -514,10 +514,103 @@ void main() {
     harness.navigator.currentState!.pop();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(harness.calls('conversation.open').last['viewId'], viewId);
+    expect(
+      harness.calls('conversation.visibility'),
+      contains(containsPair('visible', true)),
+    );
+    expect(harness.calls('conversation.read'), isNotEmpty);
+    expect(harness.calls('conversation.open'), isEmpty);
     expect(harness.calls('conversation.close'), isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'search stays hidden across backgrounding until it is dismissed in foreground',
+    (tester) async {
+      final harness = _ConversationHarness()..snapshot();
+      await _mount(tester, harness);
+      await tester.tap(find.byTooltip('Search messages'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      harness.commands.clear();
+      addTearDown(() {
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+      });
+
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pump();
+      expect(
+        harness.calls('conversation.visibility').map((args) => args['visible']),
+        [false],
+      );
+      expect(harness.calls('conversation.read'), isEmpty);
+      expect(harness.calls('conversation.open'), isEmpty);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      harness.commands.clear();
+      harness.navigator.currentState!.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(harness.calls('conversation.visibility'), isEmpty);
+      expect(harness.calls('conversation.read'), isEmpty);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(
+        harness.calls('conversation.visibility').map((args) => args['visible']),
+        [true],
+      );
+      expect(harness.calls('conversation.read'), isNotEmpty);
+      expect(harness.calls('conversation.open'), isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'a page over search does not mark the covered conversation visible',
+    (tester) async {
+      final harness = _ConversationHarness()..snapshot();
+      await _mount(tester, harness);
+      await tester.tap(find.byTooltip('Search messages'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      harness.navigator.currentState!.push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('Other page')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      harness.commands.clear();
+      harness.navigator.currentState!.pop();
+      await tester.pumpAndSettle();
+      expect(harness.calls('conversation.open'), isEmpty);
+      expect(harness.calls('conversation.visibility'), isEmpty);
+      expect(harness.calls('conversation.read'), isEmpty);
+      harness.navigator.currentState!.pop();
+      await tester.pumpAndSettle();
+      expect(
+        harness.calls('conversation.visibility').map((args) => args['visible']),
+        [true],
+      );
+      expect(harness.calls('conversation.open'), isEmpty);
+      expect(harness.calls('conversation.read'), isNotEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets(
     'old history restores its scroll position without reading the live edge',

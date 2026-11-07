@@ -57,6 +57,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   bool _opening = true;
   bool _openedOnce = false;
   bool _active = true;
+  bool _searchOpen = false;
   bool _atNewest = true;
   String? _mentionQuery;
   List<Map<String, dynamic>> _mentions = [];
@@ -145,7 +146,10 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _active && _openedOnce) {
+    if (state == AppLifecycleState.resumed &&
+        _active &&
+        _openedOnce &&
+        !_searchOpen) {
       unawaited(_command('conversation.visibility', {'visible': true}));
       _readNewest();
     } else if (state == AppLifecycleState.paused && _active && _openedOnce) {
@@ -179,7 +183,9 @@ class _ConversationScreenState extends State<ConversationScreen>
   @override
   void didPopNext() {
     _active = true;
-    unawaited(_open());
+    if (!_searchOpen) {
+      unawaited(_open());
+    }
   }
 
   Future<void> _open() async {
@@ -193,7 +199,7 @@ class _ConversationScreenState extends State<ConversationScreen>
       return;
     }
     setState(() => _opening = false);
-    await _command('conversation.visibility', {'visible': true});
+    await _command('conversation.visibility', {'visible': !_searchOpen});
     _readNewest();
     if (widget.group) {
       unawaited(_refreshRoomCallState());
@@ -247,7 +253,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   void _readNewest() {
-    if (_active) {
+    if (_active && !_searchOpen) {
       unawaited(_command('conversation.read', {'atNewestEdge': _atNewest}));
     }
   }
@@ -2464,20 +2470,37 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   Future<void> _search() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => _SearchSheet(
-        title: 'Search messages',
-        search: (value) async =>
-            _maps(await _command('conversation.search', {'query': value})),
-        tile: (context, result) => ListTile(
-          title: Text(_str(result['body'])),
-          subtitle: Text(_str(result['author'], _str(result['from']))),
+    if (_searchOpen) return;
+    _searchOpen = true;
+    if (_active && _openedOnce) {
+      unawaited(_command('conversation.visibility', {'visible': false}));
+    }
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (context) => _SearchSheet(
+          title: 'Search messages',
+          search: (value) async =>
+              _maps(await _command('conversation.search', {'query': value})),
+          tile: (context, result) => ListTile(
+            title: Text(_str(result['body'])),
+            subtitle: Text(_str(result['author'], _str(result['from']))),
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _searchOpen = false;
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (mounted &&
+          _active &&
+          _openedOnce &&
+          (lifecycle == null || lifecycle == AppLifecycleState.resumed)) {
+        await _command('conversation.visibility', {'visible': true});
+        _readNewest();
+      }
+    }
   }
 
   Future<void> _members() async {

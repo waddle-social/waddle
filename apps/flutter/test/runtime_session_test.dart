@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/runtime/context.dart';
 import 'package:waddle_flutter/runtime/session_auth.dart';
 import 'package:waddle_flutter/runtime/session_runtime.dart';
 import 'package:waddle_flutter/runtime/storage.dart';
+import 'package:waddle_flutter/transport/native_bindings.dart';
 import 'package:waddle_flutter/transport/transport.dart';
+import 'package:waddle_flutter/transport/transport_native.dart';
 
 class _Storage implements RuntimeStorage {
   final values = <String, String>{};
@@ -75,9 +78,13 @@ class _Auth implements AuthGateway {
 }
 
 class _Transport implements RustTransport {
+  _Transport({this.timeline});
+
   final controller = StreamController<Map<String, dynamic>>.broadcast();
   final calls = <(String, Map<String, dynamic>)>[];
   final localRows = <Map<String, dynamic>>[];
+  final NativeRustTransport? timeline;
+  final responses = <String, dynamic>{};
   Future<dynamic> Function(String, Map<String, dynamic>)? handler;
   bool closed = false;
   int closeCalls = 0;
@@ -93,6 +100,10 @@ class _Transport implements RustTransport {
     if (handler != null) {
       return handler!(method, args);
     }
+    if (method.startsWith('timeline_') && timeline != null) {
+      return timeline!.rpc(method, args);
+    }
+    if (responses.containsKey(method)) return responses[method];
     if (method == 'timeline_local_echo') {
       localRows.add({
         'id': args['origin_id'],
@@ -120,6 +131,7 @@ class _Transport implements RustTransport {
   Future<void> close() async {
     closeCalls++;
     await closeHandler?.call();
+    await timeline?.close();
     closed = true;
   }
 }
@@ -128,6 +140,14 @@ Future<void> _flush() async {
   for (var i = 0; i < 8; i++) {
     await Future<void>.delayed(Duration.zero);
   }
+}
+
+Future<void> _until(bool Function() condition, String operation) async {
+  for (var i = 0; i < 500; i++) {
+    if (condition()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+  fail('The runtime did not settle: $operation');
 }
 
 void main() {
@@ -245,8 +265,153 @@ void main() {
       expect(completed, true);
       expect(active.closed, true);
       expect(runtime.transport, isNull);
-      expect(runtimeRows(runtime.persistent['conversationOutbox']), isEmpty);
+      final acknowledged = runtimeRows(
+        runtime.persistent['conversationOutbox'],
+      ).single;
+      expect(acknowledged['origin_id'], row['origin_id']);
+      expect(acknowledged['acked'], isTrue);
+      expect(acknowledged['status'], 'acked');
+      expect(acknowledged['reflected'], isNot(isTrue));
+      expect(
+        storage.values['account:me@example.org'],
+        contains('"acked":true'),
+      );
+
+      await runtime.onVisibility(true);
+      expect(handles, hasLength(3));
+      final resumed = handles.last;
+      resumed.controller.add({'type': 'connected', 'data': null});
+      await _flush();
+      expect(
+        resumed.calls.where((call) => call.$1 == 'send_chat_message'),
+        isEmpty,
+      );
+      expect(
+        runtimeRows(runtime.persistent['conversationOutbox']),
+        hasLength(1),
+      );
     },
+  );
+
+  test(
+    'an acknowledged DM is reconciled with its own archived message',
+    () async {
+      final storage = _Storage()..values['session'] = 'private-token';
+      final active = _Transport(
+        timeline: NativeRustTransport(
+          FfiRustBindings.load(),
+          pollInterval: const Duration(milliseconds: 1),
+        ),
+      );
+      final runtime = SessionRuntime(
+        storage: storage,
+        auth: _Auth(),
+        transportFactory: () async => active,
+        platformInvoker: (_, _) async => null,
+      );
+      final events = <Map<String, dynamic>>[];
+      final subscription = runtime.events.listen(events.add);
+      addTearDown(subscription.cancel);
+      addTearDown(runtime.dispose);
+      await runtime.start();
+      await _until(
+        () => active.calls.any((call) => call.$1 == 'connect'),
+        'connect',
+      );
+      active.controller.add({'type': 'connected', 'data': null});
+      await _until(
+        () => active.calls.any((call) => call.$1 == 'discover_topology'),
+        'initialization',
+      );
+      final reply = runtime.conversations.notificationReply(
+        jid: 'friend@example.org',
+        group: false,
+        body: 'My archived direct reply',
+        waitForConnection: true,
+      );
+      await _until(
+        () => active.calls.any((call) => call.$1 == 'send_chat_message'),
+        'direct send',
+      );
+      final id =
+          runtimeRows(
+                runtime.persistent['conversationOutbox'],
+              ).single['origin_id']
+              as String;
+      active.controller.add({'type': 'deliveryAcked', 'data': id});
+      await reply.timeout(const Duration(seconds: 3));
+      expect(
+        runtimeRows(runtime.persistent['conversationOutbox']).single['acked'],
+        isTrue,
+      );
+
+      active.responses['fetch_dm_history'] = {
+        'messages': [
+          {
+            'id': id,
+            'origin_id': id,
+            'from': 'friend@example.org/phone',
+            'to': 'me@example.org',
+            'message_type': 'chat',
+            'body': 'Peer reused the origin',
+            'mam_id': 'peer-archive-id',
+            'timestamp': '2026-10-31T09:00:00Z',
+          },
+        ],
+        'is_complete': false,
+        'first_id': 'peer-archive-id',
+      };
+      const view = {
+        'jid': 'friend@example.org',
+        'group': false,
+        'viewId': 'direct',
+        'atNewestEdge': false,
+      };
+      await runtime.conversations.invoke('conversation.open', view);
+      await _until(
+        () => events.any(
+          (event) =>
+              event['topic'] == 'conversation' &&
+              runtimeMap(event['data'])['loadingOlder'] == false &&
+              runtimeRows(
+                runtimeMap(event['data'])['messages'],
+              ).any((row) => row['body'] == 'Peer reused the origin'),
+        ),
+        'peer archive',
+      );
+      expect(
+        runtimeRows(runtime.persistent['conversationOutbox']),
+        hasLength(1),
+      );
+
+      active.responses['fetch_dm_history'] = {
+        'messages': [
+          {
+            'id': id,
+            'origin_id': id,
+            'from': 'me@example.org/mobile',
+            'to': 'friend@example.org',
+            'message_type': 'chat',
+            'body': 'My archived direct reply',
+            'mam_id': 'own-archive-id',
+            'timestamp': '2026-10-31T10:00:00Z',
+          },
+        ],
+        'is_complete': true,
+      };
+      await runtime.conversations.invoke('conversation.history', view);
+      await _until(
+        () => runtimeRows(runtime.persistent['conversationOutbox']).isEmpty,
+        'archive reconciliation',
+      );
+      expect(
+        active.calls.where((call) => call.$1 == 'send_chat_message'),
+        hasLength(1),
+      );
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
   );
 
   test(

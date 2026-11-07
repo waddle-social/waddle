@@ -1135,6 +1135,10 @@ class ConversationRuntime {
         row.id,
         error: StateError('Your reply was refused by the server'),
       );
+    } else if (type == 'deliveryAcked' && !row.group) {
+      // Direct messages do not reflect to the sending resource. Keep the
+      // acknowledged row for archive reconciliation, but release its waiter.
+      _completeDelivery(row.id);
     }
     _emitFor(row.jid);
   }
@@ -1151,7 +1155,7 @@ class ConversationRuntime {
     final boundArchive = _optional(row.data['reflection_archive_id']);
     if (author != null && bareJid(author) != bareJid(row.owner) ||
         row.group && archive == null ||
-        archive != null && item['id'] != archive ||
+        row.group && archive != null && item['id'] != archive ||
         boundArchive != null &&
             (archive != boundArchive ||
                 item['archive_by'] != row.data['reflection_archive_by'])) {
