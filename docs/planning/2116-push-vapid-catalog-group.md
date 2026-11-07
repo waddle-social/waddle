@@ -8,8 +8,9 @@ serving authority.
 
 Close two remaining single-operation PostgreSQL catalog cutoffs around Push:
 the outer notification/Push/VAPID/PubSub custody reader and the legacy VAPID
-key provisioning write. Keep the existing SQLite behavior and XMPP wire
-behavior. These are separate transactions in one grouped PR.
+key provisioning write. Also remove the VAPID fallback's database access when
+lineage attestation fails. Keep supported SQLite and XMPP wire behavior. The
+custody read and provisioning write are separate transactions in one PR.
 
 ## Current boundaries
 
@@ -26,6 +27,10 @@ behavior. These are separate transactions in one grouped PR.
 - SQLx physical checkout hooks can attest before a caller transaction begins.
   The catalog fence is cooperative and transaction scoped; privileged actors
   and unfenced old writers remain a separate cutover gate.
+- The failed-lineage startup branch calls `load_or_ephemeral`, whose current
+  `try_new` runs schema DDL and can invalidate the Push marker despite its
+  no-write documentation. Its unready object graph needs only an ephemeral
+  signer, not a database read or write.
 
 ## Proposed transaction contract
 
@@ -54,6 +59,9 @@ behavior. These are separate transactions in one grouped PR.
    attempt may reconcile only after reacquiring catalog-X/Push-X on the same
    fenced primary and rereading durable rows. Socket closure alone is not
    rollback proof. Do not expose secret material in errors or logs.
+4. On the failed-lineage branch, construct an ephemeral signer without a
+   Database, root key, environment input or SQL. It is an unpersisted
+   placeholder for a permanently unready node, never serving authority.
 
 ## Qualification and exclusions
 
@@ -68,7 +76,9 @@ The independent architecture gate approved this grouped dark scope only with
 the ordered per-gate retry and revised first-key/uncertain-commit contract
 above. It did not approve a serving or release claim.
 
-The raw `load_or_ephemeral` key reader remains a separate unfenced entry.
+This VAPID fallback repair does not make all failed-lineage startup read-only:
+registration, Push, outbox and activity constructors still initialize their
+stores around it and remain separate work.
 Multi-session MAM, notification-activity, inbox and pending constructors,
 raw old-writer cutoff, provider roles, selected P2.1, production SM and
 release qualification remain outside this group. `MUC open()` remains three
