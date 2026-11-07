@@ -166,6 +166,30 @@ pub async fn verify_dark_shared_migration_ledger_v1030_read_sqlx(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
 ) -> Result<(), DarkLedgerPreflightError> {
+    verify_dark_shared_migration_ledger_v1030_sqlx(tx, schema, pins, restore_search_path, true)
+        .await
+}
+
+/// Verify the same pinned ledger on a closed READ COMMITTED READ WRITE SQLx
+/// transaction. The caller must already hold the shared lineage barrier, and
+/// must retain every acquired lock through its own commit or rollback.
+pub(crate) async fn verify_dark_shared_migration_ledger_v1030_write_sqlx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    pins: DarkMigrationLedgerPins,
+    restore_search_path: &str,
+) -> Result<(), DarkLedgerPreflightError> {
+    verify_dark_shared_migration_ledger_v1030_sqlx(tx, schema, pins, restore_search_path, false)
+        .await
+}
+
+async fn verify_dark_shared_migration_ledger_v1030_sqlx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    pins: DarkMigrationLedgerPins,
+    restore_search_path: &str,
+    require_read_only: bool,
+) -> Result<(), DarkLedgerPreflightError> {
     if !pins.valid() {
         return Err(DarkLedgerPreflightError::InvalidPins);
     }
@@ -182,7 +206,7 @@ pub async fn verify_dark_shared_migration_ledger_v1030_read_sqlx(
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;
-    let result = verify_locked(connection, schema, pins, 1030, true, false).await;
+    let result = verify_locked(connection, schema, pins, 1030, require_read_only, false).await;
     let restored = sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
         .bind(restore_search_path)
         .execute(&mut *connection)

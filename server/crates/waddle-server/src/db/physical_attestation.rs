@@ -45,6 +45,8 @@ mod pinned_entry;
 pub use pinned_entry::DarkPinnedEntryError;
 mod pinned_selected_entry;
 pub use pinned_selected_entry::{PinnedSelectedEntry, PinnedSelectedEntryError};
+mod pinned_receipt;
+pub use pinned_receipt::{PinnedReceiptAuthority, PinnedReceiptCommit, PinnedReceiptError};
 mod pinned_mam;
 #[cfg(not(feature = "test-support"))]
 pub(crate) use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
@@ -55,9 +57,10 @@ pub use preflight::{
     attest_dark_catalog_pinned, DarkPhysicalAttestationError, DarkPhysicalAttestationPins,
 };
 mod restricted_ingress;
+pub(crate) use restricted_ingress::verify_guarded_receipt_profile;
 pub use restricted_ingress::{
-    ReceiptAuthorityError, ReceiptCommit, ReceiptOperation, ReceiptOperationAuthority,
-    ReceiptOperationPins, ReceiptReadback,
+    GuardedReceiptOperationPins, ReceiptAuthorityError, ReceiptCommit, ReceiptOperation,
+    ReceiptOperationAuthority, ReceiptOperationPins, ReceiptReadback,
 };
 #[cfg(feature = "test-support")]
 pub use restricted_ingress::{

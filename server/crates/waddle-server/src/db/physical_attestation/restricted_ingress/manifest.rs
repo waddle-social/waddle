@@ -111,6 +111,7 @@ pub(super) async fn verify_functions_and_triggers(
     runtime: &str,
     api: &str,
     receipt_journal: bool,
+    guarded_receipt: bool,
     manifest: &Manifest,
 ) -> Result<()> {
     let function_sql = r#"
@@ -198,18 +199,25 @@ pub(super) async fn verify_functions_and_triggers(
                 .iter()
                 .filter(|f| f.owner == "api")
                 .count()
-                + 2 * usize::from(receipt_journal),
+                + 2 * usize::from(receipt_journal)
+                + usize::from(guarded_receipt),
         )
     {
         return Err(RestrictedIngressProfileError::Mismatch(
             "API owner function inventory",
         ));
     }
-    let guarded: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    let mut guarded: Vec<&str> = crate::ingress_substrate::EPOCH_GUARDED_TABLES.to_vec();
+    if guarded_receipt {
+        guarded.extend(["singleton_candidate_slot", "singleton_candidate_leases"]);
+    }
     let mut names = names;
     if receipt_journal {
         names.push("waddle_p21_record_effect_receipt");
         names.push("waddle_p21_lookup_receipt_operation");
+    }
+    if guarded_receipt {
+        names.push("waddle_p21_guarded_record_effect_receipt");
     }
     let alternate: bool = sqlx::query_scalar(r#"
         SELECT EXISTS (

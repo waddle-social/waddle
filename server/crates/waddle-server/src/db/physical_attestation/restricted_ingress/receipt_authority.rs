@@ -51,7 +51,7 @@ pub struct ReceiptOperationPins {
 }
 
 impl ReceiptOperationPins {
-    fn valid(self) -> bool {
+    pub(super) fn valid(self) -> bool {
         [
             self.schema_oid,
             self.schema_owner_role_oid,
@@ -350,7 +350,7 @@ impl ReceiptOperationAuthority {
                     config.runtime_login.as_str(),
                     api_owner.as_str(),
                     pins.epoch_relation_oid,
-                    true,
+                    super::ProfileMode::ReceiptJournal,
                 )
                 .await?;
                 let expected = RestrictedIngressProfileObservation {
@@ -369,6 +369,7 @@ impl ReceiptOperationAuthority {
                     config.runtime_login.as_str(),
                     api_owner.as_str(),
                     pins,
+                    false,
                 )
                 .await?;
                 let row = sqlx::query(&format!(

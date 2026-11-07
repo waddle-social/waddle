@@ -2,8 +2,8 @@
 //!
 //! These checks do not inspect rows, prove trigger/guard behavior, or admit a
 //! serving transaction. The caller must already hold the pinned physical and
-//! complete migration-ledger barriers in a bounded PG17 READ COMMITTED READ
-//! ONLY transaction. Privileged catalog, role, ACL and uncooperative data writes
+//! complete migration-ledger barriers in a bounded PG17 READ COMMITTED
+//! transaction. Privileged catalog, role, ACL and uncooperative data writes
 //! must be independently quiescent throughout this observation and its use.
 
 use sqlx::postgres::types::Oid;
@@ -158,6 +158,18 @@ async fn verify_catalog_connection(
         return Err(PinnedCatalogError::Preflight);
     }
 
+    // A small pglz-compressed trigger source can be legitimate catalog data.
+    // RAW_PREFLIGHT first bounds its physical representation and rejects other
+    // compression methods; now cap its logical size before later consumers.
+    let source_bounded: bool = sqlx::query_scalar(TRIGGER_SOURCE_BOUNDS)
+        .bind(epoch)
+        .bind(manifest)
+        .fetch_one(&mut *connection)
+        .await?;
+    if !source_bounded {
+        return Err(PinnedCatalogError::Preflight);
+    }
+
     // The prior statements bound inputs to ACL/array helpers. This separate
     // statement proves built-in dependencies before the expression deparser.
     let exact: bool = sqlx::query_scalar(CATALOG_SHAPE)
@@ -211,8 +223,11 @@ WHERE e.oid = $1
 "#;
 
 // pg_column_size plus rejection of compression bounds raw ACLs, array inputs,
-// expression nodes, and trigger sources before expansion or deparsing. This
-// caps individual values, not the total size of PostgreSQL's system catalogs.
+// and expression nodes before expansion or deparsing. A small pglz trigger
+// source is also permitted: PG17's maximum pglz expansion is under 137x, so
+// 2048 stored bytes bound expansion to under 281 KiB. The subsequent separate
+// logical-length check tightens that limit to 8192 bytes. These caps apply to
+// individual values, not the total size of PostgreSQL's system catalogs.
 const RAW_PREFLIGHT: &str = r#"
 SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
     WHERE c.oid IN ($1, $2) AND c.relacl IS NOT NULL
@@ -245,8 +260,10 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t
     LEFT JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
     WHERE t.tgrelid IN ($1, $2) AND (
-      p.oid IS NULL OR pg_catalog.pg_column_compression(p.prosrc) IS NOT NULL
-      OR pg_catalog.pg_column_size(p.prosrc) > 8192
+      p.oid IS NULL OR pg_catalog.pg_column_size(p.prosrc) > CASE
+        WHEN pg_catalog.pg_column_compression(p.prosrc) IS NULL THEN 8192
+        WHEN pg_catalog.pg_column_compression(p.prosrc) = 'pglz' THEN 2048
+        ELSE 0 END
       OR pg_catalog.pg_column_compression(t.tgattr) IS NOT NULL OR pg_catalog.pg_column_size(t.tgattr) > 4096
       OR pg_catalog.pg_column_compression(t.tgargs) IS NOT NULL
       OR pg_catalog.pg_column_size(t.tgargs) > 4096
@@ -267,6 +284,14 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c
          SELECT 1 FROM pg_catalog.pg_depend dep
          WHERE dep.classid = objects.classid AND dep.objid = objects.objid LIMIT 129
        ) dependency LIMIT 129) bounded) <= 128
+"#;
+
+const TRIGGER_SOURCE_BOUNDS: &str = r#"
+SELECT NOT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_trigger t
+  JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+  WHERE t.tgrelid IN ($1, $2) AND pg_catalog.octet_length(p.prosrc) > 8192
+)
 "#;
 
 const CATALOG_SHAPE: &str = r#"

@@ -687,6 +687,112 @@ pub(super) async fn exercise(
         "losing receipt rolls back with its mismatched journal attempt"
     );
 
+    // A small TOAST-compressed catalog value can expand far beyond the client
+    // bound. The fixed PG17 octet-length builtin inspects its logical size
+    // before the manifest query can decode the body.
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "DO $oversized$ BEGIN EXECUTE pg_catalog.format(\
+             'CREATE FUNCTION {s}.waddle_ingress_oversized_probe() RETURNS integer LANGUAGE sql AS %L', \
+             pg_catalog.repeat(' ',65536) || 'SELECT 1'); END $oversized$"
+        ),
+    )
+    .await;
+    let oversized: (Option<String>, i32, i32) = sqlx::query_as(
+        "SELECT pg_catalog.pg_column_compression(prosrc)::text, \
+                pg_catalog.pg_column_size(prosrc),pg_catalog.octet_length(prosrc) \
+         FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(format!("{s}.waddle_ingress_oversized_probe()"))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect oversized compressed source");
+    assert!(oversized.0.is_some(), "witness source must be compressed");
+    assert!(oversized.1 < 32768 && oversized.2 > 32768);
+    assert!(
+        matches!(
+            authority.readback(&operation).await,
+            Err(ReceiptAuthorityError::Profile(
+                RestrictedIngressProfileError::Mismatch("bounded catalog inventory/storage")
+            ))
+        ),
+        "compressed oversized body must fail before manifest decoding"
+    );
+    super::execute(
+        &fixture.admin,
+        &format!("DROP FUNCTION {s}.waddle_ingress_oversized_probe()"),
+    )
+    .await;
+
+    // A compact pglz array is admitted to the later cardinality check only
+    // after its physical representation has bounded decompression. This
+    // superuser mutation is confined to the disposable test database.
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "CREATE FUNCTION {s}.waddle_ingress_compressed_array_probe(p integer) \
+             RETURNS integer LANGUAGE sql AS 'SELECT p'; \
+             UPDATE pg_catalog.pg_proc SET proargnames=ARRAY(SELECT pg_catalog.repeat('x',60) \
+               || ((n*17)%60)::text FROM pg_catalog.generate_series(1,150) n) \
+             WHERE oid='{s}.waddle_ingress_compressed_array_probe(integer)'::regprocedure"
+        ),
+    )
+    .await;
+    let array: (Option<String>, i32, i32) = sqlx::query_as(
+        "SELECT pg_catalog.pg_column_compression(proargnames)::text, \
+                pg_catalog.pg_column_size(proargnames),pg_catalog.cardinality(proargnames) \
+         FROM pg_catalog.pg_proc WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(format!(
+        "{s}.waddle_ingress_compressed_array_probe(integer)"
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect bounded compressed argument array");
+    assert_eq!(array.0.as_deref(), Some("pglz"));
+    assert!(
+        (380..=512).contains(&array.1) && array.2 == 150,
+        "expected a compressed near-limit array: {array:?}"
+    );
+    assert!(matches!(
+        authority.readback(&operation).await,
+        Err(ReceiptAuthorityError::Profile(
+            RestrictedIngressProfileError::Mismatch("bounded catalog inventory/storage")
+        ))
+    ));
+    super::execute(
+        &fixture.admin,
+        &format!(
+            "UPDATE pg_catalog.pg_proc SET proargnames=ARRAY(SELECT pg_catalog.repeat('x',60) \
+               || ((n*17)%80)::text FROM pg_catalog.generate_series(1,150) n) \
+             WHERE oid='{s}.waddle_ingress_compressed_array_probe(integer)'::regprocedure"
+        ),
+    )
+    .await;
+    let physical: i32 = sqlx::query_scalar(
+        "SELECT pg_catalog.pg_column_size(proargnames) FROM pg_catalog.pg_proc \
+         WHERE oid=$1::pg_catalog.regprocedure",
+    )
+    .bind(format!(
+        "{s}.waddle_ingress_compressed_array_probe(integer)"
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect over-limit compressed array");
+    assert!(physical > 512);
+    assert!(matches!(
+        authority.readback(&operation).await,
+        Err(ReceiptAuthorityError::Profile(
+            RestrictedIngressProfileError::Mismatch("bounded catalog inventory/storage")
+        ))
+    ));
+    super::execute(
+        &fixture.admin,
+        &format!("DROP FUNCTION {s}.waddle_ingress_compressed_array_probe(integer)"),
+    )
+    .await;
+
     super::execute(
         &fixture.admin,
         &format!(

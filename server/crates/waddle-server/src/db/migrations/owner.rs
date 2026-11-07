@@ -22,6 +22,7 @@ use crate::ingress_substrate::supported_protocol_epoch;
 
 mod epoch_acl;
 mod ledger_preflight;
+pub(crate) use ledger_preflight::verify_dark_shared_migration_ledger_v1030_write_sqlx;
 mod mam;
 mod owner_rejection_grants;
 #[cfg(feature = "test-support")]

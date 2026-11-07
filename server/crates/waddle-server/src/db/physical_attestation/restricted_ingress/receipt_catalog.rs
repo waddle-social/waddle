@@ -23,6 +23,7 @@ pub(super) async fn verify(
     runtime: &str,
     api: &str,
     pins: &ReceiptOperationPins,
+    guarded: bool,
 ) -> Result<()> {
     let quoted_schema: String = sqlx::query_scalar("SELECT pg_catalog.quote_ident($1)")
         .bind(schema)
@@ -150,13 +151,13 @@ pub(super) async fn verify(
           AND p.prosecdef AND p.provolatile = 'v' AND p.proparallel = 'u'
           AND NOT p.proleakproof AND NOT p.proisstrict AND p.procost = 100 AND p.prorows = 0
           AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
-          AND pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE')
+          AND pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE') <> $11
           AND NOT pg_catalog.has_function_privilege(r.oid,p.oid,'EXECUTE WITH GRANT OPTION')
           AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
               COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) acl
               WHERE acl.privilege_type <> 'EXECUTE'
                  OR acl.grantee NOT IN (p.proowner,r.oid)
-                 OR (acl.grantee = r.oid AND (acl.is_grantable OR acl.grantor <> p.proowner)))
+                 OR (acl.grantee = r.oid AND ($11 OR acl.is_grantable OR acl.grantor <> p.proowner)))
           AND (SELECT count(*) FROM pg_catalog.pg_proc other
                WHERE other.pronamespace=n.oid AND other.proname=p.proname) = 1 AS exact
         FROM pg_catalog.pg_proc p
@@ -177,6 +178,7 @@ pub(super) async fn verify(
     .bind(Oid(pins.runtime_role_oid))
     .bind(Oid(pins.schema_oid))
     .bind(Oid(pins.schema_owner_role_oid))
+    .bind(guarded)
     .fetch_optional(&mut *connection)
     .await?;
     if !matches!(function, Some(row) if row.try_get::<bool, _>("exact")?) {

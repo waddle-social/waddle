@@ -8,7 +8,8 @@
 //! contract must be reviewed before any selector can consume this profile.
 //! The separately installed physical-identity attestor is an independent trust
 //! prerequisite: this observer neither verifies its body nor fences its installer.
-//! Epoch AS does not cover that attestor's pre-transaction pool-hook calls.
+//! The legacy pool hook runs before the transaction fence; those earlier calls
+//! still require independently quiescent catalog and role mutation.
 
 use std::time::Duration;
 
@@ -17,14 +18,17 @@ use thiserror::Error;
 
 use super::{
     attest_connection, quote_identifier, AttestationMode, AttestedPgPool, PgRoleName,
-    PhysicalAttestationError,
+    PhysicalAttestationError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 
 mod catalog;
 mod catalog_preflight;
+mod guarded_receipt;
 mod manifest;
 mod receipt_authority;
 mod receipt_catalog;
+pub(crate) use guarded_receipt::verify_guarded_receipt_profile;
+pub use guarded_receipt::GuardedReceiptOperationPins;
 pub use receipt_authority::{
     ReceiptAuthorityError, ReceiptCommit, ReceiptOperation, ReceiptOperationAuthority,
     ReceiptOperationPins, ReceiptReadback,
@@ -85,10 +89,22 @@ impl AttestedPgPool {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut connection = self.acquire().await?;
             let config = &self.writer_capability.config;
-            let mut tx = connection.begin().await?;
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY")
-                .execute(&mut *tx)
+            let mut tx = connection
+                .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
                 .await?;
+            // Try rather than wait: a contended transaction must roll back
+            // without retaining an older snapshot while the mutator proceeds.
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !acquired {
+                tx.rollback().await?;
+                return Err(RestrictedIngressProfileError::Mismatch(
+                    "catalog mutation fence",
+                ));
+            }
             sqlx::query("SET LOCAL statement_timeout = '5s'")
                 .execute(&mut *tx)
                 .await?;
@@ -122,9 +138,22 @@ async fn inspect_profile_on_connection(
     epoch_oid: u32,
 ) -> Result<RestrictedIngressProfileObservation> {
     inspect_profile_with_receipt_journal(
-        connection, schema, schema_oid, runtime, api_owner, epoch_oid, false,
+        connection,
+        schema,
+        schema_oid,
+        runtime,
+        api_owner,
+        epoch_oid,
+        ProfileMode::Base,
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+enum ProfileMode {
+    Base,
+    ReceiptJournal,
+    GuardedReceipt,
 }
 
 async fn inspect_profile_with_receipt_journal(
@@ -134,8 +163,10 @@ async fn inspect_profile_with_receipt_journal(
     runtime: &str,
     api_owner: &str,
     epoch_oid: u32,
-    receipt_journal: bool,
+    mode: ProfileMode,
 ) -> Result<RestrictedIngressProfileObservation> {
+    let receipt_journal = !matches!(mode, ProfileMode::Base);
+    let guarded_receipt = matches!(mode, ProfileMode::GuardedReceipt);
     let row = sqlx::query(
         "SELECT pg_catalog.current_setting('server_version_num')::integer, \
          pg_catalog.current_setting('search_path'), session_user::text, current_user::text, \
@@ -163,6 +194,7 @@ async fn inspect_profile_with_receipt_journal(
         .execute(&mut *connection)
         .await?;
     let manifest = manifest::load()?;
+    catalog_preflight::bound(connection, schema).await?;
     let before = catalog::verify_roles_and_tables(
         connection, schema, schema_oid, runtime, api_owner, epoch_oid,
     )
@@ -194,6 +226,7 @@ async fn inspect_profile_with_receipt_journal(
         runtime,
         api_owner,
         receipt_journal,
+        guarded_receipt,
         &manifest,
     )
     .await?;

@@ -11,6 +11,8 @@ const FIXED_API: &str =
     include_str!("../../src/db/migrations/owner/ingress_definer_api_candidate.sql");
 const LOOKUP: &str =
     include_str!("../../src/db/migrations/owner/p21_receipt_journal_lookup_candidate.sql");
+const GUARDED_RECEIPT: &str =
+    include_str!("../../src/db/migrations/owner/p21_guarded_receipt_candidate.sql");
 const HELPER_TABLES: &[&str] = &[
     "dnd_projection",
     "dnd_projection_source_version",
@@ -727,6 +729,195 @@ async fn v1_fixed_api_runs_v1009_with_select_only_runtime_and_exact_lookup() {
         f.schema, lab.api
     ))
     .await;
+    drop(runtime);
+    lab.cleanup().await;
+}
+
+#[tokio::test]
+async fn guarded_receipt_requires_live_singleton_and_denies_old_journal_api() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let lab = Lab::new(&url).await;
+    let f = &lab.fixture;
+    lab.install().await;
+    lab.admin(&format!(
+        r#"
+        SET ROLE {owner};
+        CREATE TABLE {schema}.singleton_candidate_leases (
+            incarnation UUID PRIMARY KEY,
+            node_id TEXT NOT NULL CHECK (octet_length(node_id) BETWEEN 1 AND 255),
+            generation BIGINT NOT NULL UNIQUE CHECK (generation > 0),
+            expires_at TIMESTAMPTZ NOT NULL,
+            revoked BOOLEAN NOT NULL DEFAULT FALSE,
+            UNIQUE (node_id, incarnation, generation)
+        );
+        CREATE TABLE {schema}.singleton_candidate_slot (
+            slot SMALLINT PRIMARY KEY CHECK (slot = 1), node_id TEXT, incarnation UUID,
+            generation BIGINT NOT NULL,
+            CHECK ((node_id IS NULL AND incarnation IS NULL AND generation = 0)
+                OR (node_id IS NOT NULL AND incarnation IS NOT NULL AND generation > 0)),
+            FOREIGN KEY (node_id, incarnation, generation)
+                REFERENCES {schema}.singleton_candidate_leases (node_id, incarnation, generation)
+        );
+        REVOKE ALL ON {schema}.singleton_candidate_slot, {schema}.singleton_candidate_leases FROM PUBLIC;
+        RESET ROLE;
+        GRANT SELECT ON {schema}.p21_receipt_operation_results TO pg_monitor;
+        "#,
+        owner = f.owner,
+        schema = f.schema,
+    )).await;
+    let guard = GUARDED_RECEIPT
+        .replace("__SCHEMA__", &format!("\"{}\"", f.schema))
+        .replace("__SCHEMA_PATH__", &format!("\"{}\"", f.schema))
+        .replace("__API_OWNER_IDENT__", &lab.api)
+        .replace("__RUNTIME_ROLE_IDENT__", &f.runtime);
+    lab.admin(&guard).await;
+
+    let old_signature = format!(
+        "{}.waddle_p21_record_effect_receipt(uuid,uuid,integer,bytea)",
+        f.schema
+    );
+    let journal = format!("{}.p21_receipt_operation_results", f.schema);
+    let privileges: (bool, bool) = sqlx::query_as(
+        "SELECT pg_catalog.has_function_privilege($1,$2::regprocedure,'EXECUTE'), \
+                pg_catalog.has_table_privilege('pg_monitor',$3,'SELECT')",
+    )
+    .bind(&f.runtime)
+    .bind(&old_signature)
+    .bind(&journal)
+    .fetch_one(&f.admin)
+    .await
+    .expect("old journal API and monitor access revoked");
+    assert_eq!(privileges, (false, false));
+
+    let incarnation = Uuid::new_v4();
+    sqlx::query(&format!(
+        "INSERT INTO {}.singleton_candidate_leases \
+         (incarnation,node_id,generation,expires_at) VALUES ($1,'node-one',1,clock_timestamp()+interval '5 minutes')",
+        f.schema
+    ))
+    .bind(incarnation)
+    .execute(&f.admin)
+    .await
+    .expect("seed singleton lease");
+    sqlx::query(&format!(
+        "INSERT INTO {}.singleton_candidate_slot (slot,node_id,incarnation,generation) \
+         VALUES (1,'node-one',$1,1)",
+        f.schema
+    ))
+    .bind(incarnation)
+    .execute(&f.admin)
+    .await
+    .expect("seed singleton slot");
+    let mut runtime = PgConnection::connect_with(&f.runtime_options)
+        .await
+        .expect("runtime login");
+    let denied = sqlx::query(&format!(
+        "UPDATE {}.singleton_candidate_slot SET generation=2 WHERE slot=1",
+        f.schema
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect_err("runtime slot DML denied");
+    assert_permission_denied(denied, "singleton_candidate_slot");
+
+    let key = Uuid::new_v4();
+    let operation = Uuid::new_v4();
+    let hash = vec![7_u8; 32];
+    begin_epoch(&mut runtime, &f.schema).await;
+    assert_eq!(
+        insert_origin(&mut runtime, &f.schema, key)
+            .await
+            .expect("origin"),
+        "inserted"
+    );
+    let intent: bool = sqlx::query_scalar(&format!(
+        "SELECT {}.waddle_ingress_insert_effect_intent($1,0::numeric,1,$2,''::bytea)",
+        f.schema
+    ))
+    .bind(key)
+    .bind(&hash)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("intent");
+    assert!(intent);
+    sqlx::query("COMMIT")
+        .execute(&mut runtime)
+        .await
+        .expect("commit intent");
+
+    let call = format!(
+        "SELECT {}.waddle_p21_guarded_record_effect_receipt($1,$2,$3,$4,$5,$6,$7)",
+        f.schema
+    );
+    begin_epoch(&mut runtime, &f.schema).await;
+    let wrong = sqlx::query_scalar::<_, bool>(&call)
+        .bind("node-one")
+        .bind(incarnation)
+        .bind(2_i64)
+        .bind(operation)
+        .bind(key)
+        .bind(1_i32)
+        .bind(&hash)
+        .fetch_one(&mut runtime)
+        .await;
+    assert!(wrong.is_err(), "wrong generation must be rejected");
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback refusal");
+
+    lab.admin(&format!(
+        "UPDATE {}.singleton_candidate_leases SET expires_at=clock_timestamp()-interval '1 second'",
+        f.schema
+    ))
+    .await;
+    begin_epoch(&mut runtime, &f.schema).await;
+    let expired = sqlx::query_scalar::<_, bool>(&call)
+        .bind("node-one")
+        .bind(incarnation)
+        .bind(1_i64)
+        .bind(operation)
+        .bind(key)
+        .bind(1_i32)
+        .bind(&hash)
+        .fetch_one(&mut runtime)
+        .await;
+    assert!(expired.is_err(), "expired lease must be rejected");
+    sqlx::query("ROLLBACK")
+        .execute(&mut runtime)
+        .await
+        .expect("rollback expired lease");
+    lab.admin(&format!(
+        "UPDATE {}.singleton_candidate_leases SET expires_at=clock_timestamp()+interval '5 minutes'", f.schema
+    )).await;
+    begin_epoch(&mut runtime, &f.schema).await;
+    let inserted: bool = sqlx::query_scalar(&call)
+        .bind("node-one")
+        .bind(incarnation)
+        .bind(1_i64)
+        .bind(operation)
+        .bind(key)
+        .bind(1_i32)
+        .bind(&hash)
+        .fetch_one(&mut runtime)
+        .await
+        .expect("guarded receipt uses live singleton");
+    assert!(inserted);
+    sqlx::query("COMMIT")
+        .execute(&mut runtime)
+        .await
+        .expect("commit guarded receipt");
+    let count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {}.p21_receipt_operation_results WHERE operation_id=$1",
+        f.schema
+    ))
+    .bind(operation)
+    .fetch_one(&f.admin)
+    .await
+    .expect("journal row");
+    assert_eq!(count, 1);
     drop(runtime);
     lab.cleanup().await;
 }
