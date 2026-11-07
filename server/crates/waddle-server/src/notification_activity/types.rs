@@ -168,6 +168,12 @@ pub enum NotificationActivityError {
     Database(#[from] DatabaseError),
     #[error("notification activity owner initialization cannot use an attested runtime handle")]
     OwnerBootstrapRequiresOwnerHandle,
+    #[error("notification activity PostgreSQL initialization timed out")]
+    PostgresInitializationTimedOut,
+    /// The database may have committed, but this attempt did not receive an
+    /// acknowledgement. A completion marker alone cannot identify this attempt.
+    #[error("notification activity PostgreSQL initialization commit is indeterminate")]
+    CommitIndeterminate,
     #[error("invalid chat-state token: {0}")]
     InvalidChatState(String),
     #[error("invalid presence <show/> token: {0}")]

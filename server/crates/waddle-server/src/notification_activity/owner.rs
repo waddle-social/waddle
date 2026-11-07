@@ -1,118 +1,192 @@
 //! PostgreSQL-only owner preparation for the notification activity projection.
 
-use crate::db::lineage::{self, PgIdentity};
-use crate::db::{Database, DatabaseError};
+use std::time::Duration;
+
+use crate::db::lineage::{
+    PgDatabaseIdentity, PgDatabaseName, PgIdentity, PgSchemaIdentity, PgSchemaName,
+    PgSystemIdentifier,
+};
+use crate::db::{CatalogFenceLock, Database, DatabaseError, Transaction};
 use sqlx::postgres::PgConnection;
-use sqlx::{Connection, Row};
+use sqlx::Row;
 
-use super::schema::{ACTIVITY_OWNER_STATE_TABLE, ACTIVITY_SCHEMA_GATE};
+use super::schema::{self, ACTIVITY_OWNER_STATE_TABLE, ACTIVITY_SCHEMA_GATE};
+use super::NotificationActivityError;
 
-/// A pinned owner session holds the exclusive activity-schema gate while the
-/// existing initializer performs its migrations through the normal pool.
-/// The incomplete marker is committed before that work begins, so cancellation
-/// or a partial migration cannot leave a completed marker behind.
-pub(super) struct OwnerPreparationSession {
-    connection: Option<PgConnection>,
-    identity: PgIdentity,
-}
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(35);
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl OwnerPreparationSession {
-    pub(super) async fn begin(db: &Database) -> Result<Self, DatabaseError> {
-        let identity = lineage::live_postgres_identity(db).await?;
-        let mut connection = db.detached_postgres_startup_connection().await?;
-        let result = begin_preparation(&mut connection, &identity).await;
-        if let Err(error) = result {
-            let _ = connection.close().await;
-            return Err(error);
-        }
-        Ok(Self {
-            connection: Some(connection),
-            identity,
-        })
+/// All PostgreSQL probes, marker changes and DDL use this single transaction.
+/// The Activity gate is tried only after catalog-X, and a failed try releases
+/// catalog-X before a fresh transaction is attempted by the fence helper.
+pub(super) async fn initialize_postgres(
+    db: &Database,
+    strict_owner: bool,
+) -> Result<(), NotificationActivityError> {
+    let mut tx = db
+        .begin_catalog_fenced_with_idle_bound(&[CatalogFenceLock::ExclusivePair(
+            ACTIVITY_SCHEMA_GATE.0,
+            ACTIVITY_SCHEMA_GATE.1,
+        )])
+        .await?;
+    tokio::time::timeout(
+        INITIALIZE_TIMEOUT,
+        prepare_in_transaction(&mut tx, strict_owner),
+    )
+    .await
+    .map_err(|_| NotificationActivityError::PostgresInitializationTimedOut)??;
+
+    // A lost COMMIT response cannot be reconciled by a marker left by a
+    // prior attempt. The lease is discarded if COMMIT is not acknowledged.
+    if !matches!(
+        tokio::time::timeout(COMMIT_TIMEOUT, tx.commit()).await,
+        Ok(Ok(()))
+    ) {
+        return Err(NotificationActivityError::CommitIndeterminate);
     }
-
-    pub(super) async fn complete(mut self) -> Result<(), DatabaseError> {
-        let connection = self.connection.as_mut().ok_or_else(|| {
-            DatabaseError::QueryFailed(
-                "notification activity owner session is already closed".to_owned(),
-            )
-        })?;
-        let result = complete_preparation(connection, &self.identity).await;
-        let close_result = self.close().await;
-        result?;
-        close_result
-    }
-
-    pub(super) async fn abort(mut self) {
-        if let Some(connection) = self.connection.take() {
-            if let Err(error) = connection.close().await {
-                tracing::warn!(%error, "failed to close notification activity owner session");
-            }
-        }
-    }
-
-    async fn close(&mut self) -> Result<(), DatabaseError> {
-        match self.connection.take() {
-            Some(connection) => connection.close().await.map_err(DatabaseError::from),
-            None => Ok(()),
-        }
-    }
-}
-
-async fn begin_preparation(
-    connection: &mut PgConnection,
-    identity: &PgIdentity,
-) -> Result<(), DatabaseError> {
-    sqlx::query("SET lock_timeout = '30s'")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1::integer, $2::integer)")
-        .bind(ACTIVITY_SCHEMA_GATE.0)
-        .bind(ACTIVITY_SCHEMA_GATE.1)
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-
-    sqlx::query("BEGIN")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    sqlx::query("SET LOCAL statement_timeout = '300000ms'")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    verify_owner_boundary(connection, identity).await?;
-    prepare_incomplete_marker(connection, identity).await?;
-    sqlx::query("COMMIT")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
     Ok(())
+}
+
+async fn prepare_in_transaction(
+    tx: &mut Transaction<'_>,
+    strict_owner: bool,
+) -> Result<(), NotificationActivityError> {
+    let connection = tx.postgres_connection().ok_or_else(|| {
+        DatabaseError::QueryFailed(
+            "notification activity initialization requires PostgreSQL".to_owned(),
+        )
+    })?;
+    // The first read on the fenced backend calls only explicitly qualified
+    // builtins. Preserve the caller's effective target before making the
+    // remainder of the transaction use a builtins-first path; otherwise a
+    // target schema could supply an operator used by a later catalog query.
+    let row = sqlx::query(
+        "SELECT pg_catalog.current_schema()::pg_catalog.text, \
+                pg_catalog.current_schemas(false)::pg_catalog.text[]",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    let active_schema: String = row.try_get(0).map_err(DatabaseError::from)?;
+    let active_schemas: Vec<String> = row.try_get(1).map_err(DatabaseError::from)?;
+    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+    // Preserve tighter role/session limits while bounding server-side waits.
+    for (setting, cap) in [("lock_timeout", "5s"), ("statement_timeout", "30s")] {
+        sqlx::query(
+            "SELECT pg_catalog.set_config($1, \
+             CASE WHEN pg_catalog.current_setting($1)::pg_catalog.interval = '0'::pg_catalog.interval \
+               OR pg_catalog.current_setting($1)::pg_catalog.interval > $2::pg_catalog.interval \
+             THEN $2 ELSE pg_catalog.current_setting($1) END, true)",
+        )
+        .bind(setting)
+        .bind(cap)
+        .execute(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+    }
+    let identity = if strict_owner {
+        Some(read_live_identity(connection, &active_schema).await?)
+    } else {
+        None
+    };
+    let schema = if let Some(identity) = identity.as_ref() {
+        verify_owner_boundary(connection, identity, &active_schema, &active_schemas).await?;
+        prepare_incomplete_marker(connection, identity).await?;
+        identity.schema.name.0.clone()
+    } else {
+        let schema = pin_legacy_schema(connection, &active_schema).await?;
+        invalidate_existing_marker(connection, &schema).await?;
+        schema
+    };
+    schema::initialize_postgres(connection, &schema).await?;
+    if let Some(identity) = identity.as_ref() {
+        verify_owner_boundary(connection, identity, &active_schema, &active_schemas).await?;
+        complete_preparation(connection, identity).await?;
+    }
+    Ok(())
+}
+
+/// Read strict owner identity only after catalog-X and the Activity gate are
+/// held on this backend. Every builtin and cast is explicitly pg_catalog
+/// qualified because the search path has not yet been trusted.
+async fn read_live_identity(
+    connection: &mut PgConnection,
+    active_schema: &str,
+) -> Result<PgIdentity, DatabaseError> {
+    let row = sqlx::query(
+        "SELECT (SELECT system_identifier::pg_catalog.text \
+                 FROM pg_catalog.pg_control_system()), \
+                database.oid::pg_catalog.int8, database.datname::pg_catalog.text, \
+                namespace.oid::pg_catalog.int8, namespace.nspname::pg_catalog.text \
+         FROM pg_catalog.pg_database database \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.nspname = $1 \
+         WHERE database.datname = pg_catalog.current_database()",
+    )
+    .bind(active_schema)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?
+    .ok_or_else(|| owner_boundary_error("notification activity active schema is missing"))?;
+    let system_identifier: String = row.try_get(0).map_err(DatabaseError::from)?;
+    let database_oid: i64 = row.try_get(1).map_err(DatabaseError::from)?;
+    let database_name: String = row.try_get(2).map_err(DatabaseError::from)?;
+    let schema_oid: i64 = row.try_get(3).map_err(DatabaseError::from)?;
+    let schema_name: String = row.try_get(4).map_err(DatabaseError::from)?;
+    Ok(PgIdentity {
+        system_identifier: system_identifier.parse::<PgSystemIdentifier>()?,
+        database: PgDatabaseIdentity {
+            oid: u32::try_from(database_oid).map_err(|_| {
+                owner_boundary_error("notification activity database OID is invalid")
+            })?,
+            name: PgDatabaseName(database_name),
+        },
+        schema: PgSchemaIdentity {
+            oid: u32::try_from(schema_oid)
+                .map_err(|_| owner_boundary_error("notification activity schema OID is invalid"))?,
+            name: PgSchemaName(schema_name),
+        },
+    })
+}
+
+/// Pin legacy DDL to the captured persistent schema and reject temporary
+/// relations that would shadow later unqualified runtime queries. SQL here
+/// runs with pg_catalog first; the caller's path is not restored for DDL.
+async fn pin_legacy_schema(
+    connection: &mut PgConnection,
+    active_schema: &str,
+) -> Result<String, DatabaseError> {
+    if active_schema.starts_with("pg_") || active_schema == "information_schema" {
+        return Err(owner_boundary_error(
+            "notification activity raw initializer requires a persistent application schema",
+        ));
+    }
+    let row = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n \
+           WHERE n.oid = pg_catalog.pg_my_temp_schema() AND n.nspname = $1) \
+         OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+           WHERE c.relnamespace = pg_catalog.pg_my_temp_schema() \
+             AND c.relname IN ('notification_activity', 'notification_activity_owner_state'))",
+    )
+    .bind(active_schema)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    if row.try_get::<bool, _>(0).map_err(DatabaseError::from)? {
+        return Err(owner_boundary_error(
+            "notification activity raw initializer refused a temporary schema shadow",
+        ));
+    }
+    Ok(active_schema.to_owned())
 }
 
 async fn complete_preparation(
     connection: &mut PgConnection,
     identity: &PgIdentity,
 ) -> Result<(), DatabaseError> {
-    sqlx::query("BEGIN")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    sqlx::query("SET LOCAL statement_timeout = '300000ms'")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-    verify_owner_boundary(connection, identity).await?;
-    verify_marker_relation(connection, identity).await?;
+    verify_marker_relation(connection, &identity.schema.name.0).await?;
     let marker = qualified_marker(&identity.schema.name.0);
     let row = sqlx::query(&format!(
         "UPDATE {marker} SET prepared_revision = '1' WHERE singleton = '1' \
@@ -133,30 +207,32 @@ async fn complete_preparation(
             "notification activity owner marker changed during preparation",
         ));
     }
-    sqlx::query("COMMIT")
-        .execute(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
     Ok(())
 }
 
 async fn verify_owner_boundary(
     connection: &mut PgConnection,
     identity: &PgIdentity,
+    active_schema: &str,
+    active_schemas: &[String],
 ) -> Result<(), DatabaseError> {
     let schema = &identity.schema.name.0;
     crate::db::physical_attestation::validate_identifier(schema, "notification activity schema")
         .map_err(DatabaseError::from)?;
+    if active_schema != schema
+        || active_schemas.first().is_none_or(|first| first != schema)
+        || active_schemas.len() > 2
+        || (active_schemas.len() == 2 && !active_schemas[1].starts_with("pg_temp_"))
+    {
+        return Err(owner_boundary_error(
+            "notification activity owner search path does not identify its schema",
+        ));
+    }
     let row = sqlx::query(
         "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
          database.oid::bigint, database.datname::text, namespace.oid::bigint, \
          namespace.nspname::text, \
-         namespace.nspname = pg_catalog.current_schema() \
-           AND COALESCE((pg_catalog.current_schemas(false))[1]::text, '') = namespace.nspname \
-           AND pg_catalog.cardinality(pg_catalog.current_schemas(false)) <= 2 \
-           AND (pg_catalog.cardinality(pg_catalog.current_schemas(false)) = 1 \
-             OR pg_catalog.left((pg_catalog.current_schemas(false))[2]::text, 8) = 'pg_temp_') \
-           AND NOT pg_catalog.pg_is_in_recovery() \
+         NOT pg_catalog.pg_is_in_recovery() \
            AND owner.rolname = current_user \
            AND NOT owner.rolcanlogin AND NOT owner.rolsuper \
            AND NOT owner.rolcreatedb AND NOT owner.rolcreaterole \
@@ -208,49 +284,13 @@ async fn prepare_incomplete_marker(
     identity: &PgIdentity,
 ) -> Result<(), DatabaseError> {
     let schema = &identity.schema.name.0;
-    let exists = sqlx::query(
-        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class relation \
-         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
-         WHERE namespace.nspname = $1 AND relation.relname = $2)",
-    )
-    .bind(schema)
-    .bind(ACTIVITY_OWNER_STATE_TABLE)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(DatabaseError::from)?
-    .try_get::<bool, _>(0)
-    .map_err(DatabaseError::from)?;
+    let exists = marker_exists(connection, schema).await?;
 
     let marker = qualified_marker(schema);
     if exists {
-        verify_marker_relation(connection, identity).await?;
-        let row = sqlx::query(&format!(
-            "SELECT prepared_revision, system_identifier, database_oid, database_name, \
-             schema_oid, schema_name FROM {marker} WHERE singleton = '1'"
-        ))
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(DatabaseError::from)?;
-        let Some(row) = row else {
-            return Err(owner_boundary_error(
-                "notification activity owner marker has no singleton row",
-            ));
-        };
-        let revision: String = row.try_get(0).map_err(DatabaseError::from)?;
-        let marker_identity_matches = row.try_get::<String, _>(1).map_err(DatabaseError::from)?
-            == identity.system_identifier.to_string()
-            && row.try_get::<i64, _>(2).map_err(DatabaseError::from)?
-                == i64::from(identity.database.oid)
-            && row.try_get::<String, _>(3).map_err(DatabaseError::from)?
-                == identity.database.name.0
-            && row.try_get::<i64, _>(4).map_err(DatabaseError::from)?
-                == i64::from(identity.schema.oid)
-            && row.try_get::<String, _>(5).map_err(DatabaseError::from)? == *schema;
-        if !marker_identity_matches || !matches!(revision.as_str(), "0" | "1") {
-            return Err(owner_boundary_error(
-                "notification activity owner marker has an unexpected physical identity or revision",
-            ));
-        }
+        lock_marker(connection, schema).await?;
+        verify_marker_relation(connection, schema).await?;
+        verify_marker_identity(connection, schema).await?;
         let result = sqlx::query(&format!(
             "UPDATE {marker} SET prepared_revision = '0' WHERE singleton = '1'"
         ))
@@ -293,12 +333,91 @@ async fn prepare_incomplete_marker(
         .await
         .map_err(DatabaseError::from)?;
     }
-    verify_marker_relation(connection, identity).await
+    verify_marker_relation(connection, schema).await?;
+    verify_marker_identity(connection, schema).await
+}
+
+async fn marker_exists(connection: &mut PgConnection, schema: &str) -> Result<bool, DatabaseError> {
+    sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class relation \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+         WHERE namespace.nspname = $1 AND relation.relname = $2)",
+    )
+    .bind(schema)
+    .bind(ACTIVITY_OWNER_STATE_TABLE)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?
+    .try_get::<bool, _>(0)
+    .map_err(DatabaseError::from)
+}
+
+async fn lock_marker(connection: &mut PgConnection, schema: &str) -> Result<(), DatabaseError> {
+    sqlx::query(&format!(
+        "LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE",
+        qualified_marker(schema)
+    ))
+    .execute(connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    Ok(())
+}
+
+async fn invalidate_existing_marker(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), DatabaseError> {
+    if !marker_exists(connection, schema).await? {
+        return Ok(());
+    }
+    lock_marker(connection, schema).await?;
+    verify_marker_relation(connection, schema).await?;
+    verify_marker_identity(connection, schema).await?;
+    let rows = sqlx::query(&format!(
+        "UPDATE {} SET prepared_revision = '0' WHERE singleton = '1'",
+        qualified_marker(schema)
+    ))
+    .execute(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    if rows.rows_affected() != 1 {
+        return Err(owner_boundary_error(
+            "notification activity owner marker could not be invalidated",
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_marker_identity(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), DatabaseError> {
+    let valid: bool = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.count(*) = 1 AND COALESCE(pg_catalog.bool_and(\
+           singleton = '1' AND prepared_revision IN ('0', '1') \
+           AND system_identifier = (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) \
+           AND database_oid = (SELECT oid::bigint FROM pg_catalog.pg_database \
+                               WHERE datname = pg_catalog.current_database()) \
+           AND database_name = pg_catalog.current_database()::text \
+           AND schema_oid = (SELECT oid::bigint FROM pg_catalog.pg_namespace WHERE nspname = $1) \
+           AND schema_name = $1), false) FROM {}",
+        qualified_marker(schema)
+    ))
+    .bind(schema)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    if !valid {
+        return Err(owner_boundary_error(
+            "notification activity owner marker has an unexpected physical identity or revision",
+        ));
+    }
+    Ok(())
 }
 
 async fn verify_marker_relation(
     connection: &mut PgConnection,
-    identity: &PgIdentity,
+    schema: &str,
 ) -> Result<(), DatabaseError> {
     let row = sqlx::query(
         "SELECT relation.relkind = 'r' AND relation.relpersistence = 'p' \
@@ -307,12 +426,50 @@ async fn verify_marker_relation(
            AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute attribute \
                 WHERE attribute.attrelid = relation.oid AND attribute.attnum > 0 \
                   AND NOT attribute.attisdropped) = 7 \
+           AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute attribute \
+                JOIN pg_catalog.pg_type typ ON typ.oid = attribute.atttypid \
+                WHERE attribute.attrelid = relation.oid AND attribute.attnum > 0 \
+                  AND NOT attribute.attisdropped AND attribute.attnotnull \
+                  AND attribute.attidentity = '' AND attribute.attgenerated = '' \
+                  AND attribute.attcollation = typ.typcollation \
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef d \
+                    WHERE d.adrelid = relation.oid AND d.adnum = attribute.attnum) \
+                  AND ((attribute.attname IN ('singleton', 'prepared_revision', \
+                         'system_identifier', 'database_name', 'schema_name') \
+                        AND attribute.atttypid = 'pg_catalog.text'::pg_catalog.regtype) \
+                    OR (attribute.attname IN ('database_oid', 'schema_oid') \
+                        AND attribute.atttypid = 'pg_catalog.int8'::pg_catalog.regtype))) = 7 \
            AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint constraint_ \
                 WHERE constraint_.conrelid = relation.oid) = 3 \
+           AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c \
+             JOIN pg_catalog.pg_index i ON i.indexrelid = c.conindid \
+             WHERE c.conrelid = relation.oid AND c.contype = 'p' \
+               AND NOT c.condeferrable AND c.convalidated \
+               AND c.conkey = ARRAY[(SELECT a.attnum FROM pg_catalog.pg_attribute a \
+                 WHERE a.attrelid = relation.oid AND a.attname = 'singleton')]::int2[] \
+               AND i.indisvalid AND i.indisready AND i.indislive AND i.indimmediate) \
+           AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint c \
+             WHERE c.conrelid = relation.oid AND c.contype = 'c' AND c.convalidated \
+               AND NOT c.condeferrable AND NOT c.condeferred AND ( \
+                (c.conname = 'notification_activity_owner_state_singleton_check' \
+                 AND pg_catalog.regexp_replace(pg_catalog.replace(pg_catalog.replace( \
+                   pg_catalog.lower(pg_catalog.pg_get_constraintdef(c.oid)), \
+                   '::text[]', ''), '::text', ''), '[[:space:]()]', '', 'g') \
+                   = 'checksingleton=''1''') \
+                OR (c.conname = 'notification_activity_owner_state_revision_check' \
+                 AND pg_catalog.regexp_replace(pg_catalog.replace(pg_catalog.replace( \
+                   pg_catalog.lower(pg_catalog.pg_get_constraintdef(c.oid)), \
+                   '::text[]', ''), '::text', ''), '[[:space:]()]', '', 'g') \
+                   = 'checkprepared_revision=anyarray[''0'',''1'']'))) = 2 \
            AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_index index_ \
                 WHERE index_.indrelid = relation.oid) = 1 \
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger trigger_ \
                            WHERE trigger_.tgrelid = relation.oid) \
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rewrite_ \
+                           WHERE rewrite_.ev_class = relation.oid) \
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inheritance \
+                           WHERE inheritance.inhrelid = relation.oid \
+                              OR inheritance.inhparent = relation.oid) \
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint inbound \
                            WHERE inbound.contype = 'f' AND inbound.confrelid = relation.oid) \
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy policy_ \
@@ -321,7 +478,7 @@ async fn verify_marker_relation(
          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
          WHERE namespace.nspname = $1 AND relation.relname = $2",
     )
-    .bind(&identity.schema.name.0)
+    .bind(schema)
     .bind(ACTIVITY_OWNER_STATE_TABLE)
     .fetch_optional(&mut *connection)
     .await

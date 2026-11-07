@@ -14,6 +14,7 @@ const ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy)]
 pub(crate) enum CatalogFenceLock {
     Exclusive(i64),
+    ExclusivePair(i32, i32),
     Shared(i64),
     SharedPair(i32, i32),
 }
@@ -217,6 +218,13 @@ pub(crate) async fn try_catalog_fence_lock(
         CatalogFenceLock::Exclusive(key) => {
             sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
                 .bind(key)
+                .fetch_one(&mut *connection)
+                .await?
+        }
+        CatalogFenceLock::ExclusivePair(first, second) => {
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)")
+                .bind(first)
+                .bind(second)
                 .fetch_one(&mut *connection)
                 .await?
         }

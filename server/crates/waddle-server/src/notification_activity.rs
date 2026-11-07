@@ -55,7 +55,15 @@ pub struct NotificationActivityStore {
 
 impl NotificationActivityStore {
     pub async fn try_new(db: Database) -> Result<Self, NotificationActivityError> {
-        Self::build_initialized(db).await
+        if db.driver() == crate::db::DatabaseDriver::Postgres {
+            if db.attested_pg_writer_capability().is_some() {
+                return Err(NotificationActivityError::OwnerBootstrapRequiresOwnerHandle);
+            }
+            owner::initialize_postgres(&db, false).await?;
+            Ok(Self { db })
+        } else {
+            Self::build_initialized(db).await
+        }
     }
 
     /// Initialize the activity projection through this exact owner database
@@ -76,14 +84,8 @@ impl NotificationActivityStore {
             .into());
         }
 
-        let store = Self { db: db.clone() };
-        let owner_session = owner::OwnerPreparationSession::begin(&db).await?;
-        if let Err(error) = store.initialize().await {
-            owner_session.abort().await;
-            return Err(error);
-        }
-        owner_session.complete().await?;
-        Ok(store)
+        owner::initialize_postgres(&db, true).await?;
+        Ok(Self { db })
     }
 
     async fn build_initialized(db: Database) -> Result<Self, NotificationActivityError> {
