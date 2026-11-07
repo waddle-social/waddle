@@ -1,8 +1,11 @@
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use chrono::DateTime;
 use jid::{BareJid, Jid};
 use waddle_client_session::judgments::{
     Probability, SafetyCategory, SafetyScore, SafetyScores, SafetyScoresFastening, ScoreTarget,
 };
+use waddle_client_session::timeline::Sha256Digest;
 use waddle_client_session::{
     strip_fallback, Attachment, Encryption, IncomingMessage, ReactionUpdate, ReplyTo,
 };
@@ -266,6 +269,7 @@ fn attachment(file: &dto::SharedFile) -> Attachment {
         media_type: file.media_type.clone(),
         size: file.size,
         inline: file.disposition == "inline",
+        hashes: content_hashes(&file.hashes),
         encryption: file.encrypted.as_ref().map(|encrypted| Encryption {
             cipher: encrypted.cipher.to_string(),
             key_b64: encrypted.key_b64.clone(),
@@ -279,6 +283,33 @@ fn attachment(file: &dto::SharedFile) -> Attachment {
             sources: encrypted.sources.iter().map(ToString::to_string).collect(),
         }),
     }
+}
+
+pub(crate) fn content_hashes(hashes: &[dto::FileHash]) -> Vec<Sha256Digest> {
+    hashes
+        .iter()
+        .filter(|hash| hash.algo.eq_ignore_ascii_case("sha-256"))
+        .map(|hash| {
+            STANDARD
+                .decode(&hash.value_b64)
+                .ok()
+                .and_then(|digest| <[u8; 32]>::try_from(digest).ok())
+                .map_or(Sha256Digest::Invalid, Sha256Digest::Valid)
+        })
+        .collect()
+}
+
+pub(crate) fn file_hashes(hashes: &[Sha256Digest]) -> Vec<dto::FileHash> {
+    hashes
+        .iter()
+        .map(|hash| dto::FileHash {
+            algo: "sha-256".to_owned(),
+            value_b64: match hash {
+                Sha256Digest::Valid(digest) => STANDARD.encode(digest),
+                Sha256Digest::Invalid => String::new(),
+            },
+        })
+        .collect()
 }
 
 fn score_target(room: &BareJid, stanza: Option<&str>, origin: Option<&str>) -> Option<ScoreTarget> {

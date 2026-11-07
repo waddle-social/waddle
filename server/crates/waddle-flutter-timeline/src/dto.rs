@@ -187,6 +187,8 @@ pub struct SharedFile {
     pub size: Option<u64>,
     #[serde(default)]
     pub disposition: String,
+    #[serde(default)]
+    pub hashes: Vec<FileHash>,
     pub encrypted: Option<EncryptedFile>,
 }
 
@@ -199,7 +201,7 @@ pub struct EncryptedFile {
     pub sources: Vec<Url>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileHash {
     pub algo: String,
     pub value_b64: String,
@@ -262,6 +264,8 @@ pub struct Attachment {
     pub size: Option<u64>,
     #[serde(default)]
     pub inline: bool,
+    #[serde(default)]
+    pub hashes: Vec<FileHash>,
     pub encryption: Option<Encryption>,
 }
 

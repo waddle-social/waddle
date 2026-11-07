@@ -4,7 +4,8 @@ use jid::BareJid;
 use thiserror::Error;
 use waddle_client_session::judgments::SafetyCategory;
 use waddle_client_session::{
-    AuthorIdentityPolicy, Delivery, HistoryPage, LocalEcho, ReplyTo, Timeline, TimelineItem,
+    AuthorIdentityPolicy, Delivery, HistoryPage, ItemKey, LocalEcho, ReplyTo, Timeline,
+    TimelineItem,
 };
 
 use crate::adapter::{adapt, display_name, Metadata};
@@ -136,6 +137,7 @@ impl TimelineStore {
                             media_type: file.media_type,
                             size: file.size,
                             inline: file.inline,
+                            hashes: crate::adapter::content_hashes(&file.hashes),
                             encryption: file.encryption.map(|value| {
                                 waddle_client_session::Encryption {
                                     cipher: value.cipher,
@@ -238,12 +240,49 @@ impl TimelineStore {
     }
 }
 
+#[derive(Hash, PartialEq, Eq)]
+enum MetadataKey<'a> {
+    Stanza(&'a str),
+    Origin(&'a str),
+}
+
 fn snapshot(conversation: &Conversation) -> TimelineSnapshot {
+    let mut metadata_by_id: HashMap<MetadataKey<'_>, Vec<&Metadata>> = HashMap::new();
+    for meta in &conversation.metadata {
+        if let Some(id) = meta.archive_id.as_deref() {
+            metadata_by_id
+                .entry(MetadataKey::Stanza(id))
+                .or_default()
+                .push(meta);
+        }
+        if let Some(id) = meta.origin_id.as_deref() {
+            metadata_by_id
+                .entry(MetadataKey::Origin(id))
+                .or_default()
+                .push(meta);
+        }
+        if let Some(id) = meta
+            .message_id
+            .as_deref()
+            .filter(|id| Some(*id) != meta.origin_id.as_deref())
+        {
+            metadata_by_id
+                .entry(MetadataKey::Origin(id))
+                .or_default()
+                .push(meta);
+        }
+    }
     let mut items: Vec<Item> = conversation
         .timeline
         .items()
         .iter()
-        .map(|item| project(item, &conversation.metadata))
+        .map(|item| {
+            let key = match &item.key {
+                ItemKey::Stanza(id) => MetadataKey::Stanza(id),
+                ItemKey::Origin(id) => MetadataKey::Origin(id),
+            };
+            project(item, metadata_by_id.get(&key).map_or(&[], Vec::as_slice))
+        })
         .collect();
     items.sort_by_key(|item| item.timestamp_ms);
     TimelineSnapshot {
@@ -253,25 +292,65 @@ fn snapshot(conversation: &Conversation) -> TimelineSnapshot {
     }
 }
 
-fn project(item: &TimelineItem, metadata: &[Metadata]) -> Item {
-    let meta = metadata.iter().rev().find(|meta| {
-        meta.ids.iter().any(|id| id == item.key.as_str())
-            && match (&item.author_id, &meta.author_id) {
-                (Some(author), Some(candidate)) => author == candidate,
-                _ => item.sender == meta.sender,
+#[cfg(test)]
+impl TimelineStore {
+    pub(crate) fn snapshot_by_scan(&self, jid: &BareJid) -> Option<TimelineSnapshot> {
+        let conversation = self.conversations.get(jid)?;
+        let metadata: Vec<&Metadata> = conversation.metadata.iter().collect();
+        let mut items: Vec<Item> = conversation
+            .timeline
+            .items()
+            .iter()
+            .map(|item| project(item, &metadata))
+            .collect();
+        items.sort_by_key(|item| item.timestamp_ms);
+        Some(TimelineSnapshot {
+            items,
+            history_complete: conversation.timeline.history_complete(),
+            older_cursor: conversation.timeline.older_cursor().map(str::to_string),
+        })
+    }
+}
+
+fn metadata_belongs_to(item: &TimelineItem, meta: &Metadata) -> bool {
+    (match &item.key {
+        ItemKey::Stanza(id) => meta.archive_id.as_ref() == Some(id),
+        ItemKey::Origin(id) => {
+            meta.origin_id.as_ref() == Some(id) || meta.message_id.as_ref() == Some(id)
+        }
+    }) && match (&item.author_id, &meta.author_id) {
+        (Some(author), Some(candidate)) => author == candidate,
+        (Some(_), None) => false,
+        (None, _) => item.sender == meta.sender,
+    }
+}
+
+fn project(item: &TimelineItem, metadata: &[&Metadata]) -> Item {
+    let mut matching: Vec<&Metadata> = metadata
+        .iter()
+        .copied()
+        .filter(|meta| metadata_belongs_to(item, meta))
+        .collect();
+    let mut trusted = None;
+    let mut ambiguous = false;
+    for meta in &matching {
+        if let Some(id) = meta.archive_id.as_deref() {
+            let identity = (id, meta.archive_by.as_ref());
+            if trusted.is_some_and(|previous| previous != identity) {
+                ambiguous = true;
+                break;
             }
-    });
+            trusted = Some(identity);
+        }
+    }
+    if ambiguous {
+        matching.retain(|meta| meta.archive_id.is_none());
+    }
+    let meta = matching.last();
     Item {
         id: item.key.as_str().to_string(),
-        identity_ids: metadata
+        identity_ids: matching
             .iter()
-            .filter(|meta| {
-                meta.ids.iter().any(|id| id == item.key.as_str())
-                    && match (&item.author_id, &meta.author_id) {
-                        (Some(author), Some(candidate)) => author == candidate,
-                        _ => item.sender == meta.sender,
-                    }
-            })
             .flat_map(|meta| meta.ids.iter().cloned())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -315,6 +394,7 @@ fn project(item: &TimelineItem, metadata: &[Metadata]) -> Item {
                 media_type: file.media_type.clone(),
                 size: file.size,
                 inline: file.inline,
+                hashes: crate::adapter::file_hashes(&file.hashes),
                 encryption: file.encryption.as_ref().map(|value| Encryption {
                     cipher: value.cipher.clone(),
                     key_b64: value.key_b64.clone(),

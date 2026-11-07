@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 waddle-client-session = { path = "../waddle-client-session" }
 jid.workspace = true
 chrono.workspace = true

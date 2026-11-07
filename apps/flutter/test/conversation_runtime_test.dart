@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/runtime/context.dart';
@@ -244,6 +245,15 @@ Future<void> _flush() async {
 Future<void> _start(ConversationRuntime runtime) =>
     runtime.onEvent({'type': 'connected', 'data': {}});
 
+Future<void> _selfPresence(ConversationRuntime runtime) => runtime.onEvent({
+  'type': 'presence',
+  'data': {
+    'from': '$room/me',
+    'muc_jid': own,
+    'muc_status_codes': [110],
+  },
+});
+
 void main() {
   test(
     'queued send is durable before wire and survives reconnect with the same origin',
@@ -382,6 +392,7 @@ void main() {
       final runtime = ConversationRuntime(context);
       addTearDown(runtime.dispose);
       await _start(runtime);
+      await _selfPresence(runtime);
       await runtime.invoke('conversation.open', viewArgs);
       await _flush();
       await runtime.invoke('conversation.send', {
@@ -442,6 +453,7 @@ void main() {
       final runtime = ConversationRuntime(context);
       addTearDown(runtime.dispose);
       await _start(runtime);
+      await _selfPresence(runtime);
       await runtime.invoke('conversation.open', viewArgs);
       await _flush();
       await runtime.invoke('conversation.send', {
@@ -614,6 +626,686 @@ void main() {
   );
 
   test(
+    'read tracking advances after an empty first read and successive messages',
+    () async {
+      final context = _Context();
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', {
+        ...viewArgs,
+        'atNewestEdge': true,
+      });
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      await _flush();
+      expect(context.recorded('send_displayed'), isEmpty);
+
+      await runtime.onEvent({'type': 'message', 'data': _message('first')});
+      await _until(() => context.recorded('send_displayed').length == 1);
+      await _until(
+        () =>
+            runtimeMap(
+              runtimeMap(context.persistent['conversationReadCursors'])[room],
+            )['id'] ==
+            'first',
+      );
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {..._message('second'), 'timestamp': '2026-10-31T10:01:00Z'},
+      });
+      await _until(() => context.recorded('send_displayed').length == 2);
+      await _until(
+        () =>
+            runtimeMap(
+              runtimeMap(context.persistent['conversationReadCursors'])[room],
+            )['id'] ==
+            'second',
+      );
+      expect(
+        context.recorded('send_displayed').map((row) => row['stanza_id']),
+        ['first', 'second'],
+      );
+    },
+  );
+
+  test(
+    'read tracking revisits a message received during an in-flight read',
+    () async {
+      final context = _Context();
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      final firstRead = Completer<dynamic>();
+      context.callbacks['send_displayed'] = (args) async {
+        if (args['stanza_id'] == 'first') return firstRead.future;
+        return true;
+      };
+      await _start(runtime);
+      await runtime.invoke('conversation.open', {
+        ...viewArgs,
+        'atNewestEdge': true,
+      });
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      await _flush();
+      await runtime.onEvent({'type': 'message', 'data': _message('first')});
+      await _until(() => context.recorded('send_displayed').length == 1);
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {..._message('second'), 'timestamp': '2026-10-31T10:01:00Z'},
+      });
+      expect(context.recorded('send_displayed'), hasLength(1));
+      firstRead.complete(true);
+      await _until(() => context.recorded('send_displayed').length == 2);
+      expect(context.recorded('send_displayed').last['stanza_id'], 'second');
+    },
+  );
+
+  test('a failed read does not block a later explicit retry', () async {
+    final context = _Context();
+    final runtime = ConversationRuntime(context);
+    addTearDown(runtime.dispose);
+    var attempts = 0;
+    context.callbacks['send_displayed'] = (_) async {
+      if (++attempts == 1) throw StateError('temporary failure');
+      return true;
+    };
+    await _start(runtime);
+    await runtime.invoke('conversation.open', {
+      ...viewArgs,
+      'atNewestEdge': true,
+    });
+    await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+    await _flush();
+    await runtime.onEvent({'type': 'message', 'data': _message('retry')});
+    await _until(() => context.emissions.any((event) => event.$1 == 'error'));
+    await runtime.invoke('conversation.read', {
+      ...viewArgs,
+      'atNewestEdge': true,
+    });
+    await _until(() => attempts == 2);
+    await _until(
+      () =>
+          runtimeMap(
+            runtimeMap(context.persistent['conversationReadCursors'])[room],
+          )['id'] ==
+          'retry',
+    );
+  });
+
+  test('inserted content passes only supplied file metadata', () async {
+    final context = _Context();
+    final runtime = ConversationRuntime(context);
+    addTearDown(runtime.dispose);
+    await runtime.invoke('conversation.open', viewArgs);
+    await runtime.invoke('conversation.insertContent', {
+      ...viewArgs,
+      'data': Uint8List.fromList([1, 2, 3]),
+    });
+    final bytes = context.recorded('file.uploadBytes').single;
+    expect(bytes, isNot(contains('name')));
+    expect(bytes, isNot(contains('media_type')));
+    await runtime.invoke('conversation.insertContent', {
+      ...viewArgs,
+      'uri': 'content://keyboard/image',
+      'name': 'photo.webp',
+      'mimeType': 'image/webp',
+    });
+    final uri = context.recorded('file.uploadUri').single;
+    expect(uri['name'], 'photo.webp');
+    expect(uri['media_type'], 'image/webp');
+  });
+
+  test(
+    'real timeline retains metadata for resource-qualified direct messages',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      const args = {
+        'jid': 'alice@example.org',
+        'group': false,
+        'viewId': 'dm',
+        'atNewestEdge': false,
+      };
+      await _start(runtime);
+      await runtime.invoke('conversation.open', args);
+      await _until(() => context.recorded('fetch_dm_history').isNotEmpty);
+      await _flush();
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          'id': 'direct',
+          'origin_id': 'direct',
+          'from': 'alice@example.org/phone',
+          'to': '$own/desktop',
+          'message_type': 'chat',
+          'body': 'Bold words',
+          'timestamp': '2026-10-31T10:00:00Z',
+          'markup_spans': [
+            {'start': 0, 'end': 4, 'span_type': 'bold'},
+          ],
+          'link_previews': [
+            {'original_url': 'https://example.org/', 'title': 'preview'},
+          ],
+          'shared_files': [
+            {
+              'url': 'https://files.example.org/file.txt',
+              'name': 'file.txt',
+              'media_type': 'text/plain',
+              'size': 3,
+              'hashes': [
+                {
+                  'algo': 'sha-256',
+                  'value_b64': 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=',
+                },
+              ],
+              'encrypted': null,
+            },
+          ],
+        },
+      });
+      final row = runtimeRows(context.conversation['messages']).single;
+      expect(runtimeRows(row['markup']), hasLength(1));
+      expect(runtimeRows(row['linkPreviews']).single['title'], 'preview');
+      await runtime.invoke('conversation.fileOpen', {
+        ...args,
+        'targetId': 'direct',
+        'fileId': '0',
+      });
+      expect(
+        runtimeRows(
+          runtimeMap(context.recorded('file.open').single['file'])['hashes'],
+        ),
+        hasLength(1),
+      );
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          'id': 'other',
+          'origin_id': 'other',
+          'stanza_id': 'direct',
+          'stanza_id_by': 'attacker.example.org',
+          'from': 'alice@example.org/phone',
+          'to': '$own/desktop',
+          'message_type': 'chat',
+          'body': 'Other',
+          'timestamp': '2026-10-31T10:01:00Z',
+          'link_previews': [
+            {'original_url': 'https://attacker.example.org/', 'title': 'spoof'},
+          ],
+        },
+      });
+      final original = runtimeRows(
+        context.conversation['messages'],
+      ).singleWhere((row) => row['id'] == 'direct');
+      expect(runtimeRows(original['linkPreviews']).single['title'], 'preview');
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
+    'room projection does not attach a new nickname owners colliding metadata',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      await runtime.onEvent({
+        'type': 'presence',
+        'data': {'from': '$room/alex', 'muc_jid': 'alice@example.org'},
+      });
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          ..._message('original', origin: 'chosen-id'),
+          'link_previews': [
+            {
+              'original_url': 'https://example.org/original',
+              'title': 'original',
+            },
+          ],
+        },
+      });
+      await runtime.onEvent({
+        'type': 'presence',
+        'data': {'from': '$room/alex', 'muc_jid': 'mallory@example.org'},
+      });
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          ..._message('attacker', origin: 'chosen-id'),
+          'link_previews': [
+            {
+              'original_url': 'https://example.org/attacker',
+              'title': 'attacker',
+            },
+          ],
+        },
+      });
+      final original = runtimeRows(
+        context.conversation['messages'],
+      ).singleWhere((row) => row['id'] == 'original');
+      expect(runtimeRows(original['linkPreviews']).single['title'], 'original');
+      await runtime.onEvent({
+        'type': 'presence',
+        'data': {'from': '$room/alex', 'muc_jid': 'alice@example.org'},
+      });
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          ..._message('correction', origin: 'chosen-id'),
+          'replaces_id': 'chosen-id',
+          'link_previews': [
+            {
+              'original_url': 'https://example.org/correction',
+              'title': 'mutation',
+            },
+          ],
+        },
+      });
+      final corrected = runtimeRows(
+        context.conversation['messages'],
+      ).singleWhere((row) => row['id'] == 'original');
+      expect(
+        runtimeRows(corrected['linkPreviews']).single['title'],
+        'original',
+      );
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
+    'trusted room identities keep duplicate sender origins on separate files',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      Map<String, dynamic> message(String stanza, String name, String style) =>
+          {
+            ..._message(stanza, origin: 'shared-origin'),
+            'body': 'hello',
+            'markup_spans': [
+              {'start': 0, 'end': 5, 'span_type': style},
+            ],
+            'shared_files': [
+              {
+                'url': 'https://files.example.org/$name',
+                'name': name,
+                'media_type': 'text/plain',
+                'size': 3,
+                'encrypted': null,
+              },
+            ],
+          };
+      await runtime.onEvent({
+        'type': 'message',
+        'data': message('stanza-a', 'a.txt', 'bold'),
+      });
+      final first = runtimeRows(context.conversation['messages']).single;
+      final firstRevision = runtimeRows(
+        first['files'],
+      ).single['contentRevision'];
+      await runtime.onEvent({
+        'type': 'message',
+        'data': message('stanza-b', 'b.txt', 'italic'),
+      });
+      final rows = runtimeRows(context.conversation['messages']);
+      expect(rows, hasLength(2));
+      final a = rows.singleWhere((row) => row['id'] == 'stanza-a');
+      final b = rows.singleWhere((row) => row['id'] == 'stanza-b');
+      expect(runtimeRows(a['markup']).single['kind'], 'bold');
+      expect(runtimeRows(b['markup']).single['kind'], 'italic');
+      expect(runtimeRows(a['files']).single['name'], 'a.txt');
+      expect(runtimeRows(a['files']).single['contentRevision'], firstRevision);
+      expect(runtimeRows(b['files']).single['name'], 'b.txt');
+      expect(
+        runtimeRows(b['files']).single['contentRevision'],
+        isNot(firstRevision),
+      );
+      await expectLater(
+        runtime.invoke('conversation.fileBytes', {
+          ...viewArgs,
+          'targetId': 'shared-origin',
+          'fileId': '0',
+        }),
+        throwsStateError,
+      );
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'stanza-a',
+        'fileId': '0',
+      });
+      final file = runtimeMap(context.recorded('file.bytes').single['file']);
+      expect(file['name'], 'a.txt');
+      expect(file['url'], 'https://files.example.org/a.txt');
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
+    'actions reject canonical identities that serialize to the same value',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      await runtime.onEvent({
+        'type': 'message',
+        'data': _message('collision', origin: 'origin-a'),
+      });
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          ..._message('unused', origin: 'collision'),
+          'id': 'message-b',
+          'from': '$room/bob',
+          'stanza_id': null,
+          'stanza_id_by': null,
+        },
+      });
+      expect(
+        runtimeRows(
+          context.conversation['messages'],
+        ).where((row) => row['id'] == 'collision'),
+        hasLength(2),
+      );
+      await expectLater(
+        runtime.invoke('conversation.fileBytes', {
+          ...viewArgs,
+          'targetId': 'collision',
+          'fileId': '0',
+        }),
+        throwsStateError,
+      );
+      expect(context.recorded('file.bytes'), isEmpty);
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
+    'trusted row identities outrank other messages sender-chosen aliases',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      await runtime.onEvent({
+        'type': 'presence',
+        'data': {'from': '$room/alex', 'muc_jid': 'alice@example.org'},
+      });
+      Map<String, dynamic> message(
+        String stanza,
+        String id,
+        String origin,
+        String name,
+        String style,
+      ) => {
+        ..._message(stanza, origin: origin),
+        'id': id,
+        'body': 'hello',
+        'markup_spans': [
+          {'start': 0, 'end': 5, 'span_type': style},
+        ],
+        'shared_files': [
+          {
+            'url': 'https://files.example.org/$name',
+            'name': name,
+            'media_type': 'text/plain',
+            'size': 3,
+            'encrypted': null,
+          },
+        ],
+      };
+      await runtime.onEvent({
+        'type': 'message',
+        'data': message('trusted-a', 'message-a', 'origin-a', 'a.txt', 'bold'),
+      });
+      final first = runtimeRows(context.conversation['messages']).single;
+      final firstRevision = runtimeRows(
+        first['files'],
+      ).single['contentRevision'];
+      await runtime.onEvent({
+        'type': 'message',
+        'data': message(
+          'trusted-b',
+          'trusted-a',
+          'origin-b',
+          'b.txt',
+          'italic',
+        ),
+      });
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          ...message(
+            'trusted-c',
+            'message-c',
+            'trusted-a',
+            'c.txt',
+            'strikethrough',
+          ),
+          'from': '$room/bob',
+        },
+      });
+      final rows = runtimeRows(context.conversation['messages']);
+      expect(rows, hasLength(3));
+      final a = rows.singleWhere((row) => row['id'] == 'trusted-a');
+      final b = rows.singleWhere((row) => row['id'] == 'trusted-b');
+      expect(runtimeRows(a['markup']).single['kind'], 'bold');
+      expect(runtimeRows(b['markup']).single['kind'], 'italic');
+      expect(runtimeRows(a['files']).single['name'], 'a.txt');
+      expect(runtimeRows(a['files']).single['contentRevision'], firstRevision);
+      expect(runtimeRows(b['files']).single['name'], 'b.txt');
+      expect(
+        runtimeRows(b['files']).single['contentRevision'],
+        isNot(firstRevision),
+      );
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'trusted-a',
+        'fileId': '0',
+      });
+      expect(
+        runtimeMap(context.recorded('file.bytes').last['file'])['name'],
+        'a.txt',
+      );
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'trusted-b',
+        'fileId': '0',
+      });
+      expect(
+        runtimeMap(context.recorded('file.bytes').last['file'])['name'],
+        'b.txt',
+      );
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
+    'file content revisions change with the envelope without exposing secrets',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      const args = {
+        'jid': 'alice@example.org',
+        'group': false,
+        'viewId': 'dm',
+        'atNewestEdge': false,
+      };
+      await _start(runtime);
+      await runtime.invoke('conversation.open', args);
+      await _until(() => context.recorded('fetch_dm_history').isNotEmpty);
+      await _flush();
+      Map<String, dynamic> message(String key, String source, String hash) => {
+        'id': 'same',
+        'origin_id': 'same',
+        'from': 'alice@example.org/phone',
+        'to': '$own/desktop',
+        'message_type': 'chat',
+        'body': 'File',
+        'timestamp': '2026-10-31T10:00:00Z',
+        'shared_files': [
+          {
+            'url': source,
+            'name': 'file.png',
+            'media_type': 'image/png',
+            'size': 3,
+            'encrypted': {
+              'cipher': 'urn:xmpp:ciphers:aes-256-gcm-nopadding:0',
+              'key_b64': key,
+              'iv_b64': 'PRIVATE-IV',
+              'hashes': [
+                {'algo': 'sha-256', 'value_b64': hash},
+              ],
+              'sources': [source],
+            },
+          },
+        ],
+      };
+      Future<dynamic> revision(String key, String source, String hash) async {
+        await runtime.onEvent({
+          'type': 'message',
+          'data': message(key, source, hash),
+        });
+        return runtimeRows(
+          runtimeRows(context.conversation['messages']).single['files'],
+        ).single['contentRevision'];
+      }
+
+      final first = await revision(
+        'PRIVATE-KEY-ONE',
+        'https://files.example.org/one',
+        'PRIVATE-HASH-ONE',
+      );
+      expect(first, isA<String>());
+      expect(
+        await revision(
+          'PRIVATE-KEY-ONE',
+          'https://files.example.org/one',
+          'PRIVATE-HASH-ONE',
+        ),
+        first,
+      );
+      final newKey = await revision(
+        'PRIVATE-KEY-TWO',
+        'https://files.example.org/one',
+        'PRIVATE-HASH-ONE',
+      );
+      expect(newKey, isNot(first));
+      final newSource = await revision(
+        'PRIVATE-KEY-TWO',
+        'https://files.example.org/two',
+        'PRIVATE-HASH-ONE',
+      );
+      expect(newSource, isNot(newKey));
+      final newHash = await revision(
+        'PRIVATE-KEY-TWO',
+        'https://files.example.org/two',
+        'PRIVATE-HASH-TWO',
+      );
+      expect(newHash, isNot(newSource));
+      final presentation = jsonEncode(context.conversation);
+      expect(presentation, isNot(contains('PRIVATE-')));
+      expect(presentation, isNot(contains('files.example.org')));
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
+    'real timeline keeps plaintext hashes after raw history eviction',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      const digest = 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=';
+      context.responses['fetch_room_history'] = {
+        'messages': [
+          for (var index = 0; index < 1601; index++)
+            {
+              ..._message('history-$index'),
+              if (index == 0)
+                'link_previews': [
+                  {
+                    'original_url': 'https://example.org/old',
+                    'title': 'evicted',
+                  },
+                ],
+              if (index == 0)
+                'shared_files': [
+                  {
+                    'url': 'https://files.example.org/old.txt',
+                    'name': 'old.txt',
+                    'media_type': 'text/plain',
+                    'size': 3,
+                    'hashes': [
+                      {'algo': 'sha-256', 'value_b64': digest},
+                    ],
+                    'encrypted': null,
+                  },
+                ],
+            },
+        ],
+        'is_complete': true,
+      };
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      await _until(
+        () => runtimeRows(context.conversation['messages']).length == 1601,
+      );
+      final oldest = runtimeRows(
+        context.conversation['messages'],
+      ).singleWhere((row) => row['id'] == 'history-0');
+      expect(runtimeRows(oldest['linkPreviews']), isEmpty);
+      await runtime.invoke('conversation.fileOpen', {
+        ...viewArgs,
+        'targetId': 'history-0',
+        'fileId': '0',
+      });
+      final file = runtimeMap(context.recorded('file.open').single['file']);
+      expect(runtimeRows(file['hashes']).single['value_b64'], digest);
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
     'notification reply never replaces the active view or publishes read state',
     () async {
       final context = _Context();
@@ -660,6 +1352,7 @@ void main() {
       expect(context.recorded('send_groupchat_message'), isEmpty);
       expect(completed, isFalse);
       await _start(runtime);
+      await _selfPresence(runtime);
       expect(
         runtimeMap(
           context.recorded('send_groupchat_message').single['options'],
@@ -687,6 +1380,7 @@ void main() {
       final runtime = ConversationRuntime(context);
       addTearDown(runtime.dispose);
       await _start(runtime);
+      await _selfPresence(runtime);
       await runtime.invoke('conversation.open', viewArgs);
       await _flush();
       var completed = false;
@@ -982,11 +1676,127 @@ void main() {
   );
 
   test(
+    'a pending send does not hide another archived row with its origin',
+    () async {
+      final transport = NativeRustTransport(FfiRustBindings.load());
+      addTearDown(transport.close);
+      final context = _Context(realTimeline: transport)..transport = transport;
+      context.responses['fetch_room_history'] = {
+        'messages': [
+          {
+            ..._message('bootstrap'),
+            'reaction_target_id': 'not-loaded',
+            'reaction_emojis': ['👍'],
+          },
+        ],
+        'is_complete': false,
+        'first_id': 'bootstrap',
+      };
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await _selfPresence(runtime);
+      await runtime.invoke('conversation.open', viewArgs);
+      await _until(() => context.recorded('fetch_room_pins').isNotEmpty);
+      final localFile = {
+        'url': 'https://files.example.org/local.png',
+        'name': 'local.png',
+        'media_type': 'image/png',
+        'size': 3,
+        'hashes': <dynamic>[],
+        'encrypted': null,
+      };
+      context.responses['file.pickAndUpload'] = localFile;
+      await runtime.invoke('conversation.attach', viewArgs);
+      await _until(() => context.recorded('send_groupchat_message').isNotEmpty);
+      final id =
+          runtimeMap(
+                context.recorded('send_groupchat_message').single['options'],
+              )['stanza_id']
+              as String;
+      await runtime.onEvent({
+        'type': 'message',
+        'data': {
+          ..._message('confirmed-own', origin: id, mine: true),
+          'body': '',
+          'shared_files': [localFile],
+        },
+      });
+      context.responses['fetch_room_history'] = {
+        'messages': [
+          {
+            ..._message('other-archive', origin: id, mine: true),
+            'mam_id': 'other-archive',
+            'body': 'Another occupant used this nickname',
+            'shared_files': [
+              {
+                'url': 'https://files.example.org/other.png',
+                'name': 'other.png',
+                'media_type': 'image/png',
+                'size': 3,
+                'hashes': <dynamic>[],
+                'encrypted': null,
+              },
+            ],
+          },
+        ],
+        'is_complete': true,
+      };
+      await runtime.invoke('conversation.history', viewArgs);
+      final beforeAck = runtimeRows(context.conversation['messages']);
+      expect(beforeAck.where((row) => row['pending'] == true), hasLength(1));
+      final other = beforeAck.singleWhere(
+        (row) => row['id'] == 'other-archive',
+      );
+      expect(runtimeRows(other['files']).single['name'], 'other.png');
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'other-archive',
+        'fileId': '0',
+      });
+      expect(
+        runtimeMap(context.recorded('file.bytes').last['file'])['name'],
+        'other.png',
+      );
+      await runtime.onEvent({
+        'type': 'deliveryAcked',
+        'data': {'stanza_id': id},
+      });
+      await _until(
+        () => runtimeRows(context.persistent['conversationOutbox']).isEmpty,
+      );
+      final afterAck = runtimeRows(context.conversation['messages']);
+      expect(
+        afterAck.where((row) => row['id'] == 'confirmed-own'),
+        hasLength(1),
+      );
+      expect(
+        afterAck.where((row) => row['id'] == 'other-archive'),
+        hasLength(1),
+      );
+    },
+    skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
+        ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
+        : false,
+  );
+
+  test(
     'real Rust foreign origin collision cannot settle an acknowledged local send',
     () async {
       final transport = NativeRustTransport(FfiRustBindings.load());
       addTearDown(transport.close);
       final context = _Context(realTimeline: transport)..transport = transport;
+      context.responses['fetch_room_history'] = {
+        'messages': [
+          {
+            ..._message('bootstrap'),
+            'reaction_target_id': 'not-loaded',
+            'reaction_emojis': ['👍'],
+          },
+        ],
+        'is_complete': false,
+        'first_id': 'bootstrap',
+      };
       final runtime = ConversationRuntime(context);
       addTearDown(runtime.dispose);
       await _start(runtime);
@@ -1001,10 +1811,22 @@ void main() {
           'muc_affiliation': 'member',
         },
       });
-      await runtime.invoke('conversation.send', {
-        ...viewArgs,
-        'body': 'Genuine outbound',
-      });
+      final localFile = {
+        'url': 'https://private.example.org/secret.bin',
+        'name': 'private.png',
+        'media_type': 'image/png',
+        'size': 3,
+        'hashes': <dynamic>[],
+        'encrypted': {
+          'cipher': 'urn:xmpp:ciphers:aes-256-gcm-nopadding:0',
+          'key_b64': 'PRIVATE-KEY',
+          'iv_b64': 'PRIVATE-IV',
+          'hashes': <dynamic>[],
+          'sources': ['https://private.example.org/secret.bin'],
+        },
+      };
+      context.responses['file.pickAndUpload'] = localFile;
+      await runtime.invoke('conversation.attach', viewArgs);
       await _until(() => context.recorded('send_groupchat_message').isNotEmpty);
       final id =
           runtimeMap(
@@ -1021,8 +1843,75 @@ void main() {
           ..._message('foreign-reflection', origin: id),
           'from': '$room/attacker',
           'body': 'An attacker reused a visible origin ID',
+          'shared_files': [
+            {
+              'url': 'https://foreign.example.org/public.txt',
+              'name': 'public.txt',
+              'media_type': 'text/plain',
+              'size': 3,
+              'hashes': <dynamic>[],
+              'encrypted': null,
+            },
+          ],
         },
       });
+      expect(
+        runtimeRows(context.persistent['conversationOutbox']),
+        hasLength(1),
+      );
+      expect(
+        runtimeRows(
+          context.conversation['messages'],
+        ).where((row) => row['pending'] == true),
+        hasLength(1),
+      );
+      final projected = runtimeRows(context.conversation['messages']);
+      final foreign = projected.singleWhere(
+        (row) => row['id'] == 'foreign-reflection',
+      );
+      final pending = projected.singleWhere((row) => row['pending'] == true);
+      expect(runtimeRows(foreign['files']).single['name'], 'public.txt');
+      expect(runtimeRows(pending['files']).single['name'], 'private.png');
+      expect(jsonEncode(foreign), isNot(contains('private.example.org')));
+      expect(jsonEncode(foreign), isNot(contains('PRIVATE-KEY')));
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'foreign-reflection',
+        'fileId': '0',
+      });
+      final opened = runtimeMap(context.recorded('file.bytes').last['file']);
+      expect(opened['name'], 'public.txt');
+      expect(opened['url'], 'https://foreign.example.org/public.txt');
+      expect(jsonEncode(opened), isNot(contains('PRIVATE-KEY')));
+      await expectLater(
+        runtime.invoke('conversation.fileBytes', {
+          ...viewArgs,
+          'targetId': 'foreign-reflection',
+          'fileId': '1',
+        }),
+        throwsStateError,
+      );
+      final archivedImposter = {
+        ..._message('archive-imposter', origin: id, mine: true),
+        'mam_id': 'archive-imposter',
+        'body': 'Reused nickname',
+        'shared_files': [
+          {
+            'url': 'https://foreign.example.org/archive.txt',
+            'name': 'archive.txt',
+            'media_type': 'text/plain',
+            'size': 3,
+            'hashes': <dynamic>[],
+            'encrypted': null,
+          },
+        ],
+      };
+      context.responses['fetch_room_history'] = {
+        'messages': [archivedImposter],
+        'is_complete': false,
+        'first_id': 'archive-imposter',
+      };
+      await runtime.invoke('conversation.history', viewArgs);
       expect(
         runtimeRows(context.persistent['conversationOutbox']),
         hasLength(1),
@@ -1037,20 +1926,104 @@ void main() {
         'type': 'message',
         'data': {
           ..._message('genuine-reflection', origin: id, mine: true),
-          'body': 'Genuine outbound',
+          'body': '',
+          'shared_files': [localFile],
         },
       });
       await _until(
         () => runtimeRows(context.persistent['conversationOutbox']).isEmpty,
       );
       final rows = runtimeRows(context.conversation['messages']);
-      expect(
-        rows.where((row) => row['mine'] == true).single['body'],
-        'Genuine outbound',
-      );
+      final ownRow = rows.where((row) => row['mine'] == true).single;
+      expect(runtimeRows(ownRow['files']).single['name'], 'private.png');
       expect(
         rows.where((row) => row['mine'] != true).single['body'],
         'An attacker reused a visible origin ID',
+      );
+      context.responses['fetch_room_history'] = {
+        'messages': [archivedImposter],
+        'is_complete': false,
+        'first_id': 'archive-imposter',
+      };
+      await runtime.invoke('conversation.history', viewArgs);
+      final imposter = runtimeRows(
+        context.conversation['messages'],
+      ).singleWhere((row) => row['id'] == 'archive-imposter');
+      expect(runtimeRows(imposter['files']).single['name'], 'archive.txt');
+      expect(jsonEncode(imposter), isNot(contains('private.example.org')));
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'archive-imposter',
+        'fileId': '0',
+      });
+      final archiveFile = runtimeMap(
+        context.recorded('file.bytes').last['file'],
+      );
+      expect(archiveFile['url'], 'https://foreign.example.org/archive.txt');
+      expect(jsonEncode(archiveFile), isNot(contains('PRIVATE-KEY')));
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'genuine-reflection',
+        'fileId': '0',
+      });
+      final genuineFile = runtimeMap(
+        context.recorded('file.bytes').last['file'],
+      );
+      expect(genuineFile['url'], 'https://private.example.org/secret.bin');
+      expect(runtimeMap(genuineFile['encrypted'])['key_b64'], 'PRIVATE-KEY');
+      final otherFile = {
+        ...localFile,
+        'url': 'https://other.example.org/other.bin',
+        'name': 'other.png',
+        'encrypted': {
+          ...runtimeMap(localFile['encrypted']),
+          'key_b64': 'OTHER-KEY',
+          'sources': ['https://other.example.org/other.bin'],
+        },
+      };
+      context.responses['fetch_room_history'] = {
+        'messages': [
+          {
+            ..._message('other-own-archive', origin: id, mine: true),
+            'mam_id': 'other-own-archive',
+            'author_real_jid': own,
+            'body': '',
+            'shared_files': [otherFile],
+          },
+        ],
+        'is_complete': true,
+      };
+      await runtime.invoke('conversation.history', viewArgs);
+      final ownRows = runtimeRows(context.conversation['messages']);
+      final other = ownRows.singleWhere(
+        (row) => row['id'] == 'other-own-archive',
+      );
+      final genuine = ownRows.singleWhere(
+        (row) => row['id'] == 'genuine-reflection',
+      );
+      expect(runtimeRows(other['files']).single['name'], 'other.png');
+      expect(
+        runtimeRows(other['files']).single['contentRevision'],
+        isNot(runtimeRows(genuine['files']).single['contentRevision']),
+      );
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'other-own-archive',
+        'fileId': '0',
+      });
+      final openedOther = runtimeMap(
+        context.recorded('file.bytes').last['file'],
+      );
+      expect(openedOther['url'], 'https://other.example.org/other.bin');
+      expect(runtimeMap(openedOther['encrypted'])['key_b64'], 'OTHER-KEY');
+      await runtime.invoke('conversation.fileBytes', {
+        ...viewArgs,
+        'targetId': 'genuine-reflection',
+        'fileId': '0',
+      });
+      expect(
+        runtimeMap(context.recorded('file.bytes').last['file'])['url'],
+        'https://private.example.org/secret.bin',
       );
     },
     skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null

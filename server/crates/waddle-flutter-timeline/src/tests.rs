@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::{TimelineCommand, TimelineSnapshot, TimelineStore};
@@ -29,6 +31,160 @@ fn room_message(author: &str, id: &str, body: &str) -> Value {
         "stanza_id":"untrusted-convenience-id","stanza_id_by":"mallory@example.org",
         "stanza_ids":[{"id":format!("archive-{id}"),"by":ROOM}],
     })
+}
+
+fn assert_index_matches_scan(store: &TimelineStore, indexed: &TimelineSnapshot) {
+    let room = ROOM.parse().expect("room JID");
+    let scanned = store.snapshot_by_scan(&room).expect("conversation exists");
+    assert_eq!(
+        serde_json::to_value(indexed).expect("indexed snapshot"),
+        serde_json::to_value(scanned).expect("scanned snapshot")
+    );
+}
+
+#[test]
+fn metadata_index_keeps_trusted_and_chosen_ids_separate() {
+    let mut store = TimelineStore::new();
+    let mut first = room_message("alex", "trusted-a", "first");
+    first["stanza_ids"] = json!([{"id":"trusted-a","by":ROOM}]);
+    first["_author_stamp"] = json!("alice@example.org");
+    first["thread"] = json!("first-thread");
+    let snapshot = ingest(&mut store, json!([first.clone()]), false);
+    assert_index_matches_scan(&store, &snapshot);
+
+    let mut same_actor = room_message("alex", "trusted-a", "second");
+    same_actor["stanza_ids"] = json!([{"id":"trusted-b","by":ROOM}]);
+    same_actor["_author_stamp"] = json!("alice@example.org");
+    same_actor["thread"] = json!("second-thread");
+    let mut other_actor = room_message("bob", "trusted-a", "third");
+    other_actor["stanza_ids"] = json!([{"id":"trusted-c","by":ROOM}]);
+    other_actor["_author_stamp"] = json!("bob@example.org");
+    let snapshot = ingest(&mut store, json!([same_actor, other_actor]), false);
+    assert_index_matches_scan(&store, &snapshot);
+    assert_eq!(snapshot.items.len(), 3);
+    let a = snapshot
+        .items
+        .iter()
+        .find(|item| item.id == "trusted-a")
+        .expect("first row");
+    assert_eq!(a.archive_id.as_deref(), Some("trusted-a"));
+    assert_eq!(a.thread.as_deref(), Some("first-thread"));
+    assert_eq!(a.identity_ids, ["trusted-a"]);
+    let b = snapshot
+        .items
+        .iter()
+        .find(|item| item.id == "trusted-b")
+        .expect("second row");
+    assert_eq!(b.archive_id.as_deref(), Some("trusted-b"));
+    assert_eq!(b.thread.as_deref(), Some("second-thread"));
+
+    first["thread"] = json!("replayed-thread");
+    let snapshot = ingest(&mut store, json!([first.clone(), first]), false);
+    assert_index_matches_scan(&store, &snapshot);
+    let a = snapshot
+        .items
+        .iter()
+        .find(|item| item.id == "trusted-a")
+        .expect("first row");
+    assert_eq!(a.thread.as_deref(), Some("replayed-thread"));
+    assert_eq!(a.identity_ids, ["trusted-a"]);
+}
+
+#[test]
+fn origin_row_accepts_only_unambiguous_archived_identity() {
+    let mut store = TimelineStore::new();
+    let mut live = room_message("alex", "chosen", "first");
+    live["stanza_ids"] = json!([]);
+    live["stanza_id"] = Value::Null;
+    live["stanza_id_by"] = Value::Null;
+    live["_author_stamp"] = json!("alice@example.org");
+    let snapshot = ingest(&mut store, json!([live.clone()]), false);
+    assert_index_matches_scan(&store, &snapshot);
+    assert_eq!(snapshot.items[0].archive_id, None);
+
+    let mut archive = live;
+    archive["mam_id"] = json!("archive-a");
+    archive["author_real_jid"] = json!("alice@example.org");
+    let snapshot = ingest(&mut store, json!([archive.clone()]), true);
+    assert_index_matches_scan(&store, &snapshot);
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].id, "chosen");
+    assert_eq!(snapshot.items[0].archive_id.as_deref(), Some("archive-a"));
+
+    archive["mam_id"] = json!("archive-b");
+    let snapshot = ingest(&mut store, json!([archive]), true);
+    assert_index_matches_scan(&store, &snapshot);
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].archive_id, None);
+    assert_eq!(snapshot.items[0].identity_ids, ["chosen"]);
+}
+
+#[test]
+fn plaintext_and_encrypted_hashes_survive_the_typed_timeline() {
+    let digest = STANDARD.encode([7_u8; 32]);
+    let mut original = room_message("alex", "file", "");
+    original["shared_files"] = json!([{
+        "url":"https://files.example.org/file",
+        "name":"file.png",
+        "media_type":"image/png",
+        "size":3,
+        "hashes":[{"algo":"sha-256","value_b64":digest}],
+        "encrypted":{
+            "cipher":"urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+            "key_b64":"key","iv_b64":"iv",
+            "hashes":[{"algo":"sha-256","value_b64":"ciphertext-digest"}],
+            "sources":["https://files.example.org/file"]
+        }
+    }]);
+    let mut store = TimelineStore::new();
+    let snapshot = ingest(&mut store, json!([original]), false);
+    let file = &snapshot.items[0].attachments[0];
+    assert_eq!(file.hashes[0].value_b64, digest);
+    assert_eq!(
+        file.encryption.as_ref().expect("encrypted").sha256_b64,
+        ["ciphertext-digest"]
+    );
+    let serialized = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    assert_eq!(
+        serialized["items"][0]["attachments"][0]["hashes"][0]["value_b64"],
+        digest
+    );
+
+    let local = apply(
+        &mut store,
+        "timeline_local_echo",
+        json!({
+            "conversation_jid":ROOM,"account_jid":ACCOUNT,"group":true,"own_nick":"david",
+            "origin_id":"local","body":"","timestamp_ms":1,
+            "attachments":[{"url":"https://files.example.org/local","hashes":[
+                {"algo":"sha-256","value_b64":digest}
+            ]}]
+        }),
+    );
+    let local_file = &local
+        .items
+        .iter()
+        .find(|item| item.own)
+        .expect("local echo")
+        .attachments[0];
+    assert_eq!(local_file.hashes[0].value_b64, digest);
+}
+
+#[test]
+fn absent_hashes_remain_optional_but_invalid_sha256_is_not_dropped() {
+    let mut original = room_message("alex", "file", "");
+    original["shared_files"] = json!([
+        {"url":"https://files.example.org/legacy"},
+        {"url":"https://files.example.org/invalid","hashes":[
+            {"algo":"sha-256","value_b64":"not-base64"}
+        ]}
+    ]);
+    let mut store = TimelineStore::new();
+    let snapshot = ingest(&mut store, json!([original]), false);
+    let files = &snapshot.items[0].attachments;
+    assert!(files[0].hashes.is_empty());
+    assert_eq!(files[1].hashes.len(), 1);
+    assert_eq!(files[1].hashes[0].value_b64, "");
 }
 
 #[test]

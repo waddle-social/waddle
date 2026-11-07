@@ -140,7 +140,17 @@ pub struct Attachment {
     pub size: Option<u64>,
     /// XEP-0446 `disposition='inline'`: show it in the message.
     pub inline: bool,
+    /// Advertised SHA-256 digests of the plaintext file.
+    pub hashes: Vec<Sha256Digest>,
     pub encryption: Option<Encryption>,
+}
+
+/// A supported file digest, including malformed advertisements that must fail
+/// verification rather than being treated as an absent hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sha256Digest {
+    Valid([u8; 32]),
+    Invalid,
 }
 
 /// XEP-0448: how to decrypt an attachment.
@@ -2136,6 +2146,7 @@ mod tests {
             media_type: Some("image/png".into()),
             size: Some(3),
             inline: true,
+            hashes: Vec::new(),
             encryption: None,
         }
     }

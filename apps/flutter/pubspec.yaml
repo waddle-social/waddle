@@ -13,8 +13,10 @@ dependencies:
   ffi: ^2.1.4
   livekit_client: ^2.13.2
   file_picker: ^13.3.0
+  android_file_picker: ^2.1.2
   file_selector: ^1.1.0
   http: ^1.6.0
+  crypto: ^3.0.8
   cryptography: ^2.9.0
   image: ^4.5.4
   url_launcher: ^6.3.2
