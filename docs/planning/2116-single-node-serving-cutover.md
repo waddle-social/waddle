@@ -418,3 +418,35 @@ login/backend and privileged-mutator cutoff, all other ingress writers,
 source/recipient and SM participation, complete role/store qualification and
 end-to-end startup tests. Do not change the selector, pinned `into_parts`
 refusal, either restricted-startup refusal, or workflows in this pilot.
+
+### Restricted startup admission and selected cutover after #2250
+
+#2250 merged the one-receipt pilot without selecting serving. The next grouped
+work begins at the actual `WADDLE_DB_RUNTIME_ATTESTATION` startup branch, rather
+than another isolated caller. An independently provisioned identity and pin
+handoff must establish the direct primary, old-login/backend and prepared
+transaction cutoff, and the privileged-mutator policy before a pinned pool
+hook can read protected catalog data. The startup path may return a sealed
+preparation result only while those premises remain enforceable. It must still
+refuse before listener publication and workers until every enabled store and
+writer uses the same authority and recovery protocol.
+
+The privileged migration runner, ACL/role installer, and concurrent-index
+maintenance paths either take the catalog fence exclusively before lineage,
+ledger, epoch and application locks, or are durably quiesced for the entire
+selected interval. A startup snapshot or a boolean operator assertion cannot
+replace an ongoing mutator and old-backend fence. Inherited listeners and the
+old process require an explicit accepting/writing cutoff before the new child
+can publish authority. A cancelled pool checkout with no returned backend PID
+remains indeterminate until the original primary is fenced and reconciled.
+
+Next, move ordinary ingress and all enabled stores from legacy `Database`
+transactions to closed pinned operations with stable source occurrences,
+supervised cancellation custody and positive-only unknown-COMMIT recovery.
+Compose the exact S/R/A/H/T/I/M/migrator privileges, singleton slot, durable
+claim, SM revision, recipient route and terminal proof in the reviewed lock
+order. Keep `into_parts` and both restricted-startup refusals closed until a
+single-node PostgreSQL 17 startup, real WebSocket/XEP-0198 flows, old-writer
+cutoff, all-store role matrix and cold/inherited failure schedules pass on one
+exact release candidate. This is a dependency order, not authority to enable
+the receipt pilot alone.
