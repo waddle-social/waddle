@@ -88,33 +88,35 @@ async fn wait_for_idle_retry(admin: &PgPool, application: &str) -> i32 {
     .expect("failed try ends its transaction, snapshot, and advisory locks")
 }
 
-async fn wait_for_ledger_waiter(admin: &PgPool, pid: i32) {
+async fn wait_for_fenced_migration_waiter(admin: &PgPool, application: &str) -> i32 {
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let state: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
-                   WHERE pid = $1 AND locktype = 'advisory' AND NOT granted \
-                     AND objsubid = 1 \
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT a.pid FROM pg_catalog.pg_stat_activity a \
+                 WHERE a.application_name = $1 AND a.wait_event_type = 'Lock' \
+                 AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
+                   WHERE pid = a.pid AND locktype = 'advisory' AND granted \
+                     AND mode = 'ExclusiveLock' AND objsubid = 1 \
                      AND ((classid::bigint << 32) | objid::bigint) = $2) \
                  AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
-                   WHERE pid = $1 AND locktype = 'advisory' AND granted \
+                   WHERE pid = a.pid AND locktype = 'advisory' AND granted \
                      AND mode = 'ExclusiveLock' AND objsubid = 1 \
                      AND ((classid::bigint << 32) | objid::bigint) = $3)",
             )
-            .bind(pid)
+            .bind(application)
             .bind(LEDGER_KEY)
             .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
-            .fetch_one(admin)
+            .fetch_optional(admin)
             .await
             .expect("inspect migration lock order");
-            if state {
-                break;
+            if let Some(pid) = pid {
+                return pid;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("runner holds catalog fence before waiting for ledger");
+    .expect("migration waiting on relation holds catalog and ledger locks")
 }
 
 async fn shared_try(connection: &mut PgConnection) -> bool {
@@ -223,43 +225,107 @@ async fn postgres_migration_catalog_fence_orders_retries_and_reindex() {
             let mut run = tokio::task::spawn_local(async move {
                 MigrationRunner::single().run(&migration_db).await
             });
-            let pid = wait_for_idle_retry(&admin, &application).await;
+            wait_for_idle_retry(&admin, &application).await;
             assert!(tokio::time::timeout(Duration::from_millis(100), &mut run)
                 .await
                 .is_err());
             unlock_shared(&mut blocker).await;
-            wait_for_ledger_waiter(&admin, pid).await;
             let mut observer = PgConnection::connect(&url).await.expect("observer session");
-            assert!(!shared_try(&mut observer).await);
-
-            // Cancelling the task does not establish that the server stopped
-            // its already-sent ledger wait. The fence remains held until the
-            // blocked statement can finish and the queued rollback completes.
-            run.abort();
-            assert!(run.await.expect_err("cancelled runner").is_cancelled());
-            assert!(!shared_try(&mut observer).await);
-            sqlx::query("COMMIT")
-                .execute(&mut blocker)
-                .await
-                .expect("release ledger blocker");
             wait_for_shared(&mut observer).await;
+            unlock_shared(&mut observer).await;
+
+            // The ledger-only blocker remains held through the full bounded
+            // retry period. Each failed ledger try releases the catalog fence.
+            let result = tokio::time::timeout(Duration::from_secs(20), &mut run)
+                .await
+                .expect("ledger contention is bounded")
+                .expect("runner task");
+            assert!(matches!(
+                result,
+                Err(DatabaseError::MigrationLedgerLockContended)
+            ));
+            let still_blocked: bool =
+                sqlx::query_scalar("SELECT NOT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(LEDGER_KEY)
+                    .fetch_one(&mut observer)
+                    .await
+                    .expect("verify ledger blocker remains held");
+            assert!(still_blocked);
+            assert!(shared_try(&mut observer).await);
             unlock_shared(&mut observer).await;
             let ledger: Option<String> =
                 sqlx::query_scalar("SELECT pg_catalog.to_regclass($1)::text")
                     .bind(format!("{schema}._migrations"))
                     .fetch_one(&admin)
                     .await
-                    .expect("inspect cancelled migration");
-            assert!(
-                ledger.is_none(),
-                "cancelled runner never started migrations"
-            );
-
-            let applied = MigrationRunner::single()
-                .run(&db)
+                    .expect("inspect refused migration");
+            assert!(ledger.is_none(), "refused runner did not start migrations");
+            sqlx::query("COMMIT")
+                .execute(&mut blocker)
                 .await
-                .expect("migrate after acknowledged rollback");
-            assert!(!applied.is_empty());
+                .expect("release ledger blocker only after refusal");
+
+            // Wait inside an actual schema operation with both advisory locks
+            // held, then cancel. A cancellation cannot prove that the server
+            // ended the in-flight statement or released the fence.
+            sqlx::query(&format!(
+                "CREATE TABLE {schema}._migrations (version bigint PRIMARY KEY, \
+                 description text NOT NULL, checksum text, \
+                 applied_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            .execute(&admin)
+            .await
+            .expect("create empty ledger");
+            sqlx::query("BEGIN")
+                .execute(&mut blocker)
+                .await
+                .expect("begin relation blocker");
+            sqlx::query(&format!(
+                "LOCK TABLE {schema}._migrations IN ACCESS EXCLUSIVE MODE"
+            ))
+            .execute(&mut blocker)
+            .await
+            .expect("hold relation lock");
+            let migration_db = db.clone();
+            let run = tokio::task::spawn_local(async move {
+                MigrationRunner::single().run(&migration_db).await
+            });
+            wait_for_fenced_migration_waiter(&admin, &application).await;
+            assert!(!shared_try(&mut observer).await);
+
+            run.abort();
+            assert!(run.await.expect_err("cancelled runner").is_cancelled());
+            assert!(!shared_try(&mut observer).await);
+            sqlx::query("COMMIT")
+                .execute(&mut blocker)
+                .await
+                .expect("release relation blocker");
+            wait_for_shared(&mut observer).await;
+            unlock_shared(&mut observer).await;
+            let rows: i64 =
+                sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}._migrations"))
+                    .fetch_one(&admin)
+                    .await
+                    .expect("inspect cancelled migration ledger");
+            assert_eq!(rows, 0, "cancelled runner recorded no migrations");
+
+            let concurrent_db = Database::from_config("concurrent migration witness", &config)
+                .await
+                .expect("open independent migration pool");
+            let first_runner = MigrationRunner::single();
+            let second_runner = MigrationRunner::single();
+            let (first, second) =
+                tokio::join!(first_runner.run(&db), second_runner.run(&concurrent_db));
+            let first = first.expect("first concurrent runner");
+            let second = second.expect("second concurrent runner");
+            let applied = if first.is_empty() {
+                assert!(!second.is_empty());
+                second
+            } else {
+                assert!(second.is_empty());
+                first
+            };
+            drop(concurrent_db);
             assert!(MigrationRunner::single()
                 .run(&db)
                 .await

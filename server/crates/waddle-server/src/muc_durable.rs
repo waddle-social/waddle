@@ -808,10 +808,9 @@ mod tests {
     }
 
     /// Poll `pg_locks` until a transaction is queued (ungranted) on the MUC
-    /// schema advisory lock, mirroring
-    /// `db::migrations::tests::wait_for_postgres_advisory_waiter`: Postgres
-    /// exposes a single-bigint advisory key with its high 32 bits in
-    /// `classid`, low 32 bits in `objid`, and `objsubid = 1`.
+    /// schema advisory lock. Postgres exposes a single-bigint advisory key
+    /// with its high 32 bits in `classid`, low 32 bits in `objid`, and
+    /// `objsubid = 1`.
     async fn wait_for_muc_schema_advisory_waiter(db: &Database) {
         let waiter = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
