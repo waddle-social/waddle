@@ -15,7 +15,8 @@ SELECT NOT EXISTS (
   WHERE n.nspname=$1 AND (pg_catalog.starts_with(c.relname,'ingress_')
     OR c.relname IN ('sessions','pending_delivery','p21_receipt_operation_results',
                      'singleton_candidate_slot','singleton_candidate_leases'))
-    AND (pg_catalog.pg_column_compression(t.tgargs) IS NOT NULL OR pg_catalog.pg_column_size(t.tgargs)>8192)
+    AND (pg_catalog.pg_column_compression(t.tgargs) IS NOT NULL OR pg_catalog.pg_column_size(t.tgargs)>8192
+      OR (t.tgqual IS NOT NULL AND pg_catalog.pg_column_size(t.tgqual)>32768))
 ) AND NOT EXISTS (
   SELECT 1 FROM pg_catalog.pg_constraint c
   JOIN pg_catalog.pg_class r ON r.oid=c.conrelid

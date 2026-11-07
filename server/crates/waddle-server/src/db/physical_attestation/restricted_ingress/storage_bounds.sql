@@ -40,7 +40,7 @@ SELECT NOT EXISTS (
      OR (p.proargmodes IS NOT NULL AND (pg_catalog.pg_column_compression(p.proargmodes) IS NOT NULL OR pg_catalog.pg_column_size(p.proargmodes)>8192))
 ) AND NOT EXISTS (
   SELECT 1 FROM pg_catalog.pg_trigger t JOIN relations r ON r.oid=t.tgrelid
-  WHERE t.tgqual IS NOT NULL
+  WHERE (t.tgqual IS NOT NULL AND pg_catalog.octet_length(t.tgqual::text)>32768)
      OR pg_catalog.pg_column_size(t.tgattr)>8192
 ) AND NOT EXISTS (
   SELECT 1 FROM pg_catalog.pg_constraint c JOIN relations r ON r.oid=c.conrelid
