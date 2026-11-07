@@ -124,6 +124,7 @@ impl RevisionedSmStorage {
             Mutation::Acknowledge { revision, h, mode } => {
                 let current = check_revision(&mut tx, revision).await?;
                 let frontier = current.frontier.acknowledge(*h)?;
+                reserve_acknowledgement_window(&mut tx, &current, *h).await?;
                 let driver = tx.driver();
                 promotion_inventory::acknowledge(&mut tx, &revision.stream, *h, driver, *mode)
                     .await
@@ -214,6 +215,53 @@ impl RevisionedSmStorage {
             None => Readback::Unconfirmed,
         })
     }
+}
+
+/// Reserve the wrapping settlement key before deleting any acknowledged
+/// frames. A previous full counter cycle can leave the same key unsettled;
+/// the shared promotion helper's conflict-ignoring insert cannot distinguish
+/// that older occurrence from this one. Lock the session row first to keep
+/// its existing session -> window lock order, and reject a collision rather
+/// than losing settlement evidence. A retry of the exact committed operation
+/// is resolved from its receipt before reaching this reservation.
+async fn reserve_acknowledgement_window(
+    tx: &mut Transaction<'_>,
+    current: &Capture,
+    h: u32,
+) -> Result<(), RevisionError> {
+    let sql = if tx.driver() == DatabaseDriver::Postgres {
+        "SELECT outbound_count, last_acked FROM sm_sessions WHERE stream_id = ? FOR UPDATE"
+    } else {
+        "SELECT outbound_count, last_acked FROM sm_sessions WHERE stream_id = ?"
+    };
+    let mut rows = tx
+        .query(sql, crate::db_params![current.revision.stream.as_str()])
+        .await
+        .map_err(storage)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(storage)?
+        .ok_or(RevisionError::GenerationChanged)?;
+    let outbound: i64 = row.get(0).map_err(storage)?;
+    let acknowledged: i64 = row.get(1).map_err(storage)?;
+    if outbound != i64::from(current.session.outbound_count)
+        || acknowledged != i64::from(current.session.last_acked)
+    {
+        return Err(RevisionError::StaleRevision);
+    }
+    drop(rows);
+    if h == current.session.last_acked {
+        return Ok(());
+    }
+    let inserted = tx.execute(
+        "INSERT INTO sm_acknowledged_windows (stream_id, from_exclusive, to_inclusive) VALUES (?, ?, ?) ON CONFLICT (stream_id, from_exclusive, to_inclusive) DO NOTHING",
+        crate::db_params![current.revision.stream.as_str(), i64::from(current.session.last_acked), i64::from(h)],
+    ).await.map_err(storage)?;
+    if inserted != 1 {
+        return Err(RevisionError::AcknowledgementWindowConflict);
+    }
+    Ok(())
 }
 
 async fn lock_stream(tx: &mut Transaction<'_>, stream: &SmSessionId) -> Result<(), RevisionError> {

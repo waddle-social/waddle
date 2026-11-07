@@ -796,6 +796,7 @@ async fn exercise(db: Database, second_db: Database) {
 
     exercise_watermarks_and_coverage(&a, &b, &blocker_db, &principal).await;
     exercise_exposure_frontier(&a, &b, &blocker_db, &principal).await;
+    exercise_ack_window_collision(&a, &b, &blocker_db, &principal).await;
 }
 
 #[tokio::test]
@@ -1794,4 +1795,185 @@ async fn verify_exposure_after_reopen(config: &DatabaseConfig) {
         })
         .await
         .expect("ACK the exposed prefix after reopening");
+}
+
+async fn exercise_ack_window_collision(
+    a: &RevisionedSmStorage,
+    b: &RevisionedSmStorage,
+    db: &Database,
+    principal: &AuthenticatedPrincipalRef,
+) {
+    for (label, from) in [("ordinary", 0_u32), ("wrapped", u32::MAX)] {
+        let mut source = session(&format!("ack-window-collision-{label}"));
+        let through = from.wrapping_add(1);
+        source.last_acked = from;
+        source.outbound_count = through;
+        let frames = vec![frame(&source.stream_id, through)];
+        let create = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Create {
+                generation: Uuid::new_v4(),
+                principal,
+                session: &source,
+                unacked: &frames,
+                drained: &[],
+            },
+        };
+        a.apply(&create).await.expect("create first ACK interval");
+        let captured = b.capture(&source.stream_id).await.expect("first capture");
+        let expose = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &captured.revision,
+                ordinal: captured.frontier.exposed() + 1,
+            },
+        };
+        a.apply(&expose).await.expect("expose first interval");
+        let captured = b
+            .capture(&source.stream_id)
+            .await
+            .expect("exposed first interval");
+        let first_ack = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &captured.revision,
+                h: through,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        let first_result = a.apply(&first_ack).await.expect("first ACK window");
+
+        // Model the same stream after one complete counter cycle, retaining
+        // the old unsettled window. Subsequent append and exposure use the
+        // normal candidate APIs; no billions-of-frames loop is needed.
+        let later_floor = (1_u64 << 32) + u64::from(from);
+        let later_floor = i64::try_from(later_floor).expect("fixture ordinal");
+        let mut tx = db.begin_immediate().await.expect("seed later cycle");
+        tx.execute(
+            "UPDATE sm_sessions SET last_acked = ?, outbound_count = ? WHERE stream_id = ?",
+            waddle_server::db_params![i64::from(from), i64::from(from), source.stream_id.as_str()],
+        )
+        .await
+        .expect("seed wrapping counters");
+        tx.execute(
+            "UPDATE sm_revision_authority SET acknowledged_ordinal = ?, exposed_ordinal = ?, appended_ordinal = ? WHERE stream_id = ?",
+            waddle_server::db_params![later_floor, later_floor, later_floor, source.stream_id.as_str()],
+        )
+        .await
+        .expect("seed nonwrapping frontier");
+        tx.commit().await.expect("commit later cycle");
+
+        let current = b
+            .capture(&source.stream_id)
+            .await
+            .expect("later-cycle capture");
+        let mut appended = current.session.clone();
+        appended.outbound_count = through;
+        let next = frame(&source.stream_id, through);
+        let custody = proof(&appended, &next);
+        let append = PersistedDetachedAppend {
+            session: appended,
+            stanza: next,
+            evicted_sequences: Vec::new(),
+            ingress_append: Some(custody.clone()),
+            new_delivery: false,
+        };
+        a.apply(&Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Append {
+                revision: &current.revision,
+                append: &append,
+            },
+        })
+        .await
+        .expect("append later occurrence");
+        let current = b.capture(&source.stream_id).await.expect("later append");
+        a.apply(&Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Expose {
+                revision: &current.revision,
+                ordinal: current.frontier.exposed() + 1,
+            },
+        })
+        .await
+        .expect("expose later occurrence");
+        let before = b
+            .capture(&source.stream_id)
+            .await
+            .expect("before colliding ACK");
+        let collision = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &before.revision,
+                h: through,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        assert!(matches!(
+            a.apply(&collision).await,
+            Err(RevisionError::AcknowledgementWindowConflict)
+        ));
+        assert_eq!(
+            b.readback(&collision)
+                .await
+                .expect("collision has no receipt"),
+            Readback::Unconfirmed
+        );
+        assert_eq!(
+            b.apply(&first_ack).await.expect("exact historical retry"),
+            first_result
+        );
+        let after = a.capture(&source.stream_id).await.expect("after collision");
+        assert_eq!(after.revision.value(), before.revision.value());
+        assert_eq!(after.frontier, before.frontier);
+        assert_eq!(after.session.last_acked, from);
+        assert_eq!(after.session.outbound_count, through);
+        assert_eq!(after.unacked.len(), 1);
+        assert_eq!(after.unacked[0].sequence, through);
+        assert_eq!(
+            after.unacked[0].stanza.to_element(),
+            append.stanza.stanza.to_element()
+        );
+
+        let mut rows = db.guard().await.expect("database guard").query(
+            "SELECT COUNT(*) FROM sm_acknowledged_windows WHERE stream_id = ? AND from_exclusive = ? AND to_inclusive = ?",
+            waddle_server::db_params![source.stream_id.as_str(), i64::from(from), i64::from(through)],
+        ).await.expect("old window query");
+        let row = rows
+            .next()
+            .await
+            .expect("window result")
+            .expect("window count");
+        assert_eq!(row.get::<i64>(0).expect("window count"), 1);
+        let mut rows = db.guard().await.expect("database guard").query(
+            "SELECT disposition FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
+            waddle_server::db_params![custody.key.message_key.to_storage().to_string(), i64::from(custody.key.kind.to_storage()), custody.key.semantic_identity_hash.to_vec(), custody.key.resource.to_string()],
+        ).await.expect("custody query");
+        let row = rows
+            .next()
+            .await
+            .expect("custody result")
+            .expect("custody row");
+        assert_eq!(row.get::<i64>(0).expect("custody disposition"), 0);
+
+        // A duplicate h has no new settlement interval and is still allowed.
+        let duplicate = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &after.revision,
+                h: from,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        assert_eq!(
+            a.apply(&duplicate).await.expect("duplicate ACK").effect,
+            Effect::Acknowledged
+        );
+        let duplicate_capture = b
+            .capture(&source.stream_id)
+            .await
+            .expect("duplicate capture");
+        assert_eq!(duplicate_capture.frontier, after.frontier);
+        assert_eq!(duplicate_capture.unacked.len(), 1);
+    }
 }

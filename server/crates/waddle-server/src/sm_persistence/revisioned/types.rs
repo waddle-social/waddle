@@ -179,6 +179,8 @@ pub enum RevisionError {
     InvalidExposure,
     #[error("acknowledgement exceeds the exposed frontier")]
     AcknowledgementBeyondExposure,
+    #[error("an earlier acknowledgement with the same wrapping window is unsettled")]
+    AcknowledgementWindowConflict,
     #[error("operation requires an unsupported authority or ledger mode")]
     Unsupported,
     #[error("session still has replay or pending custody")]

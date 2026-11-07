@@ -16,6 +16,10 @@
 //! A missing receipt after an uncertain commit is never evidence of rollback.
 //! A positive exposure receipt is historical and cannot authorize another
 //! attempt; a socket owner and its current claim must be fenced separately.
+//! Storage errors do not classify whether COMMIT succeeded; selection also
+//! needs a typed unknown-commit and original-backend reconciliation protocol.
+//! Colliding wrapping ACK windows fail closed until the earlier window is
+//! settled. ACK-window confirmation is not supported by this candidate.
 
 mod digest;
 mod frontier;
