@@ -51,6 +51,10 @@ pub struct GroupchatNotificationRecovery {
 pub enum InboxStorageError {
     #[error("inbox storage error: {0}")]
     Other(String),
+    /// The initialization commit may have succeeded, but its acknowledgement
+    /// was lost. Resolve the original backend before attempting another owner.
+    #[error("inbox PostgreSQL initialization commit is indeterminate")]
+    CommitIndeterminate,
 }
 
 /// Storage contract for the per-user inbox projection.

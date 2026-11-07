@@ -15,6 +15,9 @@ const ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 pub(crate) enum CatalogFenceLock {
     Exclusive(i64),
     ExclusivePair(i32, i32),
+    /// Match PostgreSQL's one-argument advisory lock on the signed bigint
+    /// obtained by widening the server's `hashtext` result.
+    ExclusiveHashtext(&'static str),
     Shared(i64),
     SharedPair(i32, i32),
 }
@@ -227,6 +230,15 @@ pub(crate) async fn try_catalog_fence_lock(
                 .bind(second)
                 .fetch_one(&mut *connection)
                 .await?
+        }
+        CatalogFenceLock::ExclusiveHashtext(key) => {
+            sqlx::query_scalar(
+                "SELECT pg_catalog.pg_try_advisory_xact_lock(\
+                 pg_catalog.hashtext($1)::pg_catalog.int8)",
+            )
+            .bind(key)
+            .fetch_one(&mut *connection)
+            .await?
         }
         CatalogFenceLock::Shared(key) => {
             sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
