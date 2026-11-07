@@ -46,6 +46,8 @@ pub(crate) mod promotion_inventory;
 /// writer or startup path selects this candidate.
 #[cfg(feature = "test-support")]
 pub mod recipient_route_interlock_candidate;
+/// Transactional revision participation, not selected by any serving path.
+pub mod revisioned;
 mod runtime_attach;
 mod schema;
 /// Unselected revision authority for the recipient-route snapshot laboratory.
