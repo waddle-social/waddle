@@ -49,8 +49,6 @@ mod pinned_receipt;
 pub(crate) use pinned_receipt::CustodiedReceiptAttempt;
 pub use pinned_receipt::{PinnedReceiptAuthority, PinnedReceiptCommit, PinnedReceiptError};
 mod pinned_mam;
-#[cfg(not(feature = "test-support"))]
-pub(crate) use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
 #[cfg(feature = "test-support")]
 pub use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
 mod pinned_pubsub;

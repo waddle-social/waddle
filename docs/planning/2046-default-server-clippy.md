@@ -23,3 +23,12 @@ would defeat the existing dark production compilation boundary.
 This is a lint and compilation boundary. It does not select the actor or MAM
 candidate, enable restricted serving, or complete #2046's release matrix.
 GitHub Actions and workflow files remain disabled until final qualification.
+
+## Local verification
+
+Strict `waddle-server --lib` Clippy passed with `-D warnings` in default,
+`test-support`, clustering, and all-feature configurations. Six focused
+real-socket actor-owner tests passed. Formatting and diff checks passed, and
+the source diff received independent review. The pinned MAM PostgreSQL tests,
+full workspace suite, and exact-release CI were not run for this lint-only
+change; no serving selector was activated.

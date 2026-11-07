@@ -364,14 +364,26 @@ pub(crate) struct SocketAdmission {
 /// only synchronous local publication work under the current node gate.
 #[derive(Clone)]
 pub(crate) struct ActorSocketPublicationAuthority {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     authority: Arc<TransportAuthority>,
 }
 
 impl ActorSocketPublicationAuthority {
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(crate) fn connection_ref(&self) -> &ConnectionRef {
         &self.authority.connection_ref
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(crate) fn admission_permit(&self) -> NodeAdmissionPermit {
         match &self.authority.source {
             IdentitySource::Clustered { source, stamp } => self
@@ -382,6 +394,7 @@ impl ActorSocketPublicationAuthority {
         }
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) fn with_current<R>(
         &self,
         operation: impl FnOnce() -> R,
@@ -1439,6 +1452,10 @@ impl WebSocketOutboundFrame {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     fn actor_data(
         frame: Message,
         transport: &Arc<TransportAuthority>,
@@ -1534,6 +1551,10 @@ where
         ))
     }
 
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    )]
     pub(crate) fn actor_data_frame(
         &self,
         frame: Message,
