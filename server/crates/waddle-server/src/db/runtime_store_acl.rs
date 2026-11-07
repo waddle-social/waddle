@@ -11,7 +11,6 @@ struct Relation {
     insert: bool,
     update: bool,
     delete: bool,
-    read_only: bool,
 }
 
 const INBOX_RELATIONS: &[Relation] = &[
@@ -20,14 +19,12 @@ const INBOX_RELATIONS: &[Relation] = &[
         insert: true,
         update: true,
         delete: false,
-        read_only: false,
     },
     Relation {
         name: "groupchat_notification_recovery",
         insert: true,
         update: true,
         delete: true,
-        read_only: false,
     },
 ];
 const GLOBAL_RELATIONS: &[Relation] = &[
@@ -36,14 +33,12 @@ const GLOBAL_RELATIONS: &[Relation] = &[
         insert: false,
         update: false,
         delete: false,
-        read_only: true,
     },
     Relation {
         name: "_migrations",
         insert: false,
         update: false,
         delete: false,
-        read_only: true,
     },
 ];
 const SM_RELATIONS: &[Relation] = &[
@@ -52,28 +47,24 @@ const SM_RELATIONS: &[Relation] = &[
         insert: true,
         update: true,
         delete: true,
-        read_only: false,
     },
     Relation {
         name: "sm_unacked",
         insert: true,
         update: false,
         delete: true,
-        read_only: false,
     },
     Relation {
         name: "sm_acknowledged_windows",
         insert: true,
         update: false,
         delete: true,
-        read_only: false,
     },
     Relation {
         name: "sm_ingress_appends",
         insert: true,
         update: true,
         delete: true,
-        read_only: false,
     },
 ];
 const PENDING_RELATIONS: &[Relation] = &[
@@ -82,21 +73,18 @@ const PENDING_RELATIONS: &[Relation] = &[
         insert: true,
         update: true,
         delete: true,
-        read_only: false,
     },
     Relation {
         name: "pending_delivery_sm_promotions",
         insert: true,
         update: false,
         delete: true,
-        read_only: false,
     },
     Relation {
         name: "pending_delivery_startup_migrations",
         insert: false,
         update: false,
         delete: false,
-        read_only: true,
     },
 ];
 
@@ -241,11 +229,11 @@ async fn relation_privileges_match(
         "SELECT c.relkind = 'r' AND NOT c.relrowsecurity \
          AND r.oid <> c.relowner AND NOT pg_catalog.pg_has_role(r.oid, c.relowner, 'SET') \
          AND pg_catalog.has_table_privilege(r.oid, c.oid, 'SELECT') \
-         AND (? = 0 OR pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT')) \
-         AND (? = 0 OR pg_catalog.has_table_privilege(r.oid, c.oid, 'UPDATE')) \
-         AND (? = 0 OR pg_catalog.has_table_privilege(r.oid, c.oid, 'DELETE')) \
-         AND (? = 0 OR (NOT pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE') \
-           AND NOT pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE'))) \
+         AND pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT') = (? <> 0) \
+         AND (? <> 0 OR NOT pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT')) \
+         AND pg_catalog.has_table_privilege(r.oid, c.oid, 'UPDATE') = (? <> 0) \
+         AND (? <> 0 OR NOT pg_catalog.has_any_column_privilege(r.oid, c.oid, 'UPDATE')) \
+         AND (pg_catalog.has_table_privilege(r.oid, c.oid, 'DELETE') = (? <> 0)) \
          AND NOT pg_catalog.has_table_privilege(r.oid, c.oid, 'TRUNCATE,REFERENCES,TRIGGER') \
          AND NOT pg_catalog.has_any_column_privilege(r.oid, c.oid, 'REFERENCES') \
          AND NOT pg_catalog.has_table_privilege(r.oid, c.oid, \
@@ -259,7 +247,15 @@ async fn relation_privileges_match(
            WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND acl.grantee = 0) \
          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
          JOIN pg_catalog.pg_roles r ON r.rolname = current_user WHERE n.nspname = ? AND c.relname = ?",
-        crate::db_params![relation.insert, relation.update, relation.delete, relation.read_only, schema, relation.name],
+        crate::db_params![
+            relation.insert,
+            relation.insert,
+            relation.update,
+            relation.update,
+            relation.delete,
+            schema,
+            relation.name
+        ],
     ).await?;
     match rows.next().await? {
         Some(row) => row.get(0),

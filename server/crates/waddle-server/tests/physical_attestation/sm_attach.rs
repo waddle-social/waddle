@@ -1,4 +1,4 @@
-//! Restricted, read-only attachment of the portable SM schema.
+//! Restricted attachment of the portable SM writer schema.
 
 use super::{
     attested_pool, install, test_url, url_with_schema, Database, DatabaseConfig, DatabaseDriver,
@@ -10,6 +10,10 @@ use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::sm_persistence::{
     bootstrap_portable_sm_owner_schema, DatabaseSmPersistence, SmRuntimeAttachError,
 };
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::persistence::PersistedUnackedStanza;
+use waddle_xmpp::Stanza;
+use xmpp_parsers::message::{Id, Message};
 
 async fn attach(db: &Database) -> Result<DatabaseSmPersistence, SmRuntimeAttachError> {
     DatabaseSmPersistence::attach_existing_postgres(db.clone()).await
@@ -66,16 +70,16 @@ async fn sm_startup_uses_attested_shared_pool_and_refuses_unsupported_paths() {
             component: "sm_sessions"
         })
     ));
-    for table in [
-        "sm_sessions",
-        "sm_unacked",
-        "sm_acknowledged_windows",
-        "sm_ingress_appends",
+    for (table, rights) in [
+        ("sm_sessions", "INSERT, UPDATE, DELETE"),
+        ("sm_unacked", "INSERT, DELETE"),
+        ("sm_acknowledged_windows", "INSERT, DELETE"),
+        ("sm_ingress_appends", "INSERT, UPDATE, DELETE"),
     ] {
         admin(
             &fixture,
             &format!(
-                "GRANT INSERT, UPDATE, DELETE ON {}.{table} TO {}",
+                "GRANT {rights} ON {}.{table} TO {}",
                 fixture.target, fixture.runtime
             ),
         )
@@ -85,8 +89,174 @@ async fn sm_startup_uses_attested_shared_pool_and_refuses_unsupported_paths() {
     let before = snapshot(&fixture).await;
     let storage = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
         .await
-        .expect("read-only shared-pool startup attachment");
+        .expect("writer startup attachment accepts the exact relation grants");
+    drop(storage);
+    for (table, column) in [
+        ("sm_unacked", "sequence"),
+        ("sm_acknowledged_windows", "from_exclusive"),
+    ] {
+        admin(
+            &fixture,
+            &format!(
+                "GRANT UPDATE ON {}.{table} TO {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+        let error = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+            .await
+            .err()
+            .expect("unexpected table UPDATE must fail writer startup");
+        assert!(matches!(
+            error.downcast_ref::<SmRuntimeAttachError>(),
+            Some(SmRuntimeAttachError::UnsafeRuntimePrivileges { component }) if *component == table
+        ));
+        admin(
+            &fixture,
+            &format!(
+                "REVOKE UPDATE ON {}.{table} FROM {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+        admin(
+            &fixture,
+            &format!(
+                "GRANT UPDATE ({column}) ON {}.{table} TO {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+        let error = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+            .await
+            .err()
+            .expect("unexpected column UPDATE must fail writer startup");
+        assert!(matches!(
+            error.downcast_ref::<SmRuntimeAttachError>(),
+            Some(SmRuntimeAttachError::UnsafeRuntimePrivileges { component }) if *component == table
+        ));
+        admin(
+            &fixture,
+            &format!(
+                "REVOKE UPDATE ({column}) ON {}.{table} FROM {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+    }
+    admin(
+        &fixture,
+        &format!("GRANT SELECT ON {}.sm_unacked TO PUBLIC", fixture.target),
+    )
+    .await;
+    let error = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+        .await
+        .err()
+        .expect("PUBLIC table access must fail writer startup");
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "sm_unacked"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!("REVOKE SELECT ON {}.sm_unacked FROM PUBLIC", fixture.target),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT UPDATE ON {}.sm_sessions TO {} WITH GRANT OPTION",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+        .await
+        .err()
+        .expect("runtime UPDATE grant option must fail writer startup");
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "sm_sessions"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE UPDATE ON {}.sm_sessions FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT UPDATE ON {}.sm_sessions TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE INSERT ON {}.sm_unacked FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+        .await
+        .err()
+        .expect("missing required INSERT must fail writer startup");
+    assert!(matches!(
+        error.downcast_ref::<SmRuntimeAttachError>(),
+        Some(SmRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "sm_unacked"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "GRANT INSERT ON {}.sm_unacked TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let storage = waddle_server::test_support::attach_sm_startup(&inherited, runtime, false)
+        .await
+        .expect("writer startup succeeds after restoring exact grants");
     assert_eq!(storage.list_all_sessions().await.expect("SM read").len(), 1);
+    let stream_id = SmSessionId::new("exact-writer-profile");
+    let mut message = Message::new(None);
+    message.id = Some(Id("exact-writer-profile-1".to_owned()));
+    storage
+        .append_unacked(PersistedUnackedStanza {
+            provenance: Default::default(),
+            ingress_receipts: Vec::new(),
+            stream_id: stream_id.clone(),
+            sequence: 1,
+            stanza: Box::new(Stanza::Message(message)).into(),
+            original_receipt_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("exact writer grants permit an unacked insert");
+    assert_eq!(
+        storage
+            .list_unacked(&stream_id)
+            .await
+            .expect("unacked read")
+            .len(),
+        1
+    );
+    assert_eq!(
+        storage
+            .ack_through(&stream_id, 1)
+            .await
+            .expect("unacked delete"),
+        1
+    );
     let error =
         match waddle_server::test_support::attach_sm_startup(&inherited, runtime, true).await {
             Ok(_) => panic!("clustered attachment must not fall back to portable SM"),

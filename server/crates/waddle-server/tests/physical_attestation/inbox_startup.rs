@@ -219,6 +219,30 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     .await
     .expect("grant recovery writes");
     sqlx::query(&format!(
+        "GRANT DELETE ON {}.inbox_entries TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant excess inbox delete");
+    let error = create_inbox_startup_for_test(&inherited, &runtime)
+        .await
+        .err()
+        .expect("unexpected inbox DELETE must fail writer startup");
+    assert!(matches!(
+        error.downcast_ref::<InboxRuntimeAttachError>(),
+        Some(InboxRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "inbox_entries"
+        })
+    ));
+    sqlx::query(&format!(
+        "REVOKE DELETE ON {}.inbox_entries FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore inbox delete rights");
+    sqlx::query(&format!(
         "INSERT INTO {}.inbox_entries (user_jid, partner_jid, kind, last_stanza_id, last_updated) VALUES ('alice@example.test', 'bob@example.test', 'direct', 'message-1', 1)",
         fixture.target
     ))
