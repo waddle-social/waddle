@@ -545,6 +545,7 @@ impl Database {
     /// pool, retaining its own physical writer capability. Stores that need
     /// to validate both sides of a split-pool contract can inspect this view
     /// without reopening a URL or borrowing the main-pool capability.
+    #[cfg(feature = "clustering")]
     pub(crate) fn attested_control_plane_pool_view(
         &self,
     ) -> Result<(Self, AttestedPostgresWriterCapability), DatabaseError> {

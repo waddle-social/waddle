@@ -147,6 +147,7 @@ impl NotificationOutboxStore {
 
     /// Reused, already marked pending custody must retain the exact existing
     /// approval and its live jobs, without inserting a new candidate or receipt.
+    #[cfg(test)]
     pub(crate) async fn attach_existing_candidate_lineage_in_transaction(
         tx: &mut Transaction<'_>,
         message_key: waddle_xmpp::ingress::MessageKey,
@@ -230,6 +231,7 @@ impl NotificationOutboxStore {
     /// Canonical candidate custody follows all live jobs even when another
     /// parent arrives after T1 coalesced/fanned out the original candidate.
     /// A settled scheduling relation remains an explicit terminal disposition.
+    #[cfg(test)]
     pub(crate) async fn attach_candidate_lineage_in_transaction(
         tx: &mut Transaction<'_>,
         message_key: waddle_xmpp::ingress::MessageKey,

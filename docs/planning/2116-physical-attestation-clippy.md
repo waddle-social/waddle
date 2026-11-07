@@ -16,7 +16,8 @@ unselected candidate work.
    narrowly scoped `#[expect(dead_code, reason = ...)]` with an explicit reason;
    do not add crate-wide or broad module suppressions.
 3. Avoid changes to runtime behavior, database operations, protocol behavior,
-   or unrelated Clippy findings.
+   or unrelated Clippy findings. Correct test-target style warnings that the
+   scoped command only reports after the library diagnostics are resolved.
 
 ## Verification
 
