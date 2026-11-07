@@ -113,7 +113,15 @@ impl RevisionedSmStorage {
             Mutation::Tombstone { .. } => return Err(RevisionError::Unsupported),
             Mutation::Prune { .. } => return Err(RevisionError::Unsupported),
             Mutation::Retire { revision } => {
-                check_revision(&mut tx, revision).await?;
+                let current = check_revision(&mut tx, revision).await?;
+                // A replay gap may account for an empty queue while counted
+                // frames remain unacknowledged. No terminal transition may
+                // discard that interval until an ACK has covered it.
+                if current.session.last_acked != current.session.outbound_count
+                    || current.session.replay_gap_through.is_some()
+                {
+                    return Err(RevisionError::OutstandingCustody);
+                }
                 let driver = tx.driver();
                 promotion_inventory::require_settled(&mut tx, &revision.stream, driver)
                     .await

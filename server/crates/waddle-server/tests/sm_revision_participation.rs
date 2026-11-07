@@ -306,7 +306,7 @@ async fn exercise(db: Database, second_db: Database) {
     };
     assert!(matches!(
         b.apply(&premature_retire).await,
-        Err(RevisionError::Storage(_))
+        Err(RevisionError::OutstandingCustody)
     ));
     let confirm = Request {
         id: Uuid::new_v4(),
@@ -380,7 +380,7 @@ async fn exercise(db: Database, second_db: Database) {
     };
     assert!(matches!(
         b.apply(&blocked_retire).await,
-        Err(RevisionError::Storage(_))
+        Err(RevisionError::OutstandingCustody)
     ));
 
     let mut terminal_session = session("terminal-stream");
@@ -932,6 +932,97 @@ async fn exercise_watermarks_and_coverage(
     principal: &AuthenticatedPrincipalRef,
 ) {
     for (label, last) in [("normal", 0_u32), ("wrapped", u32::MAX - 1)] {
+        // An empty replay suffix may still represent counted, unacknowledged
+        // frames when the gap reaches the outbound watermark.
+        let mut fully_gapped = session(&format!("revision-fully-gapped-{label}"));
+        fully_gapped.last_acked = last;
+        fully_gapped.outbound_count = last.wrapping_add(3);
+        fully_gapped.replay_gap_through = Some(fully_gapped.outbound_count);
+        let create = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Create {
+                generation: Uuid::new_v4(),
+                principal,
+                session: &fully_gapped,
+                unacked: &[],
+                drained: &[],
+            },
+        };
+        a.apply(&create).await.expect("create fully gapped stream");
+        let captured = b
+            .capture(&fully_gapped.stream_id)
+            .await
+            .expect("capture full gap");
+        assert!(captured.unacked.is_empty());
+        let retire = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Retire {
+                revision: &captured.revision,
+            },
+        };
+        assert!(matches!(
+            a.apply(&retire).await,
+            Err(RevisionError::OutstandingCustody)
+        ));
+        assert_eq!(
+            b.readback(&retire)
+                .await
+                .expect("retire refusal has no receipt"),
+            Readback::Unconfirmed
+        );
+        let partial = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &captured.revision,
+                h: last.wrapping_add(2),
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        a.apply(&partial).await.expect("partial ACK of full gap");
+        let captured = b
+            .capture(&fully_gapped.stream_id)
+            .await
+            .expect("capture partial full gap");
+        assert_eq!(
+            captured.session.replay_gap_through,
+            Some(fully_gapped.outbound_count)
+        );
+        let retire = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Retire {
+                revision: &captured.revision,
+            },
+        };
+        assert!(matches!(
+            a.apply(&retire).await,
+            Err(RevisionError::OutstandingCustody)
+        ));
+        let covering = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Acknowledge {
+                revision: &captured.revision,
+                h: fully_gapped.outbound_count,
+                mode: SmAcknowledgementMode::PreserveResumability,
+            },
+        };
+        b.apply(&covering).await.expect("ACK covers full gap");
+        let captured = a
+            .capture(&fully_gapped.stream_id)
+            .await
+            .expect("capture covered gap");
+        assert_eq!(captured.session.last_acked, captured.session.outbound_count);
+        assert_eq!(captured.session.replay_gap_through, None);
+        let retire = Request {
+            id: Uuid::new_v4(),
+            mutation: Mutation::Retire {
+                revision: &captured.revision,
+            },
+        };
+        assert!(
+            matches!(b.apply(&retire).await, Err(RevisionError::Storage(_))),
+            "the ACK window still requires settlement evidence"
+        );
+
         let mut source = session(&format!("revision-gap-{label}"));
         source.last_acked = last;
         source.outbound_count = last.wrapping_add(3);
