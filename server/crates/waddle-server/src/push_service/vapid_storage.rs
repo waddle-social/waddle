@@ -42,7 +42,7 @@ use waddle_xmpp::push::vapid::{InProcessVapidSigner, VapidSigner};
 use waddle_xmpp::XmppError;
 use zeroize::Zeroizing;
 
-use crate::db::{Database, IntoParams, Transaction};
+use crate::db::{CatalogFenceLock, Database, IntoParams, Transaction};
 
 pub use super::runtime_attach::VapidRuntimeAttachError;
 
@@ -250,6 +250,13 @@ impl VapidStorage {
     }
 
     async fn initialize(&self) -> Result<(), XmppError> {
+        if self.db.uses_attested_postgres_pool() {
+            return Err(XmppError::internal(
+                "attested VAPID runtime handles must use load_attested",
+            ));
+        }
+
+        let driver = self.db.driver();
         let i64_type = crate::db::i64_sql_type(self.db.driver());
         // `BLOB` is the SQLite byte type; Postgres requires `BYTEA`. Use the
         // configured driver to emit the dialect-correct column type.
@@ -272,13 +279,58 @@ impl VapidStorage {
             )
             "#
         );
-        self.run_execute(&sql, ()).await?;
-        self.run_execute(
-            "CREATE INDEX IF NOT EXISTS idx_push_service_vapid_keys_active \
-             ON push_service_vapid_keys (retired_at_ms, created_at_ms)",
-            (),
-        )
-        .await?;
+        let index_sql = "CREATE INDEX IF NOT EXISTS idx_push_service_vapid_keys_active \
+            ON push_service_vapid_keys (retired_at_ms, created_at_ms)";
+        match driver {
+            DatabaseDriver::Sqlite => {
+                self.run_execute(&sql, ()).await?;
+                self.run_execute(index_sql, ()).await?;
+            }
+            DatabaseDriver::Postgres => {
+                let mut tx = self
+                    .db
+                    .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+                        super::owner::PUSH_SCHEMA_ADVISORY_LOCK_KEY,
+                    )])
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("SET LOCAL lock_timeout = '3s'", ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("SET LOCAL statement_timeout = '30000ms'", ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                let mut rows = tx
+                    .query("SELECT pg_catalog.current_schema()::text", ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                let schema = rows
+                    .next()
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    .and_then(|row| row.get::<Option<String>>(0).ok().flatten())
+                    .ok_or_else(|| XmppError::internal("PostgreSQL VAPID schema is unavailable"))?;
+                drop(rows);
+                super::owner::verify_no_temp_push_relations_tx(&mut tx)
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                super::owner::lock_existing_push_relations_tx(&mut tx, &schema)
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                super::owner::invalidate_completion_marker_tx(&mut tx, &schema)
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute(&sql, ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute(index_sql, ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
         Ok(())
     }
 
