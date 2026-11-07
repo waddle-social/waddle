@@ -6,13 +6,17 @@ refusals remain active; this work cannot enable serving.
 ## Scope
 
 Convert the already-proven live executor receipt continuation to a dark,
-test-selected exact-main-pool authority. A complete immutable receipt tuple and
-nonzero operation UUID must be admitted synchronously before any cancellable
-await. An owned bounded supervisor retains that operation and its original
-attempt until exact positive journal readback or an explicitly unresolved
-outcome. It must not rerun the external effect or treat a missing row as
-rollback. The ordinary legacy and SQLite paths remain available under their
-current selection.
+test-selected exact-main-pool authority. Derive a stable, domain-separated,
+nonzero operation UUID from the committed effect-intent receipt identity, or
+persist the UUID with that source. A complete immutable receipt tuple and UUID
+must be admitted synchronously before any cancellable await. An owned bounded
+supervisor retains that operation and its original
+  attempt until exact positive journal readback or an explicitly unresolved
+  outcome. It must not rerun the external effect or treat a missing row as
+  rollback. Process-crash rediscovery is a separate serving gate unless this
+  group can prove the durable source of both UUID and tuple and preserve the
+  original-attempt fence. The ordinary
+  legacy and SQLite paths remain available under their current selection.
 
 Refactor the existing pinned receipt pilot only as needed to reuse a private
 non-Clone, exact-backend transaction path. Its first post-BEGIN statement
