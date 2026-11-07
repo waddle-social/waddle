@@ -927,8 +927,20 @@ async fn assert_catalog_locked(admin: &PgPool, expected_locked: bool) {
 }
 
 async fn exercise_pre_fence_idle_cap(url: &str, initial_idle: &str) {
-    let f = Fixture::new(url).await;
-    let target = PgConnectOptions::from_str(url).expect("PostgreSQL options");
+    // Advisory locks are database-scoped. A held catalog fence must not stall
+    // unrelated tests running against other schemas in the test database.
+    let cluster = PgPool::connect(url)
+        .await
+        .expect("connect disposable cluster");
+    let database = format!("vapid_idle_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {database}"))
+        .execute(&cluster)
+        .await
+        .expect("create isolated idle-cap database");
+    let mut isolated_url = url::Url::parse(url).expect("PostgreSQL URL");
+    isolated_url.set_path(&format!("/{database}"));
+    let f = Fixture::new(isolated_url.as_str()).await;
+    let target = PgConnectOptions::from_str(isolated_url.as_str()).expect("PostgreSQL options");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind local proxy");
@@ -942,7 +954,7 @@ async fn exercise_pre_fence_idle_cap(url: &str, initial_idle: &str) {
         release_receiver,
     ));
     let scoped = url_with_options(
-        url,
+        isolated_url.as_str(),
         &format!(
             "-c search_path={} -c idle_in_transaction_session_timeout={initial_idle}",
             f.schema
@@ -1041,6 +1053,11 @@ async fn exercise_pre_fence_idle_cap(url: &str, initial_idle: &str) {
     run_child(&f.url, "reuse", None);
     assert_eq!(f.count().await, 1);
     f.cleanup().await;
+    sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
+        .execute(&cluster)
+        .await
+        .expect("drop isolated idle-cap database");
+    cluster.close().await;
 }
 
 #[tokio::test]
