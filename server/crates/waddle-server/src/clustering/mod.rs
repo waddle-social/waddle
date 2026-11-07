@@ -92,6 +92,9 @@ pub mod route_bridge;
 /// [`claims`]/[`lease`]: the harness drives the node-lease loop directly.
 #[cfg(feature = "clustering")]
 pub mod self_fence;
+/// Unselected PostgreSQL single-node lease candidate. This does not fence
+/// existing claim or durable writers and is not a serving capability.
+pub mod singleton_lease;
 /// Owned swarm bring-up. Public so the multi-process cluster harness can run
 /// a swarm inside the test process (kameo's `init_global` is a process
 /// singleton, so multi-node behaviour is only testable across processes —
