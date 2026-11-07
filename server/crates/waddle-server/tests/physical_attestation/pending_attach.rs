@@ -140,6 +140,58 @@ async fn pending_startup_uses_attested_shared_pool_without_owner_repairs() {
         &format!("GRANT USAGE ON SEQUENCE {sequence} TO {}", fixture.runtime),
     )
     .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT UPDATE ON {}.pending_delivery_sm_promotions TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error = waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+        .await
+        .err()
+        .expect("unexpected promotion UPDATE must fail writer startup");
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "pending_delivery_sm_promotions"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE UPDATE ON {}.pending_delivery_sm_promotions FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    admin(
+        &fixture,
+        &format!(
+            "GRANT UPDATE (sequence) ON {}.pending_delivery_sm_promotions TO {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
+    let error = waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+        .await
+        .err()
+        .expect("unexpected promotion column UPDATE must fail writer startup");
+    assert!(matches!(
+        error.downcast_ref::<PendingRuntimeAttachError>(),
+        Some(PendingRuntimeAttachError::UnsafeRuntimePrivileges {
+            component: "pending_delivery_sm_promotions"
+        })
+    ));
+    admin(
+        &fixture,
+        &format!(
+            "REVOKE UPDATE (sequence) ON {}.pending_delivery_sm_promotions FROM {}",
+            fixture.target, fixture.runtime
+        ),
+    )
+    .await;
     let storage = waddle_server::test_support::attach_pending_startup(&inherited, runtime)
         .await
         .expect("read-only shared-pool startup attachment");
@@ -226,6 +278,62 @@ async fn pending_startup_uses_attested_shared_pool_without_owner_repairs() {
         ),
     )
     .await;
+    for privilege in ["UPDATE", "DELETE"] {
+        admin(
+            &fixture,
+            &format!(
+                "GRANT {privilege} ON {}.pending_delivery_startup_migrations TO {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+        let error = waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+            .await
+            .err()
+            .expect("read-only migration marker must reject table write privilege");
+        assert!(matches!(
+            error.downcast_ref::<PendingRuntimeAttachError>(),
+            Some(PendingRuntimeAttachError::UnsafeRuntimePrivileges {
+                component: "pending_delivery_startup_migrations"
+            })
+        ));
+        admin(
+            &fixture,
+            &format!(
+                "REVOKE {privilege} ON {}.pending_delivery_startup_migrations FROM {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+    }
+    for (privilege, column) in [("INSERT", "name"), ("UPDATE", "completed_at")] {
+        admin(
+            &fixture,
+            &format!(
+                "GRANT {privilege} ({column}) ON {}.pending_delivery_startup_migrations TO {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+        let error = waddle_server::test_support::attach_pending_startup(&inherited, runtime)
+            .await
+            .err()
+            .expect("read-only migration marker must reject column write privilege");
+        assert!(matches!(
+            error.downcast_ref::<PendingRuntimeAttachError>(),
+            Some(PendingRuntimeAttachError::UnsafeRuntimePrivileges {
+                component: "pending_delivery_startup_migrations"
+            })
+        ));
+        admin(
+            &fixture,
+            &format!(
+                "REVOKE {privilege} ({column}) ON {}.pending_delivery_startup_migrations FROM {}",
+                fixture.target, fixture.runtime
+            ),
+        )
+        .await;
+    }
     admin(&fixture, &format!("DELETE FROM {}.pending_delivery_startup_migrations WHERE name = 'legacy_mam_query_frames_v1'", fixture.target)).await;
     let error = match waddle_server::test_support::attach_pending_startup(&inherited, runtime).await
     {

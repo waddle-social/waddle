@@ -488,8 +488,8 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
             "SELECT, INSERT, UPDATE, DELETE",
         ),
         ("sm_sessions", "SELECT, INSERT, UPDATE, DELETE"),
-        ("sm_unacked", "SELECT, INSERT, UPDATE, DELETE"),
-        ("sm_acknowledged_windows", "SELECT, INSERT, UPDATE, DELETE"),
+        ("sm_unacked", "SELECT, INSERT, DELETE"),
+        ("sm_acknowledged_windows", "SELECT, INSERT, DELETE"),
         ("sm_ingress_appends", "SELECT, INSERT, UPDATE, DELETE"),
     ] {
         owner_sql(

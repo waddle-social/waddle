@@ -2506,6 +2506,59 @@ async fn restricted_attested_runtime_verifies_lineage_without_control_system_gra
             .expect("restricted store attachment"),
         fixture.lineage
     );
+    for relation in ["_lineage", "_migrations"] {
+        for privilege in ["INSERT", "UPDATE", "DELETE"] {
+            sqlx::query(&format!(
+                "GRANT {privilege} ON {}.{relation} TO {}",
+                fixture.target, fixture.runtime
+            ))
+            .execute(&fixture.admin)
+            .await
+            .expect("grant excess global table privilege");
+            let error = verify_global_runtime(&database, &runtime_config, &fixture.lineage)
+                .await
+                .expect_err("global read-only relation must reject write privilege");
+            assert!(matches!(
+                error,
+                RuntimeAttachmentError::UnsafeGlobalRuntime { component } if component == relation
+            ));
+            sqlx::query(&format!(
+                "REVOKE {privilege} ON {}.{relation} FROM {}",
+                fixture.target, fixture.runtime
+            ))
+            .execute(&fixture.admin)
+            .await
+            .expect("restore global read-only privilege profile");
+        }
+    }
+    for (relation, column, privilege) in [
+        ("_lineage", "lineage_uuid", "INSERT"),
+        ("_lineage", "lineage_uuid", "UPDATE"),
+        ("_migrations", "version", "INSERT"),
+        ("_migrations", "version", "UPDATE"),
+    ] {
+        sqlx::query(&format!(
+            "GRANT {privilege} ({column}) ON {}.{relation} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant excess global column privilege");
+        let error = verify_global_runtime(&database, &runtime_config, &fixture.lineage)
+            .await
+            .expect_err("global read-only relation must reject column write privilege");
+        assert!(matches!(
+            error,
+            RuntimeAttachmentError::UnsafeGlobalRuntime { component } if component == relation
+        ));
+        sqlx::query(&format!(
+            "REVOKE {privilege} ({column}) ON {}.{relation} FROM {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("restore global read-only column privilege profile");
+    }
     let mut wrong = fixture.lineage.clone();
     wrong.lineage_uuid = LineageUuid::new();
     assert!(verify_global_runtime(&database, &runtime_config, &wrong)
