@@ -145,7 +145,7 @@ async fn selected_entry_and_pool_hook_coordinate_with_catalog_mutator() {
 
     // The mutator now performs actual PostgreSQL concurrent index maintenance
     // under the exact protocol key used by both production candidates.
-    let mutator = CatalogFenceExclusive::acquire(
+    let mut mutator = CatalogFenceExclusive::acquire(
         &fixture.admin_options,
         CATALOG_MUTATION_ADVISORY_LOCK_KEY,
         WAIT,
@@ -216,7 +216,7 @@ async fn selected_entry_timeout_reports_and_discards_uncertain_backend() {
     .await
     .expect("timed-out backend is discarded");
 
-    let mut mutator = CatalogFenceExclusive::acquire(
+    let mutator = CatalogFenceExclusive::acquire(
         &fixture.admin_options,
         CATALOG_MUTATION_ADVISORY_LOCK_KEY,
         WAIT,
