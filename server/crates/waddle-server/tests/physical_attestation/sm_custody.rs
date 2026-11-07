@@ -49,6 +49,8 @@ struct Candidate {
 
 #[path = "sm_custody_drain_races.rs"]
 mod drain_races;
+#[path = "sm_custody_frame_occurrence.rs"]
+mod frame_occurrence;
 #[path = "sm_custody_lock_order.rs"]
 mod lock_order;
 #[path = "sm_custody_marker_transfer.rs"]
@@ -107,6 +109,8 @@ impl Candidate {
             "sm_custody_gates",
             "sm_custody_operations",
             "sm_custody_slots",
+            "sm_custody_frame_frontiers",
+            "sm_custody_frame_occurrences",
             "sm_custody_terminals",
             "sm_custody_transfers",
             "sm_custody_handoffs",

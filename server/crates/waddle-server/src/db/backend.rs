@@ -142,6 +142,7 @@ impl PendingPgAcquire {
             connection: Some(connection),
             permit: Some(permit),
             transaction_open: false,
+            discard_on_drop: false,
             runtime: tokio::runtime::Handle::current(),
         })
     }
@@ -190,6 +191,7 @@ struct PgLease {
     connection: Option<PoolConnection<sqlx::Postgres>>,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     transaction_open: bool,
+    discard_on_drop: bool,
     runtime: tokio::runtime::Handle,
 }
 
@@ -235,7 +237,7 @@ impl DerefMut for PgLease {
 
 impl Drop for PgLease {
     fn drop(&mut self) {
-        if self.transaction_open {
+        if self.transaction_open && !self.discard_on_drop {
             PgTransactionManager::start_rollback(self);
         }
 
@@ -252,6 +254,16 @@ impl Drop for PgLease {
         // Enter the original runtime for SQLx's empty PoolConnection drop,
         // which may spawn min-connections maintenance even during shutdown.
         let _runtime_guard = self.runtime.enter();
+        if self.discard_on_drop {
+            // `return_to_pool` ignores SQLx's close-on-drop flag. Drop the
+            // marked checkout itself so an uncertain transaction cannot be
+            // lent out again. Closing the socket is not proof the server has
+            // already finished its work or released its locks.
+            connection.close_on_drop();
+            drop(connection);
+            drop(permit);
+            return;
+        }
         let operation = connection.return_to_pool();
         drop(connection);
         let pending = PendingPgReturn {
@@ -962,6 +974,18 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Ensure a dropped PostgreSQL transaction closes its checkout instead
+    /// of returning a session whose completion has not been acknowledged.
+    pub(crate) fn discard_postgres_on_drop(&mut self) -> bool {
+        match &mut self.inner {
+            TransactionInner::Postgres(lease) => {
+                lease.discard_on_drop = true;
+                true
+            }
+            TransactionInner::Sqlite(_) => false,
+        }
+    }
+
     /// Reach the raw SQLite connection for connection-taking repositories.
     /// Returns `None` on PostgreSQL.
     pub(crate) fn sqlite_connection(&mut self) -> Option<&mut sqlx::SqliteConnection> {
@@ -1049,6 +1073,28 @@ impl<'a> Transaction<'a> {
             TransactionInner::Postgres(mut tx) => tx.rollback().await?,
         }
         Ok(())
+    }
+
+    /// Roll back a PostgreSQL transaction with a bounded acknowledgement.
+    /// Cancellation, timeout, and error discard the checkout rather than
+    /// returning an uncertain session to the pool. Discarding the socket does
+    /// not prove that the server has already released the transaction.
+    pub(crate) async fn rollback_bounded_discard(mut self, timeout: Duration) -> bool {
+        let TransactionInner::Postgres(lease) = &mut self.inner else {
+            return false;
+        };
+        // Set this before the cancellable await so dropping the whole future
+        // also follows the discard path.
+        lease.discard_on_drop = true;
+        if matches!(
+            tokio::time::timeout(timeout, lease.rollback()).await,
+            Ok(Ok(()))
+        ) {
+            lease.discard_on_drop = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// Commit the transaction. Drops without commit roll back automatically.

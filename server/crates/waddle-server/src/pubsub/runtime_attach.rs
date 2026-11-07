@@ -410,6 +410,11 @@ const TABLES: &[Table] = &[
     },
 ];
 
+#[cfg(feature = "test-support")]
+pub(super) fn relation_names_for_test() -> Vec<&'static str> {
+    TABLES.iter().map(|table| table.name).collect()
+}
+
 pub(super) async fn verify(db: &Database) -> Result<(), PubSubRuntimeAttachError> {
     verify_with_profile(db, None, None).await
 }
