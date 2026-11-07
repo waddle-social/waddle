@@ -63,7 +63,6 @@ where
             let pending_row_id = outbound_stanza.pending_row_id.clone();
             let pending_row_receipt_at = original_receipt_at;
             let mut request_ack_after = false;
-            let mut resumable_recovery_owned = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
                 let provenance = ingress_append.as_ref().map_or(
                     waddle_xmpp::stream_management::SmFrameProvenance::Unknown,
@@ -91,8 +90,6 @@ where
                     conn.sm_state
                         .attach_ingress_append(conn.sm_state.outbound_count, obligation);
                 }
-                resumable_recovery_owned =
-                    conn.sm_state.is_resumable() && conn.sm_state.replay_gap_through().is_none();
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound
                 // counter back onto pending_delivery flush rows before the next
                 // queued SM ack can range-delete them.
@@ -164,11 +161,10 @@ where
             {
                 AuthoritySendOutcome::Sent => true,
                 AuthoritySendOutcome::TransportClosed => {
-                    if resumable_recovery_owned {
-                        if let Some(acceptance) = outbound_stanza.write_acceptance.as_ref() {
-                            acceptance.acknowledge();
-                        }
-                    }
+                    // The live SM queue is only process memory until detach
+                    // persists it. A closed transport cannot prove that
+                    // recovery owns this frame, so retain the producer's
+                    // existing retry opportunity.
                     return false;
                 }
                 AuthoritySendOutcome::AuthorityRevoked => {
@@ -399,6 +395,43 @@ mod tests {
             _cx: &mut Context<'_>,
         ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct FlushClosedSink {
+        send_attempts: usize,
+    }
+
+    impl futures::Sink<Message> for FlushClosedSink {
+        type Error = io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.send_attempts += 1;
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "simulated flush failure",
+            )))
         }
 
         fn poll_close(
@@ -646,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumable_sm_direct_frame_acknowledges_write_acceptance_on_transport_close() {
+    async fn resumable_sm_direct_frame_keeps_write_acceptance_on_transport_close() {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let lifecycle = crate::clustering::NodeLifecycle::new();
         let permit = lifecycle.admit().expect("serving permit");
@@ -688,7 +721,7 @@ mod tests {
         assert_eq!(
             conn.sm_state.queue_len(),
             1,
-            "resumable SM retained recovery ownership"
+            "the live SM queue still contains the frame"
         );
         assert!(
             sink.acceptance_pending_on_send,
@@ -699,8 +732,54 @@ mod tests {
                 .take()
                 .expect("writer acceptance receiver")
                 .await
-                .is_ok(),
-            "resumable SM ownership must resolve acceptance even after transport close"
+                .is_err(),
+            "an in-memory SM frame cannot settle producer acceptance"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_sm_direct_frame_keeps_write_acceptance_on_flush_failure() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state.enable(
+            "outbound-write-acceptance-flush-failure".to_owned(),
+            true,
+            Some(300),
+        );
+        let (acceptance, accepted) = OutboundWriteAcceptance::new();
+        let mut sink = FlushClosedSink { send_attempts: 0 };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "alice@example.test".parse().expect("recipient JID"),
+        )));
+
+        assert!(
+            !handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::with_write_acceptance(stanza, acceptance),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert_eq!(
+            sink.send_attempts, 1,
+            "the frame started before flush failed"
+        );
+        assert_eq!(conn.sm_state.queue_len(), 1);
+        assert!(
+            accepted.await.is_err(),
+            "a failed flush cannot prove acceptance from SM memory"
         );
     }
 
