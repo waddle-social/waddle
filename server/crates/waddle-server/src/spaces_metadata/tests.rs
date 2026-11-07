@@ -421,13 +421,18 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
         }
 
         async fn exercise(&self) -> Result<()> {
-            let owner_url =
-                space_attach_url_with_role_and_schema(&self.base_url, &self.owner, &self.target);
-            let owner_database = Database::from_config(
-                "space-store owner",
-                &DatabaseConfig::new(DatabaseDriver::Postgres, owner_url),
-            )
-            .await?;
+            let mut owner_url = url::Url::parse(&space_attach_url_with_role_and_schema(
+                &self.base_url,
+                &self.owner,
+                &self.target,
+            ))?;
+            owner_url
+                .query_pairs_mut()
+                .append_pair("application_name", &self.owner);
+            let mut owner_config =
+                DatabaseConfig::new(DatabaseDriver::Postgres, owner_url.to_string());
+            owner_config.pool_size = 1;
+            let owner_database = Database::from_config("space-store owner", &owner_config).await?;
             let owner_guard = owner_database.guard().await?;
             owner_guard
                 .execute(
@@ -629,8 +634,55 @@ async fn postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drif
                 )
                 .await?;
             drop(owner_guard);
-            crate::spaces_metadata::prepare_space_stores_owner(owner_database.clone(), &identity)
+            // The real paired owner must retry catalog-X before taking the
+            // shared spaces/link gate. Observe a completed retry rather than
+            // assuming a spawned task has reached its transaction.
+            const OWNER_GATE: i64 = 0x5753_4442_4f57_4e52;
+            let mut catalog = self.admin.begin().await?;
+            sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+                .bind(crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .execute(&mut *catalog)
                 .await?;
+            let preparing_database = owner_database.clone();
+            let preparing_identity = identity.clone();
+            let prepare = tokio::spawn(async move {
+                crate::spaces_metadata::prepare_space_stores_owner(
+                    preparing_database,
+                    &preparing_identity,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let rolled_back: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                         WHERE a.application_name = $1 AND a.state = 'idle' \
+                           AND a.query = 'ROLLBACK' AND a.xact_start IS NULL \
+                           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l \
+                             WHERE l.pid = a.pid AND l.locktype = 'advisory'))",
+                    )
+                    .bind(&self.owner)
+                    .fetch_one(&self.admin)
+                    .await?;
+                    if rolled_back {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await??;
+            let mut gate_probe = self.admin.begin().await?;
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(OWNER_GATE)
+                    .fetch_one(&mut *gate_probe)
+                    .await?;
+            if !acquired {
+                bail!("paired space owner took its gate before catalog-X");
+            }
+            gate_probe.rollback().await?;
+            catalog.rollback().await?;
+            tokio::time::timeout(Duration::from_secs(30), prepare).await???;
             let owner_guard = owner_database.guard().await?;
             let mut migrated_rows = owner_guard
                 .query(

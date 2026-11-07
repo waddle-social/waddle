@@ -8,6 +8,7 @@ use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
 use waddle_server::db::physical_attestation::{
     attested_pool, install, PgRoleName, PhysicalAttestationConfig,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
@@ -804,11 +805,40 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
     f: &Fixture,
     owner_database: &Database,
     identity: &lineage::PgIdentity,
+    application: &str,
 ) {
-    // Keep synchronized with the production PubSub schema gate. The admin
-    // transaction publishes an incomplete marker and old schema version only
-    // when the waiting owner transaction is already blocked on this key.
+    // Keep synchronized with the production PubSub schema gate.
     const PUBSUB_SCHEMA_ADVISORY_LOCK_KEY: i64 = 7_534_519_881_230_429_064;
+
+    let mut catalog = f.admin.begin().await.expect("begin catalog holder");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog)
+        .await
+        .expect("hold catalog-S");
+    let database = owner_database.clone();
+    let identity_copy = identity.clone();
+    let initialize = tokio::spawn(async move {
+        DatabasePubSubStorage::initialize_owner(database, &identity_copy).await
+    });
+    wait_for_owner_retry(f, application).await;
+    let mut gate_probe = f.admin.begin().await.expect("begin gate probe");
+    let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+        .bind(PUBSUB_SCHEMA_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut *gate_probe)
+        .await
+        .expect("probe PubSub gate");
+    assert!(acquired, "owner must not take its gate before catalog-X");
+    gate_probe.rollback().await.expect("release gate probe");
+    catalog.rollback().await.expect("release catalog-S");
+    tokio::time::timeout(Duration::from_secs(30), initialize)
+        .await
+        .expect("catalog-blocked owner completes")
+        .expect("join catalog-blocked owner")
+        .expect("owner initializes after catalog release");
+
+    // Publish an incomplete marker and old schema version while the owner is
+    // retrying its lower gate. It must see that committed state on retry.
     let mut gate = f.admin.begin().await.expect("begin PubSub owner gate");
     sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
         .bind(PUBSUB_SCHEMA_ADVISORY_LOCK_KEY)
@@ -843,34 +873,25 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
         tokio::spawn(
             async move { DatabasePubSubStorage::initialize_owner(database, &identity).await },
         );
-    let waiting = tokio::time::timeout(Duration::from_secs(5), async {
+    wait_for_owner_retry(f, application).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
-                   AND wait_event = 'advisory' \
-                   AND query LIKE '%pg_advisory_xact_lock%')",
-            )
-            .fetch_one(&f.admin)
-            .await
-            .expect("observe PubSub owner gate wait");
-            if waiting {
-                return true;
+            let mut probe = f.admin.begin().await.expect("begin catalog probe");
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&mut *probe)
+                    .await
+                    .expect("probe released catalog-X");
+            probe.rollback().await.expect("release catalog probe");
+            if acquired {
+                break;
             }
-            if initialize.is_finished() {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
-    .expect("wait for PubSub owner initializer");
-    if !waiting {
-        initialize.abort();
-        gate.rollback().await.expect("release PubSub owner gate");
-        let _ = initialize.await;
-        panic!("PubSub owner initializer did not wait on its advisory gate");
-    }
+    .expect("contended lower gate must release catalog-X between retries");
     gate.commit()
         .await
         .expect("publish prior PubSub schema state");
@@ -899,6 +920,30 @@ async fn verify_pubsub_owner_gate_sees_committed_schema_state(
         owner_phase, 1,
         "the owner completed the marker after waiting"
     );
+}
+
+async fn wait_for_owner_retry(f: &Fixture, application: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rolled_back: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                 WHERE a.application_name = $1 AND a.state = 'idle' \
+                   AND a.query = 'ROLLBACK' AND a.xact_start IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l \
+                     WHERE l.pid = a.pid AND l.locktype = 'advisory'))",
+            )
+            .bind(application)
+            .fetch_one(&f.admin)
+            .await
+            .expect("observe acknowledged PubSub owner rollback");
+            if rolled_back {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("observe an acknowledged PubSub owner retry");
 }
 
 #[tokio::test]
@@ -1071,6 +1116,7 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
         .clear()
         .extend_pairs(retained.iter().map(|(k, v)| (k, v)))
         .append_pair("user", &migrator)
+        .append_pair("application_name", &owner)
         .append_pair(
             "options",
             &format!("-c role={owner} -c search_path={},public", f.target),
@@ -1188,7 +1234,7 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
     DatabasePubSubStorage::initialize_owner(owner_db.clone(), &identity)
         .await
         .expect("owner setup");
-    verify_pubsub_owner_gate_sees_committed_schema_state(&f, &owner_db, &identity).await;
+    verify_pubsub_owner_gate_sees_committed_schema_state(&f, &owner_db, &identity, &owner).await;
     let public_sentinel: Option<String> =
         sqlx::query_scalar("SELECT pg_catalog.to_regclass('public.pubsub_nodes')::text")
             .fetch_one(&f.admin)
