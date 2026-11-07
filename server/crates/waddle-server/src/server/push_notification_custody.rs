@@ -145,15 +145,14 @@ pub async fn verify_attested_push_notification_custody(
 
     let deadline = tokio::time::Instant::now() + CUSTODY_GATE_WAIT;
     let mut tx = loop {
-        let mut tx =
-            tokio::time::timeout_at(deadline, database.begin_catalog_fenced_read_only(&[]))
-                .await
-                .map_err(|_| DatabaseError::CatalogMutationLockTimeout)??;
+        let mut tx = tokio::time::timeout_at(
+            deadline,
+            database.begin_catalog_fenced_read_only_with_idle_bound(&[]),
+        )
+        .await
+        .map_err(|_| DatabaseError::CatalogMutationLockTimeout)??;
         let attempt = tokio::time::timeout_at(deadline, async {
             crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
-                .await
-                .map_err(map_read_bounds)?;
-            crate::db::read_only_timeout::bound_postgres_idle_transaction(&mut tx)
                 .await
                 .map_err(map_read_bounds)?;
 

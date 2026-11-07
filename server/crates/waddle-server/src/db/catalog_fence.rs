@@ -31,6 +31,12 @@ enum CatalogFenceMode {
     SharedReadOnly,
 }
 
+#[derive(Clone, Copy)]
+enum IdleTransactionBound {
+    Existing,
+    Capped,
+}
+
 impl Database {
     /// Begin a fresh PostgreSQL owner transaction and acquire catalog-X before
     /// the supplied advisory gates. All checkout hooks finish before catalog-X;
@@ -46,8 +52,25 @@ impl Database {
         &self,
         locks: &[CatalogFenceLock],
     ) -> Result<Transaction<'_>, DatabaseError> {
-        self.begin_catalog_fenced_with_mode(CatalogFenceMode::Exclusive, locks)
-            .await
+        self.begin_catalog_fenced_with_mode(
+            CatalogFenceMode::Exclusive,
+            IdleTransactionBound::Existing,
+            locks,
+        )
+        .await
+    }
+
+    /// As above, but cap idle transaction retention before acquiring catalog-X.
+    pub(crate) async fn begin_catalog_fenced_with_idle_bound(
+        &self,
+        locks: &[CatalogFenceLock],
+    ) -> Result<Transaction<'_>, DatabaseError> {
+        self.begin_catalog_fenced_with_mode(
+            CatalogFenceMode::Exclusive,
+            IdleTransactionBound::Capped,
+            locks,
+        )
+        .await
     }
 
     /// Begin a fresh READ COMMITTED, READ ONLY PostgreSQL transaction with
@@ -57,13 +80,31 @@ impl Database {
         &self,
         locks: &[CatalogFenceLock],
     ) -> Result<Transaction<'_>, DatabaseError> {
-        self.begin_catalog_fenced_with_mode(CatalogFenceMode::SharedReadOnly, locks)
-            .await
+        self.begin_catalog_fenced_with_mode(
+            CatalogFenceMode::SharedReadOnly,
+            IdleTransactionBound::Existing,
+            locks,
+        )
+        .await
+    }
+
+    /// As above, but cap idle transaction retention before acquiring catalog-S.
+    pub(crate) async fn begin_catalog_fenced_read_only_with_idle_bound(
+        &self,
+        locks: &[CatalogFenceLock],
+    ) -> Result<Transaction<'_>, DatabaseError> {
+        self.begin_catalog_fenced_with_mode(
+            CatalogFenceMode::SharedReadOnly,
+            IdleTransactionBound::Capped,
+            locks,
+        )
+        .await
     }
 
     async fn begin_catalog_fenced_with_mode(
         &self,
         mode: CatalogFenceMode,
+        idle_bound: IdleTransactionBound,
         locks: &[CatalogFenceLock],
     ) -> Result<Transaction<'_>, DatabaseError> {
         if self.driver() != DatabaseDriver::Postgres {
@@ -78,14 +119,18 @@ impl Database {
             let mut tx = tokio::time::timeout_at(deadline, self.begin_discard_postgres_on_drop())
                 .await
                 .map_err(|_| DatabaseError::CatalogMutationLockTimeout)??;
-            let outcome =
-                match tokio::time::timeout_at(deadline, try_locks(&mut tx, mode, locks)).await {
-                    Ok(Ok(LockAttempt::Acquired)) if tokio::time::Instant::now() < deadline => {
-                        return Ok(tx);
-                    }
-                    Ok(result) => result,
-                    Err(_) => Err(DatabaseError::CatalogMutationLockTimeout),
-                };
+            let outcome = match tokio::time::timeout_at(
+                deadline,
+                try_locks(&mut tx, mode, idle_bound, locks),
+            )
+            .await
+            {
+                Ok(Ok(LockAttempt::Acquired)) if tokio::time::Instant::now() < deadline => {
+                    return Ok(tx);
+                }
+                Ok(result) => result,
+                Err(_) => Err(DatabaseError::CatalogMutationLockTimeout),
+            };
 
             if !tx.rollback_bounded_discard(ROLLBACK_WAIT).await {
                 return Err(DatabaseError::CatalogMutationRollbackUnconfirmed);
@@ -110,6 +155,7 @@ impl Database {
 async fn try_locks(
     tx: &mut Transaction<'_>,
     mode: CatalogFenceMode,
+    idle_bound: IdleTransactionBound,
     locks: &[CatalogFenceLock],
 ) -> Result<LockAttempt, DatabaseError> {
     // Two utility statements both reject a transaction already used at either
@@ -129,6 +175,16 @@ async fn try_locks(
     };
     tx.execute(initial_mode, ()).await?;
     tx.execute(final_mode, ()).await?;
+    if matches!(idle_bound, IdleTransactionBound::Capped) {
+        super::read_only_timeout::bound_postgres_idle_transaction(tx)
+            .await
+            .map_err(|error| match error {
+                super::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
+                    DatabaseError::QueryFailed(format!("could not verify PostgreSQL {setting}"))
+                }
+                super::read_only_timeout::ReadOnlyTimeoutError::Database(error) => error,
+            })?;
+    }
 
     let connection = tx.postgres_connection().ok_or_else(|| {
         DatabaseError::QueryFailed("catalog mutation fencing requires PostgreSQL".to_owned())
