@@ -1,8 +1,12 @@
 //! Read-only checks for attaching an already owner-prepared inbox.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+
+const ATTACH_INSPECTION_WAIT: Duration = Duration::from_secs(60);
+const ATTACH_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 const REQUIRED_INDEXES: [(&str, &str); 4] = [
     ("inbox_entries", "idx_inbox_entries_user_updated"),
@@ -29,6 +33,8 @@ pub enum InboxRuntimeAttachError {
     SqliteTemporaryShadow,
     #[error("could not verify the PostgreSQL {setting} bound for inbox attachment")]
     InvalidTimeoutSetting { setting: &'static str },
+    #[error("PostgreSQL inbox attachment inspection timed out")]
+    InspectionTimeout,
     #[error("failed to inspect inbox relation {relation}: {source}")]
     Relation {
         relation: &'static str,
@@ -73,38 +79,83 @@ pub(super) async fn verify(
     } else {
         None
     };
-    let mut tx = db.begin().await?;
-    let schema = if let Some(capability) = capability {
-        // Refuse an inherited transaction snapshot before opening our own
-        // read-only snapshot, as in the global runtime verifier.
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (),
-        )
-        .await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (),
-        )
-        .await?;
-        crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
-            .await
-            .map_err(|error| match error {
-                crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
-                    InboxRuntimeAttachError::InvalidTimeoutSetting { setting }
-                }
-                crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
-                    InboxRuntimeAttachError::Database(error)
-                }
-            })?;
-        let expected = &capability.identity().schema.name.0;
-        let quoted = crate::db::physical_attestation::quote_identifier(expected);
-        // Take table locks before the first snapshot-forming query. Otherwise
-        // an owner could commit DDL after attestation fixed the RR snapshot
-        // and before these tables are locked for catalog inspection.
-        for table in ["inbox_entries", "groupchat_notification_recovery"] {
-            tx.execute(
-                &format!("LOCK TABLE {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
+    let mut tx = if capability.is_some() {
+        db.begin_catalog_fenced_read_only_with_idle_bound(&[])
+            .await?
+    } else {
+        db.begin().await?
+    };
+    let inspect = async {
+        let schema = if let Some(capability) = capability.as_ref() {
+            crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+                .await
+                .map_err(|error| match error {
+                    crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting {
+                        setting,
+                    } => InboxRuntimeAttachError::InvalidTimeoutSetting { setting },
+                    crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                        InboxRuntimeAttachError::Database(error)
+                    }
+                })?;
+            let expected = &capability.identity().schema.name.0;
+            let quoted = crate::db::physical_attestation::quote_identifier(expected);
+            // Catalog-S is already held on this backend. Lock both relations
+            // before the first catalog snapshot so later checks revalidate
+            // the shape protected by those locks.
+            for table in ["inbox_entries", "groupchat_notification_recovery"] {
+                tx.execute(
+                    &format!("LOCK TABLE {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
+                    (),
+                )
+                .await
+                .map_err(|source| InboxRuntimeAttachError::Relation {
+                    relation: table,
+                    source,
+                })?;
+            }
+            capability.attest_transaction(&mut tx).await?;
+            let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
+            let active: Option<String> = rows
+                .next()
+                .await?
+                .ok_or(InboxRuntimeAttachError::ActiveSchemaMismatch)?
+                .get(0)?;
+            if active.as_deref() != Some(expected) {
+                return Err(InboxRuntimeAttachError::ActiveSchemaMismatch);
+            }
+            expected.clone()
+        } else {
+            let mut rows = tx
+                .query(
+                    "SELECT name FROM sqlite_temp_master WHERE type IN ('table', 'view') \
+                     AND name COLLATE NOCASE IN ('inbox_entries', 'groupchat_notification_recovery', \
+                         'ingress_effect_intents', 'ingress_effect_receipts', 'ingress_messages')",
+                    (),
+                )
+                .await?;
+            if rows.next().await?.is_some() {
+                return Err(InboxRuntimeAttachError::SqliteTemporaryShadow);
+            }
+            "main".to_owned()
+        };
+        let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
+
+        for (table, columns) in [
+            (
+                "inbox_entries",
+                "user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated, \
+                 unread, preview, thread_title, reply_count, author, call_thread_kind, \
+                 call_thread_media, call_ended_at, call_duration",
+            ),
+            (
+                "groupchat_notification_recovery",
+                "message_key, recipient_bare_jid, room_jid, thread_id, stanza_id_by, \
+                 stanza_id, sender_jid, is_live_occupant, room_members_only, \
+                 sender_can_broadcast_channel_mention, created_at_ms, completed_at_ms",
+            ),
+        ] {
+            tx.query(
+                &format!("SELECT {columns} FROM {quoted_schema}.\"{table}\" WHERE 1 = 0"),
                 (),
             )
             .await
@@ -113,102 +164,66 @@ pub(super) async fn verify(
                 source,
             })?;
         }
-        capability.attest_transaction(&mut tx).await?;
-        let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
-        let active: Option<String> = rows
-            .next()
-            .await?
-            .ok_or(InboxRuntimeAttachError::ActiveSchemaMismatch)?
-            .get(0)?;
-        if active.as_deref() != Some(expected) {
-            return Err(InboxRuntimeAttachError::ActiveSchemaMismatch);
-        }
-        expected.clone()
-    } else {
-        let mut rows = tx
-            .query(
-                "SELECT name FROM sqlite_temp_master WHERE type IN ('table', 'view') \
-                 AND name COLLATE NOCASE IN ('inbox_entries', 'groupchat_notification_recovery', \
-                     'ingress_effect_intents', 'ingress_effect_receipts', 'ingress_messages')",
-                (),
-            )
-            .await?;
-        if rows.next().await?.is_some() {
-            return Err(InboxRuntimeAttachError::SqliteTemporaryShadow);
-        }
-        "main".to_owned()
-    };
-    let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
 
-    for (table, columns) in [
-        (
+        verify_indexes(&mut tx, db.driver(), &schema).await?;
+        verify_primary_key(
+            &mut tx,
+            db.driver(),
+            &schema,
             "inbox_entries",
-            "user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated, \
-             unread, preview, thread_title, reply_count, author, call_thread_kind, \
-             call_thread_media, call_ended_at, call_duration",
-        ),
-        (
-            "groupchat_notification_recovery",
-            "message_key, recipient_bare_jid, room_jid, thread_id, stanza_id_by, \
-             stanza_id, sender_jid, is_live_occupant, room_members_only, \
-             sender_can_broadcast_channel_mention, created_at_ms, completed_at_ms",
-        ),
-    ] {
-        tx.query(
-            &format!("SELECT {columns} FROM {quoted_schema}.\"{table}\" WHERE 1 = 0"),
-            (),
+            &["user_jid", "partner_jid", "thread_id"],
         )
-        .await
-        .map_err(|source| InboxRuntimeAttachError::Relation {
-            relation: table,
-            source,
-        })?;
-    }
-
-    verify_indexes(&mut tx, db.driver(), &schema).await?;
-    verify_primary_key(
-        &mut tx,
-        db.driver(),
-        &schema,
-        "inbox_entries",
-        &["user_jid", "partner_jid", "thread_id"],
-    )
-    .await?;
-    verify_primary_key(
-        &mut tx,
-        db.driver(),
-        &schema,
-        "groupchat_notification_recovery",
-        &[
-            "recipient_bare_jid",
-            "room_jid",
-            "thread_id",
-            "stanza_id_by",
-            "stanza_id",
-        ],
-    )
-    .await?;
-    verify_critical_columns(&mut tx, db.driver(), &schema).await?;
-    if require_runtime_writes && db.driver() != DatabaseDriver::Postgres {
-        return Err(InboxRuntimeAttachError::AttestedPostgresPoolRequired);
-    }
-    let unexpected_schema = if require_runtime_writes {
-        crate::db::runtime_store_acl::unexpected_inbox_executable_schema(&mut tx, &schema).await?
-    } else {
-        None
+        .await?;
+        verify_primary_key(
+            &mut tx,
+            db.driver(),
+            &schema,
+            "groupchat_notification_recovery",
+            &[
+                "recipient_bare_jid",
+                "room_jid",
+                "thread_id",
+                "stanza_id_by",
+                "stanza_id",
+            ],
+        )
+        .await?;
+        verify_critical_columns(&mut tx, db.driver(), &schema).await?;
+        if require_runtime_writes && db.driver() != DatabaseDriver::Postgres {
+            return Err(InboxRuntimeAttachError::AttestedPostgresPoolRequired);
+        }
+        let unexpected_schema = if require_runtime_writes {
+            crate::db::runtime_store_acl::unexpected_inbox_executable_schema(&mut tx, &schema)
+                .await?
+        } else {
+            None
+        };
+        if let Some(component) = unexpected_schema {
+            return Err(InboxRuntimeAttachError::UnexpectedExecutableSchema { component });
+        }
+        let privilege_failure = if require_runtime_writes {
+            crate::db::runtime_store_acl::verify_inbox(&mut tx, &schema).await?
+        } else {
+            None
+        };
+        if let Some(component) = privilege_failure {
+            return Err(InboxRuntimeAttachError::UnsafeRuntimePrivileges { component });
+        }
+        Ok::<(), InboxRuntimeAttachError>(())
     };
-    if let Some(component) = unexpected_schema {
-        return Err(InboxRuntimeAttachError::UnexpectedExecutableSchema { component });
-    }
-    let privilege_failure = if require_runtime_writes {
-        crate::db::runtime_store_acl::verify_inbox(&mut tx, &schema).await?
+    if capability.is_some() {
+        let deadline = tokio::time::Instant::now() + ATTACH_INSPECTION_WAIT;
+        let inspection = tokio::time::timeout_at(deadline, inspect)
+            .await
+            .unwrap_or(Err(InboxRuntimeAttachError::InspectionTimeout));
+        if !tx.rollback_bounded_discard(ATTACH_ROLLBACK_WAIT).await {
+            return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+        }
+        inspection?;
     } else {
-        None
-    };
-    if let Some(component) = privilege_failure {
-        return Err(InboxRuntimeAttachError::UnsafeRuntimePrivileges { component });
+        inspect.await?;
+        tx.commit().await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
