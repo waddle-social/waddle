@@ -4,12 +4,15 @@ use std::sync::Arc;
 
 use super::{
     attested_pool, install, test_url, url_with_schema, Database, DatabaseConfig, DatabaseDriver,
-    DatabaseError, Duration, Fixture, CATALOG_GRANT_LOCK,
+    DatabaseError, Duration, Fixture, PgPool, CATALOG_GRANT_LOCK,
 };
 use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::{DeploymentUuid, DurableStore, LineageAction, LineageStatus};
+use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use waddle_server::db::{DatabasePool, PoolConfig};
-use waddle_server::inbox::{bootstrap_inbox_owner_schema, InboxRuntimeAttachError};
+use waddle_server::inbox::{
+    bootstrap_inbox_owner_schema, DatabaseInboxStorage, InboxRuntimeAttachError,
+};
 use waddle_server::server::{AppState, ResolvedXmppDatabaseUrl};
 use waddle_server::test_support::{
     create_inbox_startup_for_test, database_from_attested_postgres_pool,
@@ -81,6 +84,15 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
     let fixture = Fixture::new(url).await;
+    let server_version: i32 =
+        sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("PostgreSQL version");
+    assert!(
+        (170_000..180_000).contains(&server_version),
+        "inbox reader operation witness requires PostgreSQL 17"
+    );
     let owner = Database::from_config(
         "inbox startup owner",
         &DatabaseConfig::new(
@@ -97,11 +109,15 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     )
     .await
     .expect("install physical attestor");
+    let application_name = format!("inbox_attach_{}", uuid::Uuid::new_v4().simple());
     let pool = Arc::new(
         database_pool_from_attested_postgres_pool(
             "inbox startup",
             attested_pool(
-                fixture.runtime_options.clone(),
+                fixture
+                    .runtime_options
+                    .clone()
+                    .application_name(&application_name),
                 config.clone(),
                 2,
                 Duration::from_millis(400),
@@ -175,6 +191,9 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
         .await
         .expect("grant restricted runtime reads");
     }
+    DatabaseInboxStorage::attach_existing(runtime.clone())
+        .await
+        .expect("public read-only attach needs no runtime write grants");
     let error = create_inbox_startup_for_test(&inherited, &runtime)
         .await
         .err()
@@ -246,9 +265,10 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     .await
     .expect("remove unexpected rule");
 
-    // Commit owner DDL while attachment waits for its pre-snapshot table
-    // lock. The attachment must inspect the new shape, not an earlier RR
-    // snapshot fixed by the physical attestor.
+    // The production write-checking attachment reaches its relation lock only
+    // after checkout, catalog-S, and the transaction-bound physical attestor.
+    // Commit owner DDL while it waits; READ COMMITTED must inspect the new
+    // shape after the lock is granted.
     let mut ddl = fixture.admin.begin().await.expect("owner DDL transaction");
     sqlx::query(&format!(
         "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated DROP NOT NULL",
@@ -262,26 +282,14 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
         let runtime = runtime.clone();
         tokio::spawn(async move { create_inbox_startup_for_test(&selection, &runtime).await })
     };
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-                 WHERE datname = $1 AND usename = $2 AND wait_event_type = 'Lock' \
-                 AND query LIKE '%inbox_entries%')",
-            )
-            .bind(&fixture.database_name)
-            .bind(&fixture.runtime)
-            .fetch_one(&fixture.admin)
-            .await
-            .expect("observe inbox lock wait");
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("inbox attachment waits before its snapshot");
+    wait_for_catalog_fenced_inbox_attach(
+        &fixture.admin,
+        &application_name,
+        &fixture.database_name,
+        &fixture.runtime,
+        &fixture.target,
+    )
+    .await;
     ddl.commit().await.expect("commit changed schema");
     let error = match pending.await.expect("join inbox attachment") {
         Ok(_) => panic!("committed schema drift must be rejected"),
@@ -295,6 +303,8 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
             ..
         })
     ));
+    assert_no_runtime_inbox_transaction(&fixture.admin, &fixture.database_name, &fixture.runtime)
+        .await;
     sqlx::query(&format!(
         "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated SET NOT NULL",
         fixture.target
@@ -302,6 +312,50 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     .execute(&fixture.admin)
     .await
     .expect("restore inbox schema");
+
+    // The second public attachment mode shares the catalog-first transaction
+    // path while retaining its read-only grant contract.
+    let mut read_only_ddl = fixture.admin.begin().await.expect("read-only owner DDL");
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated DROP NOT NULL",
+        fixture.target
+    ))
+    .execute(&mut *read_only_ddl)
+    .await
+    .expect("hold read-only attach schema change");
+    let pending_read_only = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move { DatabaseInboxStorage::attach_existing(runtime).await })
+    };
+    wait_for_catalog_fenced_inbox_attach(
+        &fixture.admin,
+        &application_name,
+        &fixture.database_name,
+        &fixture.runtime,
+        &fixture.target,
+    )
+    .await;
+    read_only_ddl
+        .commit()
+        .await
+        .expect("commit read-only attach schema change");
+    assert!(matches!(
+        pending_read_only.await.expect("join read-only attach"),
+        Err(InboxRuntimeAttachError::InvalidColumn {
+            table: "inbox_entries",
+            column: "last_updated",
+            ..
+        })
+    ));
+    assert_no_runtime_inbox_transaction(&fixture.admin, &fixture.database_name, &fixture.runtime)
+        .await;
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated SET NOT NULL",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore read-only attach schema");
 
     let held = runtime.begin().await.expect("occupy main capacity");
     let ingress_db = pool.ingress();
@@ -461,6 +515,85 @@ async fn attested_inbox_factory_and_lineage_use_only_the_shared_main_lane() {
     drop(pool);
     drop(owner);
     fixture.cleanup().await;
+}
+
+async fn wait_for_catalog_fenced_inbox_attach(
+    admin: &PgPool,
+    application_name: &str,
+    database: &str,
+    runtime_role: &str,
+    schema: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let operation: Option<(i32, bool)> = sqlx::query_as(
+                "SELECT activity.pid, \
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_locks catalog_lock \
+                     WHERE catalog_lock.pid = activity.pid \
+                       AND catalog_lock.locktype = 'advisory' \
+                       AND catalog_lock.objsubid = 1 \
+                       AND catalog_lock.classid::bigint = ($5::bigint >> 32) \
+                       AND catalog_lock.objid::bigint = ($5::bigint & 4294967295::bigint) \
+                       AND catalog_lock.mode = 'ShareLock' \
+                       AND catalog_lock.granted) \
+                 FROM pg_catalog.pg_stat_activity activity \
+                 WHERE activity.application_name = $1 AND activity.datname = $2 \
+                   AND activity.usename = $3 AND activity.state = 'active' \
+                   AND activity.xact_start IS NOT NULL \
+                   AND activity.wait_event_type = 'Lock' \
+                   AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks relation_wait \
+                     JOIN pg_catalog.pg_class relation \
+                       ON relation.oid = relation_wait.relation \
+                     JOIN pg_catalog.pg_namespace namespace \
+                       ON namespace.oid = relation.relnamespace \
+                     WHERE relation_wait.pid = activity.pid \
+                       AND namespace.nspname = $4 \
+                       AND relation.relname = 'inbox_entries' \
+                       AND relation_wait.mode = 'AccessShareLock' \
+                       AND NOT relation_wait.granted)",
+            )
+            .bind(application_name)
+            .bind(database)
+            .bind(runtime_role)
+            .bind(schema)
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_optional(admin)
+            .await
+            .expect("observe the public inbox attachment operation");
+            if let Some((pid, holds_catalog_s)) = operation {
+                assert!(
+                    holds_catalog_s,
+                    "operation backend {pid} waits on inbox_entries without catalog-S"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("inbox attachment operation reaches its relation lock");
+}
+
+async fn assert_no_runtime_inbox_transaction(admin: &PgPool, database: &str, runtime_role: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let active: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity \
+                 WHERE datname = $1 AND usename = $2 AND xact_start IS NOT NULL",
+            )
+            .bind(database)
+            .bind(runtime_role)
+            .fetch_one(admin)
+            .await
+            .expect("inspect inbox attachment transaction release");
+            if active == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("inbox attachment must acknowledge transaction end");
 }
 
 #[tokio::test]

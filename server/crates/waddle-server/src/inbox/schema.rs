@@ -1,8 +1,15 @@
 use super::{info, DatabaseDriver, InboxStorageError};
-use crate::db::{Database, IntoParams, Rows};
+use crate::db::{CatalogFenceLock, Database, IntoParams, Rows, Transaction};
+use sqlx::PgConnection;
+use std::time::Duration;
 
-/// Owner-side schema access retains the inbox store's per-call pool acquisition
-/// and error mapping without constructing a live inbox storage object.
+const RECOVERY_MESSAGE_KEY_GATE: &str = "groupchat_notification_recovery.message_key";
+const POSTGRES_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(35);
+const POSTGRES_COMMIT_TIMEOUT: Duration = Duration::from_secs(5);
+const POSTGRES_ROLLBACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// SQLite schema access retains the inbox store's existing per-call pool
+/// acquisition without constructing a live inbox storage object.
 struct OwnerSchemaDb<'a> {
     db: &'a Database,
 }
@@ -44,10 +51,332 @@ impl OwnerSchemaDb<'_> {
 }
 
 pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), InboxStorageError> {
-    initialize(&OwnerSchemaDb { db }).await
+    match db.driver() {
+        DatabaseDriver::Postgres => initialize_postgres(db).await,
+        DatabaseDriver::Sqlite => initialize_sqlite(&OwnerSchemaDb { db }).await,
+    }
 }
 
-async fn initialize(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStorageError> {
+async fn initialize_postgres(db: &Database) -> Result<(), InboxStorageError> {
+    if db.uses_attested_postgres_pool() {
+        return Err(InboxStorageError::Other(
+            "inbox owner initialization requires an owner database handle".to_owned(),
+        ));
+    }
+    let mut tx = db
+        .begin_catalog_fenced_with_idle_bound(&[CatalogFenceLock::ExclusiveHashtext(
+            RECOVERY_MESSAGE_KEY_GATE,
+        )])
+        .await
+        .map_err(inbox_database_error)?;
+    let result =
+        match tokio::time::timeout(POSTGRES_INITIALIZE_TIMEOUT, initialize_postgres_tx(&mut tx))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(InboxStorageError::Other(
+                "inbox PostgreSQL initialization timed out".into(),
+            )),
+        };
+    if let Err(error) = result {
+        if !tx.rollback_bounded_discard(POSTGRES_ROLLBACK_TIMEOUT).await {
+            return Err(InboxStorageError::Other(
+                "inbox PostgreSQL initialization rollback was not acknowledged; reconcile the original backend".into(),
+            ));
+        }
+        return Err(error);
+    }
+    // The checkout is already marked for disposal on any unacknowledged end.
+    // Neither an existing table nor a retry proves what this commit did.
+    if !matches!(
+        tokio::time::timeout(POSTGRES_COMMIT_TIMEOUT, tx.commit()).await,
+        Ok(Ok(()))
+    ) {
+        return Err(InboxStorageError::CommitIndeterminate);
+    }
+    Ok(())
+}
+
+async fn initialize_postgres_tx(tx: &mut Transaction<'_>) -> Result<(), InboxStorageError> {
+    let connection = tx.postgres_connection().ok_or_else(|| {
+        InboxStorageError::Other("inbox owner initialization requires PostgreSQL".to_owned())
+    })?;
+    // Capture only through qualified builtins, before evaluating any operator
+    // from an untrusted search path. DDL below always names this schema.
+    let schema: Option<String> =
+        sqlx::query_scalar("SELECT pg_catalog.current_schema()::pg_catalog.text")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(inbox_database_error)?;
+    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await
+        .map_err(inbox_database_error)?;
+    for (setting, cap) in [("lock_timeout", "5s"), ("statement_timeout", "30s")] {
+        sqlx::query(
+            "SELECT pg_catalog.set_config($1, \
+             CASE WHEN pg_catalog.current_setting($1)::pg_catalog.interval = '0'::pg_catalog.interval \
+               OR pg_catalog.current_setting($1)::pg_catalog.interval > $2::pg_catalog.interval \
+             THEN $2 ELSE pg_catalog.current_setting($1) END, true)",
+        )
+        .bind(setting)
+        .bind(cap)
+        .execute(&mut *connection)
+        .await
+        .map_err(inbox_database_error)?;
+    }
+    let schema = schema.ok_or_else(|| {
+        InboxStorageError::Other("inbox active PostgreSQL schema is missing".to_owned())
+    })?;
+    if schema.starts_with("pg_") || schema == "information_schema" {
+        return Err(InboxStorageError::Other(
+            "inbox owner requires a persistent application schema".to_owned(),
+        ));
+    }
+    let shadowed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n \
+           WHERE n.oid = pg_catalog.pg_my_temp_schema() AND n.nspname = $1) \
+         OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+           WHERE c.relnamespace = pg_catalog.pg_my_temp_schema() \
+             AND c.relname IN ('inbox_entries', 'groupchat_notification_recovery'))",
+    )
+    .bind(&schema)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(inbox_database_error)?;
+    if shadowed {
+        return Err(InboxStorageError::Other(
+            "inbox owner refused a temporary schema shadow".to_owned(),
+        ));
+    }
+    // `CREATE TABLE IF NOT EXISTS` also accepts a relation of another kind.
+    // In particular, never let the legacy DELETE run through an updatable
+    // view or foreign table. Inspect both names before making any changes.
+    for table in ["inbox_entries", "groupchat_notification_recovery"] {
+        lock_and_verify_postgres_relation(connection, &schema, table, false).await?;
+    }
+    prepare_postgres_schema(connection, &schema).await
+}
+
+async fn lock_and_verify_postgres_relation(
+    connection: &mut PgConnection,
+    schema: &str,
+    table: &str,
+    required: bool,
+) -> Result<(), InboxStorageError> {
+    async fn relation(
+        connection: &mut PgConnection,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<(i64, bool)>, InboxStorageError> {
+        sqlx::query_as(
+            "SELECT c.oid::pg_catalog.int8, c.relkind = 'r' AND c.relpersistence = 'p' \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i \
+                 WHERE i.inhparent = c.oid OR i.inhrelid = c.oid) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_optional(connection)
+        .await
+        .map_err(inbox_database_error)
+    }
+    let oid = match relation(connection, schema, table).await? {
+        Some((oid, true)) => oid,
+        None if !required => return Ok(()),
+        _ => {
+            return Err(InboxStorageError::Other(format!(
+                "inbox owner refused unexpected PostgreSQL relation kind or inheritance for {table}"
+            )));
+        }
+    };
+    let namespace = crate::db::physical_attestation::quote_identifier(schema);
+    let name = crate::db::physical_attestation::quote_identifier(table);
+    postgres_execute(
+        connection,
+        &format!("LOCK TABLE ONLY {namespace}.{name} IN ACCESS EXCLUSIVE MODE"),
+    )
+    .await?;
+    if relation(connection, schema, table).await? != Some((oid, true)) {
+        return Err(InboxStorageError::Other(format!(
+            "inbox owner relation changed while locking {table}"
+        )));
+    }
+    if table == "groupchat_notification_recovery" {
+        // The legacy migration deletes rows. An executable rule, trigger,
+        // policy, or incoming FK could make that DELETE mutate another table.
+        let direct_delete: bool = sqlx::query_scalar(
+            "SELECT NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint f \
+                 WHERE f.contype = 'f' AND f.confrelid = c.oid) \
+             FROM pg_catalog.pg_class c WHERE c.oid = $1::pg_catalog.oid",
+        )
+        .bind(oid)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(inbox_database_error)?;
+        if !direct_delete {
+            return Err(InboxStorageError::Other(
+                "inbox owner refused executable PostgreSQL recovery DELETE side effects".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn prepare_postgres_schema(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), InboxStorageError> {
+    let namespace = crate::db::physical_attestation::quote_identifier(schema);
+    let entries = format!("{namespace}.\"inbox_entries\"");
+    let recovery = format!("{namespace}.\"groupchat_notification_recovery\"");
+    postgres_execute(
+        connection,
+        &format!(
+            "CREATE TABLE IF NOT EXISTS {entries} (\
+           user_jid TEXT NOT NULL, partner_jid TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '', \
+           kind TEXT NOT NULL, last_stanza_id TEXT NOT NULL, last_updated BIGINT NOT NULL, \
+           unread INTEGER NOT NULL DEFAULT 0, preview TEXT, thread_title TEXT, \
+           reply_count INTEGER NOT NULL DEFAULT 0, author TEXT, call_thread_kind TEXT, \
+           call_thread_media TEXT, call_ended_at BIGINT, call_duration TEXT, \
+           PRIMARY KEY (user_jid, partner_jid, thread_id))"
+        ),
+    )
+    .await?;
+    lock_and_verify_postgres_relation(connection, schema, "inbox_entries", true).await?;
+
+    let current_type: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT a.atttypid = 'pg_catalog.int4'::pg_catalog.regtype, \
+                a.atttypid = 'pg_catalog.int8'::pg_catalog.regtype \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = 'inbox_entries' \
+           AND a.attname = 'last_updated' AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .bind(schema)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(inbox_database_error)?;
+    let (is_int4, is_int8) = current_type.ok_or_else(|| {
+        InboxStorageError::Other("inbox owner requires last_updated column".into())
+    })?;
+    if is_int4 {
+        postgres_execute(
+            connection,
+            &format!("ALTER TABLE {entries} ALTER COLUMN last_updated TYPE BIGINT"),
+        )
+        .await?;
+    } else if !is_int8 {
+        return Err(InboxStorageError::Other(
+            "inbox owner refused non-integer last_updated conversion".into(),
+        ));
+    }
+    postgres_execute(
+        connection,
+        &format!(
+            "CREATE INDEX IF NOT EXISTS idx_inbox_entries_user_updated \
+         ON {entries} (user_jid, last_updated DESC)"
+        ),
+    )
+    .await?;
+    postgres_execute(
+        connection,
+        &format!(
+            "CREATE INDEX IF NOT EXISTS idx_inbox_entries_user_room_threads \
+         ON {entries} (user_jid, partner_jid, thread_id) WHERE thread_id != ''"
+        ),
+    )
+    .await?;
+    for (column, sql_type) in [
+        ("call_thread_kind", "TEXT"),
+        ("call_thread_media", "TEXT"),
+        ("call_ended_at", "BIGINT"),
+        ("call_duration", "TEXT"),
+    ] {
+        postgres_execute(
+            connection,
+            &format!("ALTER TABLE {entries} ADD COLUMN IF NOT EXISTS {column} {sql_type}"),
+        )
+        .await?;
+    }
+
+    postgres_execute(connection, &format!(
+        "CREATE TABLE IF NOT EXISTS {recovery} (\
+           message_key TEXT NOT NULL, recipient_bare_jid TEXT NOT NULL, room_jid TEXT NOT NULL, \
+           thread_id TEXT NOT NULL DEFAULT '', stanza_id_by TEXT NOT NULL, stanza_id TEXT NOT NULL, \
+           sender_jid TEXT NOT NULL, is_live_occupant INTEGER NOT NULL, room_members_only INTEGER NOT NULL, \
+           sender_can_broadcast_channel_mention INTEGER NOT NULL, created_at_ms BIGINT NOT NULL, \
+           completed_at_ms BIGINT, \
+           PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id))"
+    )).await?;
+    lock_and_verify_postgres_relation(connection, schema, "groupchat_notification_recovery", true)
+        .await?;
+    postgres_execute(
+        connection,
+        &format!(
+            "ALTER TABLE {recovery} ADD COLUMN IF NOT EXISTS \
+         sender_can_broadcast_channel_mention INTEGER NOT NULL DEFAULT 0"
+        ),
+    )
+    .await?;
+    let message_key_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = $1 AND table_name = 'groupchat_notification_recovery' \
+           AND column_name = 'message_key')",
+    )
+    .bind(schema)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(inbox_database_error)?;
+    if !message_key_exists {
+        info!("Discarding legacy groupchat notification recoveries before adding canonical message keys");
+        postgres_execute(connection, &format!("DELETE FROM {recovery}")).await?;
+        postgres_execute(
+            connection,
+            &format!("ALTER TABLE {recovery} ADD COLUMN message_key TEXT NOT NULL"),
+        )
+        .await?;
+    }
+    postgres_execute(
+        connection,
+        &format!(
+            "CREATE INDEX IF NOT EXISTS idx_groupchat_notification_recovery_pending \
+         ON {recovery} (created_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id) \
+         WHERE completed_at_ms IS NULL"
+        ),
+    )
+    .await?;
+    postgres_execute(connection, &format!(
+        "CREATE INDEX IF NOT EXISTS idx_groupchat_notification_recovery_completed_prune \
+         ON {recovery} (completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) \
+         WHERE completed_at_ms IS NOT NULL"
+    )).await?;
+    Ok(())
+}
+
+async fn postgres_execute(
+    connection: &mut PgConnection,
+    sql: &str,
+) -> Result<(), InboxStorageError> {
+    sqlx::query(sql)
+        .execute(connection)
+        .await
+        .map_err(inbox_database_error)?;
+    Ok(())
+}
+
+fn inbox_database_error(error: impl std::fmt::Display) -> InboxStorageError {
+    InboxStorageError::Other(error.to_string())
+}
+
+async fn initialize_sqlite(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStorageError> {
     let i64_type = crate::db::i64_sql_type(storage.db.driver());
 
     // Check if the table already exists with the old schema (missing thread_id column).
@@ -113,10 +442,6 @@ async fn initialize(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStorageError
             )
             .await?;
     }
-
-    crate::db::widen_postgres_i64_column_to_bigint(storage.db, "inbox_entries", "last_updated")
-        .await
-        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
 
     storage.execute(
         "CREATE INDEX IF NOT EXISTS idx_inbox_entries_user_updated ON inbox_entries (user_jid, last_updated DESC)",
@@ -193,10 +518,9 @@ async fn initialize(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStorageError
     Ok(())
 }
 
-/// Adds the canonical ingress message key to recovery rows. Legacy rows are
-/// deliberately discarded before the required column is added: V1014 removes
-/// their canonical ingress obligations, so retaining rows that cannot point to
-/// a canonical message would create an unreceiptable retry path.
+/// Adds the canonical ingress message key to SQLite recovery rows. Legacy rows
+/// are discarded before the required column is added. This migration alone
+/// does not establish a cutoff for old writers or deletion safety.
 async fn migrate_recovery_message_key_column(
     storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), InboxStorageError> {
@@ -206,27 +530,11 @@ async fn migrate_recovery_message_key_column(
         .begin_immediate()
         .await
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    if matches!(tx.driver(), DatabaseDriver::Postgres) {
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(?))",
-            crate::db_params!["groupchat_notification_recovery.message_key"],
-        )
-        .await
-        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    }
-    let probe = match tx.driver() {
-        DatabaseDriver::Sqlite => {
-            "SELECT 1 FROM pragma_table_info('groupchat_notification_recovery') WHERE name = ?"
-        }
-        DatabaseDriver::Postgres => {
-            "SELECT 1 FROM information_schema.columns \
-             WHERE table_schema = current_schema() \
-               AND table_name = 'groupchat_notification_recovery' \
-               AND column_name = ?"
-        }
-    };
     let mut rows = tx
-        .query(probe, crate::db_params![COLUMN])
+        .query(
+            "SELECT 1 FROM pragma_table_info('groupchat_notification_recovery') WHERE name = ?",
+            crate::db_params![COLUMN],
+        )
         .await
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
     let column_present = rows
@@ -259,7 +567,7 @@ async fn migrate_recovery_message_key_column(
 
 /// Adds the `sender_can_broadcast_channel_mention` column to existing
 /// `groupchat_notification_recovery` tables that pre-date PR #738.
-/// Idempotent on both SQLite and Postgres — re-runs at every startup
+/// Idempotent on SQLite — re-runs at every startup
 /// are no-ops once the column exists.
 ///
 /// XEP-0513 §"Multi-User Chats Permissions" §304 default value `0`
@@ -272,37 +580,20 @@ async fn migrate_recovery_channel_broadcast_column(
     storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), InboxStorageError> {
     const COLUMN: &str = "sender_can_broadcast_channel_mention";
-    match storage.db.driver() {
-        DatabaseDriver::Sqlite => {
-            if !recovery_column_present_sqlite(storage, COLUMN).await? {
-                info!(
-                    column = COLUMN,
-                    "Adding column to groupchat_notification_recovery (SQLite)"
-                );
-                storage
-                    .execute(
-                        &format!(
-                            "ALTER TABLE groupchat_notification_recovery \
-                             ADD COLUMN {COLUMN} INTEGER NOT NULL DEFAULT 0"
-                        ),
-                        (),
-                    )
-                    .await?;
-            }
-        }
-        DatabaseDriver::Postgres => {
-            // `ADD COLUMN IF NOT EXISTS` makes this idempotent at the
-            // SQL layer; no PRAGMA-equivalent probe needed.
-            storage
-                .execute(
-                    &format!(
-                        "ALTER TABLE groupchat_notification_recovery \
-                         ADD COLUMN IF NOT EXISTS {COLUMN} INTEGER NOT NULL DEFAULT 0"
-                    ),
-                    (),
-                )
-                .await?;
-        }
+    if !recovery_column_present_sqlite(storage, COLUMN).await? {
+        info!(
+            column = COLUMN,
+            "Adding column to groupchat_notification_recovery (SQLite)"
+        );
+        storage
+            .execute(
+                &format!(
+                    "ALTER TABLE groupchat_notification_recovery \
+                     ADD COLUMN {COLUMN} INTEGER NOT NULL DEFAULT 0"
+                ),
+                (),
+            )
+            .await?;
     }
     Ok(())
 }
@@ -318,8 +609,8 @@ async fn recovery_column_present_sqlite(
 }
 
 /// Adds the four call-thread columns (issue #919) to existing
-/// `inbox_entries` tables that pre-date them. Idempotent on both SQLite
-/// and Postgres — re-runs at every startup are no-ops once the columns
+/// `inbox_entries` tables that pre-date them. Idempotent on SQLite —
+/// re-runs at every startup are no-ops once the columns
 /// exist. All four are nullable: a row that pre-dates a call thread has
 /// no anchor metadata, and a row whose call has not ended has no ended
 /// summary.
@@ -334,33 +625,15 @@ async fn migrate_inbox_call_thread_columns(
         ("call_ended_at", i64_type),
         ("call_duration", "TEXT"),
     ];
-    match storage.db.driver() {
-        DatabaseDriver::Sqlite => {
-            for (column, sql_type) in columns {
-                if !column_present_sqlite(storage, "inbox_entries", column).await? {
-                    info!(column, "Adding column to inbox_entries (SQLite)");
-                    storage
-                        .execute(
-                            &format!("ALTER TABLE inbox_entries ADD COLUMN {column} {sql_type}"),
-                            (),
-                        )
-                        .await?;
-                }
-            }
-        }
-        DatabaseDriver::Postgres => {
-            // `ADD COLUMN IF NOT EXISTS` makes this idempotent at the
-            // SQL layer; no PRAGMA-equivalent probe needed.
-            for (column, sql_type) in columns {
-                storage
-                    .execute(
-                        &format!(
-                            "ALTER TABLE inbox_entries ADD COLUMN IF NOT EXISTS {column} {sql_type}"
-                        ),
-                        (),
-                    )
-                    .await?;
-            }
+    for (column, sql_type) in columns {
+        if !column_present_sqlite(storage, "inbox_entries", column).await? {
+            info!(column, "Adding column to inbox_entries (SQLite)");
+            storage
+                .execute(
+                    &format!("ALTER TABLE inbox_entries ADD COLUMN {column} {sql_type}"),
+                    (),
+                )
+                .await?;
         }
     }
     Ok(())
