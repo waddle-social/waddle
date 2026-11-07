@@ -3,6 +3,9 @@
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use std::collections::HashMap;
+use std::time::Duration;
+
+const READ_ONLY_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RoomEffectRuntimeAttachError {
@@ -482,7 +485,9 @@ async fn verify_tables(
         verify_table_acl(&mut tx, schema, table).await?;
     }
     verify_incoming_foreign_keys(&mut tx, schema, tables).await?;
-    tx.rollback().await?;
+    if !tx.rollback_bounded_discard(READ_ONLY_ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
     Ok(capability)
 }
 

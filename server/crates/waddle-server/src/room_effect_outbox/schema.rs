@@ -30,6 +30,7 @@ pub(super) async fn initialize_owner(
             ROOM_EFFECT_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
         )])
         .await?;
+    bound_owner_bootstrap_waits(&mut tx).await?;
     pin_owner_schema(&mut tx, identity).await?;
     let schema = &identity.schema.name.0;
     let exists = super::runtime_attach::verify_existing_owner(&mut tx, schema)
@@ -93,8 +94,18 @@ async fn postgres(db: &Database) -> Result<(), RoomEffectOutboxError> {
             ROOM_EFFECT_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
         )])
         .await?;
+    bound_owner_bootstrap_waits(&mut tx).await?;
     postgres_schema(&mut tx).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn bound_owner_bootstrap_waits(
+    tx: &mut Transaction<'_>,
+) -> Result<(), RoomEffectOutboxError> {
+    tx.execute("SET LOCAL lock_timeout = '3s'", ()).await?;
+    tx.execute("SET LOCAL statement_timeout = '30s'", ())
+        .await?;
     Ok(())
 }
 

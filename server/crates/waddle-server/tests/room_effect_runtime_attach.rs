@@ -11,10 +11,12 @@ use waddle_server::db::physical_attestation::{
     CATALOG_MUTATION_ADVISORY_LOCK_KEY, PgRoleName, PhysicalAttestationConfig, attested_pool,
     install,
 };
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError};
 use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
 use waddle_server::muc_durable::{MucOwnerPreparationError, PostgresMucRoomStore};
-use waddle_server::room_effect_outbox::{RoomEffectOutboxStore, RoomEffectRuntimeAttachError};
+use waddle_server::room_effect_outbox::{
+    RoomEffectOutboxError, RoomEffectOutboxStore, RoomEffectRuntimeAttachError,
+};
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
 
 struct Fixture {
@@ -22,6 +24,7 @@ struct Fixture {
     admin: PgPool,
     installer_options: PgConnectOptions,
     runtime_options: PgConnectOptions,
+    runtime_app_name: String,
     base_url: String,
     database_name: String,
     lineage: AttestedLineage,
@@ -121,12 +124,17 @@ impl Fixture {
 
         let admin_options = PgConnectOptions::from_str(&boundary_url).expect("admin options");
         let installer_options = admin_options.clone().username(&installer);
-        let runtime_options = admin_options.clone().username(&runtime);
+        let runtime_app_name = format!("room_runtime_{suffix}");
+        let runtime_options = admin_options
+            .clone()
+            .username(&runtime)
+            .application_name(&runtime_app_name);
         Self {
             cluster_admin,
             admin,
             installer_options,
             runtime_options,
+            runtime_app_name,
             base_url,
             database_name,
             lineage,
@@ -227,20 +235,29 @@ async fn relation_exists(admin: &PgPool, schema: &str, relation: &str) -> bool {
         .expect("inspect fixture relation")
 }
 
+fn room_effect_pg_error_code(error: &RoomEffectOutboxError) -> Option<String> {
+    match error {
+        RoomEffectOutboxError::Database(DatabaseError::Internal(sqlx::Error::Database(error))) => {
+            error.code().map(|code| code.into_owned())
+        }
+        _ => None,
+    }
+}
+
 const MUC_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_994;
 const MUC_DESTROY_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_995;
 const ROOM_EFFECT_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_996;
 
-/// Exercise a public owner entry while its family gate is held. The shared
-/// catalog probe must succeed during the wait, showing that a failed lower
-/// gate attempt was rolled back before retry; the relation becomes visible
-/// only after releasing the family gate and allowing the public entry to
-/// commit.
+/// Exercise a public owner entry while its family gate is held. Observe the
+/// public backend holding catalog-X during an advisory-lock attempt, confirm
+/// the retry releases catalog-X while it remains pending, then verify relation
+/// visibility after releasing the family gate.
 async fn assert_owner_gate_releases_catalog<T>(
     admin: PgPool,
     schema: String,
     relation: &'static str,
     family_gate: i64,
+    application_name: &str,
     operation: impl Future<Output = T> + Send + 'static,
 ) -> T
 where
@@ -256,14 +273,8 @@ where
         .await
         .expect("hold owner-family gate");
 
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let operation = tokio::spawn(async move {
-        let _ = started_tx.send(());
-        operation.await
-    });
-    started_rx.await.expect("public owner operation started");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let remained_pending = !operation.is_finished();
+    let operation = tokio::spawn(operation);
+    let lower_gate_attempt_seen = wait_for_owner_gate_attempt(&admin, application_name).await;
 
     let catalog_released = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -281,30 +292,30 @@ where
     })
     .await
     .is_ok();
+    let remained_pending = !operation.is_finished();
     let visible_while_gate_held = relation_exists(&admin, &schema, relation).await;
 
     gate.rollback().await.expect("release owner-family gate");
-    if !remained_pending || !catalog_released || visible_while_gate_held {
-        operation.abort();
-        let _ = operation.await;
-        assert!(
-            remained_pending,
-            "public owner entry bypassed its family gate"
-        );
-        assert!(
-            catalog_released,
-            "owner retry retained catalog-X while the family gate was busy"
-        );
-        assert!(
-            !visible_while_gate_held,
-            "owner DDL became visible before the family gate was released"
-        );
-    }
-
     let output = tokio::time::timeout(Duration::from_secs(10), operation)
         .await
         .expect("public owner entry completed after gate release")
         .expect("join public owner entry");
+    assert!(
+        lower_gate_attempt_seen,
+        "public owner transaction never reached its lower advisory gate"
+    );
+    assert!(
+        remained_pending,
+        "public owner entry bypassed its family gate"
+    );
+    assert!(
+        catalog_released,
+        "owner retry retained catalog-X while the family gate was busy"
+    );
+    assert!(
+        !visible_while_gate_held,
+        "owner DDL became visible before the family gate was released"
+    );
     assert!(
         relation_exists(&admin, &schema, relation).await,
         "{} became visible after the public owner entry completed",
@@ -315,6 +326,7 @@ where
 
 async fn assert_reader_waits_for_catalog_fence<T>(
     admin: PgPool,
+    application_name: &str,
     operation: impl Future<Output = T> + Send + 'static,
 ) -> T
 where
@@ -327,13 +339,8 @@ where
         .await
         .expect("hold catalog-X");
 
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let operation = tokio::spawn(async move {
-        let _ = started_tx.send(());
-        operation.await
-    });
-    started_rx.await.expect("public reader operation started");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let operation = tokio::spawn(operation);
+    let catalog_attempt_seen = wait_for_reader_catalog_attempt(&admin, application_name).await;
     let remained_pending = !operation.is_finished();
 
     catalog.rollback().await.expect("release catalog-X");
@@ -342,10 +349,63 @@ where
         .expect("public reader completed after catalog-X release")
         .expect("join public reader");
     assert!(
+        catalog_attempt_seen,
+        "public reader never attempted to acquire catalog-S"
+    );
+    assert!(
         remained_pending,
-        "public reader completed its attestation while catalog-X was held"
+        "public reader completed while catalog-X was held"
     );
     output
+}
+
+async fn wait_for_owner_gate_attempt(admin: &PgPool, application_name: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observed: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                 JOIN pg_catalog.pg_locks l ON l.pid = a.pid \
+                 WHERE a.application_name = $1 AND a.state = 'active' \
+                   AND a.query LIKE '%pg_try_advisory_xact_lock%' \
+                   AND l.locktype = 'advisory' AND l.objsubid = 1 \
+                   AND l.mode = 'ExclusiveLock' AND l.granted \
+                   AND ((l.classid::bigint << 32) | l.objid::bigint) = $2)",
+            )
+            .bind(application_name)
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(admin)
+            .await
+            .expect("observe owner catalog lock while trying its family gate");
+            if observed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+async fn wait_for_reader_catalog_attempt(admin: &PgPool, application_name: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observed: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                 WHERE a.application_name = $1 AND a.state = 'active' \
+                   AND a.query LIKE '%pg_try_advisory_xact_lock_shared%')",
+            )
+            .bind(application_name)
+            .fetch_one(admin)
+            .await
+            .expect("observe reader catalog-S try-lock attempt");
+            if observed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 #[tokio::test]
@@ -424,6 +484,7 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         .await
         .is_err()
     );
+    let owner_app_name = format!("muc_owner_{}", f.operation_id.simple());
     let mut url = url::Url::parse(&f.base_url).unwrap();
     let retained: Vec<_> = url
         .query_pairs()
@@ -437,7 +498,8 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         .append_pair(
             "options",
             &format!("-c role={owner} -c search_path={},public", f.target),
-        );
+        )
+        .append_pair("application_name", &owner_app_name);
     run_sql(
         &f,
         &format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"),
@@ -551,6 +613,7 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         f.target.clone(),
         "clustering_muc_rooms",
         MUC_SCHEMA_ADVISORY_LOCK_KEY,
+        &owner_app_name,
         async move { PostgresMucRoomStore::initialize_owner(&database, &room_identity).await },
     )
     .await
@@ -561,6 +624,7 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         f.target.clone(),
         "clustering_muc_destroy_outbox",
         MUC_DESTROY_SCHEMA_ADVISORY_LOCK_KEY,
+        &owner_app_name,
         async move { MucDestroyCompletionOutboxStore::try_new(database).await },
     )
     .await
@@ -585,6 +649,7 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         f.target.clone(),
         "clustering_muc_room_effects",
         ROOM_EFFECT_SCHEMA_ADVISORY_LOCK_KEY,
+        &owner_app_name,
         async move { RoomEffectOutboxStore::initialize_owner(&database, &effect_identity).await },
     )
     .await
@@ -636,12 +701,14 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
     .await;
     let verified_room_runtime = assert_reader_waits_for_catalog_fence(
         f.admin.clone(),
+        &f.runtime_app_name,
         RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()),
     )
     .await
     .expect("verify complete room runtime schema after acquiring catalog-S");
     assert_reader_waits_for_catalog_fence(
         f.admin.clone(),
+        &f.runtime_app_name,
         MucDestroyCompletionOutboxStore::attach_existing(runtime.clone()),
     )
     .await
@@ -963,6 +1030,37 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         RoomEffectOutboxStore::attach_existing(runtime.clone())
             .await
             .is_err()
+    );
+    let mut relation_holder = f.admin.begin().await.expect("begin relation lock holder");
+    sqlx::query(&format!(
+        "LOCK TABLE {}.clustering_muc_room_effects IN ACCESS EXCLUSIVE MODE",
+        f.target
+    ))
+    .execute(&mut *relation_holder)
+    .await
+    .expect("hold room-effect relation lock");
+    let mut bootstrap = tokio::spawn(RoomEffectOutboxStore::try_new(owner_db.clone()));
+    let bootstrap_result = tokio::time::timeout(Duration::from_secs(8), &mut bootstrap).await;
+    relation_holder
+        .rollback()
+        .await
+        .expect("release room-effect relation lock");
+    let bootstrap_result = match bootstrap_result {
+        Ok(result) => result.expect("room-effect bootstrap task"),
+        Err(_) => {
+            bootstrap.abort();
+            let _ = bootstrap.await;
+            panic!("room-effect bootstrap exceeded its bounded relation-lock wait");
+        }
+    };
+    let error = match bootstrap_result {
+        Ok(_) => panic!("room-effect bootstrap unexpectedly passed the held relation lock"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        room_effect_pg_error_code(&error).as_deref(),
+        Some("55P03"),
+        "room-effect owner bootstrap should fail with PostgreSQL lock_timeout"
     );
     drop(attached);
     drop(runtime);

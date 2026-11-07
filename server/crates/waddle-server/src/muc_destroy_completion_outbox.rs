@@ -4,6 +4,9 @@
 //! support state for clustered MUC recovery, not application schema history.
 
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError};
+use std::time::Duration;
+
+const READ_ONLY_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
 /// A restricted runtime may only adopt an owner-prepared outbox on its
 /// physically attested main lane. The legacy constructor still owns bootstrap.
@@ -83,9 +86,9 @@ impl MucDestroyCompletionOutboxStore {
             "\"{}\".\"clustering_muc_destroy_outbox\"",
             schema.replace('"', "\"\"")
         );
-        // Lock the qualified relation before the first snapshot-forming SELECT.
-        // Otherwise owner DDL could commit after an RR catalog snapshot and
-        // before a relation lock, falsely accepting an obsolete shape.
+        // Catalog-S excludes owner schema work while this read-only check is
+        // in progress. Lock the exact relation before the first snapshot-forming
+        // SELECT so the metadata snapshot follows any lock wait.
         tx.execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
             .await
             .map_err(MucDestroyRuntimeAttachError::Relation)?;
@@ -342,7 +345,9 @@ impl MucDestroyCompletionOutboxStore {
         if !safe {
             return Err(MucDestroyRuntimeAttachError::UnsafeRuntimeRole);
         }
-        tx.commit().await?;
+        if !tx.rollback_bounded_discard(READ_ONLY_ROLLBACK_WAIT).await {
+            return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+        }
         Ok(Self { _db: db })
     }
 
@@ -359,6 +364,7 @@ impl MucDestroyCompletionOutboxStore {
                 MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
             )])
             .await?;
+        bound_owner_bootstrap_waits(&mut tx).await?;
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_destroy_outbox (
@@ -437,6 +443,15 @@ impl MucDestroyCompletionOutboxStore {
         )
         .await?;
         tx.commit().await
+    }
+
+    async fn bound_owner_bootstrap_waits(
+        tx: &mut crate::db::Transaction<'_>,
+    ) -> Result<(), DatabaseError> {
+        tx.execute("SET LOCAL lock_timeout = '3s'", ()).await?;
+        tx.execute("SET LOCAL statement_timeout = '30s'", ())
+            .await?;
+        Ok(())
     }
 
     async fn ensure_sqlite_schema(db: &Database) -> Result<(), DatabaseError> {
