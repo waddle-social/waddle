@@ -377,19 +377,7 @@ async fn verify_tables(
     crate::db::physical_attestation::validate_identifier(schema, "room-effect schema")
         .map_err(|_| RoomEffectRuntimeAttachError::ActiveSchemaMismatch)?;
     let quoted = crate::db::physical_attestation::quote_identifier(schema);
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-        (),
-    )
-    .await?;
-    if profile.is_none() {
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (),
-        )
-        .await?;
-    }
+    let mut tx = db.begin_catalog_fenced_read_only(&[]).await?;
     crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
         .await
         .map_err(|_| RoomEffectRuntimeAttachError::ReadBounds)?;
@@ -861,10 +849,12 @@ async fn verify_runtime_role(
     profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
 ) -> Result<(), RoomEffectRuntimeAttachError> {
     let schema_acl = if let Some(profile) = profile {
-        format!("AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+        format!(
+            "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
            WHERE a.grantee NOT IN (n.nspowner,r.oid,definer.oid,pg_catalog.to_regrole('pg_monitor'),{}::pg_catalog.oid,{}::pg_catalog.oid) \
              OR (a.grantee <> n.nspowner AND (a.grantor <> n.nspowner OR a.privilege_type <> 'USAGE' OR a.is_grantable)))",
-            profile.api_oid, profile.helper_oid)
+            profile.api_oid, profile.helper_oid
+        )
     } else if exact_schema_acl {
         "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
            WHERE a.grantee = 0 OR a.grantee NOT IN (n.nspowner,r.oid,definer.oid) \

@@ -2,12 +2,14 @@
 #![cfg(feature = "test-support")]
 
 use sqlx::postgres::{PgConnectOptions, PgPool};
+use std::future::Future;
 use std::str::FromStr;
 use std::time::Duration;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
 use waddle_server::db::physical_attestation::{
-    attested_pool, install, PgRoleName, PhysicalAttestationConfig,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY, PgRoleName, PhysicalAttestationConfig, attested_pool,
+    install,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
@@ -216,6 +218,136 @@ async fn run_sql(f: &Fixture, statement: &str) {
         .unwrap_or_else(|error| panic!("{statement}: {error}"));
 }
 
+async fn relation_exists(admin: &PgPool, schema: &str, relation: &str) -> bool {
+    let qualified = format!("{schema}.{relation}");
+    sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+        .bind(qualified)
+        .fetch_one(admin)
+        .await
+        .expect("inspect fixture relation")
+}
+
+const MUC_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_994;
+const MUC_DESTROY_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_995;
+const ROOM_EFFECT_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_996;
+
+/// Exercise a public owner entry while its family gate is held. The shared
+/// catalog probe must succeed during the wait, showing that a failed lower
+/// gate attempt was rolled back before retry; the relation becomes visible
+/// only after releasing the family gate and allowing the public entry to
+/// commit.
+async fn assert_owner_gate_releases_catalog<T>(
+    admin: PgPool,
+    schema: String,
+    relation: &'static str,
+    family_gate: i64,
+    operation: impl Future<Output = T> + Send + 'static,
+) -> T
+where
+    T: Send + 'static,
+{
+    let qualified = format!("{schema}.{relation}");
+    assert!(!relation_exists(&admin, &schema, relation).await);
+
+    let mut gate = admin.begin().await.expect("begin owner-family gate");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(family_gate)
+        .execute(&mut *gate)
+        .await
+        .expect("hold owner-family gate");
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let operation = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        operation.await
+    });
+    started_rx.await.expect("public owner operation started");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let remained_pending = !operation.is_finished();
+
+    let catalog_released = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let shared: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&admin)
+                    .await
+                    .expect("probe catalog lock release");
+            if shared {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let visible_while_gate_held = relation_exists(&admin, &schema, relation).await;
+
+    gate.rollback().await.expect("release owner-family gate");
+    if !remained_pending || !catalog_released || visible_while_gate_held {
+        operation.abort();
+        let _ = operation.await;
+        assert!(
+            remained_pending,
+            "public owner entry bypassed its family gate"
+        );
+        assert!(
+            catalog_released,
+            "owner retry retained catalog-X while the family gate was busy"
+        );
+        assert!(
+            !visible_while_gate_held,
+            "owner DDL became visible before the family gate was released"
+        );
+    }
+
+    let output = tokio::time::timeout(Duration::from_secs(10), operation)
+        .await
+        .expect("public owner entry completed after gate release")
+        .expect("join public owner entry");
+    assert!(
+        relation_exists(&admin, &schema, relation).await,
+        "{} became visible after the public owner entry completed",
+        qualified
+    );
+    output
+}
+
+async fn assert_reader_waits_for_catalog_fence<T>(
+    admin: PgPool,
+    operation: impl Future<Output = T> + Send + 'static,
+) -> T
+where
+    T: Send + 'static,
+{
+    let mut catalog = admin.begin().await.expect("begin catalog-X reader witness");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *catalog)
+        .await
+        .expect("hold catalog-X");
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let operation = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        operation.await
+    });
+    started_rx.await.expect("public reader operation started");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let remained_pending = !operation.is_finished();
+
+    catalog.rollback().await.expect("release catalog-X");
+    let output = tokio::time::timeout(Duration::from_secs(10), operation)
+        .await
+        .expect("public reader completed after catalog-X release")
+        .expect("join public reader");
+    assert!(
+        remained_pending,
+        "public reader completed its attestation while catalog-X was held"
+    );
+    output
+}
+
 #[tokio::test]
 async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
@@ -273,19 +405,25 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         absent_room_table.is_none(),
         "runtime verification must not create schema"
     );
-    assert!(RoomEffectOutboxStore::try_new(runtime.clone())
+    assert!(
+        RoomEffectOutboxStore::try_new(runtime.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        RoomEffectOutboxStore::initialize_owner(&runtime, &identity)
+            .await
+            .is_err()
+    );
+    assert!(
+        PostgresMucRoomStore::open(
+            runtime.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            SharedNodeIdentity::new(NodeIdentity::new("node", "epoch")),
+        )
         .await
-        .is_err());
-    assert!(RoomEffectOutboxStore::initialize_owner(&runtime, &identity)
-        .await
-        .is_err());
-    assert!(PostgresMucRoomStore::open(
-        runtime.clone(),
-        tokio_util::sync::CancellationToken::new(),
-        SharedNodeIdentity::new(NodeIdentity::new("node", "epoch")),
-    )
-    .await
-    .is_err());
+        .is_err()
+    );
     let mut url = url::Url::parse(&f.base_url).unwrap();
     let retained: Vec<_> = url
         .query_pairs()
@@ -317,9 +455,11 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         .unwrap();
     let mut wrong = identity.clone();
     wrong.database.oid += 1;
-    assert!(RoomEffectOutboxStore::initialize_owner(&owner_db, &wrong)
-        .await
-        .is_err());
+    assert!(
+        RoomEffectOutboxStore::initialize_owner(&owner_db, &wrong)
+            .await
+            .is_err()
+    );
     run_sql(
         &f,
         &format!("GRANT TEMPORARY ON DATABASE {} TO {owner}", f.database_name),
@@ -404,12 +544,27 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         &format!("DELETE FROM {}.xmpp_occupancy_authority", f.target),
     )
     .await;
-    PostgresMucRoomStore::initialize_owner(&owner_db, &identity)
-        .await
-        .expect("prepare fresh room schema");
-    MucDestroyCompletionOutboxStore::try_new(owner_db.clone())
-        .await
-        .expect("prepare destroy completion outbox");
+    let database = owner_db.clone();
+    let room_identity = identity.clone();
+    assert_owner_gate_releases_catalog(
+        f.admin.clone(),
+        f.target.clone(),
+        "clustering_muc_rooms",
+        MUC_SCHEMA_ADVISORY_LOCK_KEY,
+        async move { PostgresMucRoomStore::initialize_owner(&database, &room_identity).await },
+    )
+    .await
+    .expect("prepare fresh room schema after the MUC gate is released");
+    let database = owner_db.clone();
+    assert_owner_gate_releases_catalog(
+        f.admin.clone(),
+        f.target.clone(),
+        "clustering_muc_destroy_outbox",
+        MUC_DESTROY_SCHEMA_ADVISORY_LOCK_KEY,
+        async move { MucDestroyCompletionOutboxStore::try_new(database).await },
+    )
+    .await
+    .expect("prepare destroy completion outbox after its gate is released");
     run_sql(&f, &format!("INSERT INTO {}.clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json) VALUES ('room@conference.example.test', 'space', 'channel', '{{}}')", f.target)).await;
     assert!(matches!(
         PostgresMucRoomStore::initialize_owner(&owner_db, &identity).await,
@@ -423,9 +578,24 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
     .await
     .unwrap();
     assert_eq!(preserved, 1);
-    RoomEffectOutboxStore::initialize_owner(&owner_db, &identity)
-        .await
-        .expect("prepare outbox");
+    let database = owner_db.clone();
+    let effect_identity = identity.clone();
+    assert_owner_gate_releases_catalog(
+        f.admin.clone(),
+        f.target.clone(),
+        "clustering_muc_room_effects",
+        ROOM_EFFECT_SCHEMA_ADVISORY_LOCK_KEY,
+        async move { RoomEffectOutboxStore::initialize_owner(&database, &effect_identity).await },
+    )
+    .await
+    .expect("prepare room-effect outbox after its gate is released");
+    PostgresMucRoomStore::open(
+        owner_db.clone(),
+        tokio_util::sync::CancellationToken::new(),
+        SharedNodeIdentity::new(NodeIdentity::new("node", "epoch")),
+    )
+    .await
+    .expect("open the raw MUC composition across its three fenced commits");
     let sentinel: Option<String> = sqlx::query_scalar(
         "SELECT pg_catalog.to_regclass('public.clustering_muc_room_effects')::text",
     )
@@ -464,14 +634,25 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         ),
     )
     .await;
-    let verified_room_runtime = RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone())
-        .await
-        .expect("verify complete room runtime schema");
+    let verified_room_runtime = assert_reader_waits_for_catalog_fence(
+        f.admin.clone(),
+        RoomEffectOutboxStore::verify_muc_room_runtime(runtime.clone()),
+    )
+    .await
+    .expect("verify complete room runtime schema after acquiring catalog-S");
+    assert_reader_waits_for_catalog_fence(
+        f.admin.clone(),
+        MucDestroyCompletionOutboxStore::attach_existing(runtime.clone()),
+    )
+    .await
+    .expect("attach destroy outbox after acquiring catalog-S");
     assert!(verified_room_runtime.belongs_to_main_pool(&runtime));
     assert!(!verified_room_runtime.belongs_to_main_pool(&pool.ingress()));
-    assert!(verified_room_runtime
-        .effect_outbox()
-        .belongs_to_main_pool(&runtime));
+    assert!(
+        verified_room_runtime
+            .effect_outbox()
+            .belongs_to_main_pool(&runtime)
+    );
     let mut mismatched_lineage = f.lineage.clone();
     mismatched_lineage
         .postgres_identity
@@ -778,9 +959,11 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
             .await
             .is_err()
     );
-    assert!(RoomEffectOutboxStore::attach_existing(runtime.clone())
-        .await
-        .is_err());
+    assert!(
+        RoomEffectOutboxStore::attach_existing(runtime.clone())
+            .await
+            .is_err()
+    );
     drop(attached);
     drop(runtime);
     drop(pool);

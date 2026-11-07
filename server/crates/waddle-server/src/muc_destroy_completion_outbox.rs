@@ -3,7 +3,7 @@
 //! The table is intentionally outside the application migration ledger: it is
 //! support state for clustered MUC recovery, not application schema history.
 
-use crate::db::{Database, DatabaseDriver, DatabaseError};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError};
 
 /// A restricted runtime may only adopt an owner-prepared outbox on its
 /// physically attested main lane. The legacy constructor still owns bootstrap.
@@ -66,17 +66,7 @@ impl MucDestroyCompletionOutboxStore {
         db.verify_attested_pg_writer_capability(&capability)
             .map_err(DatabaseError::from)?;
 
-        let mut tx = db.begin().await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
-            (),
-        )
-        .await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            (),
-        )
-        .await?;
+        let mut tx = db.begin_catalog_fenced_read_only(&[]).await?;
         crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
             .await
             .map_err(|error| match error {
@@ -364,16 +354,11 @@ impl MucDestroyCompletionOutboxStore {
     }
 
     async fn ensure_postgres_schema(db: &Database) -> Result<(), DatabaseError> {
-        let mut tx = db.begin().await?;
-        // The transaction isolation command must remain first: a bootstrap
-        // loser needs to observe the winner's committed DDL.
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        let mut tx = db
+            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+                MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
+            )])
             .await?;
-        tx.query(
-            "SELECT pg_advisory_xact_lock(?)",
-            crate::db_params![MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY],
-        )
-        .await?;
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_destroy_outbox (
@@ -510,7 +495,7 @@ impl MucDestroyCompletionOutboxStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use crate::db::{DEFAULT_CONTROL_PLANE_POOL_SIZE, DatabaseConfig};
 
     #[tokio::test]
     async fn runtime_attach_refuses_sqlite_before_schema_work() {

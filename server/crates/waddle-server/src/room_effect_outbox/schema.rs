@@ -1,7 +1,7 @@
 use super::RoomEffectOutboxError;
-use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
 use crate::db::ConnectionGuard;
-use crate::db::{Database, DatabaseDriver, Transaction};
+use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, Transaction};
 
 /// Dedicated transaction-scoped Postgres advisory lock for room-effect outbox
 /// bootstrap. It is distinct from the claims (`…991`), migrations (`…992`),
@@ -25,22 +25,11 @@ pub(super) async fn initialize_owner(
     if db.driver() != DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
         return Err(RoomEffectOutboxError::OwnerPreparationRequired);
     }
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
-        (),
-    )
-    .await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-        (),
-    )
-    .await?;
-    tx.query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![ROOM_EFFECT_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+            ROOM_EFFECT_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
+        )])
+        .await?;
     pin_owner_schema(&mut tx, identity).await?;
     let schema = &identity.schema.name.0;
     let exists = super::runtime_attach::verify_existing_owner(&mut tx, schema)
@@ -99,14 +88,11 @@ pub(crate) async fn pin_owner_schema(
 }
 
 async fn postgres(db: &Database) -> Result<(), RoomEffectOutboxError> {
-    let mut tx = db.begin().await?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(
+            ROOM_EFFECT_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
+        )])
         .await?;
-    tx.query(
-        "SELECT pg_advisory_xact_lock(?)",
-        crate::db_params![ROOM_EFFECT_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
     postgres_schema(&mut tx).await?;
     tx.commit().await?;
     Ok(())

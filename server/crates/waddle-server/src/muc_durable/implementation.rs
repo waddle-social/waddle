@@ -1,6 +1,5 @@
 //! Implementation behind the parent module facade.
 
-use super::admin_receipts;
 use super::AffiliationEntry;
 use super::BareJid;
 use super::CancellationToken;
@@ -11,6 +10,7 @@ use super::RelayHandle;
 use super::RoomEffectEnqueue;
 use super::RoomEffectOutboxStore;
 use super::RoomEffectProducingNode;
+use super::admin_receipts;
 use super::{Affiliation, XmppError};
 use super::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity};
 use super::{Database, DatabaseError, Transaction};
@@ -23,6 +23,7 @@ use super::{
     RoomCommitOutcome, RoomCommittedCoordinates, RoomDurableMutation, RoomMutationEffects,
     RoomPinProjection, RoomProjection,
 };
+use crate::db::CatalogFenceLock;
 
 /// Dedicated transaction-scoped Postgres advisory lock for MUC store schema
 /// bootstrap. It is distinct from the clustering claims lock
@@ -336,22 +337,9 @@ impl PostgresMucRoomStore {
         if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
             return Err(MucOwnerPreparationError::OwnerHandleRequired);
         }
-        let mut tx = db.begin().await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
-            (),
-        )
-        .await?;
-        tx.execute(
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-            (),
-        )
-        .await?;
-        tx.query(
-            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-            crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
-        )
-        .await?;
+        let mut tx = db
+            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
+            .await?;
         crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
             .await
             .map_err(|_| MucOwnerPreparationError::UnsafeOwnerBoundary)?;
@@ -413,6 +401,9 @@ impl PostgresMucRoomStore {
                 "MUC runtime attachment requires a verified shared claim and occupancy authority",
             ));
         }
+        // These three bootstraps each fence and commit their own transaction.
+        // The composition is intentionally not atomic: MUC core, destroy
+        // completion, and room effects can commit independently.
         Self::ensure_schema(&db).await.map_err(db_err)?;
         MucDestroyCompletionOutboxStore::try_new(db.clone())
             .await
@@ -436,16 +427,9 @@ impl PostgresMucRoomStore {
     }
 
     pub(in crate::muc_durable) async fn ensure_schema(db: &Database) -> Result<(), DatabaseError> {
-        let mut tx = db.begin().await?;
-        // The advisory-lock loser must observe the winner's committed DDL,
-        // even when the deployment's session default is stricter.
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        let mut tx = db
+            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
             .await?;
-        tx.query(
-            "SELECT pg_advisory_xact_lock(?)",
-            crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
-        )
-        .await?;
         Self::ensure_schema_in_tx(&mut tx).await?;
         tx.commit().await?;
         Ok(())
