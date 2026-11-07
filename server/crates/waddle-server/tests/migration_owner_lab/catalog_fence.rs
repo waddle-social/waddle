@@ -9,6 +9,9 @@ use sqlx::{Connection, PgConnection, PgPool};
 use waddle_server::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError, MigrationRunner};
 
+use super::{make_v1028_pending, Fixture};
+use waddle_server::db::run_dark_postgres_owner;
+
 const LEDGER_KEY: i64 = 6_841_445_497_037_937_992;
 
 async fn lose_commit_reply(
@@ -144,6 +147,67 @@ async fn wait_for_shared(connection: &mut PgConnection) {
     })
     .await
     .expect("original backend eventually released the exclusive fence");
+}
+
+#[tokio::test]
+async fn postgres_dark_owner_waits_for_catalog_before_ledger_or_ddl() {
+    let Some(cluster_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&cluster_url, true).await;
+    fixture.enable_owner_handoff().await;
+    make_v1028_pending(&fixture).await;
+
+    let mut blocker = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("connect catalog reader");
+    sqlx::query("BEGIN")
+        .execute(&mut blocker)
+        .await
+        .expect("begin catalog reader");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut blocker)
+        .await
+        .expect("hold catalog reader");
+
+    let application = format!("dark_owner_fence_{}", uuid::Uuid::new_v4().simple());
+    let options = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
+    let config = fixture.config();
+    let migrator = fixture.migrator_role();
+    let mut owner =
+        tokio::spawn(async move { run_dark_postgres_owner(&options, &config, &migrator).await });
+
+    wait_for_idle_retry(&fixture.admin, &application).await;
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut owner)
+        .await
+        .is_err());
+    let pending: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {}._migrations WHERE version >= 1028",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect pending owner catalog");
+    assert_eq!(pending, 0, "catalog reader prevented migration DDL");
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut blocker)
+        .await
+        .expect("release catalog reader");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(20), owner)
+            .await
+            .expect("owner resumes after catalog reader")
+            .expect("owner task")
+            .expect("owner commits pending catalog"),
+        vec![1028, 1029, 1030]
+    );
+    blocker.close().await.expect("close catalog reader");
+    fixture.cleanup().await;
 }
 
 #[tokio::test]
