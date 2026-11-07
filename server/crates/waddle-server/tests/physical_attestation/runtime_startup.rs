@@ -8,8 +8,11 @@ use sqlx::Row;
 use uuid::Uuid;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::bootstrap::RuntimePoolLimits;
-use waddle_server::db::runtime_startup::RuntimeStartupIdentity;
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::db::physical_attestation::DarkPinnedEntryError;
+use waddle_server::db::runtime_startup::{RuntimeStartupError, RuntimeStartupIdentity};
+use waddle_server::db::{
+    DarkLedgerPreflightError, Database, DatabaseConfig, DatabaseDriver, MigrationRunner,
+};
 
 use super::{dark_attestor_fixture, test_url, url_with_schema, Fixture, CATALOG_GRANT_LOCK};
 
@@ -44,6 +47,24 @@ async fn restricted_startup_runs_pinned_preflight_then_refuses_store_activation(
         wrong_socket_identity.preflight(&database_url, limits).await,
         Err(waddle_server::db::runtime_startup::RuntimeStartupError::PrimaryEndpointMismatch)
     ));
+    if effective_socket_dir(&PgConnectOptions::from_str(&database_url).expect("runtime URL"))
+        .is_some()
+    {
+        wrong_socket_document["cutover"]["primary"]["endpoint_socket_dir"] =
+            serde_json::Value::Null;
+        let omitted_socket_identity = RuntimeStartupIdentity::from_json(
+            &wrong_socket_document.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        )
+        .expect("valid handoff with missing socket record");
+        assert!(matches!(
+            omitted_socket_identity
+                .preflight(&database_url, limits)
+                .await,
+            Err(waddle_server::db::runtime_startup::RuntimeStartupError::PrimaryEndpointMismatch)
+        ));
+    }
     let identity = RuntimeStartupIdentity::from_json(&document, &lineage, RELEASE_GIT_SHA)
         .expect("v3 operator procedure handoff");
 
@@ -102,6 +123,43 @@ async fn restricted_startup_runs_pinned_preflight_then_refuses_store_activation(
         !port_file.exists(),
         "the HTTP listener must not be published"
     );
+
+    // A syntactically valid handoff with a wrong independent ledger pin must
+    // fail on the connected pinned path, before the all-store refusal or any
+    // listener publication. This is distinct from a URL preflight rejection.
+    let mut wrong_pin: serde_json::Value =
+        serde_json::from_str(&document).expect("structured handoff JSON");
+    wrong_pin["pins"]["ledger_relation_oid"] = 4_000_000_001_u32.into();
+    let drifted_document = wrong_pin.to_string();
+    let drifted_identity =
+        RuntimeStartupIdentity::from_json(&drifted_document, &lineage, RELEASE_GIT_SHA)
+            .expect("drifted catalog pin is structurally valid");
+    assert!(matches!(
+        drifted_identity.preflight(&database_url, limits).await,
+        Err(RuntimeStartupError::PinnedPreflightIndeterminate(
+            DarkPinnedEntryError::Ledger(DarkLedgerPreflightError::CatalogDrift)
+        ))
+    ));
+    server.env("WADDLE_DB_RUNTIME_ATTESTATION", drifted_document);
+    let failed = tokio::time::timeout(Duration::from_secs(40), server.output())
+        .await
+        .expect("drifted-pin startup finishes")
+        .expect("start drifted-pin server binary");
+    assert!(!failed.status.success(), "drifted pin must refuse startup");
+    let failed_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        failed_text.contains("pinned startup preflight did not complete"),
+        "drifted pin must fail in the connected preflight: {failed_text}"
+    );
+    assert!(
+        !failed_text.contains("enabled stores and transaction entry remain unconverted"),
+        "a failed preflight must not reach the all-store refusal: {failed_text}"
+    );
+    assert!(!port_file.exists(), "drifted pin cannot publish a listener");
 
     fixture.cleanup().await;
 }
@@ -182,7 +240,7 @@ async fn runtime_handoff(fixture: &Fixture) -> (String, String) {
                 "instance_id": "disposable-primary",
                 "endpoint_host": endpoint.get_host(),
                 "endpoint_port": endpoint.get_port(),
-                "endpoint_socket_dir": endpoint.get_socket().map(|path| path.to_string_lossy().into_owned()),
+                "endpoint_socket_dir": effective_socket_dir(&endpoint),
                 "observation_record_id": Uuid::new_v4().to_string(),
             },
             "old_runtime": {
@@ -232,4 +290,16 @@ fn runtime_database_url(fixture: &Fixture) -> String {
         .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
         .append_pair("user", &fixture.runtime);
     url.to_string()
+}
+
+fn effective_socket_dir(options: &PgConnectOptions) -> Option<String> {
+    options
+        .get_socket()
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| {
+            options
+                .get_host()
+                .starts_with('/')
+                .then(|| options.get_host().to_owned())
+        })
 }

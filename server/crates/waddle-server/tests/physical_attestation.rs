@@ -3232,6 +3232,17 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         RuntimeStartupIdentity::from_json(&missing_cutoff.to_string(), &lineage, RELEASE_GIT_SHA),
         Err(RuntimeStartupError::InvalidDocument)
     ));
+    let mut unsupported_cooperative = document.clone();
+    unsupported_cooperative["cutover"]["mutator_policy"]["mode"] =
+        "cooperative_catalog_fence_v1".into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &unsupported_cooperative.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        ),
+        Err(RuntimeStartupError::CooperativeMutatorPolicyUnavailable)
+    ));
     let mut old_boolean_only = document.clone();
     old_boolean_only["operator_asserts_direct_fenced_primary"] = true.into();
     assert!(matches!(
@@ -3250,6 +3261,28 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
     assert!(matches!(
         RuntimeStartupIdentity::from_json(&same_old_oid.to_string(), &lineage, RELEASE_GIT_SHA,),
         Err(RuntimeStartupError::OldRuntimePrincipalMismatch)
+    ));
+    let mut conflicting_installer_login = document.clone();
+    conflicting_installer_login["cutover"]["old_runtime"]["login"] =
+        fixture.installer.clone().into();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &conflicting_installer_login.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        ),
+        Err(RuntimeStartupError::InvalidDocument)
+    ));
+    let mut conflicting_definer_oid = document.clone();
+    conflicting_definer_oid["cutover"]["old_runtime"]["role_oid"] =
+        document["pins"]["definer_role_oid"].clone();
+    assert!(matches!(
+        RuntimeStartupIdentity::from_json(
+            &conflicting_definer_oid.to_string(),
+            &lineage,
+            RELEASE_GIT_SHA,
+        ),
+        Err(RuntimeStartupError::InvalidDocument)
     ));
     assert!(matches!(
         RuntimeStartupIdentity::from_json(

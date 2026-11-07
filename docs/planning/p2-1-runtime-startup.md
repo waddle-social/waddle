@@ -7,8 +7,8 @@ The following shape uses illustrative values:
 
 ```json
 {
-  "version": 2,
-  "operator_asserts_direct_fenced_primary": true,
+  "version": 3,
+  "release_git_sha": "0123456789abcdef0123456789abcdef01234567",
   "deployment_uuid": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001",
   "lineage_uuid": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90002",
   "system_identifier": "123456789",
@@ -20,6 +20,30 @@ The following shape uses illustrative values:
   "runtime_login": "waddle_runtime",
   "definer_role": "waddle_attestor",
   "trusted_schema": "waddle_attestation",
+  "cutover": {
+    "transition_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90004",
+    "primary": {
+      "provider": "example-provider",
+      "cluster_id": "example-cluster",
+      "instance_id": "example-primary",
+      "endpoint_host": "db-primary.example.com",
+      "endpoint_port": 5432,
+      "endpoint_socket_dir": null,
+      "observation_record_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90005"
+    },
+    "old_runtime": {
+      "login": "waddle_old_runtime",
+      "role_oid": 16400,
+      "credential_cutoff_record_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90006"
+    },
+    "listener_cutoff_record_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90007",
+    "backend_cutoff_record_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90008",
+    "prepared_transaction_cutoff_record_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a90009",
+    "mutator_policy": {
+      "mode": "quiesced_for_serving_interval",
+      "record_id": "018f47b2-4b2e-7a3a-9a4c-52a5a6a9000a"
+    }
+  },
   "pins": {
     "database_owner_role_oid": 16386,
     "schema_owner_role_oid": 16387,
@@ -40,39 +64,60 @@ The following shape uses illustrative values:
 }
 ```
 
-These OIDs are illustrative, not an installation recipe. A trusted operator
-must record the actual values independently of the runtime connection, after
-positive attestor installation or same-operation reconciliation on the fenced
-primary. Version 1 and incomplete pin bundles are refused.
+These OIDs and record IDs are illustrative, not an installation recipe. A
+trusted operator must record actual pins independently of the runtime
+connection, after positive attestor installation or same-operation
+reconciliation on the original primary. Version 1, version 2, and incomplete
+handoffs are refused. The record IDs describe an operator procedure; the
+runtime has no trusted signing key or anti-replay store and does not verify
+that old credentials, backends, listeners, prepared transactions, or privileged
+mutators were actually fenced or remain fenced. The old login/OID pair is
+checked for contradictions against other name/OID pairs in this handoff;
+it is not checked against a possibly retired live role.
+Only `quiesced_for_serving_interval` is accepted: the current read-only startup
+entry does not hold the shared catalog fence from before its checkout hook
+through rollback. The operator must keep privileged catalog, ACL, role,
+function, and concurrent-index mutation quiescent for the entire preflight
+and any future selected serving interval. The runtime does not prove this
+quiescence; `cooperative_catalog_fence_v1` is rejected.
 
-`WADDLE_DEPLOYMENT_UUID` must equal the document's deployment UUID; enrollment
-or adoption actions are refused in this mode. The runtime PostgreSQL URL must
-name the expected database and login. The opt-in pinned checkout hook proves
-the independently pinned physical and lineage identities, then sets a known
-schema path before lending a connection; it does not require an inherited
-active schema. The v2 production attachment is still closed. TCP connections require
-`sslmode=verify-full`; Unix sockets depend on operator-controlled filesystem
-permissions. A direct, session-preserving endpoint and the operator's fencing
-of the authoritative primary and old sessions remain prerequisites. The
-assertion records that requirement; it does not prove any of those conditions.
+`WADDLE_DEPLOYMENT_UUID` and the exact 40-character lowercase `WADDLE_GIT_SHA`
+must match the handoff; enrollment or adoption actions are refused. The Git SHA
+is supplied by the launcher and is not independently authenticated as an
+artifact identity. The runtime PostgreSQL URL must name the recorded database
+and runtime login and match the recorded host, port, and optional Unix socket
+directory. A TCP endpoint requires `sslmode=verify-full`; a Unix socket depends
+on operator-controlled filesystem permissions. The direct, session-preserving
+primary and old-writer cutoff are external prerequisites.
+The focused startup integration fixture requires a PostgreSQL test URL using
+a Unix socket or authenticated TCP with `sslmode=verify-full`; a plain TCP
+test URL cannot exercise its positive preflight case. The checked-in Nix
+lane uses a Unix socket.
 
-The v2 production attachment currently refuses before opening a connection.
-Its former name-based, REPEATABLE READ lineage/ledger entry runs before a
-pinned catalog proof, so it cannot safely consume the new pin bundle yet.
-The opt-in dark hook and ledger helpers must be integrated into that bootstrap
-entry and each transaction caller before this path may hand out a pool.
-Attachment cannot reopen a DSN or fall back to owner bootstrap after a
-refusal. Privileged DDL, ownership and grant changes must remain quiescent
-through any future proof and use.
+The selected restricted startup branch now opens a one-connection throwaway
+pinned pool. Its hook checks physical identity before lending a connection;
+the same backend runs a bounded read-only pinned ledger and epoch preflight,
+then the runtime awaits SQLx pool close. That local completion does not prove
+PostgreSQL terminated the original backend. A successful preflight yields only a sealed preparation
+marker. Startup still exits with `UnconvertedStores` before listener
+publication or effectful workers. No pool or serving authority is handed to
+the application, and the legacy owner startup is not a fallback from refusal.
+Cancellation, a lost response, or a pool-close timeout cannot prove that the
+original backend stopped. Even a completed local close does not establish
+server-side exit. Fence and reconcile the original primary and backend before
+retrying an indeterminate attempt; do not treat a missing local
+marker as rollback. Privileged DDL, ownership, grant, and concurrent-index
+mutations need an enforceable catalog-fence protocol or independent quiescence
+through any future serving interval.
 
 The prior attachment implementation checks for unexpected triggers and rewrite
 rules on inbox, portable SM and pending-delivery relations. Those checks remain
-available to the legacy test path, but are not a v2 serving authorization. An
+available to the legacy test path, but are not a serving authorization. An
 epoch guard cannot be added to its allowlist until its definition, owner and
 installation are verified.
 
-**This is not yet a serving cutover.** The server currently refuses an
-attested pool before binding a listener or running store constructors. MAM,
+**This is not yet a serving cutover.** The server refuses after the pinned
+preflight and before binding a listener or running store constructors. MAM,
 PubSub, clustered SM, clustering claim/lease/MUC stores, push, observation and
 outbox constructors still need owner-only preparation and verified runtime
 attachments. The PostgreSQL relation-guard migration, old-writer drain,

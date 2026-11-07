@@ -53,9 +53,11 @@ pub enum RuntimeStartupError {
         "the operator-recorded old runtime principal must differ from the new runtime principal"
     )]
     OldRuntimePrincipalMismatch,
+    #[error("cooperative catalog fencing is not held through this startup preflight; require operator quiescence")]
+    CooperativeMutatorPolicyUnavailable,
     #[error("the pinned startup preflight did not complete; reconcile this attempt on the original primary before retrying")]
     PinnedPreflightIndeterminate(#[source] DarkPinnedEntryError),
-    #[error("the pinned startup preflight pool did not close cleanly; reconcile this attempt on the original primary before retrying")]
+    #[error("the pinned startup preflight pool close timed out; reconcile the original backend before retrying")]
     PreflightPoolCloseIndeterminate,
     #[error("restricted startup preflight passed, but enabled stores and transaction entry remain unconverted")]
     UnconvertedStores,
@@ -242,16 +244,26 @@ impl RuntimeStartupIdentity {
                 },
             }),
         };
+        let installer_login = PgRoleName::new(doc.installer_login)?;
         let runtime_login = PgRoleName::new(doc.runtime_login)?;
+        let definer_role = PgRoleName::new(doc.definer_role)?;
         let physical = PhysicalAttestationConfig::new(
             expected.clone(),
-            PgRoleName::new(doc.installer_login)?,
+            installer_login.clone(),
             runtime_login.clone(),
-            PgRoleName::new(doc.definer_role)?,
+            definer_role.clone(),
             PgSchemaName(doc.trusted_schema),
         )?;
         let pin_doc = doc.pins;
-        let cutover = validate_cutover(doc.cutover, &runtime_login, pin_doc.runtime_role_oid)?;
+        let cutover = validate_cutover(
+            doc.cutover,
+            &runtime_login,
+            pin_doc.runtime_role_oid,
+            [
+                (installer_login.as_str(), pin_doc.installer_role_oid),
+                (definer_role.as_str(), pin_doc.definer_role_oid),
+            ],
+        )?;
         let installation_operation_id = Uuid::parse_str(&pin_doc.installation_operation_id)
             .map_err(|_| RuntimeStartupError::InvalidDocument)?;
         let attestor = DarkPhysicalAttestationPins {
@@ -291,9 +303,10 @@ impl RuntimeStartupIdentity {
     }
 
     /// Run the pinned physical, complete-ledger, and epoch-manifest preflight
-    /// on one checked-out pool connection, then close the throwaway pool.
-    /// Errors are indeterminate because cancellation or transport loss does
-    /// not prove the server-side backend has stopped. No pool escapes.
+    /// on one checked-out pool connection, then await the throwaway pool's
+    /// local close. SQLx close completion does not prove that PostgreSQL has
+    /// exited the backend; cancellation or transport loss is indeterminate.
+    /// No pool escapes or serving authority is returned.
     pub async fn preflight(
         &self,
         database_url: &str,
@@ -312,9 +325,10 @@ impl RuntimeStartupIdentity {
         if options.get_database() != Some(expected_database.as_str()) {
             return Err(RuntimeStartupError::DatabaseNameMismatch);
         }
+        let effective_socket_dir = effective_socket_dir(&options);
         if options.get_host() != self.cutover.primary_endpoint_host.as_str()
             || options.get_port() != self.cutover.primary_endpoint_port
-            || options.get_socket().and_then(|path| path.to_str())
+            || effective_socket_dir.and_then(std::path::Path::to_str)
                 != self.cutover.primary_endpoint_socket_dir.as_deref()
         {
             return Err(RuntimeStartupError::PrimaryEndpointMismatch);
@@ -324,7 +338,7 @@ impl RuntimeStartupIdentity {
         }
         // Unix socket transport depends on operator-controlled filesystem
         // permissions. TCP must authenticate the named server certificate.
-        let unix_socket = options.get_socket().is_some() || options.get_host().starts_with('/');
+        let unix_socket = effective_socket_dir.is_some();
         if !unix_socket && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
             return Err(RuntimeStartupError::UnauthenticatedTcp);
         }
@@ -348,6 +362,8 @@ impl RuntimeStartupIdentity {
         if close.is_err() {
             return Err(RuntimeStartupError::PreflightPoolCloseIndeterminate);
         }
+        // SQLx close returns no server-side exit acknowledgement. The original
+        // primary/backend still needs external custody before a later cutover.
         preflight.map_err(RuntimeStartupError::PinnedPreflightIndeterminate)?;
 
         Ok(RestrictedStartupPreparation {
@@ -361,6 +377,7 @@ fn validate_cutover(
     cutover: OperatorCutoverDocument,
     runtime_login: &PgRoleName,
     runtime_role_oid: u32,
+    other_known_roles: [(&str, u32); 2],
 ) -> Result<OperatorCutoverRecord, RuntimeStartupError> {
     let transition_id = parse_record_id(&cutover.transition_id)?;
     let observation_record_id = parse_record_id(&cutover.primary.observation_record_id)?;
@@ -395,6 +412,20 @@ fn validate_cutover(
         || cutover.old_runtime.role_oid == runtime_role_oid
     {
         return Err(RuntimeStartupError::OldRuntimePrincipalMismatch);
+    }
+    // These names and OIDs are supplied together in the same handoff. Catch
+    // internal contradictions without claiming the old role still exists in
+    // the live catalog after credential cutoff.
+    if other_known_roles.iter().any(|(login, oid)| {
+        (old_runtime_login.as_str() == *login) != (cutover.old_runtime.role_oid == *oid)
+    }) {
+        return Err(RuntimeStartupError::InvalidDocument);
+    }
+    if matches!(
+        cutover.mutator_policy.mode,
+        OperatorMutatorPolicyMode::CooperativeCatalogFenceV1
+    ) {
+        return Err(RuntimeStartupError::CooperativeMutatorPolicyUnavailable);
     }
     if !valid_operator_label(&cutover.primary.provider)
         || !valid_operator_label(&cutover.primary.cluster_id)
@@ -450,6 +481,43 @@ fn valid_operator_label(value: &str) -> bool {
 
 fn valid_socket_directory(value: &str) -> bool {
     valid_operator_label(value) && std::path::Path::new(value).is_absolute()
+}
+
+/// SQLx selects a Unix socket when the effective host is an absolute path,
+/// even if `get_socket()` is empty (for example, when PGHOST supplies it).
+fn effective_socket_dir(options: &PgConnectOptions) -> Option<&std::path::Path> {
+    options
+        .get_socket()
+        .map(std::path::PathBuf::as_path)
+        .or_else(|| {
+            options
+                .get_host()
+                .starts_with('/')
+                .then(|| std::path::Path::new(options.get_host()))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_socket_dir;
+    use sqlx::postgres::PgConnectOptions;
+
+    #[test]
+    fn endpoint_records_effective_sqlx_socket_transport() {
+        let socket = PgConnectOptions::new_without_pgpass().socket("/private/tmp");
+        assert_eq!(
+            effective_socket_dir(&socket).and_then(|path| path.to_str()),
+            Some("/private/tmp")
+        );
+        let host_path = PgConnectOptions::new_without_pgpass().host("/private/tmp");
+        assert!(host_path.get_socket().is_none());
+        assert_eq!(
+            effective_socket_dir(&host_path).and_then(|path| path.to_str()),
+            Some("/private/tmp")
+        );
+        let tcp = PgConnectOptions::new_without_pgpass().host("db-primary.example.com");
+        assert!(effective_socket_dir(&tcp).is_none());
+    }
 }
 
 /// The operator records these values outside the runtime connection. They are
