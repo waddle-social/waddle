@@ -215,6 +215,22 @@ async fn wait_backend_exit(admin: &PgPool, pid: i32) {
     .expect("cancelled checkout is discarded");
 }
 
+async fn assert_replacement_checkout(db: &Database, cancelled_pid: i32) {
+    let connection = db.guard().await.expect("replacement checkout");
+    let mut rows = connection
+        .query("SELECT pg_catalog.pg_backend_pid()::bigint", ())
+        .await
+        .expect("replacement backend PID");
+    let replacement: i64 = rows
+        .next()
+        .await
+        .expect("replacement PID row")
+        .expect("replacement PID exists")
+        .get(0)
+        .expect("decode replacement PID");
+    assert_ne!(replacement, i64::from(cancelled_pid));
+}
+
 fn spawn_owner(
     db: Database,
     identity: Option<PgIdentity>,
@@ -289,11 +305,12 @@ async fn exercise_owner_entry(
     assert_advisory_lock(&fixture.admin, pid, OWNER_GATE, "ExclusiveLock").await;
     task.abort();
     assert!(task.await.expect_err("cancel owner entry").is_cancelled());
-    wait_backend_exit(&fixture.admin, pid).await;
+    assert_replacement_checkout(db, pid).await;
     sqlx::query("ROLLBACK")
         .execute(&mut blocker)
         .await
         .expect("release relation barrier");
+    wait_backend_exit(&fixture.admin, pid).await;
     let partial: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute \
          WHERE attrelid = $1::regclass AND attname = 'unbound_occupant' AND NOT attisdropped)",
@@ -467,11 +484,12 @@ async fn exercise_reader_entry(
     );
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
-    wait_backend_exit(&fixture.admin, pid).await;
+    assert_replacement_checkout(runtime, pid).await;
     sqlx::query("ROLLBACK")
         .execute(&mut blocker)
         .await
         .expect("release relation barrier");
+    wait_backend_exit(&fixture.admin, pid).await;
 
     let mut lower = fixture
         .admin
