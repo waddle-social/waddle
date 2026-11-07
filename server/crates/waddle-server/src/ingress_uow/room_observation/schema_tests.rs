@@ -1,7 +1,8 @@
 use super::{
     prepare_dark_room_observation_schema, verify_attested_room_observation_schema,
     RoomObservationSchemaError, ROOM_OBSERVATION_OWNER_GATE_LOCK,
-    ROOM_OBSERVATION_OWNER_STATE_TABLE, ROOM_OBSERVATION_SCHEMA_REVISION,
+    ROOM_OBSERVATION_OWNER_STATE_TABLE, ROOM_OBSERVATION_SCHEMA_LOCK,
+    ROOM_OBSERVATION_SCHEMA_REVISION,
 };
 use anyhow::{bail, Result};
 use sqlx::postgres::{PgConnectOptions, PgPool};
@@ -14,6 +15,7 @@ use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
 use crate::db::physical_attestation::{
     attested_pool, install, PgRoleName, PhysicalAttestationConfig,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use crate::db::Database;
 use crate::db::{DatabaseConfig, DatabaseDriver, MigrationRunner};
@@ -182,7 +184,8 @@ impl Fixture {
             .expect("PostgreSQL lineage identity");
         let designated_migrator = PgRoleName::new(self.migrator.clone())?;
         let attestation_definer = PgRoleName::new(self.definer.clone())?;
-        crate::ingress_uow::initialize_room_observations(&owner_database).await?;
+        self.initialize_room_observations_with_catalog_blocker(&owner_database)
+            .await?;
         MigrationRunner::single().run(&owner_database).await?;
         owner_database
             .execute(&format!(
@@ -1562,7 +1565,7 @@ impl Fixture {
         let admin_options = PgConnectOptions::from_str(&url_with_options(&self.base_url, ""))?;
         let mut gate = PgConnection::connect_with(&admin_options).await?;
         sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
-            .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
             .execute(&mut gate)
             .await?;
 
@@ -1581,36 +1584,40 @@ impl Fixture {
             )
             .await
         });
-        let wait_seen = matches!(
-            tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let waiting: bool = sqlx::query_scalar(
-                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-                         WHERE datname = pg_catalog.current_database() \
-                           AND pid <> pg_catalog.pg_backend_pid() \
-                           AND wait_event_type = 'Lock' \
-                           AND query LIKE '%pg_advisory_xact_lock%')",
-                    )
-                    .fetch_one(&self.admin)
-                    .await?;
-                    if waiting {
-                        return Ok::<(), sqlx::Error>(());
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await,
-            Ok(Ok(()))
-        );
-        if !wait_seen {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let owner_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
+                .fetch_one(&self.admin)
+                .await?;
+        let lineage_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(lineage::LINEAGE_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
+        let ledger_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(crate::db::MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
+        let schema_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                .bind(ROOM_OBSERVATION_SCHEMA_LOCK)
+                .fetch_one(&self.admin)
+                .await?;
+        if !owner_gate_available
+            || !lineage_gate_available
+            || !ledger_gate_available
+            || !schema_gate_available
+        {
             owner.abort();
             let _ = owner.await;
             sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
-                .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
                 .execute(&mut gate)
                 .await?;
             gate.close().await?;
-            bail!("owner preparation did not wait on the held owner gate");
+            bail!("room-observation lower gate was acquired before catalog-X");
         }
 
         owner.abort();
@@ -1619,10 +1626,56 @@ impl Fixture {
             Ok(_) => bail!("cancelled owner preparation completed unexpectedly"),
         }
         sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
-            .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
             .execute(&mut gate)
             .await?;
         gate.close().await?;
+        Ok(())
+    }
+
+    async fn initialize_room_observations_with_catalog_blocker(
+        &self,
+        owner_database: &Database,
+    ) -> Result<()> {
+        let admin_options = PgConnectOptions::from_str(&url_with_options(&self.base_url, ""))?;
+        let mut catalog_blocker = PgConnection::connect_with(&admin_options).await?;
+        sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .execute(&mut catalog_blocker)
+            .await?;
+
+        let initialization_database = owner_database.clone();
+        let initialization = tokio::spawn(async move {
+            crate::ingress_uow::initialize_room_observations(&initialization_database).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let owner_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(ROOM_OBSERVATION_OWNER_GATE_LOCK)
+                .fetch_one(&self.admin)
+                .await?;
+        let schema_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock_shared($1)")
+                .bind(ROOM_OBSERVATION_SCHEMA_LOCK)
+                .fetch_one(&self.admin)
+                .await?;
+
+        if !owner_gate_available || !schema_gate_available {
+            initialization.abort();
+            let _ = initialization.await;
+            sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+                .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                .execute(&mut catalog_blocker)
+                .await?;
+            catalog_blocker.close().await?;
+            bail!("raw room-observation initialization acquired a lower gate before catalog-X");
+        }
+        sqlx::query("SELECT pg_catalog.pg_advisory_unlock($1)")
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .execute(&mut catalog_blocker)
+            .await?;
+        catalog_blocker.close().await?;
+        initialization.await??;
         Ok(())
     }
 

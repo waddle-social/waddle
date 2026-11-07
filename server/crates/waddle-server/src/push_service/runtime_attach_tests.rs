@@ -7,6 +7,7 @@ use super::{
 use crate::db::lineage::{self, DeploymentUuid};
 use crate::db::physical_attestation::{
     attested_pool, install, PgRoleName, PhysicalAttestationConfig,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 use anyhow::{bail, Context, Result};
@@ -298,12 +299,13 @@ impl Fixture {
             &identity,
         )
         .await?;
-        DatabasePushServiceStore::adopt_notification_ancestry_owner(&owner_database, &identity)
+        self.adopt_notification_ancestry_with_catalog_blocker(&owner_database, &identity)
             .await?;
         if marker_phase(&self.admin, &self.target).await? != 1 {
             bail!("cross-store owner adoption did not complete the marker");
         }
-        VapidStorage::prepare_owner(&owner_database, &identity, &secret).await?;
+        self.prepare_vapid_owner_with_catalog_blocker(&owner_database, &identity, &secret)
+            .await?;
         let vapid_kid: String = sqlx::query_scalar(&format!(
             "SELECT initial_kid FROM {}.push_service_vapid_schema_marker WHERE marker_id = 1",
             self.target
@@ -618,6 +620,85 @@ impl Fixture {
         Ok(())
     }
 
+    async fn adopt_notification_ancestry_with_catalog_blocker(
+        &self,
+        owner_database: &Database,
+        identity: &lineage::PgIdentity,
+    ) -> Result<()> {
+        let mut catalog = owner_database.begin().await?;
+        catalog
+            .query(
+                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+                crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
+            )
+            .await?;
+
+        let database = owner_database.clone();
+        let identity = identity.clone();
+        let adoption = tokio::spawn(async move {
+            DatabasePushServiceStore::adopt_notification_ancestry_owner(&database, &identity).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let outbox_gate = crate::notification_outbox::outbox_schema_gate();
+        let outbox_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)")
+                .bind(outbox_gate.0)
+                .bind(outbox_gate.1)
+                .fetch_one(&self.admin)
+                .await?;
+        let push_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
+        if !outbox_gate_available || !push_gate_available {
+            adoption.abort();
+            let _ = adoption.await;
+            catalog.rollback().await?;
+            bail!("Push ancestry owner gate was acquired before catalog-X");
+        }
+        catalog.rollback().await?;
+        adoption.await??;
+        Ok(())
+    }
+
+    async fn prepare_vapid_owner_with_catalog_blocker(
+        &self,
+        owner_database: &Database,
+        identity: &lineage::PgIdentity,
+        root_key: &[u8],
+    ) -> Result<()> {
+        let mut catalog = owner_database.begin().await?;
+        catalog
+            .query(
+                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+                crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
+            )
+            .await?;
+
+        let database = owner_database.clone();
+        let identity = identity.clone();
+        let root_key = root_key.to_vec();
+        let preparation = tokio::spawn(async move {
+            VapidStorage::prepare_owner(&database, &identity, &root_key).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let push_gate_available: bool =
+            sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+                .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
+                .fetch_one(&self.admin)
+                .await?;
+        if !push_gate_available {
+            preparation.abort();
+            let _ = preparation.await;
+            catalog.rollback().await?;
+            bail!("VAPID owner gate was acquired before catalog-X");
+        }
+        catalog.rollback().await?;
+        preparation.await??;
+        Ok(())
+    }
+
     async fn cleanup(self) {
         for role in [&self.owner, &self.definer] {
             sqlx::query(&format!(
@@ -748,7 +829,7 @@ async fn verify_owner_preparation_cancellation(
     let mut gate = owner_database.begin().await?;
     gate.query(
         "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
+        crate::db_params![CATALOG_MUTATION_ADVISORY_LOCK_KEY],
     )
     .await?;
 
@@ -758,36 +839,17 @@ async fn verify_owner_preparation_cancellation(
         DatabasePushServiceStore::initialize_owner(&preparation_database, &preparation_identity)
             .await
     });
-    let waiting = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
-                   AND wait_event = 'advisory' \
-                   AND query LIKE '%pg_advisory_xact_lock%')",
-            )
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let push_gate_available: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(PUSH_SCHEMA_ADVISORY_LOCK_KEY)
             .fetch_one(admin)
             .await?;
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        Ok::<(), sqlx::Error>(())
-    })
-    .await;
-    match waiting {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            preparation.abort();
-            gate.rollback().await?;
-            return Err(error.into());
-        }
-        Err(error) => {
-            preparation.abort();
-            gate.rollback().await?;
-            return Err(error.into());
-        }
+    if !push_gate_available {
+        preparation.abort();
+        gate.rollback().await?;
+        let _ = preparation.await;
+        bail!("Push owner gate was acquired before catalog-X");
     }
     preparation.abort();
     match preparation.await {

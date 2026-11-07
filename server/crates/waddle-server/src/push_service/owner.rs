@@ -1,7 +1,7 @@
 //! Trusted PostgreSQL owner preparation for the Push Service schema.
 
 use crate::db::lineage::PgIdentity;
-use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
+use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
 pub(super) const PUSH_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_998;
 const PUSH_SCHEMA_MARKER_TABLE: &str = "push_service_schema_marker";
@@ -67,13 +67,10 @@ pub(super) async fn initialize_owner(
         return Err(PushServiceOwnerError::OwnerHandleRequired);
     }
 
-    let mut tx = db.begin().await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(PUSH_SCHEMA_ADVISORY_LOCK_KEY)])
+        .await?;
     configure_owner_transaction(&mut tx).await?;
-    tx.query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
     pin_owner_schema(&mut tx, identity).await?;
     lock_existing_push_relations_tx(&mut tx, &identity.schema.name.0).await?;
 
@@ -123,13 +120,10 @@ pub(super) async fn prepare_vapid_owner(
         return Err(super::vapid_storage::VapidOwnerError::OwnerHandleRequired);
     }
 
-    let mut tx = db.begin().await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(PUSH_SCHEMA_ADVISORY_LOCK_KEY)])
+        .await?;
     configure_owner_transaction(&mut tx).await?;
-    tx.query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
     pin_owner_schema(&mut tx, identity).await?;
     lock_existing_push_relations_tx(&mut tx, &identity.schema.name.0).await?;
     let push_ready =
@@ -157,18 +151,21 @@ pub(super) async fn adopt_notification_ancestry_owner(
         return Err(PushServiceOwnerError::OwnerHandleRequired);
     }
 
-    let mut tx = db.begin().await?;
+    let mut tx = db
+        .begin_catalog_fenced(&[
+            CatalogFenceLock::SharedPair(
+                crate::notification_outbox::outbox_schema_gate().0,
+                crate::notification_outbox::outbox_schema_gate().1,
+            ),
+            CatalogFenceLock::Exclusive(PUSH_SCHEMA_ADVISORY_LOCK_KEY),
+        ])
+        .await?;
     configure_owner_transaction(&mut tx).await?;
     crate::notification_outbox::NotificationOutboxStore::verify_owner_preparation_complete_tx(
         &mut tx, identity,
     )
     .await
     .map_err(|_| PushServiceOwnerError::NotificationOutboxNotPrepared)?;
-    tx.query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
-        crate::db_params![PUSH_SCHEMA_ADVISORY_LOCK_KEY],
-    )
-    .await?;
     pin_owner_schema(&mut tx, identity).await?;
     lock_existing_push_relations_tx(&mut tx, &identity.schema.name.0).await?;
     super::runtime_attach::verify_marker_shape_and_data_tx(&mut tx, identity)
@@ -206,11 +203,8 @@ pub(super) async fn adopt_notification_ancestry_owner(
 async fn configure_owner_transaction(
     tx: &mut Transaction<'_>,
 ) -> Result<(), PushServiceOwnerError> {
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-        (),
-    )
-    .await?;
+    // begin_catalog_fenced starts a fresh READ COMMITTED, READ WRITE
+    // transaction and acquires catalog-X plus its gates before this setup.
     tx.execute("SET LOCAL lock_timeout = '30s'", ()).await?;
     tx.execute("SET LOCAL statement_timeout = '300000ms'", ())
         .await?;
