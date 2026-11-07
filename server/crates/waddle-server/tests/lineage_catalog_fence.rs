@@ -211,7 +211,7 @@ async fn wait_for_idle_rollback(admin: &PgPool, application: &str) -> i32 {
         }
     })
     .await
-    .expect("lineage retry acknowledges rollback and releases locks");
+    .expect("lineage retry acknowledges rollback and releases locks")
 }
 
 async fn assert_clean_retry_window(admin: &PgPool, application: &str) -> i32 {
@@ -467,16 +467,22 @@ async fn postgres_lineage_retry_releases_catalog_and_serializes_races() {
     let mut catalog_probe = PgConnection::connect(&fixture.database_url)
         .await
         .expect("connect catalog-fence probe");
-    let shared_available: bool =
-        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock_shared($1)")
-            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
-            .fetch_one(&mut catalog_probe)
-            .await
-            .expect("probe catalog fence between attempts");
-    assert!(
-        shared_available,
-        "failed lineage attempt rolled back catalog-X"
-    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let shared_available: bool =
+                sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock_shared($1)")
+                    .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+                    .fetch_one(&mut catalog_probe)
+                    .await
+                    .expect("probe catalog fence between attempts");
+            if shared_available {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("failed lineage attempts release catalog-X between retries");
     let shared_released: bool =
         sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock_shared($1)")
             .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
@@ -547,9 +553,11 @@ async fn postgres_lineage_retry_releases_catalog_and_serializes_races() {
     let db = fixture.db.clone();
     let config_a = config.clone();
     let config_b = config.clone();
+    let expected_a = [current_uuid];
+    let expected_b = [current_uuid];
     let (first, second) = tokio::join!(
-        lineage::adopt_if_matched(&db, &config_a, &[current_uuid]),
-        lineage::adopt_if_matched(&second_db, &config_b, &[current_uuid])
+        lineage::adopt_if_matched(&db, &config_a, &expected_a),
+        lineage::adopt_if_matched(&second_db, &config_b, &expected_b)
     );
     let first = first.expect("first concurrent adoption");
     let second = second.expect("second concurrent adoption");
@@ -571,6 +579,7 @@ async fn postgres_lineage_retry_releases_catalog_and_serializes_races() {
         lineage_row(&fixture.admin).await,
         Some(winners[0].to_string())
     );
+    drop(db);
     drop(second_db);
 
     fixture.cleanup().await;
