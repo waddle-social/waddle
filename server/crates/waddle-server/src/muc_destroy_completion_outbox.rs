@@ -86,9 +86,10 @@ impl MucDestroyCompletionOutboxStore {
             "\"{}\".\"clustering_muc_destroy_outbox\"",
             schema.replace('"', "\"\"")
         );
-        // Catalog-S excludes owner schema work while this read-only check is
-        // in progress. Lock the exact relation before the first snapshot-forming
-        // SELECT so the metadata snapshot follows any lock wait.
+        // Catalog-S excludes catalog-fenced owner schema transactions while
+        // this read-only check is in progress. Lock the exact relation before
+        // reading its catalog metadata so the READ COMMITTED query sees any
+        // owner transaction that completed while this relation lock waited.
         tx.execute(&format!("LOCK TABLE {qualified} IN ACCESS SHARE MODE"), ())
             .await
             .map_err(MucDestroyRuntimeAttachError::Relation)?;
@@ -364,7 +365,7 @@ impl MucDestroyCompletionOutboxStore {
                 MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY,
             )])
             .await?;
-        bound_owner_bootstrap_waits(&mut tx).await?;
+        Self::bound_owner_bootstrap_waits(&mut tx).await?;
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS clustering_muc_destroy_outbox (

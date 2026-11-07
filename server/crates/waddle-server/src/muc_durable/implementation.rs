@@ -340,7 +340,7 @@ impl PostgresMucRoomStore {
         let mut tx = db
             .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
             .await?;
-        bound_owner_bootstrap_waits(&mut tx).await?;
+        Self::bound_owner_bootstrap_waits(&mut tx).await?;
         crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
             .await
             .map_err(|_| MucOwnerPreparationError::UnsafeOwnerBoundary)?;
@@ -431,7 +431,7 @@ impl PostgresMucRoomStore {
         let mut tx = db
             .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
             .await?;
-        bound_owner_bootstrap_waits(&mut tx).await?;
+        Self::bound_owner_bootstrap_waits(&mut tx).await?;
         Self::ensure_schema_in_tx(&mut tx).await?;
         tx.commit().await?;
         Ok(())
