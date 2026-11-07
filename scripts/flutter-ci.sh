@@ -32,14 +32,16 @@ case "$MODE" in
     FLUTTER_COMMIT_TIME="$(git show -s --format=%ct HEAD)"
     FLUTTER_VERSION_CODE=$((FLUTTER_COMMIT_TIME / 60))
     FLUTTER_VERSION_NAME="pr-$(git rev-parse --short=12 HEAD)"
-    flutter build apk --debug --no-pub --target-platform android-arm64,android-x64 \
+    # Profile mode uses ahead-of-time compilation for representative animation
+    # performance while retaining the stable public preview signing key.
+    flutter build apk --profile --no-pub --target-platform android-arm64,android-x64 \
       --build-number "$FLUTTER_VERSION_CODE" --build-name "$FLUTTER_VERSION_NAME"
     python3 "$REPO_ROOT/scripts/flutter-verify-apk.py" \
-      build/app/outputs/flutter-apk/app-debug.apk "$FLUTTER_VERSION_CODE" "$FLUTTER_VERSION_NAME"
+      build/app/outputs/flutter-apk/app-profile.apk "$FLUTTER_VERSION_CODE" "$FLUTTER_VERSION_NAME"
     # Device integration tests rebuild app-debug.apk. Preserve this deliverable
     # with its intended entrypoint and upgradeable version before that rebuild.
     mkdir -p build/artifacts
-    cp build/app/outputs/flutter-apk/app-debug.apk build/artifacts/waddle-flutter.apk
+    cp build/app/outputs/flutter-apk/app-profile.apk build/artifacts/waddle-flutter.apk
     ;;
   web)
     cd "$REPO_ROOT/apps/flutter"
