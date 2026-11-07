@@ -51,6 +51,7 @@ class SessionRuntime implements RuntimeContext {
   RustTransport? _transport, _retiringTransport;
   Future<void>? _retirement, _connecting, _disposeFuture;
   Future<void> _demandTail = Future<void>.value();
+  Future<void> _disconnectFuture = Future<void>.value();
   bool _visible,
       _deliveryResolved = false,
       _pushEnabled = false,
@@ -86,6 +87,7 @@ class SessionRuntime implements RuntimeContext {
       _settled = false,
       _canManage = false,
       _connected = false,
+      _disconnectNotified = true,
       _cleanupComplete = false;
   String _resource = '';
 
@@ -208,16 +210,11 @@ class SessionRuntime implements RuntimeContext {
           return;
         }
         final captured = generation;
+        _connectionEpoch++;
+        _connected = false;
+        await _notifyDisconnected(captured);
         await _retire();
         requireGeneration(this, captured);
-        await conversations.onEvent({
-          'type': 'disconnected',
-          'data': <String, dynamic>{},
-        });
-        rawEventObserver?.call({
-          'type': 'disconnected',
-          'data': <String, dynamic>{},
-        });
         emit('connection', {'state': 'paused'});
       } else if (_transport == null) {
         await _connect();
@@ -495,8 +492,8 @@ class SessionRuntime implements RuntimeContext {
             }),
           );
         },
-        onError: (_) => _scheduleReconnect(captured),
-        onDone: () => _scheduleReconnect(captured),
+        onError: (_) => _scheduleReconnect(captured, epoch, source: next),
+        onDone: () => _scheduleReconnect(captured, epoch, source: next),
       );
       final credential = _credentials!;
       await next.rpc('connect', {
@@ -510,32 +507,52 @@ class SessionRuntime implements RuntimeContext {
         _connectTimeout?.cancel();
         _connectTimeout = Timer(
           const Duration(seconds: 20),
-          () => _scheduleReconnect(captured),
+          () => _scheduleReconnect(captured, epoch, source: next),
         );
       }
     } catch (_) {
       if (_retiringTransport != null) {
         rethrow;
       }
-      _scheduleReconnect(captured);
+      _scheduleReconnect(captured, epoch);
     }
   }
 
-  void _scheduleReconnect(int captured) {
+  Future<void> _notifyDisconnected(int captured) {
+    if (_disconnectNotified) return _disconnectFuture;
+    _disconnectNotified = true;
+    final event = {'type': 'disconnected', 'data': <String, dynamic>{}};
+    rawEventObserver?.call(event);
+    _disconnectFuture = conversations.onEvent(event).catchError((Object error) {
+      if (!_disposed &&
+          !_closing &&
+          captured == generation &&
+          error is! AccountChanged) {
+        emit('error', {
+          'message': 'Could not save pending messages. Please try again.',
+        });
+      }
+    });
+    return _disconnectFuture;
+  }
+
+  void _scheduleReconnect(int captured, int epoch, {RustTransport? source}) {
     if (_disposed ||
         _closing ||
         captured != generation ||
+        epoch != _connectionEpoch ||
+        source != null && !identical(source, _transport) ||
         _credentials == null ||
-        !connectionWanted) {
-      return;
-    }
-    if (_reconnect?.isActive == true) {
+        _reconnect?.isActive == true) {
       return;
     }
     _connectTimeout?.cancel();
     _connectTimeout = null;
+    final reconnectEpoch = ++_connectionEpoch;
     _connected = false;
     _ping?.cancel();
+    unawaited(_notifyDisconnected(captured));
+    if (!connectionWanted) return;
     final delay = _reconnectDelay(_retry++);
     emit('connection', {
       'state': 'reconnecting',
@@ -545,7 +562,7 @@ class SessionRuntime implements RuntimeContext {
     _reconnect = Timer(delay, () {
       _reconnect = null;
       unawaited(
-        _connect().catchError((Object error) {
+        _resumeConnection(captured, reconnectEpoch).catchError((Object error) {
           if (error is AccountChanged) {
             return;
           }
@@ -556,6 +573,22 @@ class SessionRuntime implements RuntimeContext {
         }),
       );
     });
+  }
+
+  Future<void> _resumeConnection(int captured, int epoch) async {
+    await _disconnectFuture;
+    final pending = _connecting;
+    if (pending != null) await pending;
+    if (_disposed ||
+        _closing ||
+        captured != generation ||
+        epoch != _connectionEpoch ||
+        _credentials == null ||
+        !connectionWanted ||
+        _connected) {
+      return;
+    }
+    await _connect();
   }
 
   Future<void> _event(
@@ -585,7 +618,8 @@ class SessionRuntime implements RuntimeContext {
           ? {'stanza_id': payload}
           : data,
     };
-    rawEventObserver?.call(normalized);
+    if (type == 'connected') _disconnectNotified = false;
+    if (type != 'disconnected') rawEventObserver?.call(normalized);
     switch (type) {
       case 'connected':
         _connected = true;
@@ -599,11 +633,16 @@ class SessionRuntime implements RuntimeContext {
         _joined.clear();
         _joinRequests.clear();
         emit('connection', {'state': 'ready'});
-        await rpc('send_presence', {
-          'status': null,
-          'show': null,
-          'idle_since': null,
-        });
+        try {
+          await rpc('send_presence', {
+            'status': null,
+            'show': null,
+            'idle_since': null,
+          });
+        } catch (_) {
+          _scheduleReconnect(captured, epoch, source: source);
+          return;
+        }
         _requireEventOwner(captured, source, epoch);
         await conversations.onEvent(normalized);
         _requireEventOwner(captured, source, epoch);
@@ -635,10 +674,13 @@ class SessionRuntime implements RuntimeContext {
         _emitHome();
         _ping?.cancel();
         _ping = Timer.periodic(const Duration(seconds: 180), (_) {
-          if (_connected && captured == generation) {
+          if (_connected &&
+              captured == generation &&
+              epoch == _connectionEpoch &&
+              identical(source, _transport)) {
             unawaited(
               rpc('ping_server').catchError((Object _) {
-                _scheduleReconnect(captured);
+                _scheduleReconnect(captured, epoch, source: source);
                 return null;
               }),
             );
@@ -646,8 +688,8 @@ class SessionRuntime implements RuntimeContext {
         });
         return;
       case 'disconnected':
-        _scheduleReconnect(captured);
-        break;
+        _scheduleReconnect(captured, epoch, source: source);
+        return;
       case 'authenticationFailed':
         await _signOut(revoke: false);
         return;
@@ -678,7 +720,7 @@ class SessionRuntime implements RuntimeContext {
         _emitHome();
       case 'error':
         if (data['code'] == 'resync_required') {
-          _scheduleReconnect(captured);
+          _scheduleReconnect(captured, epoch, source: source);
           return;
         }
         emit('error', {
@@ -1282,7 +1324,7 @@ class SessionRuntime implements RuntimeContext {
         } else {
           _reconnect?.cancel();
           _reconnect = null;
-          await _connect();
+          await _resumeConnection(generation, _connectionEpoch);
         }
         return null;
       case 'preferences.set':
@@ -1312,6 +1354,7 @@ class SessionRuntime implements RuntimeContext {
     _pushEnabled = false;
     _backgroundDemand = false;
     _callDemand = false;
+    _disconnectNotified = true;
     _channels.clear();
     _inbox.clear();
     _presence.clear();

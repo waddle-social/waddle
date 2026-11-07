@@ -126,6 +126,20 @@ void main() {
   });
 
   test(
+    'quiet requests return errors without showing a global banner',
+    () async {
+      final bridge = create(
+        invoke: (method, args) async => throw StateError('offline'),
+      );
+      addTearDown(bridge.dispose);
+      await expectLater(bridge.invokeQuiet('profile.load'), throwsStateError);
+      expect(bridge.error, isNull);
+      await expectLater(bridge.invoke('profile.save'), throwsStateError);
+      expect(bridge.error, contains('offline'));
+    },
+  );
+
+  test(
     'disposing the view detaches events and prevents further commands',
     () async {
       var cancelled = false;
