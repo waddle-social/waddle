@@ -5,7 +5,8 @@ use super::{
     NotificationActivityError, NotificationActivityStore, NotificationChatState,
     NotificationPresenceShow,
 };
-use crate::db::DatabaseDriver;
+use crate::db::DatabaseError;
+use sqlx::{PgConnection, Row};
 use std::collections::BTreeSet;
 
 // This database-local gate serializes owner preparation with runtime attach.
@@ -159,11 +160,11 @@ pub(crate) fn notification_activity_presence_show_constraint_matches_expected(
     extracted == expected
 }
 
-fn notification_activity_table_sql(i64_type: &str, if_not_exists: bool) -> String {
+fn notification_activity_table_sql(i64_type: &str, if_not_exists: bool, table: &str) -> String {
     let if_not_exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
     format!(
         r#"
-        CREATE TABLE {if_not_exists}notification_activity (
+        CREATE TABLE {if_not_exists}{table} (
             owner_bare_jid TEXT NOT NULL,
             conversation_jid TEXT NOT NULL,
             last_active_at_ms {i64_type} NOT NULL,
@@ -178,51 +179,139 @@ fn notification_activity_table_sql(i64_type: &str, if_not_exists: bool) -> Strin
     )
 }
 
+fn validate_codecs() -> Result<(), NotificationActivityError> {
+    // Startup invariant: every closed-set typed `NotificationChatState`
+    // db-value MUST round-trip through `from_db_value`. Mismatched
+    // builds fail fast at process start rather than at first
+    // insert-time CHECK violation.
+    for state in NotificationChatState::ALL.iter().copied() {
+        let db = state.as_db_value();
+        let decoded = NotificationChatState::from_db_value(db)?;
+        if decoded != state {
+            return Err(NotificationActivityError::InvalidChatState(format!(
+                "round-trip mismatch for {db}: decoded {decoded:?}",
+            )));
+        }
+    }
+    // Same invariant for the closed-set typed `NotificationPresenceShow`
+    // db-values — mismatched builds fail fast at process start.
+    for show in NotificationPresenceShow::ALL.iter().copied() {
+        let db = show.as_db_value();
+        let decoded = NotificationPresenceShow::from_db_value(db)?;
+        if decoded != show {
+            return Err(NotificationActivityError::InvalidPresenceShow(format!(
+                "round-trip mismatch for {db}: decoded {decoded:?}",
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Probe and repair the PostgreSQL schema on the fenced, mutating backend.
+pub(super) async fn initialize_postgres(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), NotificationActivityError> {
+    validate_codecs()?;
+    crate::db::physical_attestation::validate_identifier(schema, "notification activity schema")
+        .map_err(DatabaseError::from)?;
+    let table = format!(
+        "{}.\"notification_activity\"",
+        crate::db::physical_attestation::quote_identifier(schema)
+    );
+    sqlx::query(&notification_activity_table_sql("BIGINT", true, &table))
+        .execute(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+    for (column, name, check, matches) in [
+        (
+            "last_chat_state",
+            NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME,
+            NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_SQL,
+            notification_activity_last_chat_state_constraint_matches_expected as fn(&str) -> bool,
+        ),
+        (
+            "presence_show",
+            NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME,
+            NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_SQL,
+            notification_activity_presence_show_constraint_matches_expected as fn(&str) -> bool,
+        ),
+    ] {
+        migrate_postgres_constraint(connection, &table, column, name, check, matches).await?;
+    }
+    sqlx::query(&format!(
+        "CREATE INDEX IF NOT EXISTS idx_notification_activity_conversation_active \
+         ON {table} (conversation_jid, last_active_at_ms)"
+    ))
+    .execute(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    Ok(())
+}
+
+async fn migrate_postgres_constraint(
+    connection: &mut PgConnection,
+    table: &str,
+    column: &str,
+    expected_name: &str,
+    check: &str,
+    matches_expected: fn(&str) -> bool,
+) -> Result<(), NotificationActivityError> {
+    let rows = sqlx::query(
+        "SELECT c.conname::text, pg_catalog.pg_get_constraintdef(c.oid) \
+         FROM pg_catalog.pg_constraint c \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attname = $2 \
+         WHERE c.conrelid = ($1::text)::pg_catalog.regclass \
+           AND c.contype = 'c' AND c.conkey = ARRAY[a.attnum]::int2[]",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(DatabaseError::from)?;
+    let mut current_named_present = false;
+    for row in rows {
+        let name: String = row.try_get(0).map_err(DatabaseError::from)?;
+        let definition: String = row.try_get(1).map_err(DatabaseError::from)?;
+        if name == expected_name && matches_expected(&definition) {
+            current_named_present = true;
+            continue;
+        }
+        crate::db::physical_attestation::validate_identifier(
+            &name,
+            "notification activity constraint",
+        )
+        .map_err(DatabaseError::from)?;
+        let quoted_name = crate::db::physical_attestation::quote_identifier(&name);
+        sqlx::query(&format!(
+            "ALTER TABLE {table} DROP CONSTRAINT {quoted_name}"
+        ))
+        .execute(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+    }
+    if !current_named_present {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD CONSTRAINT {expected_name} CHECK ({check})"
+        ))
+        .execute(&mut *connection)
+        .await
+        .map_err(DatabaseError::from)?;
+    }
+    Ok(())
+}
+
 impl NotificationActivityStore {
     pub(super) async fn initialize(&self) -> Result<(), NotificationActivityError> {
-        // Startup invariant: every closed-set typed `NotificationChatState`
-        // db-value MUST round-trip through `from_db_value`. Mismatched
-        // builds fail fast at process start rather than at first
-        // insert-time CHECK violation.
-        for state in NotificationChatState::ALL.iter().copied() {
-            let db = state.as_db_value();
-            let decoded = NotificationChatState::from_db_value(db)?;
-            if decoded != state {
-                return Err(NotificationActivityError::InvalidChatState(format!(
-                    "round-trip mismatch for {db}: decoded {decoded:?}",
-                )));
-            }
-        }
-        // Same invariant for the closed-set typed `NotificationPresenceShow`
-        // db-values — mismatched builds fail fast at process start.
-        for show in NotificationPresenceShow::ALL.iter().copied() {
-            let db = show.as_db_value();
-            let decoded = NotificationPresenceShow::from_db_value(db)?;
-            if decoded != show {
-                return Err(NotificationActivityError::InvalidPresenceShow(format!(
-                    "round-trip mismatch for {db}: decoded {decoded:?}",
-                )));
-            }
-        }
+        validate_codecs()?;
         let i64_type = crate::db::i64_sql_type(self.db.driver());
-        self.execute(&notification_activity_table_sql(i64_type, true), ())
-            .await?;
-        // Migrate the Postgres CHECK constraint if a previous build
-        // shipped a stale variant set. SQLite enforces CHECK at row
-        // write time and has no `pg_constraint`-equivalent walker, so
-        // we instead rebuild the table on a stale-schema detection.
-        self.migrate_last_chat_state_constraint(i64_type).await?;
-        // Same migration shape for the closed-set `presence_show` CHECK
-        // introduced by the typed `NotificationPresenceShow` enum: any
-        // legacy build whose `presence_show` column lacked a CHECK (or
-        // shipped a stale variant set) gets repaired here before the
-        // first write attempts to honour the closed set.
-        self.migrate_presence_show_constraint(i64_type).await?;
-        // Per-conversation active-recipient lookup index. Slice 2b only
-        // reads per-(user, conversation), but the trailing
-        // `last_active_at_ms` lets future slices range-scan all
-        // "recently active" recipients of a conversation without a
-        // table scan.
+        self.execute(
+            &notification_activity_table_sql(i64_type, true, "notification_activity"),
+            (),
+        )
+        .await?;
+        self.migrate_sqlite_last_chat_state(i64_type).await?;
+        self.migrate_sqlite_presence_show(i64_type).await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_activity_conversation_active \
              ON notification_activity (conversation_jid, last_active_at_ms)",
@@ -230,95 +319,6 @@ impl NotificationActivityStore {
         )
         .await?;
         Ok(())
-    }
-
-    async fn migrate_last_chat_state_constraint(
-        &self,
-        i64_type: &str,
-    ) -> Result<(), NotificationActivityError> {
-        match self.db.driver() {
-            DatabaseDriver::Postgres => self.migrate_postgres_last_chat_state().await,
-            DatabaseDriver::Sqlite => self.migrate_sqlite_last_chat_state(i64_type).await,
-        }
-    }
-
-    /// Postgres path: walk `pg_constraint` for every CHECK on the
-    /// `last_chat_state` column, drop any whose definition does NOT
-    /// match the typed closed set, then ensure the named CHECK is in
-    /// place. Mirrors the
-    /// `migrate_postgres_check_constraint_on_column` helper in
-    /// `notification_outbox` — including the anonymous-CHECK drop so
-    /// legacy inline `CHECK (col IN (...))` definitions can be
-    /// replaced safely.
-    async fn migrate_postgres_last_chat_state(&self) -> Result<(), NotificationActivityError> {
-        let existing = self
-            .postgres_check_constraints_on_column("notification_activity", "last_chat_state")
-            .await?;
-        let mut current_named_present = false;
-        let mut to_drop: Vec<String> = Vec::new();
-        for (conname, definition) in &existing {
-            if conname == NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME
-                && notification_activity_last_chat_state_constraint_matches_expected(definition)
-            {
-                current_named_present = true;
-            } else {
-                to_drop.push(conname.clone());
-            }
-        }
-        if current_named_present && to_drop.is_empty() {
-            return Ok(());
-        }
-        for conname in &to_drop {
-            self.execute(
-                &format!(
-                    "ALTER TABLE notification_activity DROP CONSTRAINT IF EXISTS \"{conname}\""
-                ),
-                (),
-            )
-            .await?;
-        }
-        if !current_named_present {
-            self.execute(
-                &format!(
-                    "ALTER TABLE notification_activity \
-                     ADD CONSTRAINT {NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME} \
-                     CHECK ({NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_SQL})"
-                ),
-                (),
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    async fn postgres_check_constraints_on_column(
-        &self,
-        table: &str,
-        column: &str,
-    ) -> Result<Vec<(String, String)>, NotificationActivityError> {
-        let mut rows = self
-            .query(
-                r#"
-                SELECT c.conname,
-                       pg_get_constraintdef(c.oid)
-                FROM pg_constraint AS c
-                JOIN pg_attribute AS a
-                  ON a.attrelid = c.conrelid
-                 AND a.attname = ?
-                WHERE c.conrelid = (? :: regclass)
-                  AND c.contype = 'c'
-                  AND c.conkey = ARRAY[a.attnum]::int2[]
-                "#,
-                crate::db_params![column, table],
-            )
-            .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let conname: String = row.get(0)?;
-            let definition: String = row.get(1)?;
-            out.push((conname, definition));
-        }
-        Ok(out)
     }
 
     async fn migrate_sqlite_last_chat_state(
@@ -340,8 +340,11 @@ impl NotificationActivityStore {
             (),
         )
         .await?;
-        tx.execute(&notification_activity_table_sql(i64_type, false), ())
-            .await?;
+        tx.execute(
+            &notification_activity_table_sql(i64_type, false, "notification_activity"),
+            (),
+        )
+        .await?;
         tx.execute(
             r#"
             INSERT INTO notification_activity (
@@ -373,7 +376,6 @@ impl NotificationActivityStore {
         tx.commit().await?;
         Ok(())
     }
-
     async fn sqlite_last_chat_state_constraint_is_stale(
         &self,
     ) -> Result<bool, NotificationActivityError> {
@@ -388,61 +390,6 @@ impl NotificationActivityStore {
         };
         let create_sql: String = row.get(0)?;
         Ok(!notification_activity_last_chat_state_constraint_matches_expected(&create_sql))
-    }
-
-    async fn migrate_presence_show_constraint(
-        &self,
-        i64_type: &str,
-    ) -> Result<(), NotificationActivityError> {
-        match self.db.driver() {
-            DatabaseDriver::Postgres => self.migrate_postgres_presence_show().await,
-            DatabaseDriver::Sqlite => self.migrate_sqlite_presence_show(i64_type).await,
-        }
-    }
-
-    /// Postgres path: same shape as [`Self::migrate_postgres_last_chat_state`].
-    /// Walk `pg_constraint` for every CHECK on the `presence_show`
-    /// column, drop any whose definition does NOT match the typed
-    /// closed set, then ensure the named CHECK is in place.
-    async fn migrate_postgres_presence_show(&self) -> Result<(), NotificationActivityError> {
-        let existing = self
-            .postgres_check_constraints_on_column("notification_activity", "presence_show")
-            .await?;
-        let mut current_named_present = false;
-        let mut to_drop: Vec<String> = Vec::new();
-        for (conname, definition) in &existing {
-            if conname == NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME
-                && notification_activity_presence_show_constraint_matches_expected(definition)
-            {
-                current_named_present = true;
-            } else {
-                to_drop.push(conname.clone());
-            }
-        }
-        if current_named_present && to_drop.is_empty() {
-            return Ok(());
-        }
-        for conname in &to_drop {
-            self.execute(
-                &format!(
-                    "ALTER TABLE notification_activity DROP CONSTRAINT IF EXISTS \"{conname}\""
-                ),
-                (),
-            )
-            .await?;
-        }
-        if !current_named_present {
-            self.execute(
-                &format!(
-                    "ALTER TABLE notification_activity \
-                     ADD CONSTRAINT {NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_NAME} \
-                     CHECK ({NOTIFICATION_ACTIVITY_PRESENCE_SHOW_CHECK_SQL})"
-                ),
-                (),
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     async fn migrate_sqlite_presence_show(
@@ -464,8 +411,11 @@ impl NotificationActivityStore {
             (),
         )
         .await?;
-        tx.execute(&notification_activity_table_sql(i64_type, false), ())
-            .await?;
+        tx.execute(
+            &notification_activity_table_sql(i64_type, false, "notification_activity"),
+            (),
+        )
+        .await?;
         tx.execute(
             r#"
             INSERT INTO notification_activity (
