@@ -12,7 +12,10 @@ same READ COMMITTED mutation transaction, before any catalog read, table DDL
 or row write. Use bounded nonblocking attempts; a contended lineage lock
 must release the catalog fence by acknowledged rollback before retrying in a
 fresh transaction. Keep both locks through the actual PostgreSQL transaction
-end. Preserve the SQLite immediate-write behavior.
+end. Finish the pool checkout and any hook before taking catalog-X; do not
+open another checkout while holding it. Mark the transaction discard-on-drop
+before cancellable work, and close an unconfirmed checkout after a bounded
+rollback attempt. Preserve the SQLite immediate-write behavior.
 
 Do not infer rollback from a cancelled COMMIT, absent row or closed client.
 `enroll` and `adopt_if_matched` currently mint a new lineage UUID inside the
@@ -45,8 +48,12 @@ Use PostgreSQL 17 tests to hold a shared catalog reader while each lineage
 mutator starts, prove no lineage lock or DDL precedes catalog acquisition,
 exercise catalog-first contention and a lineage-only blocker with bounded
 rollback/retry and fresh READ COMMITTED snapshots, and verify cancellation
-retains no false completion claim. Cover both winner orders and a second
-connection. Re-run focused SQLite lineage enrollment/adoption tests. Run
+retains no false completion claim or reusable uncertain checkout. Cover both
+winner orders, a second connection, actual commit/rollback visibility, and
+single-connection pool progress alongside the existing migration runner.
+Include a session-fenced `REINDEX CONCURRENTLY` with a held old snapshot to
+prove retries do not strand an active snapshot; refresh pins after its index
+identity changes. Re-run focused SQLite lineage enrollment/adoption tests. Run
 formatting, scoped strict Clippy, diff checks and independent exact-head
 review. GitHub Actions and workflow files remain disabled until #2046 is
 complete.
