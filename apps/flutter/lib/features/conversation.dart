@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../bridge.dart';
 import '../design.dart';
+import '../page_coverage_observer.dart';
 import 'gif_picker.dart';
 import 'message_media.dart';
 import 'verified_image.dart';
@@ -33,7 +34,8 @@ class ConversationScreen extends StatefulWidget {
 }
 
 class _ConversationScreenState extends State<ConversationScreen>
-    with WidgetsBindingObserver, RouteAware, RestorationMixin {
+    with WidgetsBindingObserver, RouteAware, RestorationMixin
+    implements PopupCoverageAware {
   static int _nextViewId = 0;
   final _restorableDraft = RestorableTextEditingController();
   final _restorableMentions = RestorableString('[]');
@@ -56,8 +58,13 @@ class _ConversationScreenState extends State<ConversationScreen>
   bool _startingCall = false;
   bool _opening = true;
   bool _openedOnce = false;
+  bool _openStarted = false;
   bool _active = true;
   bool _searchOpen = false;
+  bool _popupCovered = false;
+  bool _foreground = true;
+  bool? _reportedVisible;
+  int _visibilityRevision = 0;
   bool _atNewest = true;
   String? _mentionQuery;
   List<Map<String, dynamic>> _mentions = [];
@@ -79,6 +86,8 @@ class _ConversationScreenState extends State<ConversationScreen>
     'atNewestEdge': _atNewest,
     if (widget.threadId != null) 'threadId': widget.threadId,
   };
+
+  bool get _canRead => _active && !_popupCovered && _foreground;
 
   Map<String, dynamic> get _data {
     final value = widget.bridge.conversation(widget.jid);
@@ -134,6 +143,8 @@ class _ConversationScreenState extends State<ConversationScreen>
     super.initState();
     _accountGeneration = widget.bridge.generation;
     _connected = widget.bridge.topic('connection')['state'] == 'ready';
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     widget.bridge.addListener(_bridgeChanged);
     _scroll.addListener(_onScroll);
@@ -146,17 +157,8 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        _active &&
-        _openedOnce &&
-        !_searchOpen) {
-      unawaited(_command('conversation.visibility', {'visible': true}));
-      _readNewest();
-    } else if (state == AppLifecycleState.paused && _active && _openedOnce) {
-      // System document/image pickers pause this activity. Keep the native
-      // model alive so their result remains attached to the same upload.
-      unawaited(_command('conversation.visibility', {'visible': false}));
-    }
+    _foreground = state == AppLifecycleState.resumed;
+    _syncVisibility();
   }
 
   @override
@@ -175,17 +177,39 @@ class _ConversationScreenState extends State<ConversationScreen>
   @override
   void didPushNext() {
     _active = false;
-    if (_openedOnce) {
-      unawaited(_command('conversation.visibility', {'visible': false}));
-    }
+    _syncVisibility();
   }
 
   @override
   void didPopNext() {
     _active = true;
-    if (!_searchOpen) {
-      unawaited(_open());
+    unawaited(_open());
+  }
+
+  @override
+  void didChangePopupCoverage(bool covered) {
+    _popupCovered = covered;
+    _syncVisibility();
+  }
+
+  void _syncVisibility() {
+    final revision = ++_visibilityRevision;
+    if (!mounted || !_openStarted) return;
+    if (!_canRead) {
+      if (_reportedVisible != false) {
+        _reportedVisible = false;
+        unawaited(_command('conversation.visibility', {'visible': false}));
+      }
+      return;
     }
+    if (_reportedVisible == true) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || revision != _visibilityRevision || !_canRead) return;
+      _reportedVisible = true;
+      unawaited(_command('conversation.visibility', {'visible': true}));
+      _readNewest();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   Future<void> _open() async {
@@ -193,13 +217,19 @@ class _ConversationScreenState extends State<ConversationScreen>
       return;
     }
     setState(() => _opening = true);
-    await _command('conversation.open');
+    _openStarted = true;
+    final opening = _command('conversation.open', {
+      'atNewestEdge': _canRead && _atNewest,
+    });
+    _reportedVisible = true;
+    _syncVisibility();
+    await opening;
     _openedOnce = _openedOnce || _error == null;
     if (!mounted || !_active) {
       return;
     }
     setState(() => _opening = false);
-    await _command('conversation.visibility', {'visible': !_searchOpen});
+    _syncVisibility();
     _readNewest();
     if (widget.group) {
       unawaited(_refreshRoomCallState());
@@ -253,7 +283,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   void _readNewest() {
-    if (_active && !_searchOpen) {
+    if (_canRead && _openedOnce) {
       unawaited(_command('conversation.read', {'atNewestEdge': _atNewest}));
     }
   }
@@ -2472,9 +2502,6 @@ class _ConversationScreenState extends State<ConversationScreen>
   Future<void> _search() async {
     if (_searchOpen) return;
     _searchOpen = true;
-    if (_active && _openedOnce) {
-      unawaited(_command('conversation.visibility', {'visible': false}));
-    }
     try {
       await showModalBottomSheet<void>(
         context: context,
@@ -2492,14 +2519,6 @@ class _ConversationScreenState extends State<ConversationScreen>
       );
     } finally {
       _searchOpen = false;
-      final lifecycle = WidgetsBinding.instance.lifecycleState;
-      if (mounted &&
-          _active &&
-          _openedOnce &&
-          (lifecycle == null || lifecycle == AppLifecycleState.resumed)) {
-        await _command('conversation.visibility', {'visible': true});
-        _readNewest();
-      }
     }
   }
 

@@ -992,6 +992,27 @@ void main() {
       final file = runtimeMap(context.recorded('file.bytes').single['file']);
       expect(file['name'], 'a.txt');
       expect(file['url'], 'https://files.example.org/a.txt');
+      await runtime.invoke('conversation.pin', {
+        ...viewArgs,
+        'targetId': 'stanza-a',
+      });
+      expect(
+        context.recorded('pin_message').single['target_stanza_id'],
+        'stanza-a',
+      );
+      await runtime.invoke('conversation.reaction', {
+        ...viewArgs,
+        'targetId': 'stanza-a',
+        'emoji': '👍',
+      });
+      expect(
+        context.recorded('send_reaction').single['target_stanza_id'],
+        'stanza-a',
+      );
+      await runtime.invoke('conversation.reply', {
+        ...viewArgs,
+        'targetId': 'stanza-a',
+      });
     },
     skip: Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'] == null
         ? 'Build the real Rust runtime and set WADDLE_FLUTTER_RUNTIME_LIBRARY.'
@@ -1934,11 +1955,17 @@ void main() {
         () => runtimeRows(context.persistent['conversationOutbox']).isEmpty,
       );
       final rows = runtimeRows(context.conversation['messages']);
-      final ownRow = rows.where((row) => row['mine'] == true).single;
+      final ownRow = rows.singleWhere(
+        (row) => row['id'] == 'genuine-reflection',
+      );
       expect(runtimeRows(ownRow['files']).single['name'], 'private.png');
       expect(
-        rows.where((row) => row['mine'] != true).single['body'],
+        rows.singleWhere((row) => row['id'] == 'foreign-reflection')['body'],
         'An attacker reused a visible origin ID',
+      );
+      expect(
+        rows.where((row) => row['id'] == 'archive-imposter'),
+        hasLength(1),
       );
       context.responses['fetch_room_history'] = {
         'messages': [archivedImposter],

@@ -524,6 +524,46 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('invite search remains covered through menu to sheet', (
+    tester,
+  ) async {
+    final harness = _ConversationHarness()..snapshot();
+    harness.bridge.acceptEvent({
+      'topic': 'home',
+      'data': {
+        'rooms': [
+          {'jid': _jid, 'groupDm': true},
+        ],
+      },
+    });
+    await _mount(tester, harness);
+    harness.commands.clear();
+    await tester.tap(find.byTooltip('Conversation options'));
+    await tester.pumpAndSettle();
+    expect(
+      harness.calls('conversation.visibility').map((args) => args['visible']),
+      [false],
+    );
+    harness.commands.clear();
+    await tester.tap(find.text('Invite to group'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Find someone to invite'), findsOneWidget);
+    expect(harness.calls('conversation.visibility'), isEmpty);
+    expect(harness.calls('conversation.read'), isEmpty);
+    expect(harness.calls('conversation.open'), isEmpty);
+
+    harness.navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(
+      harness.calls('conversation.visibility').map((args) => args['visible']),
+      [true],
+    );
+    expect(harness.calls('conversation.read'), isNotEmpty);
+    expect(harness.calls('conversation.open'), isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets(
     'search stays hidden across backgrounding until it is dismissed in foreground',
     (tester) async {
@@ -552,7 +592,7 @@ void main() {
       await tester.pump();
       expect(
         harness.calls('conversation.visibility').map((args) => args['visible']),
-        [false],
+        isEmpty,
       );
       expect(harness.calls('conversation.read'), isEmpty);
       expect(harness.calls('conversation.open'), isEmpty);
@@ -597,9 +637,17 @@ void main() {
       harness.commands.clear();
       harness.navigator.currentState!.pop();
       await tester.pumpAndSettle();
-      expect(harness.calls('conversation.open'), isEmpty);
-      expect(harness.calls('conversation.visibility'), isEmpty);
+      expect(harness.calls('conversation.open'), hasLength(1));
+      expect(
+        harness.calls('conversation.open').single['atNewestEdge'],
+        isFalse,
+      );
+      expect(
+        harness.calls('conversation.visibility').map((args) => args['visible']),
+        [false],
+      );
       expect(harness.calls('conversation.read'), isEmpty);
+      harness.commands.clear();
       harness.navigator.currentState!.pop();
       await tester.pumpAndSettle();
       expect(

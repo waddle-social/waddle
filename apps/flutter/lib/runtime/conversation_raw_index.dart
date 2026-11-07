@@ -125,6 +125,7 @@ class _RawConversation {
     required bool group,
     required String jid,
     required String account,
+    bool preferArchived = false,
   }) {
     final author = _optional(row['author_id']);
     final actor = group
@@ -137,9 +138,14 @@ class _RawConversation {
         (group ? _optional(row['reference_id']) : null);
     final archiveBy = _optional(row['archive_by']) ?? (group ? jid : null);
     if (archiveId != null && archiveBy != null) {
-      return _trusted[(group, actor, bareJid(archiveBy), archiveId)]
-          ?.last
-          .record;
+      final candidates =
+          _trusted[(group, actor, bareJid(archiveBy), archiveId)];
+      if (preferArchived && candidates != null) {
+        for (final candidate in candidates.toList().reversed) {
+          if (candidate.record['_archived'] == true) return candidate.record;
+        }
+      }
+      return candidates?.last.record;
     }
     _IndexedRaw? newest;
     for (final id in _identities(row)) {

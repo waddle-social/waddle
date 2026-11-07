@@ -54,7 +54,12 @@ void main() {
     final (_, calls, _) = await mount(tester);
     await tester.tap(find.byTooltip('More message options'));
     await tester.pumpAndSettle();
-    expect(calls.where((call) => call.startsWith('conversation.')), isEmpty);
+    expect(calls, contains('conversation.visibility:false'));
+    expect(
+      calls.where((call) => call.startsWith('conversation.open')),
+      isEmpty,
+    );
+    calls.clear();
 
     await tester.tap(find.text('GIFs'));
     await tester.pump();
@@ -64,7 +69,16 @@ void main() {
     await tester.binding.handlePopRoute();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
-    expect(calls.where((call) => call.startsWith('conversation.')), isEmpty);
+    expect(calls, contains('conversation.visibility:true'));
+    expect(calls, contains('conversation.read:null'));
+    expect(
+      calls.where((call) => call.startsWith('conversation.open')),
+      isEmpty,
+    );
+    expect(
+      calls.where((call) => call.startsWith('conversation.close')),
+      isEmpty,
+    );
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -74,19 +88,58 @@ void main() {
     final (_, calls, navigator) = await mount(tester);
     await tester.tap(find.byTooltip('More message options'));
     await tester.pumpAndSettle();
+    expect(calls, contains('conversation.visibility:false'));
+    calls.clear();
     navigator.currentState!.push<void>(
       MaterialPageRoute<void>(
         builder: (_) => const Scaffold(body: Text('Other page')),
       ),
     );
     await tester.pumpAndSettle();
-    expect(calls, contains('conversation.visibility:false'));
+    expect(calls, isNot(contains('conversation.visibility:true')));
+    calls.clear();
+
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(calls, contains('conversation.open:null'));
+    expect(calls, isNot(contains('conversation.visibility:true')));
+    expect(calls, isNot(contains('conversation.read:null')));
     calls.clear();
 
     navigator.currentState!.pop();
     await tester.pumpAndSettle();
     expect(calls, contains('conversation.visibility:true'));
     expect(calls, contains('conversation.read:null'));
+    expect(
+      calls.where((call) => call.startsWith('conversation.open')),
+      isEmpty,
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('nested popups stay covered until the final popup closes', (
+    tester,
+  ) async {
+    final (_, calls, navigator) = await mount(tester);
+    await tester.tap(find.byTooltip('More message options'));
+    await tester.pumpAndSettle();
+    calls.clear();
+    showDialog<void>(
+      context: navigator.currentContext!,
+      builder: (_) => const AlertDialog(title: Text('Nested dialog')),
+    );
+    await tester.pumpAndSettle();
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(calls.where((call) => call.startsWith('conversation.')), isEmpty);
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(calls, contains('conversation.visibility:true'));
+    expect(calls, contains('conversation.read:null'));
+    expect(
+      calls.where((call) => call.startsWith('conversation.open')),
+      isEmpty,
+    );
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

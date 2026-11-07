@@ -120,6 +120,52 @@ fn origin_row_accepts_only_unambiguous_archived_identity() {
 }
 
 #[test]
+fn local_echo_metadata_is_not_taken_from_a_distinct_archive() {
+    for archive_id in ["archive", "origin"] {
+        for body in ["local body", "other body"] {
+            let mut store = TimelineStore::new();
+            let _ = apply(
+                &mut store,
+                "timeline_local_echo",
+                json!({
+                    "conversation_jid":ROOM,"account_jid":ACCOUNT,"group":true,"own_nick":"david",
+                    "origin_id":"origin","body":"local body","timestamp_ms":1,
+                    "thread":"local-thread"
+                }),
+            );
+            let mut archive = room_message("david", "origin", body);
+            archive["mam_id"] = json!(archive_id);
+            archive["author_real_jid"] = json!(ACCOUNT);
+            archive["thread"] = json!("archive-thread");
+            let snapshot = ingest(&mut store, json!([archive]), true);
+            assert_index_matches_scan(&store, &snapshot);
+            assert_eq!(snapshot.items.len(), 2);
+            let local = snapshot
+                .items
+                .iter()
+                .find(|item| item.local_echo)
+                .expect("echo");
+            assert_eq!(local.id, "origin");
+            assert_eq!(local.body, "local body");
+            assert_eq!(local.archive_id, None);
+            assert_eq!(local.thread.as_deref(), Some("local-thread"));
+            let local_json = serde_json::to_value(local).expect("local projection");
+            assert_eq!(local_json["identity_kind"], "origin");
+            let archived = snapshot
+                .items
+                .iter()
+                .find(|item| !item.local_echo)
+                .expect("archive");
+            assert_eq!(archived.id, archive_id);
+            assert_eq!(archived.body, body);
+            assert_eq!(archived.thread.as_deref(), Some("archive-thread"));
+            let archive_json = serde_json::to_value(archived).expect("archive projection");
+            assert_eq!(archive_json["identity_kind"], "stanza");
+        }
+    }
+}
+
+#[test]
 fn plaintext_and_encrypted_hashes_survive_the_typed_timeline() {
     let digest = STANDARD.encode([7_u8; 32]);
     let mut original = room_message("alex", "file", "");

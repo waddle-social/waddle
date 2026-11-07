@@ -290,6 +290,8 @@ pub struct TimelineSnapshot {
 #[derive(Debug, Serialize)]
 pub struct Item {
     pub id: String,
+    pub identity_kind: IdentityKind,
+    pub local_echo: bool,
     pub identity_ids: Vec<String>,
     pub sender: String,
     pub author_id: Option<String>,
@@ -312,6 +314,13 @@ pub struct Item {
     pub marker_requested: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityKind {
+    Origin,
+    Stanza,
 }
 
 #[derive(Debug, Serialize)]

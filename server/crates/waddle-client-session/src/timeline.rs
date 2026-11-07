@@ -168,6 +168,8 @@ pub struct Encryption {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineItem {
     pub key: ItemKey,
+    /// The row originated as this client's optimistic send.
+    pub local_echo: bool,
     /// Display name of the sender: the room nick, or the DM peer's local
     /// part.
     pub sender: String,
@@ -336,7 +338,9 @@ pub struct Timeline {
     by_score_target: HashMap<ScoreTarget, BTreeSet<u64>>,
     by_reference: HashMap<String, usize>,
     by_chosen: HashMap<(Author, String), usize>,
-    /// The user's own rows by origin id and `@id`, for delivery outcomes.
+    /// Chosen IDs belonging to messages that were not local echoes.
+    nonlocal_chosen: HashMap<(Author, String), usize>,
+    /// Local sends by origin id and `@id`, for delivery outcomes.
     own_chosen: HashMap<String, usize>,
     /// Confirmed reflections and explicit rejections, by stable row serial.
     /// Transport acknowledgments alone do not establish acceptance.
@@ -453,7 +457,7 @@ impl Timeline {
                 }
                 continue;
             }
-            if self.holds(&ids, &author) {
+            if self.holds(&ids, &author, true) {
                 if let Some(at) = self.enrich_archived_author(&message) {
                     enriched.insert(at);
                 }
@@ -524,6 +528,7 @@ impl Timeline {
         };
         let item = TimelineItem {
             key: ItemKey::Origin(echo.origin_id.clone()),
+            local_echo: true,
             sender: echo.sender,
             author_id: None,
             own: true,
@@ -638,13 +643,21 @@ impl Timeline {
                 .as_deref()
                 .and_then(|origin| self.own_chosen.get(origin))
             {
-                self.take_reflection(at, &message, &mut touched);
-                return self.sets(touched);
+                let occupied = message
+                    .stanza_id
+                    .as_ref()
+                    .is_some_and(|id| self.by_stanza.get(id).is_some_and(|&other| other != at));
+                if !occupied
+                    && (self.ids[at].stanza.is_none() || self.ids[at].stanza == message.stanza_id)
+                {
+                    self.take_reflection(at, &message, &mut touched);
+                    return self.sets(touched);
+                }
             }
         }
 
         let ids = ids_of(&message);
-        if self.holds(&ids, &Author::of(&message)) {
+        if self.holds(&ids, &Author::of(&message), false) {
             return Vec::new();
         }
         let Some(item) = content_item(&message) else {
@@ -729,16 +742,20 @@ impl Timeline {
     /// Whether a message with these ids from this author is already shown:
     /// the same verified stanza id, or the same sender-chosen id from the
     /// same sender.
-    fn holds(&self, ids: &RowIds, author: &Author) -> bool {
+    fn holds(&self, ids: &RowIds, author: &Author, archived: bool) -> bool {
         // When both carry verified stanza ids, those decide: a sender may
         // reuse an `@id` for different messages.
         ids.stanza
             .as_ref()
             .is_some_and(|id| self.by_stanza.contains_key(id))
             || ids.chosen.iter().any(|id| {
-                self.by_chosen
-                    .get(&(author.clone(), id.clone()))
-                    .is_some_and(|&at| ids.stanza.is_none() || self.ids[at].stanza.is_none())
+                (if archived {
+                    &self.nonlocal_chosen
+                } else {
+                    &self.by_chosen
+                })
+                .get(&(author.clone(), id.clone()))
+                .is_some_and(|&at| ids.stanza.is_none() || self.ids[at].stanza.is_none())
             })
     }
 
@@ -1229,8 +1246,11 @@ impl Timeline {
         }
         for id in &ids.chosen {
             self.by_chosen.insert((author.clone(), id.clone()), at);
-            if item.own {
+            if item.local_echo {
                 self.own_chosen.insert(id.clone(), at);
+            } else {
+                self.nonlocal_chosen
+                    .insert((author.clone(), id.clone()), at);
             }
         }
     }
@@ -1241,6 +1261,7 @@ impl Timeline {
         self.by_score_target.clear();
         self.by_reference.clear();
         self.by_chosen.clear();
+        self.nonlocal_chosen.clear();
         self.own_chosen.clear();
         for at in 0..self.items.len() {
             self.index_row(at);
@@ -1380,6 +1401,7 @@ fn content_item(message: &IncomingMessage) -> Option<TimelineItem> {
     };
     Some(TimelineItem {
         key,
+        local_echo: false,
         sender: message.sender.clone(),
         author_id: message.author_id.clone(),
         own: message.own,
@@ -1572,6 +1594,91 @@ mod tests {
             timeline.get("o1").is_none(),
             "sender-chosen ids are not references"
         );
+    }
+
+    #[test]
+    fn archived_origin_collision_keeps_the_local_echo_and_archive_separate() {
+        for archive_id in ["archive", "o1"] {
+            for body in ["hello", "different"] {
+                let mut timeline = Timeline::new();
+                timeline.add_local_echo(echo("o1", "hello"));
+                let archive = IncomingMessage {
+                    origin_id: Some("o1".into()),
+                    own: true,
+                    ..message(archive_id, "me", body, 1)
+                };
+                timeline.apply_history_page(
+                    vec![archive.clone()],
+                    Some(archive_id.into()),
+                    HistoryPage::Partial,
+                );
+                assert_eq!(timeline.items().len(), 2);
+                assert_eq!(timeline.items()[0].key, ItemKey::Stanza(archive_id.into()));
+                assert!(!timeline.items()[0].local_echo);
+                assert_eq!(timeline.items()[0].body, body);
+                assert_eq!(timeline.items()[1].key, ItemKey::Origin("o1".into()));
+                assert!(timeline.items()[1].local_echo);
+
+                timeline.set_delivery("o1", Delivery::Failed);
+                assert_eq!(timeline.items()[0].delivery, Delivery::Sent);
+                assert_eq!(timeline.items()[1].delivery, Delivery::Failed);
+                timeline.apply_history_page(vec![archive], None, HistoryPage::Complete);
+                assert_eq!(timeline.items().len(), 2, "archive replay is deduped");
+                timeline.apply_live(IncomingMessage {
+                    origin_id: Some("o1".into()),
+                    own: true,
+                    ..message("live-reflection", "me", "hello", 11)
+                });
+                let local = timeline
+                    .items()
+                    .iter()
+                    .find(|item| item.local_echo)
+                    .expect("echo");
+                assert_eq!(local.key, ItemKey::Stanza("live-reflection".into()));
+                assert_eq!(local.delivery, Delivery::Sent);
+                assert_eq!(timeline.items().len(), 2);
+
+                timeline.apply_live(IncomingMessage {
+                    origin_id: Some("o1".into()),
+                    own: true,
+                    ..message("other-live", "me", "another", 12)
+                });
+                let local = timeline
+                    .items()
+                    .iter()
+                    .find(|item| item.local_echo)
+                    .expect("echo");
+                assert_eq!(local.key, ItemKey::Stanza("live-reflection".into()));
+                assert_eq!(timeline.items().len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn archive_before_live_reflection_does_not_duplicate_the_trusted_key() {
+        let mut timeline = Timeline::new();
+        timeline.add_local_echo(echo("o1", "hello"));
+        let reflected = IncomingMessage {
+            origin_id: Some("o1".into()),
+            own: true,
+            ..message("s1", "me", "hello", 11)
+        };
+        timeline.apply_history_page(vec![reflected.clone()], None, HistoryPage::Partial);
+        assert!(timeline.apply_live(reflected).is_empty());
+        assert_eq!(timeline.items().len(), 2);
+        assert_eq!(timeline.items()[0].key, ItemKey::Stanza("s1".into()));
+        assert!(!timeline.items()[0].local_echo);
+        assert_eq!(timeline.items()[1].key, ItemKey::Origin("o1".into()));
+        assert!(timeline.items()[1].local_echo);
+        timeline.set_delivery("o1", Delivery::Sent);
+        assert_eq!(timeline.items()[1].delivery, Delivery::Sent);
+        timeline.apply_live(IncomingMessage {
+            origin_id: Some("o1".into()),
+            own: true,
+            ..message("s2", "me", "hello", 12)
+        });
+        assert_eq!(timeline.items().len(), 2);
+        assert_eq!(timeline.items()[1].key, ItemKey::Stanza("s2".into()));
     }
 
     #[test]

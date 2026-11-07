@@ -14,6 +14,7 @@ use crate::dto::{self, CarbonDirection, Category, Ingest, Message};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Metadata {
+    pub local_echo: bool,
     pub ids: Vec<String>,
     pub sender: String,
     pub author_id: Option<String>,
@@ -200,6 +201,7 @@ fn metadata(
     marker_requested: bool,
 ) -> Metadata {
     Metadata {
+        local_echo: false,
         ids: [
             archive_id.clone(),
             message.origin_id.clone(),

@@ -10,8 +10,8 @@ use waddle_client_session::{
 
 use crate::adapter::{adapt, display_name, Metadata};
 use crate::dto::{
-    Attachment, Category, DeliveryUpdate, Encryption, Item, Reaction, ReplyPreview, Score, Scores,
-    TimelineCommand, TimelineSnapshot,
+    Attachment, Category, DeliveryUpdate, Encryption, IdentityKind, Item, Reaction, ReplyPreview,
+    Score, Scores, TimelineCommand, TimelineSnapshot,
 };
 
 /// A rejected application-store operation, distinct from an XMPP stanza error.
@@ -107,6 +107,7 @@ impl TimelineStore {
                 let conversation =
                     self.conversation(&input.conversation_jid, input.group, input.own_nick)?;
                 conversation.metadata.push(Metadata {
+                    local_echo: true,
                     ids: vec![input.origin_id.clone()],
                     sender: sender.clone(),
                     author_id: None,
@@ -313,6 +314,9 @@ impl TimelineStore {
 }
 
 fn metadata_belongs_to(item: &TimelineItem, meta: &Metadata) -> bool {
+    if item.local_echo && matches!(&item.key, ItemKey::Origin(_)) && !meta.local_echo {
+        return false;
+    }
     (match &item.key {
         ItemKey::Stanza(id) => meta.archive_id.as_ref() == Some(id),
         ItemKey::Origin(id) => {
@@ -349,6 +353,11 @@ fn project(item: &TimelineItem, metadata: &[&Metadata]) -> Item {
     let meta = matching.last();
     Item {
         id: item.key.as_str().to_string(),
+        identity_kind: match &item.key {
+            ItemKey::Origin(_) => IdentityKind::Origin,
+            ItemKey::Stanza(_) => IdentityKind::Stanza,
+        },
+        local_echo: item.local_echo,
         identity_ids: matching
             .iter()
             .flat_map(|meta| meta.ids.iter().cloned())
