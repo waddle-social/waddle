@@ -542,13 +542,8 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
             .await
             .is_err()
     );
-    owner_db
-        .guard()
-        .await
-        .unwrap()
-        .execute("DROP TABLE pg_temp.clustering_muc_room_effects", ())
-        .await
-        .unwrap();
+    // The catalog-fenced refusal discards this checkout; closing that backend
+    // also removes the temporary shadow before the next owner checkout.
     run_sql(
         &f,
         &format!(
