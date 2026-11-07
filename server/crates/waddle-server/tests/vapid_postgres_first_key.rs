@@ -160,7 +160,7 @@ async fn pg17_vapid_subprocess_entry() {
     let url = std::env::var(CHILD_URL).expect("fixture URL");
     let schema = std::env::var(CHILD_SCHEMA).ok();
     let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url);
-    if schema.is_some() {
+    if schema.is_some() || mode == "commit_unknown" {
         config.pool_size = 1;
     }
     let db = Database::from_config("VAPID PostgreSQL public-entry test", &config)
@@ -769,10 +769,23 @@ async fn pg17_commit_reply_timeout_is_indeterminate_and_retry_reuses_committed_k
         .await
         .is_err()
     {
-        child.kill().expect("terminate stalled VAPID process");
-        let _ = child.wait();
-        proxy.abort();
-        panic!("proxy did not observe a COMMIT reply");
+        if child.try_wait().expect("poll VAPID process").is_none() {
+            child.kill().expect("terminate stalled VAPID process");
+        }
+        let output = child
+            .wait_with_output()
+            .expect("read VAPID subprocess output");
+        let proxy_result = if proxy.is_finished() {
+            Some(proxy.await)
+        } else {
+            proxy.abort();
+            None
+        };
+        panic!(
+            "proxy did not observe a COMMIT reply; proxy={proxy_result:?}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     assert_eq!(f.count().await, 1, "server committed before reply was held");
     let committed_kid: String = sqlx::query_scalar(&format!(
