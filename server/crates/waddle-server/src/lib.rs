@@ -49,6 +49,10 @@ pub mod shutdown_deadline;
 /// Unselected PostgreSQL custody candidate; no release transport calls this API.
 #[cfg(all(feature = "test-support", feature = "clustering"))]
 pub mod sm_custody;
+/// Retained occurrence model for an unselected SM custody experiment.
+#[doc(hidden)]
+#[path = "sm_custody/frame_occurrence.rs"]
+pub mod sm_frame_occurrence;
 pub mod sm_persistence;
 /// Postgres-fenced `SmPersistenceStorage` (ADR-0017 Phase 3 Slice 4).
 /// Gated behind the `clustering` Cargo feature, matching every other

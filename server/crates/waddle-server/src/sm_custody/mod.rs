@@ -5,6 +5,7 @@
 //! Operations retain full payloads independently of the bounded replay cache.
 
 mod admission;
+mod frame_repository;
 mod handoff;
 mod recipient_guard;
 mod repository;
