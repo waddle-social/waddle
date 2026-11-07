@@ -6,14 +6,15 @@
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgConnectOptions;
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
 use super::{
     identity_select, quote_identifier, read_preflight_snapshot, read_snapshot, verify_identity,
-    PhysicalAttestationConfig, PhysicalAttestationError, FUNCTION_NAME, LINEAGE_FORMAT,
+    PhysicalAttestationConfig, PhysicalAttestationError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+    FUNCTION_NAME, LINEAGE_FORMAT,
 };
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
@@ -27,6 +28,9 @@ mod pinned_preflight;
 const INSTALL_LOCK_NAMESPACE: i32 = 1_464_448_084;
 const COMMIT_DEADLINE: Duration = Duration::from_secs(15);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
+const LOCK_DEADLINE: Duration = Duration::from_secs(5);
+const LOCK_RETRY: Duration = Duration::from_millis(20);
+const ROLLBACK_DEADLINE: Duration = Duration::from_secs(5);
 
 /// An absent installation is not proof that an earlier request cannot commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,8 +133,9 @@ pub enum DarkInstallerError {
     Database(#[from] sqlx::Error),
 }
 
-/// A prepared, non-cloneable installation whose transaction is still open.
-/// The caller must durably retain [`Self::fence`] before calling `commit`.
+/// A prepared, non-cloneable installation whose transaction and catalog fence
+/// remain open. The caller must durably retain [`Self::fence`] before calling
+/// `commit`; cancellation or drop does not prove that the backend has ended.
 pub struct DarkPreparedInstallation {
     tx: sqlx::Transaction<'static, sqlx::Postgres>,
     pool: sqlx::PgPool,
@@ -183,8 +188,9 @@ impl DarkPreparedInstallation {
 
 /// Prepare a dark, independently pinned installation. The caller must provide
 /// a direct, authenticated, authoritative PG17 primary and enforce quiescence
-/// or the cooperative lineage/installer mutation protocol across privileged
-/// DDL, role/ACL changes and lineage writes. No COMMIT is sent by this method.
+/// or the cooperative catalog/lineage/installer mutation protocol across
+/// privileged DDL, role/ACL changes and lineage writes. No COMMIT is sent by
+/// this method.
 /// Reconciliation retains the original operation and primary/backend fence;
 /// an absent marker never proves rollback, and an observed function OID is not
 /// runtime authority.
@@ -249,9 +255,9 @@ pub async fn install(
     config: PhysicalAttestationConfig,
     operation_id: Uuid,
 ) -> Result<PhysicalAttestationConfig, PhysicalAttestationError> {
-    let mut connection = connect_installer(options, &config).await?;
-    let mut tx = connection.begin().await?;
-    prepare(&mut tx, &config, false).await?;
+    let pool = installer_pool(options, &config)?;
+    let mut tx = begin_locked(&pool, &config, false).await?;
+    prepare(&mut tx, &config).await?;
     let marker = marker(&config, operation_id);
     match inspect_locked(&mut tx, &config, &marker).await? {
         InstallationStatus::Committed => {}
@@ -271,7 +277,7 @@ pub async fn install(
             return Err(PhysicalAttestationError::CommitUnknown { operation_id });
         }
     }
-    drop(connection);
+    drop(pool);
     match inspect_installation(options, &config, operation_id).await {
         Ok(InstallationStatus::Committed) => Ok(config),
         Ok(InstallationStatus::Indeterminate) => {
@@ -294,32 +300,77 @@ pub async fn inspect_installation(
     config: &PhysicalAttestationConfig,
     operation_id: Uuid,
 ) -> Result<InstallationStatus, PhysicalAttestationError> {
-    let mut connection = connect_installer(options, config).await?;
-    let mut tx = connection.begin().await?;
-    prepare(&mut tx, config, true).await?;
+    let pool = installer_pool(options, config)?;
+    let mut tx = begin_locked(&pool, config, true).await?;
+    prepare(&mut tx, config).await?;
     let result = inspect_locked(&mut tx, config, &marker(config, operation_id)).await?;
     tx.commit().await?;
     Ok(result)
 }
 
-async fn connect_installer(
+fn installer_pool(
     options: &PgConnectOptions,
     config: &PhysicalAttestationConfig,
-) -> Result<PgConnection, PhysicalAttestationError> {
+) -> Result<PgPool, PhysicalAttestationError> {
     if options.get_username() != config.installer_login.as_str() {
         return Err(PhysicalAttestationError::WrongInstallerLogin);
     }
-    tokio::time::timeout(CONNECT_DEADLINE, PgConnection::connect_with(options))
-        .await
-        .map_err(|_| PhysicalAttestationError::InstallationIndeterminate)?
-        .map_err(PhysicalAttestationError::from)
+    // This pool is private to one operation and has no checkout hooks. Every
+    // acquired connection is marked close-on-drop before BEGIN.
+    Ok(PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(CONNECT_DEADLINE)
+        .connect_lazy_with(options.clone()))
 }
 
-async fn prepare(
+async fn begin_locked(
+    pool: &PgPool,
+    config: &PhysicalAttestationConfig,
+    read_only: bool,
+) -> Result<Transaction<'static, Postgres>, PhysicalAttestationError> {
+    let deadline = tokio::time::Instant::now() + LOCK_DEADLINE;
+    loop {
+        let mut connection = tokio::time::timeout_at(deadline, pool.acquire())
+            .await
+            .map_err(|_| PhysicalAttestationError::InstallationIndeterminate)??;
+        // A cancelled BEGIN, rollback or COMMIT must never lend this session.
+        connection.close_on_drop();
+        let mut tx = tokio::time::timeout_at(deadline, Transaction::begin(connection, None))
+            .await
+            .map_err(|_| PhysicalAttestationError::InstallationIndeterminate)??;
+        let attempt =
+            tokio::time::timeout_at(deadline, try_locks(&mut tx, config, read_only)).await;
+        if matches!(attempt, Ok(Ok(true))) && tokio::time::Instant::now() < deadline {
+            return Ok(tx);
+        }
+        // A failed lower-lock try may hold catalog-X. End its transaction and
+        // snapshot before backoff, and never retry after unconfirmed rollback.
+        if !matches!(
+            tokio::time::timeout(ROLLBACK_DEADLINE, tx.rollback()).await,
+            Ok(Ok(()))
+        ) {
+            return Err(PhysicalAttestationError::InstallationIndeterminate);
+        }
+        match attempt {
+            Err(_) | Ok(Ok(true)) => {
+                return Err(PhysicalAttestationError::InstallationIndeterminate);
+            }
+            Ok(Err(error)) => return Err(lock_error(error)),
+            Ok(Ok(false)) => {}
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(PhysicalAttestationError::InstallationIndeterminate);
+        }
+        tokio::time::sleep(LOCK_RETRY.min(remaining)).await;
+    }
+}
+
+async fn try_locks(
     connection: &mut PgConnection,
     config: &PhysicalAttestationConfig,
     read_only: bool,
-) -> Result<(), PhysicalAttestationError> {
+) -> Result<bool, sqlx::Error> {
     // This must precede the first SELECT, including either advisory lock.
     let isolation = if read_only {
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY"
@@ -327,28 +378,38 @@ async fn prepare(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE"
     };
     sqlx::query(isolation).execute(&mut *connection).await?;
+    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await?;
+    for key in [
+        CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+        LINEAGE_ADVISORY_LOCK_KEY,
+    ] {
+        let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(key)
+            .fetch_one(&mut *connection)
+            .await?;
+        if !acquired {
+            return Ok(false);
+        }
+    }
+    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1, pg_catalog.hashtext($2))")
+        .bind(INSTALL_LOCK_NAMESPACE)
+        .bind(&config.trusted_schema.0)
+        .fetch_one(connection)
+        .await
+}
+
+async fn prepare(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+) -> Result<(), PhysicalAttestationError> {
     sqlx::query("SET LOCAL lock_timeout = '5s'")
         .execute(&mut *connection)
         .await?;
     sqlx::query("SET LOCAL statement_timeout = '10s'")
         .execute(&mut *connection)
         .await?;
-    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
-        .execute(&mut *connection)
-        .await?;
-    // Enrollment/adoption takes this same lock. Always order it before the
-    // installation lock so lineage cannot change during the preflight/commit.
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
-        .bind(LINEAGE_ADVISORY_LOCK_KEY)
-        .execute(&mut *connection)
-        .await
-        .map_err(lock_error)?;
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1, pg_catalog.hashtext($2))")
-        .bind(INSTALL_LOCK_NAMESPACE)
-        .bind(&config.trusted_schema.0)
-        .execute(&mut *connection)
-        .await
-        .map_err(lock_error)?;
     let row = sqlx::query(
         "SELECT session_user::text, current_user::text, pg_catalog.pg_is_in_recovery()",
     )

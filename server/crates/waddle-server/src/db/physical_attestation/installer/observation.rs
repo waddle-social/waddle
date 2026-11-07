@@ -8,8 +8,11 @@ use uuid::Uuid;
 
 use super::super::super::read_only_timeout::timeout_millis;
 use super::super::{parse_snapshot, quote_identifier, verify_identity};
-use super::super::{PhysicalAttestationConfig, PhysicalAttestationError, FUNCTION_NAME};
-use super::{marker, verify_function, verify_prerequisites, INSTALL_LOCK_NAMESPACE};
+use super::super::{
+    PhysicalAttestationConfig, PhysicalAttestationError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+    FUNCTION_NAME,
+};
+use super::{marker, verify_function, verify_prerequisites, INSTALL_LOCK_NAMESPACE, LOCK_RETRY};
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -26,7 +29,9 @@ pub enum InstallationObservation {
 /// Observe one installation using an independently supplied expected identity.
 /// The endpoint must be a direct, authenticated connection to the authoritative
 /// primary; callers must establish primary fencing and exclude non-cooperating
-/// administrative changes. This function does not invoke the attestor.
+/// administrative changes. An error or cancellation does not prove that the
+/// original backend released its locks; reconcile that backend on the fenced
+/// primary. This function does not invoke the attestor.
 pub async fn observe_installation(
     options: &PgConnectOptions,
     config: &PhysicalAttestationConfig,
@@ -84,7 +89,7 @@ async fn observe(
     sqlx::query("SET search_path = pg_catalog, pg_temp")
         .execute(&mut connection)
         .await?;
-    check_backend_bounds(&mut connection).await?;
+    let lock_wait = check_backend_bounds(&mut connection).await?;
     let row = sqlx::query(
         "SELECT session_user::pg_catalog.text, current_user::pg_catalog.text, pg_catalog.pg_is_in_recovery()",
     )
@@ -100,17 +105,10 @@ async fn observe(
     if row.try_get::<bool, _>(2)? {
         return Err(PhysicalAttestationError::NotPrimary);
     }
-    // Session locks are acquired before BEGIN so the repeatable-read snapshot
-    // is taken only after both cooperating installer/lineage locks are held.
-    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
-        .bind(LINEAGE_ADVISORY_LOCK_KEY)
-        .execute(&mut connection)
-        .await?;
-    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1, pg_catalog.hashtext($2))")
-        .bind(INSTALL_LOCK_NAMESPACE)
-        .bind(&config.trusted_schema.0)
-        .execute(&mut connection)
-        .await?;
+    // Use this dedicated session for every barrier. All tries run in
+    // autocommit, and a failed lower-lock try releases earlier barriers before
+    // backoff. The repeatable-read snapshot starts only after all are held.
+    acquire_session_locks(&mut connection, config, lock_wait).await?;
     let mut tx = connection.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
@@ -154,19 +152,21 @@ async fn observe(
         },
     };
     tx.rollback().await?;
+    release_session_locks(&mut connection, config).await?;
     connection.close().await?;
     Ok(observation)
 }
 
 async fn check_backend_bounds(
     connection: &mut PgConnection,
-) -> Result<(), PhysicalAttestationError> {
+) -> Result<Duration, PhysicalAttestationError> {
     // Reject unbounded/looser settings instead of overriding them at startup:
     // startup overrides would silently lengthen a stricter inherited limit.
     // transaction_timeout requires PostgreSQL 17 or newer.
     let row = sqlx::query("SELECT pg_catalog.current_setting('lock_timeout'), pg_catalog.current_setting('statement_timeout'), pg_catalog.current_setting('idle_in_transaction_session_timeout'), pg_catalog.current_setting('idle_session_timeout'), pg_catalog.current_setting('transaction_timeout', true)")
         .fetch_one(connection)
         .await?;
+    let mut lock_wait_ms = 0;
     for (index, cap) in [
         (0, 2_000),
         (1, 5_000),
@@ -175,15 +175,114 @@ async fn check_backend_bounds(
         (4, 20_000),
     ] {
         let value: Option<String> = row.try_get(index)?;
-        let valid = value
+        let millis = value
             .as_deref()
             .and_then(timeout_millis)
-            .is_some_and(|millis| millis > 0 && millis <= cap);
-        if !valid {
-            return Err(PhysicalAttestationError::InstallationIndeterminate);
+            .filter(|millis| *millis > 0 && *millis <= cap)
+            .ok_or(PhysicalAttestationError::InstallationIndeterminate)?;
+        if index == 0 {
+            lock_wait_ms = millis;
         }
     }
-    Ok(())
+    Ok(Duration::from_millis(lock_wait_ms))
+}
+
+async fn acquire_session_locks(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+    wait: Duration,
+) -> Result<(), PhysicalAttestationError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let acquired = tokio::time::timeout_at(deadline, try_session_locks(connection, config))
+            .await
+            .map_err(|_| PhysicalAttestationError::InstallationIndeterminate)??;
+        if acquired && tokio::time::Instant::now() < deadline {
+            return Ok(());
+        }
+        if acquired {
+            // The caller discards this dedicated connection on this error.
+            return Err(PhysicalAttestationError::InstallationIndeterminate);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(PhysicalAttestationError::InstallationIndeterminate);
+        }
+        tokio::time::sleep(LOCK_RETRY.min(remaining)).await;
+    }
+}
+
+async fn try_session_locks(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+) -> Result<bool, PhysicalAttestationError> {
+    let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut *connection)
+        .await?;
+    if !acquired {
+        return Ok(false);
+    }
+    let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock($1)")
+        .bind(LINEAGE_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut *connection)
+        .await?;
+    if !acquired {
+        unlock_catalog(connection).await?;
+        return Ok(false);
+    }
+    let acquired: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_lock($1, pg_catalog.hashtext($2))")
+            .bind(INSTALL_LOCK_NAMESPACE)
+            .bind(&config.trusted_schema.0)
+            .fetch_one(&mut *connection)
+            .await?;
+    if !acquired {
+        unlock_lineage(connection).await?;
+        unlock_catalog(connection).await?;
+    }
+    Ok(acquired)
+}
+
+async fn release_session_locks(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+) -> Result<(), PhysicalAttestationError> {
+    let released: bool =
+        sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1, pg_catalog.hashtext($2))")
+            .bind(INSTALL_LOCK_NAMESPACE)
+            .bind(&config.trusted_schema.0)
+            .fetch_one(&mut *connection)
+            .await?;
+    if !released {
+        return Err(PhysicalAttestationError::InstallationIndeterminate);
+    }
+    unlock_lineage(connection).await?;
+    unlock_catalog(connection).await
+}
+
+async fn unlock_lineage(connection: &mut PgConnection) -> Result<(), PhysicalAttestationError> {
+    let released: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+        .bind(LINEAGE_ADVISORY_LOCK_KEY)
+        .fetch_one(connection)
+        .await?;
+    if released {
+        Ok(())
+    } else {
+        Err(PhysicalAttestationError::InstallationIndeterminate)
+    }
+}
+
+async fn unlock_catalog(connection: &mut PgConnection) -> Result<(), PhysicalAttestationError> {
+    let released: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock_shared($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .fetch_one(connection)
+        .await?;
+    if released {
+        Ok(())
+    } else {
+        Err(PhysicalAttestationError::InstallationIndeterminate)
+    }
 }
 
 async fn read_locked_identity(

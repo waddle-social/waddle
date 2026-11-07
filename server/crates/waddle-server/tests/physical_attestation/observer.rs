@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use waddle_server::db::lineage::{DeploymentUuid, LineageUuid};
 use waddle_server::db::physical_attestation::{
-    install, observe_installation, InstallationObservation,
+    install, observe_installation, InstallationObservation, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 
 use super::{test_url, Fixture, CATALOG_GRANT_LOCK};
@@ -589,6 +589,78 @@ async fn operator_observer_refuses_spoof_without_invocation() {
 }
 
 #[tokio::test]
+async fn operator_observer_waits_for_catalog_before_other_barriers() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install fixture attestor");
+    configure_observer(&fixture).await;
+    sqlx::query(&format!(
+        "ALTER ROLE {} SET lock_timeout = '2s'",
+        fixture.installer
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("allow bounded observer retry");
+    let tls = TlsFixture::new(&fixture).await;
+    let mut blocker = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("catalog blocker");
+    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .execute(&mut blocker)
+        .await
+        .expect("hold catalog exclusive");
+    let application = format!("observer_catalog_{}", uuid::Uuid::new_v4().simple());
+    let options = tls.options().application_name(&application);
+    let config = fixture.config();
+    let operation = fixture.operation_id;
+    let task =
+        tokio::spawn(async move { observe_installation(&options, &config, operation).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let retrying: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                 WHERE a.application_name=$1 AND a.state='idle' AND a.backend_xmin IS NULL \
+                 AND a.query LIKE '%pg_try_advisory_lock_shared%' AND NOT EXISTS \
+                 (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.pid=a.pid \
+                  AND l.locktype='advisory' AND l.granted))",
+            )
+            .bind(&application)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("inspect observer retry");
+            if retrying {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("observer retries catalog without a snapshot or lower lock");
+    assert!(!task.is_finished());
+    let released: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+        .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+        .fetch_one(&mut blocker)
+        .await
+        .expect("release catalog exclusive");
+    assert!(released);
+    assert_eq!(
+        task.await.expect("join observer"),
+        InstallationObservation::Observed
+    );
+    drop(blocker);
+    drop(tls);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn operator_observer_preserves_tighter_timeouts_and_bounds_cancellation() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
@@ -719,19 +791,20 @@ async fn operator_observer_preserves_tighter_timeouts_and_bounds_cancellation() 
     .await
     .expect("allow time to observe cancellation");
     let before_cancel = catalog(&fixture).await;
-    let options = tls.options();
+    let application = format!("observer_cancel_{}", uuid::Uuid::new_v4().simple());
+    let options = tls.options().application_name(&application);
     let config = fixture.config();
     let operation = fixture.operation_id;
     let task =
         tokio::spawn(async move { observe_installation(&options, &config, operation).await });
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename = $1 AND wait_event_type = 'Lock' AND wait_event = 'advisory'")
-                .bind(&fixture.installer).fetch_one(&fixture.admin).await.expect("lock waiter");
-            if waiting > 0 { break; }
+            let retrying: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name = $1 AND state = 'idle' AND query LIKE '%pg_advisory_unlock_shared%')")
+                .bind(&application).fetch_one(&fixture.admin).await.expect("observe lock retry");
+            if retrying { break; }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }).await.expect("observer actually reached the blocked query");
+    }).await.expect("observer released the catalog fence before retry");
     task.abort();
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {

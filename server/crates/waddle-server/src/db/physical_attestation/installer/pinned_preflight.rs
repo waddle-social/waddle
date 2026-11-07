@@ -1,7 +1,7 @@
 //! Catalog-first proof for the separately provisioned installer role.
 
 use sqlx::postgres::types::Oid;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use super::super::super::read_only_timeout::timeout_millis;
@@ -10,10 +10,9 @@ use super::super::{
     PhysicalAttestationError,
 };
 use super::{
-    marker, verify_function, verify_prerequisites, DarkInstallerError, DarkInstallerFence,
-    DarkInstallerPins, CONNECT_DEADLINE, FUNCTION_NAME, INSTALL_LOCK_NAMESPACE,
+    begin_locked, installer_pool, marker, verify_function, verify_prerequisites,
+    DarkInstallerError, DarkInstallerFence, DarkInstallerPins, FUNCTION_NAME,
 };
-use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
 pub(super) async fn begin(
     options: &PgConnectOptions,
@@ -39,24 +38,16 @@ pub(super) async fn begin(
     {
         return Err(DarkInstallerError::InvalidConnection);
     }
-    // This private one-connection pool is never exposed or reused by runtime
-    // code. Dropping a cancelled preparation cannot lend its connection.
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(CONNECT_DEADLINE)
-        .connect_lazy_with(options.clone());
-    let mut tx = tokio::time::timeout(CONNECT_DEADLINE, pool.begin())
+    let pool = installer_pool(options, config)?;
+    let mut tx = begin_locked(&pool, config, read_only)
         .await
-        .map_err(|_| DarkInstallerError::Indeterminate)??;
-    let isolation = if read_only {
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY"
-    } else {
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE"
-    };
-    sqlx::query(isolation).execute(&mut *tx).await?;
-    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
-        .execute(&mut *tx)
-        .await?;
+        .map_err(|error| match error {
+            PhysicalAttestationError::InstallationIndeterminate => {
+                DarkInstallerError::Indeterminate
+            }
+            PhysicalAttestationError::Database(source) => DarkInstallerError::Database(source),
+            other => DarkInstallerError::Attestation(other),
+        })?;
     let version: String = sqlx::query_scalar("SHOW server_version_num")
         .fetch_one(&mut *tx)
         .await?;
@@ -90,18 +81,6 @@ pub(super) async fn begin(
             sqlx::query(set).execute(&mut *tx).await?;
         }
     }
-    // No lineage relation or attestor is resolved before these ordered locks.
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
-        .bind(LINEAGE_ADVISORY_LOCK_KEY)
-        .execute(&mut *tx)
-        .await
-        .map_err(lock_error)?;
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1, pg_catalog.hashtext($2))")
-        .bind(INSTALL_LOCK_NAMESPACE)
-        .bind(&config.trusted_schema.0)
-        .execute(&mut *tx)
-        .await
-        .map_err(lock_error)?;
     verify_catalog(&mut tx, config, pins, false).await?;
     let row = sqlx::query(
         "SELECT pg_catalog.pg_backend_pid(), a.backend_start, pg_catalog.pg_postmaster_start_time() \
