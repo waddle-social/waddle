@@ -46,6 +46,10 @@ impl NotificationOutboxStore {
     }
 
     #[cfg(feature = "test-support")]
+    #[expect(
+        dead_code,
+        reason = "the relation-guard pruning candidate remains unselected outside its focused tests"
+    )]
     pub(crate) async fn prune_completed_before_with_candidate(
         &self,
         cutoff_ms: i64,

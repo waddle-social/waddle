@@ -8,6 +8,7 @@ mod store_jobs;
 mod supervisor;
 mod types;
 pub use runtime_attach::RoomEffectRuntimeAttachError;
+#[cfg(feature = "clustering")]
 pub(crate) use schema::pin_owner_schema as pin_room_owner_schema;
 pub use store::{
     retry_delay_ms, RoomEffectEnqueue, RoomEffectOutboxStore, VerifiedMucRoomRuntime,

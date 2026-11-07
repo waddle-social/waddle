@@ -7,9 +7,10 @@ use thiserror::Error;
 
 use super::SPACES_METADATA_CONTRACT;
 use crate::channel_space_links::CHANNEL_SPACE_LINK_CONTRACT;
+use crate::db::lineage::PgIdentity;
+#[cfg(test)]
 use crate::db::lineage::{
-    PgDatabaseIdentity, PgDatabaseName, PgIdentity, PgSchemaIdentity, PgSchemaName,
-    PgSystemIdentifier,
+    PgDatabaseIdentity, PgDatabaseName, PgSchemaIdentity, PgSchemaName, PgSystemIdentifier,
 };
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
@@ -187,6 +188,7 @@ impl SpaceStoreKind {
 /// Prepare both space-store tables on one trusted owner connection and bind
 /// their completed schema contract to the supplied physical PostgreSQL
 /// identity. This does not enroll or alter `_lineage`.
+#[cfg(test)]
 pub(crate) async fn prepare_space_stores_owner(
     db: Database,
     identity: &PgIdentity,
@@ -211,6 +213,7 @@ pub(crate) async fn prepare_space_stores_owner_paused_for_test(
     prepare_space_stores_owner_inner(db, identity, Some((entered, resume))).await
 }
 
+#[cfg(test)]
 async fn prepare_space_stores_owner_inner(
     db: Database,
     identity: &PgIdentity,
@@ -385,6 +388,7 @@ async fn set_local_search_path(
     Ok(())
 }
 
+#[cfg(test)]
 async fn verify_owner_boundary(
     tx: &mut Transaction<'_>,
     expected: &PgIdentity,
@@ -644,6 +648,7 @@ async fn verify_contract_shape(
     Ok(())
 }
 
+#[cfg(test)]
 async fn verify_existing_marker_if_present(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -719,6 +724,7 @@ async fn verify_marker(
     Ok(())
 }
 
+#[cfg(test)]
 async fn write_owner_marker(
     tx: &mut Transaction<'_>,
     schema: &str,

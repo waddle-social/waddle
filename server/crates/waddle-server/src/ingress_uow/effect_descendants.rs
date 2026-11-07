@@ -374,6 +374,10 @@ impl EffectDescendantRepository {
         Ok(())
     }
 
+    #[expect(
+        dead_code,
+        reason = "the restricted definer API candidate is not selected by production ingress yet"
+    )]
     pub(crate) async fn descendant_exists_with_candidate_api(
         tx: &mut Transaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
@@ -409,6 +413,10 @@ impl EffectDescendantRepository {
         .await
     }
 
+    #[expect(
+        dead_code,
+        reason = "the restricted definer API candidate is not selected by production ingress yet"
+    )]
     pub(crate) async fn descendant_settled_with_candidate_api(
         tx: &mut Transaction<'_>,
         api: &DefinerApiCandidateContext<'_>,

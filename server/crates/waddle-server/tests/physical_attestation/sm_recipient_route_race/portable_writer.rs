@@ -273,7 +273,7 @@ async fn portable_snapshot_interlock_revalidates_inventory_and_preserves_conflic
         &schema,
         None,
         &session,
-        &[replacement.clone()],
+        std::slice::from_ref(&replacement),
         CandidateSnapshotLedger::Untouched,
     )
     .await
@@ -297,7 +297,7 @@ async fn portable_snapshot_interlock_revalidates_inventory_and_preserves_conflic
         &schema,
         None,
         &session,
-        &[replacement.clone()],
+        std::slice::from_ref(&replacement),
         CandidateSnapshotLedger::Exclusive(proof.clone()),
     )
     .await
@@ -329,7 +329,7 @@ async fn portable_snapshot_interlock_revalidates_inventory_and_preserves_conflic
             &schema,
             None,
             &session,
-            &[later.clone()],
+            std::slice::from_ref(&later),
             CandidateSnapshotLedger::Exclusive(proof.clone())
         )
         .await,
@@ -357,7 +357,7 @@ async fn portable_snapshot_interlock_revalidates_inventory_and_preserves_conflic
         &schema,
         None,
         &session,
-        &[later.clone()],
+        std::slice::from_ref(&later),
         CandidateSnapshotLedger::Drained(vec![proof.clone()]),
     )
     .await

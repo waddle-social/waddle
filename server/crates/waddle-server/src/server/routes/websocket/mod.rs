@@ -86,12 +86,9 @@ pub(crate) use registration::complete_bind_retirements;
     )
 )]
 mod connection_actor_core;
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(
-        dead_code,
-        reason = "the supervised actor driver remains dormant until the /ws cutover"
-    )
+#[expect(
+    dead_code,
+    reason = "the supervised actor driver remains dormant until the /ws cutover"
 )]
 mod connection_actor_driver_task;
 #[cfg(feature = "test-support")]
