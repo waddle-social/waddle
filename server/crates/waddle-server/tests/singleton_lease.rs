@@ -10,8 +10,8 @@ use std::time::Duration;
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use uuid::Uuid;
 use waddle_server::clustering::singleton_lease::{
-    prepare_owner_schema, LeaseGrant, LeaseOutcome, LeaseReadback, LeaseRequest, ProcessIdentity,
-    SingletonLeaseError, SingletonLeaseStore,
+    prepare_owner_schema, GuardBackend, LeaseGrant, LeaseOutcome, LeaseReadback, LeaseRequest,
+    ProcessIdentity, SingletonLeaseError, SingletonLeaseStore,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 
@@ -85,6 +85,39 @@ impl Fixture {
 
     async fn wait_for_slot_waiter(&self) {
         self.wait_for_row_waiter("singleton_candidate_slot").await;
+    }
+
+    async fn guard_holds_slot(&self, backend: GuardBackend) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity activity \
+             JOIN pg_catalog.pg_locks held ON held.pid = activity.pid \
+             WHERE activity.pid = $1 AND activity.backend_start = $2 \
+               AND activity.xact_start = $3 AND activity.datid::bigint = $4 \
+               AND activity.backend_xid::text = $5 \
+               AND pg_catalog.pg_postmaster_start_time() = $6 \
+               AND held.relation = pg_catalog.to_regclass($7) \
+               AND held.mode = 'RowShareLock' AND held.granted)",
+        )
+        .bind(backend.pid)
+        .bind(backend.backend_start)
+        .bind(backend.transaction_start)
+        .bind(i64::from(backend.database_oid))
+        .bind((backend.transaction_id & u64::from(u32::MAX)).to_string())
+        .bind(backend.postmaster_start)
+        .bind(format!("{}.singleton_candidate_slot", self.schema))
+        .fetch_one(&self.admin)
+        .await
+        .expect("inspect exact guard transaction")
+    }
+
+    async fn wait_for_guard_release(&self, backend: GuardBackend) {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while self.guard_holds_slot(backend).await {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("guard transaction releases its slot lock");
     }
 
     async fn wait_for_row_waiter(&self, relation: &str) {
@@ -342,6 +375,133 @@ async fn successor_waits_for_a_writer_admitted_before_lease_expiry() {
 }
 
 #[tokio::test]
+async fn idle_guard_is_terminated_and_expired_slot_can_be_replaced() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let old = fixture.acquired(identity("node-a")).await;
+    let guard = fixture.store.guard(&old).await.expect("admit guard");
+    let backend = guard.backend();
+    assert!(fixture.guard_holds_slot(backend).await);
+    fixture.expire(&old).await;
+
+    let contender = fixture.store.clone();
+    let pending = tokio::spawn(async move {
+        contender
+            .register(Uuid::new_v4(), identity("node-b"), TTL)
+            .await
+    });
+    fixture.wait_for_slot_waiter().await;
+    assert!(fixture.guard_holds_slot(backend).await);
+    assert!(!pending.is_finished(), "takeover must wait for the guard");
+    fixture.wait_for_guard_release(backend).await;
+    assert!(matches!(
+        pending
+            .await
+            .expect("join takeover")
+            .expect("takeover result"),
+        LeaseOutcome::Acquired { .. }
+    ));
+    assert!(matches!(
+        guard.release().await,
+        Err(SingletonLeaseError::GuardRollbackUnconfirmed { backend: observed })
+            if observed == backend
+    ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn cancelled_guard_eventually_releases_its_exact_transaction() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let old = fixture.acquired(identity("node-a")).await;
+    let worker = fixture.store.clone();
+    let worker_grant = old.clone();
+    let (ready, received) = tokio::sync::oneshot::channel();
+    let holder = tokio::spawn(async move {
+        let guard = worker.guard(&worker_grant).await.expect("admit guard");
+        ready.send(guard.backend()).expect("report backend");
+        std::future::pending::<()>().await;
+        drop(guard);
+    });
+    let backend = received.await.expect("guard backend");
+    assert!(fixture.guard_holds_slot(backend).await);
+    fixture.expire(&old).await;
+
+    let contender = fixture.store.clone();
+    let pending = tokio::spawn(async move {
+        contender
+            .register(Uuid::new_v4(), identity("node-b"), TTL)
+            .await
+    });
+    fixture.wait_for_slot_waiter().await;
+    assert!(fixture.guard_holds_slot(backend).await);
+    assert!(!pending.is_finished(), "takeover must wait for the guard");
+    holder.abort();
+    assert!(holder.await.expect_err("holder cancelled").is_cancelled());
+    fixture.wait_for_guard_release(backend).await;
+    assert!(matches!(
+        pending
+            .await
+            .expect("join takeover")
+            .expect("takeover result"),
+        LeaseOutcome::Acquired { .. }
+    ));
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn total_deadline_ends_a_guard_that_is_not_idle() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let old = fixture.acquired(identity("node-a")).await;
+    let mut guard = fixture.store.guard(&old).await.expect("admit guard");
+    let backend = guard.backend();
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        guard.pulse_for_test().await.expect("guard remains active");
+    }
+    assert!(fixture.guard_holds_slot(backend).await);
+    fixture.expire(&old).await;
+    let contender = fixture.store.clone();
+    let pending = tokio::spawn(async move {
+        contender
+            .register(Uuid::new_v4(), identity("node-b"), TTL)
+            .await
+    });
+    fixture.wait_for_slot_waiter().await;
+    assert!(!pending.is_finished(), "takeover must wait for the guard");
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if guard.pulse_for_test().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("total deadline stops the active guard");
+    fixture.wait_for_guard_release(backend).await;
+    assert!(matches!(
+        pending
+            .await
+            .expect("join takeover")
+            .expect("takeover result"),
+        LeaseOutcome::Acquired { .. }
+    ));
+    assert!(matches!(
+        guard.release().await,
+        Err(SingletonLeaseError::GuardRollbackUnconfirmed { backend: observed })
+            if observed == backend
+    ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn missing_slot_or_referenced_lease_is_never_reconstructed() {
     let Some(fixture) = Fixture::new().await else {
         return;
@@ -480,9 +640,10 @@ async fn post_wait_heartbeat_rechecks_expiry_and_absent_authority_fails_closed()
     fixture.cleanup().await;
 }
 
-async fn lose_commit_reply_proxy(
+async fn hold_command_reply_proxy(
     listener: tokio::net::TcpListener,
     target: PgConnectOptions,
+    command: &'static [u8],
     reply_held: Arc<tokio::sync::Notify>,
     disconnect: Arc<tokio::sync::Notify>,
 ) -> std::io::Result<()> {
@@ -493,7 +654,7 @@ async fn lose_commit_reply_proxy(
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = tokio::io::split(server);
     let hold = Arc::new(AtomicBool::new(false));
-    let on_commit = hold.clone();
+    let on_command = hold.clone();
     let upstream = async move {
         let mut buffer = [0_u8; 8192];
         let mut tail = Vec::new();
@@ -504,14 +665,11 @@ async fn lose_commit_reply_proxy(
             }
             let mut scan = tail;
             scan.extend_from_slice(&buffer[..count]);
-            if scan
-                .windows(b"COMMIT\0".len())
-                .any(|part| part == b"COMMIT\0")
-            {
-                on_commit.store(true, Ordering::SeqCst);
+            if scan.windows(command.len()).any(|part| part == command) {
+                on_command.store(true, Ordering::SeqCst);
             }
             server_write.write_all(&buffer[..count]).await?;
-            tail = scan[scan.len().saturating_sub(b"COMMIT\0".len() - 1)..].to_vec();
+            tail = scan[scan.len().saturating_sub(command.len() - 1)..].to_vec();
         }
     };
     let downstream = async move {
@@ -533,6 +691,58 @@ async fn lose_commit_reply_proxy(
 }
 
 #[tokio::test]
+async fn lost_rollback_reply_is_bounded_and_reports_exact_backend() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let grant = fixture.acquired(identity("node-a")).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("proxy listener");
+    let port = listener.local_addr().expect("proxy address").port();
+    let held = Arc::new(tokio::sync::Notify::new());
+    let disconnect = Arc::new(tokio::sync::Notify::new());
+    let target = PgConnectOptions::from_str(&fixture.url).expect("target options");
+    let proxy = tokio::spawn(hold_command_reply_proxy(
+        listener,
+        target,
+        b"ROLLBACK\0",
+        held.clone(),
+        disconnect.clone(),
+    ));
+    let url = postgres_proxy::local_proxy_url(&fixture.url, port).expect("proxy URL");
+    let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+    config.pool_size = 1;
+    let db = Database::from_config("rollback proxy", &config)
+        .await
+        .expect("proxied database");
+    let proxied = SingletonLeaseStore::new_unverified(db, &fixture.schema).expect("proxied store");
+    let guard = proxied.guard(&grant).await.expect("proxied guard");
+    let backend = guard.backend();
+    assert!(fixture.guard_holds_slot(backend).await);
+
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(guard.release(), async {
+            held.notified().await;
+        })
+    })
+    .await
+    .expect("bounded release and held response");
+    assert!(matches!(
+        result,
+        Err(SingletonLeaseError::GuardRollbackUnconfirmed { backend: observed })
+            if observed == backend
+    ));
+    // The proxy has seen the server's reply, but the caller has not. Observe
+    // the actual transaction lock on the original primary before proceeding.
+    fixture.wait_for_guard_release(backend).await;
+    disconnect.notify_one();
+    proxy.await.expect("join proxy").expect("proxy I/O");
+    drop(proxied);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn lost_commit_reply_is_reconciled_by_exact_operation_readback() {
     let Some(fixture) = Fixture::new().await else {
         return;
@@ -544,9 +754,10 @@ async fn lost_commit_reply_is_reconciled_by_exact_operation_readback() {
     let held = Arc::new(tokio::sync::Notify::new());
     let disconnect = Arc::new(tokio::sync::Notify::new());
     let target = PgConnectOptions::from_str(&fixture.url).expect("target options");
-    let proxy = tokio::spawn(lose_commit_reply_proxy(
+    let proxy = tokio::spawn(hold_command_reply_proxy(
         listener,
         target,
+        b"COMMIT\0",
         held.clone(),
         disconnect.clone(),
     ));

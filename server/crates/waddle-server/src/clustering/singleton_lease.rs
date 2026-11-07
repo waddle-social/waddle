@@ -13,6 +13,16 @@
 //! must use a trusted owner-prepared schema and must not expose raw DML under
 //! the eventual runtime role. Startup remains closed until those boundaries
 //! are integrated and independently verified.
+//!
+//! Guard timeouts bound server-side transactions, not backend reconciliation.
+//! A cancelled acquisition can leave a backend whose identity was never
+//! returned to the caller. A returned guard identifies its backend and
+//! transaction so an operator can reconcile an unconfirmed rollback on the
+//! independently fenced primary. Prepared transactions are outside these
+//! timeouts and must be disabled or separately fenced before selection.
+//! These total and idle limits apply only to `guard`; register, renew, and
+//! revoke retain per-lock and per-statement limits and still need their own
+//! bounded-backend protocol before serving selection.
 
 use std::time::Duration;
 
@@ -24,6 +34,7 @@ use uuid::Uuid;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
 const MAX_LEASE_MILLIS: u128 = 3_600_000;
+const GUARD_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 pub enum SingletonLeaseError {
@@ -43,6 +54,8 @@ pub enum SingletonLeaseError {
     NotCurrent,
     #[error("the lease operation commit outcome is unknown for {operation_id}")]
     CommitUnknown { operation_id: Uuid },
+    #[error("the singleton guard rollback is unconfirmed on {backend:?}")]
+    GuardRollbackUnconfirmed { backend: GuardBackend },
     #[error(transparent)]
     Database(#[from] DatabaseError),
     #[error(transparent)]
@@ -82,6 +95,18 @@ impl ProcessIdentity {
 pub struct LeaseGrant {
     identity: ProcessIdentity,
     generation: i64,
+}
+
+/// Identity of a guard transaction on its original, independently fenced
+/// PostgreSQL primary. PID alone is not enough because backends are reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuardBackend {
+    pub pid: i32,
+    pub backend_start: DateTime<Utc>,
+    pub transaction_start: DateTime<Utc>,
+    pub postmaster_start: DateTime<Utc>,
+    pub database_oid: u32,
+    pub transaction_id: u64,
 }
 
 impl LeaseGrant {
@@ -539,42 +564,119 @@ impl SingletonLeaseStore {
         Ok(LeaseOutcome::Revoked)
     }
 
-    /// Hold the exact slot against replacement. The guard exposes no raw SQL
-    /// or transaction. It is a laboratory guard, not yet a durable-write API.
+    /// Hold the exact slot against replacement with bounded server-side idle
+    /// and total transaction time. The guard exposes no raw SQL or transaction
+    /// and does not authorize a write on another connection. Keeping the Rust
+    /// value alive does not prove the server still holds the lock: a timeout
+    /// can terminate its backend. If acquisition is cancelled, it has no
+    /// result or backend identity; dropping its transaction requests rollback
+    /// but does not prove the server has released its locks.
     pub async fn guard<'a>(
         &'a self,
         grant: &LeaseGrant,
     ) -> Result<SlotGuard<'a>, SingletonLeaseError> {
         let mut tx = bounded_transaction(&self.db).await?;
-        lock_slot(pg(&mut tx)?, &self.schema, true).await?;
-        let slot = read_slot(pg(&mut tx)?, &self.schema).await?;
-        if slot.owner.as_ref()
-            != Some(&(grant.identity.node_id.clone(), grant.identity.incarnation))
-            || slot.generation != grant.generation
-        {
-            return Err(SingletonLeaseError::NotCurrent);
+        // Install these before the first slot lock. PostgreSQL 17's
+        // transaction timeout bounds an active transaction as well as an idle
+        // one; lock_timeout and statement_timeout alone do neither.
+        tx.execute("SET LOCAL idle_in_transaction_session_timeout = '2s'", ())
+            .await?;
+        tx.execute("SET LOCAL transaction_timeout = '5s'", ())
+            .await?;
+        let backend = guard_backend(pg(&mut tx)?).await?;
+        let admitted = async {
+            lock_slot(pg(&mut tx)?, &self.schema, true).await?;
+            let slot = read_slot(pg(&mut tx)?, &self.schema).await?;
+            if slot.owner.as_ref()
+                != Some(&(grant.identity.node_id.clone(), grant.identity.incarnation))
+                || slot.generation != grant.generation
+            {
+                return Err(SingletonLeaseError::NotCurrent);
+            }
+            let lease = read_lease(pg(&mut tx)?, &self.schema, grant.identity.incarnation).await?;
+            if lease.node_id != grant.identity.node_id
+                || lease.generation != grant.generation
+                || lease.revoked
+                || !lease.fresh
+            {
+                return Err(SingletonLeaseError::NotCurrent);
+            }
+            Ok(())
         }
-        let lease = read_lease(pg(&mut tx)?, &self.schema, grant.identity.incarnation).await?;
-        if lease.node_id != grant.identity.node_id
-            || lease.generation != grant.generation
-            || lease.revoked
-            || !lease.fresh
-        {
-            return Err(SingletonLeaseError::NotCurrent);
+        .await;
+        match admitted {
+            Ok(()) => Ok(SlotGuard { tx, backend }),
+            Err(error) => {
+                rollback_guard(tx, backend).await?;
+                Err(error)
+            }
         }
-        Ok(SlotGuard { tx })
     }
 }
 
 pub struct SlotGuard<'a> {
     tx: Transaction<'a>,
+    backend: GuardBackend,
 }
 
 impl SlotGuard<'_> {
-    pub async fn release(self) -> Result<(), SingletonLeaseError> {
-        self.tx.rollback().await?;
+    /// Save this before a cancellable wait or release so an unconfirmed
+    /// rollback can be reconciled on the same fenced primary.
+    pub fn backend(&self) -> GuardBackend {
+        self.backend
+    }
+
+    /// Keep a guard active in the PG17 transaction-deadline test.
+    #[cfg(feature = "test-support")]
+    pub async fn pulse_for_test(&mut self) -> Result<(), SingletonLeaseError> {
+        sqlx::query("SELECT 1").execute(pg(&mut self.tx)?).await?;
         Ok(())
     }
+
+    /// A successful return confirms rollback. An error identifies the
+    /// original backend and transaction but does not claim either has ended.
+    pub async fn release(self) -> Result<(), SingletonLeaseError> {
+        rollback_guard(self.tx, self.backend).await
+    }
+}
+
+async fn rollback_guard(
+    tx: Transaction<'_>,
+    backend: GuardBackend,
+) -> Result<(), SingletonLeaseError> {
+    match tokio::time::timeout(GUARD_RELEASE_TIMEOUT, tx.rollback()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err(SingletonLeaseError::GuardRollbackUnconfirmed { backend }),
+    }
+}
+
+async fn guard_backend(conn: &mut PgConnection) -> Result<GuardBackend, SingletonLeaseError> {
+    // Assign an xid before acquiring the slot. Backend identity plus xid lets
+    // a trusted observer distinguish this transaction from later pool reuse.
+    let row = sqlx::query(
+        "SELECT activity.pid, activity.backend_start, activity.xact_start, \
+                activity.datid::bigint, pg_catalog.pg_postmaster_start_time(), \
+                pg_catalog.pg_current_xact_id()::text \
+         FROM pg_catalog.pg_stat_activity AS activity \
+         WHERE activity.pid = pg_catalog.pg_backend_pid()",
+    )
+    .fetch_optional(conn)
+    .await?
+    .ok_or(SingletonLeaseError::InvalidAuthority)?;
+    let database_oid = u32::try_from(row.try_get::<i64, _>(3)?)
+        .map_err(|_| SingletonLeaseError::InvalidAuthority)?;
+    let transaction_id = row
+        .try_get::<String, _>(5)?
+        .parse()
+        .map_err(|_| SingletonLeaseError::InvalidAuthority)?;
+    Ok(GuardBackend {
+        pid: row.try_get(0)?,
+        backend_start: row.try_get(1)?,
+        transaction_start: row.try_get(2)?,
+        postmaster_start: row.try_get(4)?,
+        database_oid,
+        transaction_id,
+    })
 }
 
 fn validate_db(db: &Database) -> Result<(), SingletonLeaseError> {
