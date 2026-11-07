@@ -154,6 +154,44 @@ pub async fn acquire_dark_shared_migration_ledger_v1030_read<'a, 'connection>(
         .await
 }
 
+/// Verify the complete pinned ledger on a caller-owned READ COMMITTED READ ONLY
+/// SQLx transaction. This entry is used by the closed selected-transaction
+/// candidate, whose first statement is its catalog mutation
+/// `pg_try_advisory_xact_lock_shared`. The caller must already have proved
+/// physical identity and held the shared lineage barrier in the same
+/// transaction.
+pub async fn verify_dark_shared_migration_ledger_v1030_read_sqlx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    pins: DarkMigrationLedgerPins,
+    restore_search_path: &str,
+) -> Result<(), DarkLedgerPreflightError> {
+    if !pins.valid() {
+        return Err(DarkLedgerPreflightError::InvalidPins);
+    }
+    if schema.is_empty() || schema.len() > MAX_SCHEMA_NAME_BYTES || schema.contains('\0') {
+        return Err(DarkLedgerPreflightError::InvalidSchema);
+    }
+    if restore_search_path.is_empty()
+        || restore_search_path.len() > MAX_RESTORE_PATH_BYTES
+        || restore_search_path.contains('\0')
+    {
+        return Err(DarkLedgerPreflightError::InvalidRestorePath);
+    }
+    let connection: &mut PgConnection = tx;
+    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await?;
+    let result = verify_locked(connection, schema, pins, 1030, true, false).await;
+    let restored = sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
+        .bind(restore_search_path)
+        .execute(&mut *connection)
+        .await;
+    result?;
+    restored?;
+    Ok(())
+}
+
 async fn acquire_dark_shared_migration_ledger<'a, 'connection>(
     tx: &'a mut Transaction<'connection>,
     schema: &str,

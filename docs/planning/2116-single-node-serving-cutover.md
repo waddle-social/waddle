@@ -287,3 +287,51 @@ The final PR description must match the exact integrated scope and evidence.
 GitHub Actions and workflow files stay disabled while #2046 implementation is
 open; restore them with `cuenv sync -A` and run exact-release CI only when the
 entire issue is ready.
+
+## Grouped serving-authority work after #2246
+
+#2246 merged dark same-backend catalog-fence and snapshot-revision labs. Neither
+is a production selector. This grouped branch develops unselected candidates
+for the singleton claim, SM revision participation, and pinned catalog read.
+The following steps are the remaining selection plan, not a claim that the
+selected serving path is complete. Both restricted-startup refusals remain
+closed until the exact combined path passes its acceptance gate.
+
+1. Specify and implement a database-enforced deployment singleton slot, node
+   lease, claim and guarded-write protocol. Registration may not replace a
+   live same-ID epoch; acquisition needs a live node and post-lock freshness.
+   Prove lock order and liveness under concurrent heartbeat, takeover and
+   nested writes. Reconcile unknown commits and orphaned claims before serving.
+2. Make production SM capture, append, full snapshot, ACK, deletion, pending
+   and GC advance one durable session revision. Serialize actor capture with
+   outbound publication, retain exact generation/occurrence and positive-only
+   unknown-COMMIT readback, and cut off legacy writers before selecting the
+   new path. Prove both race winners on PostgreSQL and SQLite where applicable.
+3. Compose the selected claim and SM authority with the main-pool catalog
+   fence, exact runtime role graph and every enabled store. Keep the old
+   startup gates closed until trusted mutator/old-backend cutoff, complete
+   store attachment, cold/inherited listener publication and recovery have
+   a single integrated proof. Do not infer selected safety from a dark lab.
+4. Run focused PostgreSQL 17 and native WebSocket/XEP-0198 tests plus the
+   required server gates on the exact proposed SHA. Obtain independent
+   architecture and final-diff reviews. Update this plan and the issue
+   checklist to match what actually lands. Keep workflows absent until all
+   #2046 work is ready for `cuenv sync -A` and exact-release CI.
+
+### Candidate boundary in this grouped branch
+
+- The owner-prepared singleton slot and lease candidate is unselected. Its
+  PostgreSQL tests prove local registration, heartbeat, takeover, and guarded
+  transaction schedules. Selection still needs bounded holder/backend
+  lifetime, composition with every durable writer, old-backend cutoff, and
+  claim recovery on the actual serving path.
+- The revisioned SM storage candidate has an exact operation receipt and
+  positive readback. It refuses unsupported tombstone, prune, and
+  acknowledgement-confirmation operations. Legacy append, ACK, snapshot,
+  pending, GC, and actor publication still need a joint conversion; the
+  production SM selector remains unchanged.
+- The pinned catalog candidate exposes only a closed read-only epoch
+  observation. It does not provide receipt writes or ordinary units of work.
+  Selection needs a provisioned writer authority, cooperative catalog
+  mutator/old-backend cutoff, and the full same-transaction role and epoch
+  contract. No startup path selects any of these three candidates.

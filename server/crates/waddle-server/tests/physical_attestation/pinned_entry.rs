@@ -15,7 +15,7 @@ use waddle_server::db::{
 
 use super::{dark_attestor_fixture, test_url, url_with_schema, Fixture, CATALOG_GRANT_LOCK};
 
-async fn pinned_pool(fixture: &Fixture, lock_timeout: Option<&str>) -> AttestedPgPool {
+pub(super) async fn pinned_pool(fixture: &Fixture, lock_timeout: Option<&str>) -> AttestedPgPool {
     let (config, attestor) = dark_attestor_fixture(fixture).await;
     let migration_url = url_with_schema(&fixture.base_url, &fixture.target);
     let database = Database::from_config(
