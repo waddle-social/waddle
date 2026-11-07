@@ -1,8 +1,8 @@
 # P2.1 Push custody and VAPID catalog group
 
-Status: architecture-gated dark implementation plan for #2116 and #2046.
-Both restricted-startup refusals remain active; this group cannot select
-serving authority.
+Status: locally verified dark implementation for #2116 and #2046. Both
+restricted-startup refusals remain active; this group cannot select serving
+authority.
 
 ## Objective
 
@@ -12,7 +12,7 @@ key provisioning write. Also remove the VAPID fallback's database access when
 lineage attestation fails. Keep supported SQLite and XMPP wire behavior. The
 custody read and provisioning write are separate transactions in one PR.
 
-## Current boundaries
+## Starting boundaries
 
 - `verify_attested_push_notification_custody` begins a read-only READ COMMITTED
   transaction, then takes notification-outbox, Push, VAPID, registration and
@@ -32,9 +32,9 @@ custody read and provisioning write are separate transactions in one PR.
   no-write documentation. Its unready object graph needs only an ephemeral
   signer, not a database read or write.
 
-## Proposed transaction contract
+## Implemented transaction contract
 
-1. Start the outer custody read through `begin_catalog_fenced_read_only` on
+1. Start the outer custody read through the opt-in idle-bounded catalog helper on
    the attested main pool, with catalog-S before protected or snapshot-forming
    work after the transaction-mode `SET` statements.
    Preserve the existing notification-outbox → Push → VAPID → registration/
@@ -59,11 +59,15 @@ custody read and provisioning write are separate transactions in one PR.
    attempt may reconcile only after reacquiring catalog-X/Push-X on the same
    fenced primary and rereading durable rows. Socket closure alone is not
    rollback proof. Do not expose secret material in errors or logs.
+   Both opt-in catalog helpers cap the server's idle transaction lifetime
+   before acquiring catalog-S/X, preserve tighter existing settings and pair
+   that server bound with a client deadline. The bound applies to these
+   operation transactions, not the earlier SQLx checkout hook.
 4. On the failed-lineage branch, construct an ephemeral signer without a
    Database, root key, environment input or SQL. It is an unpersisted
    placeholder for a permanently unready node, never serving authority.
 
-## Qualification and exclusions
+## Verification and exclusions
 
 Require PostgreSQL 17 public-entry tests for catalog-first order, lower-gate
 retry, relation and role drift, cancellation, exact backend, bounded rollback,
@@ -79,8 +83,29 @@ above. It did not approve a serving or release claim.
 This VAPID fallback repair does not make all failed-lineage startup read-only:
 registration, Push, outbox and activity constructors still initialize their
 stores around it and remain separate work.
+
 Multi-session MAM, notification-activity, inbox and pending constructors,
 raw old-writer cutoff, provider roles, selected P2.1, production SM and
 release qualification remain outside this group. `MUC open()` remains three
 commits. GitHub Actions and workflow files remain absent until all #2046
 implementation is finished and `cuenv sync -A` restores them.
+
+### Local verification
+
+On the integrated tree, PostgreSQL 17 was required for the relevant cases:
+PubSub/Push custody integration 6/6 (including owner-prepared positive read,
+all four ordered gates and two lost-reply proxy schedules); VAPID first-key
+integration 10/10 in default parallel execution (including one subprocess
+dispatcher and a URL precedence test); strict Push/VAPID owner and attach
+library tests 2/2. XEP-0357 Push regressions passed 7/7, and VAPID storage
+unit tests passed 10/10. The no-default server build, workspace formatting
+and diff checks passed. Independent source review found no actionable issue.
+Strict server Clippy with `-D warnings` remains blocked by the same 21
+pre-existing unused/dead-code diagnostics; this group introduced none.
+
+The loopback proxy witnesses ran against a local PostgreSQL 17 target. They
+observe exact backend catalog-lock retention and later server-side release;
+client socket closure alone was not counted as release. They do not prove
+cross-primary failover reconciliation, every checkout hook, or whole-startup
+no-write behavior. Actions and workflow files remain disabled, so no hosted
+CI, exact-release or deployment qualification is claimed.
