@@ -3,7 +3,9 @@
 use super::{run_sql, Fixture};
 use sqlx::postgres::PgPool;
 use std::time::Duration;
-use waddle_server::db::physical_attestation::{attested_pool, install};
+use waddle_server::db::physical_attestation::{
+    attested_pool, install, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::notification_activity::NotificationActivityStore;
 use waddle_server::pubsub::DatabasePubSubStorage;
@@ -151,13 +153,25 @@ async fn pg17_prepared_custody_reader_classifies_and_acknowledges_rollback() {
                    AND a.query LIKE '%ingress_effect_descendants%' \
                    AND (SELECT count(*) FROM pg_catalog.pg_locks l \
                         WHERE l.pid = a.pid AND l.locktype = 'advisory' AND l.granted \
-                          AND l.mode = 'ShareLock') = 3 \
-                   AND (SELECT count(*) FROM pg_catalog.pg_locks l \
-                        WHERE l.pid = a.pid AND l.locktype = 'advisory' AND l.granted \
-                          AND l.mode = 'ExclusiveLock') = 2)",
+                          AND ((l.objsubid = 1 AND l.mode = 'ShareLock' \
+                            AND l.classid::bigint = ($3::bigint >> 32) \
+                            AND l.objid::bigint = ($3::bigint & 4294967295)) \
+                           OR (l.objsubid = 1 AND l.mode = 'ExclusiveLock' AND \
+                             ((l.classid::bigint = ($4::bigint >> 32) \
+                               AND l.objid::bigint = ($4::bigint & 4294967295)) \
+                              OR (l.classid::bigint = ($5::bigint >> 32) \
+                               AND l.objid::bigint = ($5::bigint & 4294967295)))) \
+                           OR (l.objsubid = 2 AND l.mode = 'ShareLock' \
+                            AND l.classid::bigint = $6 AND l.objid::bigint IN ($7, $8)))) = 5)",
             )
             .bind(pid)
             .bind(&application)
+            .bind(CATALOG_MUTATION_ADVISORY_LOCK_KEY)
+            .bind(6_841_445_497_037_937_998_i64)
+            .bind(7_534_519_881_230_429_064_i64)
+            .bind(0x5744444c_i64)
+            .bind(0x4e4f5449_i64)
+            .bind(0x4e414354_i64)
             .fetch_one(&f.admin)
             .await
             .expect("observe exact operation backend");
