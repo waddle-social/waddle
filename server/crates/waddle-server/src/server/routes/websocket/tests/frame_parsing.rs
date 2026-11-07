@@ -825,6 +825,67 @@ async fn websocket_resource_bind_without_resource_uses_unique_server_resource() 
 }
 
 #[tokio::test]
+async fn websocket_resource_bind_rejects_invalid_explicit_resource_with_bad_request() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+    let auth_frame = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
+            .append(payload)
+            .build(),
+    );
+    let resource = "r".repeat(1024);
+    let bind_frame = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "bind-invalid-resource",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .append(
+                Element::builder("bind", waddle_xmpp::ns::BIND)
+                    .append(
+                        Element::builder("resource", waddle_xmpp::ns::BIND)
+                            .append(resource)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let mut conn = WsConnState::new();
+
+    let auth_responses =
+        handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
+    assert_eq!(auth_responses, vec![sasl_success_xml()]);
+
+    let bind_responses =
+        handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert_eq!(bind_responses.len(), 1);
+    assert!(conn.phase.is_authenticated());
+    assert!(!conn.phase.is_ready());
+
+    let response = Element::from_str(&bind_responses[0]).expect("bind error response XML");
+    assert_eq!(response.name(), "iq");
+    assert_eq!(response.ns(), waddle_xmpp::ns::JABBER_CLIENT);
+    assert_eq!(response.attr("id"), Some("bind-invalid-resource"));
+    assert_eq!(response.attr("type"), Some("error"));
+
+    let error = response
+        .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
+        .expect("stanza error");
+    assert_eq!(error.attr("type"), Some("modify"));
+    assert!(error
+        .get_child("bad-request", xmpp_parsers::ns::XMPP_STANZAS)
+        .is_some());
+}
+
+#[tokio::test]
 async fn websocket_rejects_second_resource_bind_after_ready() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;

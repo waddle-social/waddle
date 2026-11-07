@@ -68,6 +68,13 @@ pub(super) fn handle_resource_binding(
         ))]
     } else {
         warn!(jid = %full_jid_str, "Invalid JID during resource binding");
-        vec![]
+        vec![ResponseFrame::from(build_iq_error_xml_typed(
+            &id,
+            None,
+            None,
+            super::handlers::iq::errors::bad_request_iq_error(
+                "The requested resourcepart is invalid.",
+            ),
+        ))]
     }
 }
