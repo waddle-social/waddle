@@ -7573,6 +7573,10 @@ mod observer_quarantine;
 mod combined_restricted_profile;
 
 #[cfg(feature = "test-support")]
+#[path = "physical_attestation/coverage_gap_gate.rs"]
+mod coverage_gap_gate_tests;
+
+#[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_hook.rs"]
 mod pinned_hook_tests;
 

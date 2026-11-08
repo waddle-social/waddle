@@ -837,6 +837,14 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         (&runtime, &api, &helper, &migrator, &owner),
     )
     .await?;
+    #[cfg(feature = "clustering")]
+    super::coverage_gap_gate_tests::exercise_combined_fixture(
+        &admin,
+        &database_owner,
+        &owner,
+        main,
+    )
+    .await?;
     let owner_role = PgRoleName::new(&owner)?;
     DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
     #[cfg(feature = "clustering")]
