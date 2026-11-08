@@ -8,7 +8,9 @@ use waddle_server::db::lineage::PgIdentity;
 use waddle_server::db::Database;
 use waddle_server::notification_activity::NotificationActivityStore;
 use waddle_server::notification_outbox::NotificationOutboxStore;
-use waddle_server::pubsub::{DatabasePubSubStorage, PubSubRuntimeAttachError};
+use waddle_server::pubsub::{
+    DatabasePubSubStorage, PubSubRuntimeAttachError, RestrictedServingProfileV1,
+};
 use waddle_server::push_registrations::DatabasePushRegistrationStore;
 use waddle_server::push_service::vapid_storage::VapidStorage;
 use waddle_server::push_service::DatabasePushServiceStore;
@@ -16,6 +18,8 @@ use waddle_server::server::push_notification_custody::{
     verify_attested_push_notification_custody, PushNotificationCustodyError,
 };
 use waddle_server::spaces_metadata::{DatabaseSpacesMetadataStore, SpaceStoreAttachError};
+
+use super::pinned_pubsub_inventory::InventoryFixture;
 
 #[derive(Clone, Copy)]
 enum ExpectedAttachRefusal {
@@ -33,6 +37,7 @@ pub(super) struct FixtureRoles<'a> {
     pub(super) owner: &'a str,
     pub(super) api: &'a str,
     pub(super) helper: &'a str,
+    pub(super) migrator: &'a str,
     pub(super) runtime: &'a str,
 }
 
@@ -136,12 +141,15 @@ pub(super) async fn prepare_and_check(
     main: &Database,
     identity: &PgIdentity,
     admin: &PgPool,
+    pinned: &InventoryFixture,
+    pubsub_profile: &RestrictedServingProfileV1,
     roles: FixtureRoles<'_>,
 ) -> anyhow::Result<()> {
     let FixtureRoles {
         owner,
         api,
         helper,
+        migrator,
         runtime,
     } = roles;
     // Never import an operator's VAPID bootstrap secret into a disposable
@@ -361,6 +369,13 @@ pub(super) async fn prepare_and_check(
     ensure!(table_matches(admin, owner, runtime, registrations).await?);
 
     assert_push_custody_refusals(admin, main, identity, owner, api, helper, runtime).await?;
+    super::pinned_push_profile::exercise(
+        admin,
+        pinned,
+        (runtime, api, helper, migrator),
+        pubsub_profile,
+    )
+    .await?;
     Ok(())
 }
 

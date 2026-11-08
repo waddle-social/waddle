@@ -61,6 +61,8 @@ mod combined_restricted_profile_extra;
 mod pinned_partial_profile;
 #[path = "pinned_pubsub_inventory.rs"]
 mod pinned_pubsub_inventory;
+#[path = "pinned_push_profile.rs"]
+mod pinned_push_profile;
 
 const RELATION_GUARD: &str =
     include_str!("../../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
@@ -1038,10 +1040,13 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         main,
         &identity,
         &admin,
+        &pinned,
+        &serving_profile,
         combined_restricted_profile_extra::FixtureRoles {
             owner: &owner,
             api: &api,
             helper: &helper,
+            migrator: &migrator,
             runtime: &runtime,
         },
     )

@@ -26,7 +26,8 @@ use super::DarkIngressAuthorityError;
 use super::{
     read_epoch_after_prelock, AttestationMode, AttestedPgPool, PhysicalAttestationError,
     PinnedCatalogError, PinnedPartialProfileError, PinnedPartialProfilePinsV1,
-    PinnedRuntimeAuthority, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+    PinnedPushProfileError, PinnedPushProfilePinsV1, PinnedRuntimeAuthority,
+    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use crate::db::migrations::{
     verify_dark_shared_migration_ledger_v1030_partial_profile_sqlx,
@@ -57,6 +58,8 @@ pub enum PinnedSelectedEntryError {
     #[error(transparent)]
     PartialProfile(#[from] PinnedPartialProfileError),
     #[error(transparent)]
+    PushProfile(#[from] PinnedPushProfileError),
+    #[error(transparent)]
     Epoch(#[from] DarkIngressAuthorityError),
     #[error(transparent)]
     Physical(#[from] PhysicalAttestationError),
@@ -64,9 +67,9 @@ pub enum PinnedSelectedEntryError {
     Postgres(#[from] sqlx::Error),
 }
 
-/// A closed API over one exact pinned pool. It exposes only a typed, pinned
-/// protocol-epoch observation; no SQL, connection, transaction, callback, or
-/// pool accessor escapes. It does not claim all-store authority or select
+/// A closed API over one exact pinned pool. It exposes a typed protocol epoch
+/// and named partial observations; no SQL, connection, transaction, callback,
+/// or pool accessor escapes. It does not claim all-store authority or select
 /// production serving.
 pub struct PinnedSelectedEntry {
     pool: AttestedPgPool,
@@ -91,7 +94,7 @@ impl PinnedSelectedEntry {
     /// server has already released its locks. Dropping the caller future also
     /// marks any acquired session for close-on-drop.
     pub async fn observe_protocol_epoch(&self) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, None, None, None)
+        self.observe_with_deadline(ENTRY_DEADLINE, None, None, None, None)
             .await
     }
 
@@ -106,9 +109,48 @@ impl PinnedSelectedEntry {
         &self,
         profile: &PinnedPartialProfilePinsV1,
     ) -> Result<(), PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, None, Some(profile), None)
+        self.observe_with_deadline(ENTRY_DEADLINE, None, Some(profile), None, None)
             .await
             .map(|_| ())
+    }
+
+    /// Inspect the fixed, partial H and Push-family ACL profile on this exact
+    /// pinned transaction. This is not custody evidence or serving authority.
+    /// The provider must exclude every mutation of the scanned catalogs from
+    /// before the pool hook until rollback is acknowledged, including changes
+    /// by other sessions that can create temporary schemas. The bounded
+    /// preflight and helper checks use separate READ COMMITTED statements.
+    pub async fn inspect_push_profile_v1(
+        &self,
+        profile: &PinnedPushProfilePinsV1,
+    ) -> Result<(), PinnedSelectedEntryError> {
+        self.observe_with_deadline(
+            ENTRY_DEADLINE,
+            None,
+            Some(&profile.partial),
+            None,
+            Some(profile),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn inspect_push_profile_v1_paused_for_test(
+        &self,
+        profile: &PinnedPushProfilePinsV1,
+        ready: tokio::sync::oneshot::Sender<i32>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), PinnedSelectedEntryError> {
+        self.observe_with_deadline(
+            ENTRY_DEADLINE,
+            Some((ready, release)),
+            Some(&profile.partial),
+            None,
+            Some(profile),
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(feature = "test-support")]
@@ -118,9 +160,15 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)), Some(profile), None)
-            .await
-            .map(|_| ())
+        self.observe_with_deadline(
+            ENTRY_DEADLINE,
+            Some((ready, release)),
+            Some(profile),
+            None,
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(feature = "test-support")]
@@ -130,9 +178,15 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, None, Some(profile), Some((ready, release)))
-            .await
-            .map(|_| ())
+        self.observe_with_deadline(
+            ENTRY_DEADLINE,
+            None,
+            Some(profile),
+            Some((ready, release)),
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(feature = "test-support")]
@@ -141,7 +195,7 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)), None, None)
+        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)), None, None, None)
             .await
     }
 
@@ -152,7 +206,7 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_with_deadline(timeout, Some((ready, release)), None, None)
+        self.observe_with_deadline(timeout, Some((ready, release)), None, None, None)
             .await
     }
 
@@ -162,6 +216,7 @@ impl PinnedSelectedEntry {
         pause: Option<EntryPause>,
         partial_profile: Option<&PinnedPartialProfilePinsV1>,
         before_attestor: Option<EntryPause>,
+        push_profile: Option<&PinnedPushProfilePinsV1>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
         let mut backend_pid = None;
         match tokio::time::timeout(
@@ -171,6 +226,7 @@ impl PinnedSelectedEntry {
                 pause,
                 partial_profile,
                 before_attestor,
+                push_profile,
             ),
         )
         .await
@@ -186,12 +242,16 @@ impl PinnedSelectedEntry {
         pause: Option<EntryPause>,
         partial_profile: Option<&PinnedPartialProfilePinsV1>,
         mut before_attestor: Option<EntryPause>,
+        push_profile: Option<&PinnedPushProfilePinsV1>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
         let AttestationMode::Pinned(authority) = &self.pool.writer_capability.mode else {
             return Err(PinnedSelectedEntryError::NotPinned);
         };
         if partial_profile.is_some_and(|profile| !profile.valid_for(authority)) {
             return Err(PinnedPartialProfileError::InvalidPins.into());
+        }
+        if push_profile.is_some_and(|profile| !profile.valid_for(authority)) {
+            return Err(PinnedPushProfileError::InvalidPins.into());
         }
         let mut connection = DiscardOnDrop::new(self.pool.acquire().await?);
         let pid: i32 = match sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
@@ -266,6 +326,19 @@ impl PinnedSelectedEntry {
                     return Err(error);
                 }
             };
+
+            if let Some(profile) = push_profile {
+                if let Err(error) =
+                    super::pinned_push_profile::inspect(&mut tx, authority, profile).await
+                {
+                    if !rollback_transaction(tx).await {
+                        return Err(PinnedSelectedEntryError::ObservationUnconfirmed {
+                            backend_pid: Some(pid),
+                        });
+                    }
+                    return Err(error.into());
+                }
+            }
 
             if let Some((ready, release)) = pause {
                 if ready.send(pid).is_err() || release.await.is_err() {

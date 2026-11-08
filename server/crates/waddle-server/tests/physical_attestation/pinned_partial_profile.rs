@@ -32,7 +32,7 @@ async fn relation_oid(admin: &PgPool, name: &str) -> anyhow::Result<u32> {
     Ok(oid.0)
 }
 
-async fn pins(
+pub(super) async fn pins(
     admin: &PgPool,
     api: &str,
     helper: &str,
