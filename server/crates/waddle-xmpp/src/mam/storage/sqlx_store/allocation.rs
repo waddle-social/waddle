@@ -1,11 +1,7 @@
 use jid::BareJid;
-use sqlx::{PgConnection, SqliteConnection};
+use sqlx::{Connection, PgConnection, SqliteConnection};
 use waddle_xmpp_core::mam::ArchiveOrdinal;
 
-/// Take the archive's counter row lock without allocating, creating the row at
-/// zero (no ordinal allocated yet) when the archive has never been written.
-/// Callers lock several archives in one canonical order before any insert so
-/// opposite-direction transactions cannot deadlock on the counters.
 const LOCK: &str = "INSERT INTO mam_archive_sequences (archive_jid, next_seq) VALUES ($1, 0) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = mam_archive_sequences.next_seq";
 
 const ALLOCATE: &str = "INSERT INTO mam_archive_sequences (archive_jid, next_seq) VALUES ($1, 1) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = mam_archive_sequences.next_seq + 1 RETURNING next_seq";
@@ -14,10 +10,24 @@ const SQLITE_LOCK: &str = "INSERT INTO main.mam_archive_sequences (archive_jid, 
 
 const SQLITE_ALLOCATE: &str = "INSERT INTO main.mam_archive_sequences (archive_jid, next_seq) VALUES ($1, 1) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = next_seq + 1 RETURNING next_seq";
 
+fn require_transaction(in_transaction: bool) -> Result<(), sqlx::Error> {
+    if in_transaction {
+        Ok(())
+    } else {
+        Err(sqlx::Error::InvalidArgument(
+            "MAM archive counter lock requires an SQLx-tracked transaction".to_owned(),
+        ))
+    }
+}
+
+/// Take the archive counter row lock on an SQLx-tracked transaction,
+/// creating a zero-valued row if needed. Callers should lock multiple
+/// archives in canonical order and roll back the transaction after errors.
 pub async fn lock_archive_sequence_on_connection(
     conn: &mut PgConnection,
     archive: &BareJid,
 ) -> Result<(), sqlx::Error> {
+    require_transaction(conn.is_in_transaction())?;
     sqlx::query(LOCK)
         .bind(archive.to_string())
         .execute(conn)
@@ -25,12 +35,14 @@ pub async fn lock_archive_sequence_on_connection(
     Ok(())
 }
 
-/// Lock the counter in the supplied PostgreSQL schema on the caller's transaction.
+/// Lock the counter in the supplied PostgreSQL schema on the caller's
+/// SQLx-tracked transaction. The caller must roll it back after an error.
 pub async fn lock_archive_sequence_on_connection_in_schema(
     conn: &mut PgConnection,
     schema: &str,
     archive: &BareJid,
 ) -> Result<(), sqlx::Error> {
+    require_transaction(conn.is_in_transaction())?;
     let relation = super::postgres_relation(Some(schema), "mam_archive_sequences");
     let sql = format!("INSERT INTO {relation} AS target (archive_jid, next_seq) VALUES ($1, 0) ON CONFLICT (archive_jid) DO UPDATE SET next_seq = target.next_seq");
     sqlx::query(&sql)
@@ -40,10 +52,13 @@ pub async fn lock_archive_sequence_on_connection_in_schema(
     Ok(())
 }
 
+/// Lock the counter on the caller's SQLx-tracked SQLite transaction. The
+/// caller must roll it back after an error.
 pub async fn lock_archive_sequence_on_sqlite_connection(
     conn: &mut SqliteConnection,
     archive: &BareJid,
 ) -> Result<(), sqlx::Error> {
+    require_transaction(conn.is_in_transaction())?;
     sqlx::query(SQLITE_LOCK)
         .bind(archive.to_string())
         .execute(conn)

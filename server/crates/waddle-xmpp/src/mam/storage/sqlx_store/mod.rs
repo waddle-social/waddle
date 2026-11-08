@@ -217,3 +217,6 @@ mod lookup_tests;
 
 #[cfg(test)]
 mod ordinal_tests;
+
+#[cfg(test)]
+mod transaction_guard_tests;
