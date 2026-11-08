@@ -260,32 +260,6 @@ pub(super) async fn handle_sasl_oauthbearer(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::oauth_status_for_session_validation_error;
-    use crate::auth::AuthError;
-
-    #[test]
-    fn oauth_session_validation_errors_use_generic_oauth_statuses() {
-        assert_eq!(
-            oauth_status_for_session_validation_error(&AuthError::SessionNotFound(
-                "secret-token".to_owned()
-            )),
-            "invalid_token"
-        );
-        assert_eq!(
-            oauth_status_for_session_validation_error(&AuthError::SessionExpired),
-            "invalid_token"
-        );
-        assert_eq!(
-            oauth_status_for_session_validation_error(&AuthError::DatabaseError(
-                "db unavailable".to_owned()
-            )),
-            "server_error"
-        );
-    }
-}
-
 /// Handle SASL SCRAM-SHA-256 client-first-message.
 ///
 /// Parses the client-first to extract the username, looks up stored SCRAM
@@ -520,5 +494,31 @@ pub(super) async fn handle_sasl_scram_response(
             .append(success_b64)
             .build(),
         server_final: Some(server_final),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::oauth_status_for_session_validation_error;
+    use crate::auth::AuthError;
+
+    #[test]
+    fn oauth_session_validation_errors_use_generic_oauth_statuses() {
+        assert_eq!(
+            oauth_status_for_session_validation_error(&AuthError::SessionNotFound(
+                "secret-token".to_owned()
+            )),
+            "invalid_token"
+        );
+        assert_eq!(
+            oauth_status_for_session_validation_error(&AuthError::SessionExpired),
+            "invalid_token"
+        );
+        assert_eq!(
+            oauth_status_for_session_validation_error(&AuthError::DatabaseError(
+                "db unavailable".to_owned()
+            )),
+            "server_error"
+        );
     }
 }

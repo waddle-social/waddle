@@ -1,19 +1,27 @@
 use super::commit::commit_submission;
 use super::test_support::IngressFixture;
 use super::{IngressCanonicalRef, IngressStreamIdentity, IngressSubmission};
-use crate::ingress_substrate::{CanonicalSourceBinding, IngressSubstrateError, MessageEnvelope};
+use crate::ingress_substrate::IngressSubstrateError;
+#[cfg(not(feature = "clustering"))]
+use crate::ingress_substrate::{CanonicalSourceBinding, MessageEnvelope};
 use crate::ingress_uow::{
-    CanonicalMessageRepository, ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal,
-    ClosedRoomOwnerResultSource, EffectIntentRepository, EffectReceiptRepository, IngressUowError,
-    ReconcileVerdict, RoomOwnerDecision, SmIngressRepository, SmIngressStreamRepository,
+    CanonicalMessageRepository, EffectIntentRepository, IngressUowError, ReconcileVerdict,
+    SmIngressRepository, SmIngressStreamRepository,
+};
+#[cfg(not(feature = "clustering"))]
+use crate::ingress_uow::{
+    ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal, ClosedRoomOwnerResultSource,
+    EffectReceiptRepository, RoomOwnerDecision,
 };
 use crate::server::routes::interpret::effects::{
     AuthorizationDeniedReason, PlanRejection, RoomExecutionPath,
 };
+#[cfg(not(feature = "clustering"))]
+use waddle_xmpp::ingress::IngressOrdinal;
 use waddle_xmpp::ingress::{
     DeliveryKey, DigestContext, DigestInput, FrozenStanzaError, FrozenStanzaErrorType,
-    IngressEffectIntent, IngressEffectKind, IngressOrdinal, MessageKey, NormalizedTarget,
-    RelayTargetIdentity, WireHandledCount,
+    IngressEffectIntent, IngressEffectKind, MessageKey, NormalizedTarget, RelayTargetIdentity,
+    WireHandledCount,
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 
@@ -80,6 +88,7 @@ fn replan_for_successor(
     submission
 }
 
+#[cfg(not(feature = "clustering"))]
 fn closed_owner_route(room: &jid::BareJid) -> IngressEffectIntent {
     IngressEffectIntent::RouteMucGroupchat {
         room: room.clone(),
@@ -92,6 +101,7 @@ fn closed_owner_route(room: &jid::BareJid) -> IngressEffectIntent {
     }
 }
 
+#[cfg(not(feature = "clustering"))]
 fn forbidden_owner_error() -> FrozenStanzaError {
     FrozenStanzaError::new(
         FrozenStanzaErrorType::Cancel,
@@ -108,6 +118,7 @@ async fn recorded_intents(fixture: &IngressFixture, key: MessageKey) -> Vec<Ingr
     intents
 }
 
+#[cfg(not(feature = "clustering"))]
 async fn seed_dark_source(
     fixture: &IngressFixture,
     submission: &IngressSubmission,
@@ -120,6 +131,7 @@ async fn seed_dark_source(
     seed_dark_source_with_binding(fixture, submission, &binding, record_dispatch).await
 }
 
+#[cfg(not(feature = "clustering"))]
 async fn seed_dark_source_with_binding(
     fixture: &IngressFixture,
     submission: &IngressSubmission,
@@ -198,6 +210,7 @@ async fn seed_dark_source_with_binding(
     key
 }
 
+#[cfg(not(feature = "clustering"))]
 #[derive(Debug, PartialEq, Eq)]
 struct SourceBindingRow {
     version: Option<i64>,
@@ -210,6 +223,7 @@ struct SourceBindingRow {
     owner_decision: Option<i64>,
 }
 
+#[cfg(not(feature = "clustering"))]
 async fn read_dark_source_binding(fixture: &IngressFixture, key: MessageKey) -> SourceBindingRow {
     let connection = fixture.db.guard().await.expect("source binding connection");
     let mut rows = connection

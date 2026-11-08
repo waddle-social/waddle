@@ -75,7 +75,7 @@ pub use repositories::{
 };
 #[cfg(feature = "clustering")]
 pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 pub(crate) use repositories::{
     ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal, ClosedRoomOwnerResultSource,
 };

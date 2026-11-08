@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use jid::BareJid;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 use jid::FullJid;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ use crate::ingress_substrate::{
 };
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 use waddle_xmpp::ingress::{DigestContext, DigestInput, FrozenStanzaError};
 
 /// Repository for MAM archive rows written inside the ingress transaction.
@@ -284,7 +284,7 @@ pub(crate) struct RelayedSourceAuthority {
     pub rejection_child: Option<MessageKey>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 #[derive(Debug)]
 pub(crate) struct ClosedRoomOwnerResultSource<'a> {
     message_key: MessageKey,
@@ -295,7 +295,7 @@ pub(crate) struct ClosedRoomOwnerResultSource<'a> {
     stanza_lang: Option<&'a xmpp_parsers::message::Lang>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 impl<'a> ClosedRoomOwnerResultSource<'a> {
     pub(crate) fn new(
         message_key: MessageKey,
@@ -316,7 +316,7 @@ impl<'a> ClosedRoomOwnerResultSource<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 #[derive(Debug)]
 pub(crate) enum ClosedRoomOwnerResultProposal {
     Accepted {
@@ -327,7 +327,7 @@ pub(crate) enum ClosedRoomOwnerResultProposal {
     },
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClosedRoomOwnerResultOutcome {
     pub decision: RoomOwnerDecision,
@@ -688,7 +688,7 @@ impl CanonicalMessageRepository {
     /// Lock and validate the exact canonical source before the room owner
     /// resolves acceptance versus a child rejection. This is called after the
     /// epoch, principal and room-claim fences and before any child row.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "clustering")))]
     pub(crate) async fn assert_relayed_source(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -817,7 +817,7 @@ impl CanonicalMessageRepository {
     /// planner provenance, runtime grants, and the independent PostgreSQL
     /// commit-unknown pilot. This test harness composes stored effects and
     /// latches atomically; it does not establish those activation authorities.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "clustering")))]
     pub(crate) async fn apply_closed_room_owner_result(
         transaction: &mut IngressUowTransaction<'_>,
         source: ClosedRoomOwnerResultSource<'_>,
@@ -976,7 +976,7 @@ impl CanonicalMessageRepository {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "clustering")))]
     async fn replay_closed_room_owner_result(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -1062,7 +1062,7 @@ impl CanonicalMessageRepository {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "clustering")))]
     async fn stored_digest(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -1402,7 +1402,7 @@ impl CanonicalMessageRepository {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 fn validate_room_owner_effects(
     effects: &[IngressEffectIntent],
     room: &BareJid,
@@ -1417,7 +1417,7 @@ fn validate_room_owner_effects(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 fn owner_error_reply(
     source: &xmpp_parsers::message::Message,
     sender: &FullJid,
@@ -1437,7 +1437,7 @@ fn owner_error_reply(
     Ok(reply)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "clustering")))]
 async fn pending_room_effect_receipts(
     transaction: &mut IngressUowTransaction<'_>,
     message_key: MessageKey,
