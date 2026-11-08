@@ -2320,16 +2320,146 @@ async fn pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capa
     let binding_ref = entry.binding_ref().expect("local binding attempt");
     assert!(entry.seal_binding(owner, binding_ref));
     receiver.recv().await.expect("release channel capacity");
-    let reservation = reserve.await.expect("reserve returns after capacity");
-    assert_eq!(
-        registry.send_reserved_pending_flush(
-            reservation,
-            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
-        ),
-        PendingFlushCommitOutcome::DefinitelyNotEnqueued(PendingFlushCommitRejection::Sealed)
-    );
+    assert!(matches!(
+        reserve.await,
+        Err(PendingFlushReserveError::NotAdmitted)
+    ));
     assert!(receiver.try_recv().is_err());
     assert_eq!(sender.capacity(), 1, "refusal returns reserved capacity");
+}
+
+#[tokio::test]
+async fn pending_flush_closed_sealed_queue_evicts_only_the_exact_stale_entry() {
+    for replace in [false, true] {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("sealed-closed");
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+                "held@example.com",
+            ))))
+            .expect("fill old queue");
+        let old = ConnectionEntry::new(sender);
+        let owner = old.binding_id();
+        registry.register_entry(jid.clone(), old.clone());
+        let mut reserve = Box::pin(registry.reserve_pending_flush(&jid, Some(&owner)));
+        assert!(futures::poll!(reserve.as_mut()).is_pending());
+        assert!(old.seal_binding(owner, old.binding_ref().expect("old binding")));
+        let mut replacement_receiver = None;
+        if replace {
+            let (replacement, receiver) = mpsc::channel(1);
+            registry.register(jid.clone(), replacement);
+            replacement_receiver = Some(receiver);
+        }
+        drop(receiver);
+        assert!(matches!(
+            reserve.await,
+            Err(PendingFlushReserveError::Closed)
+        ));
+        assert_eq!(registry.is_connected(&jid), replace);
+        drop(replacement_receiver);
+    }
+}
+
+#[tokio::test]
+async fn failed_resume_wakeup_is_exact_and_drops_after_registration_guards() {
+    use futures::task::{waker, ArcWake};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::task::Context;
+
+    struct ReentrantWake {
+        registry: Arc<ConnectionRegistry>,
+        jid: FullJid,
+        entry: ConnectionEntry,
+        authority: Arc<tokio::sync::Mutex<()>>,
+        called: AtomicBool,
+        unlocked: AtomicBool,
+    }
+
+    impl ArcWake for ReentrantWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            let unlocked = this.entry.endpoint.admission.try_lock().is_ok()
+                && this.registry.try_lock_bind(&this.jid).is_some()
+                && this.authority.try_lock().is_ok()
+                && !matches!(
+                    this.registry.connections.try_get(&this.jid),
+                    dashmap::try_result::TryResult::Locked
+                );
+            this.unlocked.store(unlocked, AtomicOrdering::SeqCst);
+            this.called.store(true, AtomicOrdering::SeqCst);
+        }
+    }
+
+    for cancelled in [false, true] {
+        let registry = Arc::new(ConnectionRegistry::new());
+        let jid = test_jid("failed-resume-wake");
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+                "held@example.com",
+            ))))
+            .expect("fill queue");
+        let entry = ConnectionEntry::new(sender);
+        let owner = entry.binding_id();
+        let binding = entry.binding_ref().expect("local binding").clone();
+        registry.register_entry(jid.clone(), entry.clone());
+        let authority = Arc::new(tokio::sync::Mutex::new(()));
+        let wake = Arc::new(ReentrantWake {
+            registry: registry.clone(),
+            jid: jid.clone(),
+            entry: entry.clone(),
+            authority: authority.clone(),
+            called: AtomicBool::new(false),
+            unlocked: AtomicBool::new(false),
+        });
+        let waker = waker(wake.clone());
+        let mut context = Context::from_waker(&waker);
+        let mut reserve = Box::pin(registry.reserve_pending_flush(&jid, Some(&owner)));
+        assert!(reserve.as_mut().poll(&mut context).is_pending());
+
+        let mut mismatched = super::DeferredPendingFlushWakeups::default();
+        let other_binding = BindingRef::fresh(binding.connection_ref().clone());
+        assert!(!entry.seal_binding_for_failed_resume(
+            LocalConnectionBindingId::fresh(),
+            &binding,
+            &mut mismatched,
+        ));
+        assert!(!entry.seal_binding_for_failed_resume(owner, &other_binding, &mut mismatched));
+        drop(mismatched);
+        assert!(!wake.called.load(AtomicOrdering::SeqCst));
+
+        let mut registration = Box::pin(async {
+            // The real registration collector is likewise declared before
+            // its bind and publication guards.
+            let mut wakeups = super::DeferredPendingFlushWakeups::default();
+            let _bind = registry.lock_bind(&jid).await;
+            let _authority = authority.lock().await;
+            assert!(entry.seal_binding_for_failed_resume(owner, &binding, &mut wakeups));
+            assert!(!wake.called.load(AtomicOrdering::SeqCst));
+            if cancelled {
+                std::future::pending::<()>().await;
+            }
+        });
+        let polled = registration.as_mut().poll(&mut context);
+        if cancelled {
+            assert!(polled.is_pending());
+            assert!(!wake.called.load(AtomicOrdering::SeqCst));
+            drop(registration);
+        } else {
+            assert!(polled.is_ready());
+        }
+        assert!(wake.called.load(AtomicOrdering::SeqCst));
+        assert!(wake.unlocked.load(AtomicOrdering::SeqCst));
+        assert!(matches!(
+            reserve.as_mut().poll(&mut context),
+            std::task::Poll::Ready(Err(PendingFlushReserveError::NotAdmitted))
+        ));
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the old accepted frame stays queued"
+        );
+    }
 }
 
 #[tokio::test]

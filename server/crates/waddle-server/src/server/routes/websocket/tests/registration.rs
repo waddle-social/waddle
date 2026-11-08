@@ -1716,15 +1716,23 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 
 #[tokio::test]
 async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control() {
-    assert_replay_gap_rollback_endpoint_custody(false).await;
+    assert_replay_gap_rollback_endpoint_custody(false, false).await;
 }
 
 #[tokio::test]
 async fn replay_gap_with_queued_outbound_refuses_same_socket_endpoint_handoff() {
-    assert_replay_gap_rollback_endpoint_custody(true).await;
+    assert_replay_gap_rollback_endpoint_custody(true, false).await;
 }
 
-async fn assert_replay_gap_rollback_endpoint_custody(queue_before_rollback: bool) {
+#[tokio::test]
+async fn cancelled_failed_resume_wakes_pending_flush_after_bind_guard_drops() {
+    assert_replay_gap_rollback_endpoint_custody(true, true).await;
+}
+
+async fn assert_replay_gap_rollback_endpoint_custody(
+    queue_before_rollback: bool,
+    cancel_after_rollback: bool,
+) {
     use super::super::connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority};
     use super::super::send::InterruptibleSink;
     use waddle_xmpp::registry::LocalSocketIo;
@@ -1813,53 +1821,91 @@ async fn assert_replay_gap_rollback_endpoint_custody(queue_before_rollback: bool
     let adopted_generation = conn.occupancy_session;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    let post_finalize = Arc::new(tokio::sync::Notify::new());
+    let release_finalize = Arc::new(tokio::sync::Notify::new());
+    if cancel_after_rollback {
+        conn.post_sm_finalization_test_hook =
+            Some((post_finalize.clone(), release_finalize.clone()));
+    }
     let registration = register_bound_connection_after_frame(
         state.as_ref(),
         "example.com",
         &mut conn,
         &mut pending_tx,
     );
-    let capture_failed_entry = async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
-            .await
-            .expect("resume entry publication");
-        let entry = state
-            .deps
-            .protocol
-            .connection_registry
-            .entry(&jid)
-            .expect("resume entry published");
-        assert!(!entry
-            .local_io_relinquishment()
-            .expect("local witness")
-            .is_relinquished());
-        if queue_before_rollback {
-            let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-            message.id = Some(xmpp_parsers::message::Id(
-                "accepted-before-replay-gap-finalization".to_owned(),
-            ));
-            assert_eq!(
-                state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_outbound_if_owner(
-                        &jid,
-                        &entry.binding_id(),
-                        OutboundStanza::new(Stanza::Message(message)),
-                    ),
-                waddle_xmpp::registry::BroadcastOutcome::Delivered,
-                "test frame is accepted before the old binding is sealed"
-            );
-        }
-        release.notify_one();
-        entry
-    };
-    let (result, failed_entry) = tokio::join!(
+    let mut registration = Box::pin(
         super::super::registration::LOCAL_PUBLICATION_GATE
             .scope((entered.clone(), release.clone()), registration),
-        capture_failed_entry,
     );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            _ = &mut registration => panic!("registration passed its publication gate"),
+            _ = entered.notified() => {}
+        }
+    })
+    .await
+    .expect("resume entry publication");
+    let registry = &state.deps.protocol.connection_registry;
+    let failed_entry = registry.entry(&jid).expect("resume entry published");
+    assert!(!failed_entry
+        .local_io_relinquishment()
+        .expect("local witness")
+        .is_relinquished());
+    let owner = failed_entry.binding_id();
+    if queue_before_rollback {
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message.id = Some(xmpp_parsers::message::Id(
+            "accepted-before-replay-gap-finalization".to_owned(),
+        ));
+        assert_eq!(
+            registry.try_send_outbound_if_owner(
+                &jid,
+                &owner,
+                OutboundStanza::new(Stanza::Message(message)),
+            ),
+            waddle_xmpp::registry::BroadcastOutcome::Delivered,
+            "test frame is accepted before the old binding is sealed"
+        );
+    }
+    let mut pending_reserve = Box::pin(registry.reserve_pending_flush(&jid, Some(&owner)));
+    if queue_before_rollback {
+        assert!(futures::poll!(pending_reserve.as_mut()).is_pending());
+    }
+    release.notify_one();
+    if cancel_after_rollback {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                _ = &mut registration => panic!("post-finalization hook must hold registration"),
+                _ = post_finalize.notified() => {}
+            }
+        })
+        .await
+        .expect("failed-resume rollback completed");
+        assert!(futures::poll!(pending_reserve.as_mut()).is_pending());
+        drop(registration);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), pending_reserve).await,
+            Ok(Err(
+                waddle_xmpp::registry::PendingFlushReserveError::NotAdmitted
+            ))
+        ));
+        assert!(
+            registry.try_lock_bind(&jid).is_some(),
+            "bind guard was released"
+        );
+        assert!(rx.try_recv().is_ok(), "the accepted frame is retained");
+        return;
+    }
+    let result = registration.as_mut().await;
+    drop(registration);
+    if queue_before_rollback {
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), pending_reserve).await,
+            Ok(Err(
+                waddle_xmpp::registry::PendingFlushReserveError::NotAdmitted
+            ))
+        ));
+    }
 
     assert!(matches!(
         result,

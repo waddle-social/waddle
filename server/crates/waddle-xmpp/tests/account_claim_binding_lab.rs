@@ -50,6 +50,19 @@ fn source(claim: &UserClaimIdentity) -> Source {
     )
 }
 
+#[test]
+fn retirement_action_keeps_its_json_shape_and_round_trips() {
+    let owner = claim("owner", "epoch-1", 7);
+    let retirement = SyntheticRetirement::complete(&source(&owner), 1);
+    let action = Action::CompleteRetirement(Box::new(retirement.clone()));
+    let encoded = serde_json::to_value(&action).unwrap();
+    assert_eq!(
+        encoded,
+        serde_json::json!({ "CompleteRetirement": retirement })
+    );
+    assert_eq!(serde_json::from_value::<Action>(encoded).unwrap(), action);
+}
+
 async fn request(pool: &PgPool, jid: &FullJid, source: &Source, action: Action) -> Request {
     Request::new(jid, source, &db::slot(pool, jid).await.unwrap(), action)
 }
@@ -373,7 +386,7 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
         pool,
         &jid,
         &adopted,
-        Action::CompleteRetirement(invalid_retirement),
+        Action::CompleteRetirement(Box::new(invalid_retirement)),
     )
     .await;
     rejected(pool, &invalid, Rejection::Receipt).await;
@@ -408,7 +421,7 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
         pool,
         &jid,
         &adopted,
-        Action::CompleteRetirement(SyntheticRetirement::complete(&adopted, 1)),
+        Action::CompleteRetirement(Box::new(SyntheticRetirement::complete(&adopted, 1))),
         &mut model,
         complete,
         State::Vacant,
@@ -526,7 +539,7 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
         pool,
         &jid,
         &adopted,
-        Action::CompleteRetirement(SyntheticRetirement::complete(&adopted, 1)),
+        Action::CompleteRetirement(Box::new(SyntheticRetirement::complete(&adopted, 1))),
     )
     .await;
     delayed.generation = 1;
@@ -535,7 +548,7 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
         pool,
         &jid,
         &adopted,
-        Action::CompleteRetirement(SyntheticRetirement::complete(&adopted, 1)),
+        Action::CompleteRetirement(Box::new(SyntheticRetirement::complete(&adopted, 1))),
     )
     .await;
     rejected(pool, &stale_exact, Rejection::Binding).await;
@@ -548,7 +561,7 @@ async fn exact_identities_replacement_and_retirement_match_model_trace() {
     // Direct database checks ensure non-reuse does not depend on the Rust check.
     let duplicate_generation = sqlx::query("INSERT INTO lab_used_binding VALUES ($1, 1, $2)")
         .bind(jid.to_string())
-        .bind(serde_json::to_value(&BindingRef::fresh(first.connection.clone())).unwrap())
+        .bind(serde_json::to_value(BindingRef::fresh(first.connection.clone())).unwrap())
         .execute(pool)
         .await;
     assert!(duplicate_generation.is_err());
@@ -795,7 +808,7 @@ async fn multiprocess_cancellation_lost_reply_and_generation_fenced_recovery() {
         &fixture.pool,
         &jid,
         &source,
-        Action::CompleteRetirement(SyntheticRetirement::complete(&source, 1)),
+        Action::CompleteRetirement(Box::new(SyntheticRetirement::complete(&source, 1))),
     )
     .await;
     let ready_retire = signals.path().join("retire-after");
@@ -831,7 +844,7 @@ async fn multiprocess_cancellation_lost_reply_and_generation_fenced_recovery() {
         &fixture.pool,
         &jid,
         &source,
-        Action::CompleteRetirement(SyntheticRetirement::complete(&source, 1)),
+        Action::CompleteRetirement(Box::new(SyntheticRetirement::complete(&source, 1))),
     )
     .await;
     delayed.generation = 1;
