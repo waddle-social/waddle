@@ -161,6 +161,13 @@ pub async fn store_archived_message_on_connection_in_schema(
     store_postgres(conn, Some(schema), archive, message, expectation).await
 }
 
+fn postgres_fresh_conflict_query(schema: Option<&str>) -> String {
+    format!(
+        "SELECT 1 FROM {} WHERE id = $1",
+        super::postgres_relation(schema, "mam_messages")
+    )
+}
+
 async fn store_postgres(
     conn: &mut PgConnection,
     schema: Option<&str>,
@@ -169,20 +176,31 @@ async fn store_postgres(
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
-    let existing = sqlx::query(&format!(
-        "SELECT {SELECT_COLUMNS}, timestamp = $2 AS matches_timestamp FROM {} WHERE id = $1",
-        super::postgres_relation(schema, "mam_messages")
-    ))
-    .bind(&stanza_id.id)
-    .bind(message.timestamp)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let existing = if matches!(expectation, ArchiveExpectation::Fresh) {
+        // Fresh only needs to know whether the global primary key exists. A
+        // conflict remains a conflict even if other stored fields are corrupt.
+        let exists = sqlx::query_scalar::<_, i32>(&postgres_fresh_conflict_query(schema))
+            .bind(&stanza_id.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+        if exists.is_some() {
+            return Err(MamTxStoreError::Conflict { stanza_id });
+        }
+        None
+    } else {
+        sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS}, timestamp = $2 AS matches_timestamp FROM {} WHERE id = $1",
+            super::postgres_relation(schema, "mam_messages")
+        ))
+        .bind(&stanza_id.id)
+        .bind(message.timestamp)
+        .fetch_optional(&mut *conn)
+        .await?
+    };
     if let Some(row) = existing {
         let recorded_archive: String = row.try_get("room_jid")?;
         let stored_ordinal = row.try_get("archive_seq")?;
-        if matches!(expectation, ArchiveExpectation::Fresh)
-            || recorded_archive != archive.to_string()
-        {
+        if recorded_archive != archive.to_string() {
             return Err(MamTxStoreError::Conflict { stanza_id });
         }
         let ordinal = decode_ordinal(stored_ordinal)?;
@@ -275,6 +293,10 @@ async fn store_postgres(
         ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired { stanza_id, ordinal },
     })
 }
+
+#[cfg(test)]
+#[path = "tx_write/fresh_postgres_tests.rs"]
+mod fresh_postgres_tests;
 
 /// Store using a caller-owned connection; transaction boundaries remain with the caller.
 /// MAM currently has unbounded retention, so absent recorded identities are repaired.
