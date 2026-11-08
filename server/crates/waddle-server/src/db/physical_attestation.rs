@@ -48,6 +48,13 @@ pub use pinned_selected_entry::{PinnedSelectedEntry, PinnedSelectedEntryError};
 mod pinned_partial_profile;
 pub(crate) use pinned_partial_profile::verify_pinned_partial_profile;
 pub use pinned_partial_profile::{PinnedPartialProfileError, PinnedPartialProfilePinsV1};
+#[cfg(feature = "test-support")]
+mod coverage_gap_gate;
+#[cfg(feature = "test-support")]
+pub use coverage_gap_gate::{
+    inspect_coverage_gap_gate_v1, CoverageGap, CoverageGapId, CoverageRefusal, CoverageTarget,
+    CoverageTargetError, CoverageTargetStore, COVERAGE_GAPS_V1,
+};
 mod pinned_receipt;
 pub(crate) use pinned_receipt::CustodiedReceiptAttempt;
 pub use pinned_receipt::{PinnedReceiptAuthority, PinnedReceiptCommit, PinnedReceiptError};
