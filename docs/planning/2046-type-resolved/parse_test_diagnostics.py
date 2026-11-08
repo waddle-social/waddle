@@ -10,8 +10,10 @@ that its cfg-gated body compiled. Test captures do not prove execution, all-test
 coverage, the original capture's authenticity, or absence of uses for which
 rustc did not emit a warning.
 
-The server-support-integration mode selects server integration targets with
-test-support enabled (and clustering for that profile); XMPP uses test-utils.
+Server-support unit and integration modes expect test-support enabled (and
+clustering for that profile); XMPP uses test-utils. XMPP default unit and
+integration modes instead expect an empty XMPP feature list. These expectations
+are checked against Cargo artifacts; feature unification that differs is rejected.
 
 Integration target selection is limited to targets marked test=true in the
 retained metadata, including explicit selections. This excludes test=false
@@ -41,7 +43,8 @@ from parse_diagnostics import (
     strip_marker_lines, validate_patched_checkout,
 )
 
-MODES = ("support-lib", "server-unit", "server-integration", "server-support-integration", "xmpp-unit", "xmpp-integration")
+MODES = ("support-lib", "server-unit", "server-integration", "server-support-unit", "server-support-integration",
+         "xmpp-unit", "xmpp-integration", "xmpp-default-unit", "xmpp-default-integration")
 SCHEMA_VERSION = "test-capture-v2"
 USE_FIELDS = (
     "schema_version", "capture_mode", "feature_profile", "capture_sha256", "metadata_sha256", "tag", "kind", "source_class_hint",
@@ -126,9 +129,9 @@ def load_metadata(path: pathlib.Path, digest: str, root: pathlib.Path, capture_r
 
 def expected_features(mode: str, profile: str, package: str) -> list[str]:
     if package == "waddle-xmpp":
-        return ["test-utils"]
+        return [] if mode in {"xmpp-default-unit", "xmpp-default-integration"} else ["test-utils"]
     result = ["clustering"] if profile == "clustering" else []
-    if mode in {"support-lib", "server-support-integration"}:
+    if mode in {"support-lib", "server-support-unit", "server-support-integration"}:
         result.append("test-support")
     return sorted(result)
 
@@ -139,7 +142,13 @@ def test_inventory(
 ) -> dict[tuple[str, str, str], dict[str, object]]:
     if mode not in MODES:
         raise ValueError("unknown test capture mode")
-    if (mode.startswith("xmpp-") and profile != "test-utils") or (not mode.startswith("xmpp-") and profile not in {"default", "clustering"}):
+    if mode in {"xmpp-default-unit", "xmpp-default-integration"}:
+        allowed_profiles = {"default"}
+    elif mode.startswith("xmpp-"):
+        allowed_profiles = {"test-utils"}
+    else:
+        allowed_profiles = {"default", "clustering"}
+    if profile not in allowed_profiles:
         raise ValueError("feature profile does not match capture mode")
     package = "waddle-xmpp" if mode.startswith("xmpp-") else "waddle-server"
     integration = mode.endswith("-integration")
@@ -193,7 +202,7 @@ def test_inventory(
             raise ValueError(f"unknown or feature-ineligible metadata target: {logical_key}")
         if kind == "lib" and name == PACKAGES[package_name]:
             target_source = metadata_target["source"]
-            test_mode = (mode == "server-unit" and package_name == "waddle-server") or (mode == "xmpp-unit" and package_name == "waddle-xmpp")
+            test_mode = (mode in {"server-unit", "server-support-unit"} and package_name == "waddle-server") or (mode in {"xmpp-unit", "xmpp-default-unit"} and package_name == "waddle-xmpp")
         elif integration and package_name == package and kind == "test" and name in selected:
             target_source, test_mode = metadata_target["source"], True
         elif mode in {"server-integration", "server-support-integration"} and package_name == "waddle-server" and kind == "bin":
