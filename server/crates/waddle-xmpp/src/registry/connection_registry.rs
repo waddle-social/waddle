@@ -20,6 +20,14 @@ mod archive_dispatch;
 mod binding;
 mod binding_permit;
 mod connections;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "unwired custody primitive for a later integration"
+    )
+)]
+mod dark_envelope_custody;
 pub(super) mod endpoint;
 mod live_resume;
 mod local_io;
