@@ -269,6 +269,7 @@ pub async fn start_with_config_and_owner_outbox(
             process_stop: stop_token.clone(),
             complete: sm_drain_complete.clone(),
             connections_drained: connections_drained.clone(),
+            connections: shutdown.handle(),
             deadline: shutdown_deadline.clone(),
         },
     )
@@ -522,13 +523,28 @@ pub async fn start_with_config_and_owner_outbox(
     // `shutdown.run()` indefinitely.
     shutdown_handle.abort();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_handle).await;
-    info!("Graceful shutdown complete");
-    match node_lifecycle.critical_failure() {
-        Some(failure) => Err(anyhow::anyhow!(
-            "critical actor service terminated; node fenced and drained: {failure:?}"
-        )),
-        None => result.map(|()| metrics_flush),
+    validate_node_shutdown(&node_lifecycle)?;
+    info!("Shutdown waits finished");
+    result.map(|()| metrics_flush)
+}
+
+/// An owner can signal the fatal fence before it obtains the lifecycle write
+/// lock. Do not report successful shutdown while that latch is still pending.
+pub(super) fn validate_node_shutdown(lifecycle: &crate::clustering::NodeLifecycle) -> Result<()> {
+    let fatal = lifecycle.fatal_fence_token();
+    if let Some(failure) = lifecycle.pending_websocket_owner_failure() {
+        anyhow::bail!("critical node failure; cleanup completion is unconfirmed: {failure:?}");
     }
+    if let Some(failure) = lifecycle.critical_failure() {
+        anyhow::bail!("critical node failure; cleanup completion is unconfirmed: {failure:?}");
+    }
+    if let Some(failure) = lifecycle.pending_websocket_owner_failure() {
+        anyhow::bail!("critical node failure; cleanup completion is unconfirmed: {failure:?}");
+    }
+    if fatal.is_cancelled() {
+        anyhow::bail!("fatal node fence signalled; cleanup completion is unconfirmed");
+    }
+    Ok(())
 }
 
 /// Preserve the configured location's provenance before constructing PubSub.

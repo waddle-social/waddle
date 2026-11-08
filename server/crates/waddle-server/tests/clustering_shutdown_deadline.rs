@@ -4,18 +4,16 @@
 //! These drive the production `run_node_lease` loop with an in-memory
 //! node-lease store and injected stalled stages, on paused Tokio time:
 //!
-//! - SIGTERM with every drain stage stalled still retires the node's
-//!   identity, which hands every claim it holds to survivors, and the loop
-//!   ends inside the enclosing deadline;
+//! - SIGTERM with stalled drain stages leaves the identity to lease expiry
+//!   while the loop ends inside the enclosing deadline;
 //! - if the publication barrier cannot close inside the deadline, the
 //!   identity is not retired;
 //! - if either exact-owner demotion cannot complete, neither retirement
 //!   API runs, even after Q6 and the socket drain have completed;
 //! - a fatal fence waiting on a publication guard before SIGTERM remains
 //!   pending after the process deadline, without retiring the identity;
-//! - SIGTERM while the node is re-registering after a self-fence (#1985
-//!   follow-up) is an ordinary shutdown: both identities are retired after
-//!   the publication barrier, instead of waiting for the orphan reaper;
+//! - SIGTERM during re-registration can retire both identities after the
+//!   publication barrier and a completed connection drain;
 //! - fatal fencing observed during marking prevents graceful retirement;
 //!   an already-dispatched retirement may still commit, but no second
 //!   identity is admitted after observing the fence.
@@ -302,6 +300,19 @@ fn stalled_q6(process_stop: &CancellationToken, deadline: &ShutdownDeadline) -> 
         process_stop: process_stop.clone(),
         complete: CancellationToken::new(),
         connections_drained: Arc::new(AtomicBool::new(false)),
+        connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
+        deadline: deadline.clone(),
+    }
+}
+
+fn completed_q6(process_stop: &CancellationToken, deadline: &ShutdownDeadline) -> ShutdownSmDrain {
+    let complete = CancellationToken::new();
+    complete.cancel();
+    ShutdownSmDrain {
+        process_stop: process_stop.clone(),
+        complete,
+        connections_drained: Arc::new(AtomicBool::new(true)),
+        connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
         deadline: deadline.clone(),
     }
 }
@@ -316,12 +327,10 @@ fn ten_second_deadline() -> ShutdownDeadline {
 
 /// SIGTERM with every stage stalled: Q6 never settles, the room drain's
 /// inventory read and the terminal sweep never return, and the control
-/// plane is production-sized (10 s per write). The identity is still
-/// retired — after the `disable()` barrier and exact demotion — and the
-/// node-lease loop ends inside the enclosing deadline. Before W1.10 the
-/// stalled room drain held this loop until the process was killed.
+/// plane is production-sized (10 s per write). The identity is left to
+/// expiry and the node-lease loop ends inside the enclosing deadline.
 #[tokio::test(start_paused = true)]
-async fn sigterm_with_stalled_stages_retires_inside_the_enclosing_deadline() {
+async fn sigterm_with_stalled_stages_leaves_identity_to_expiry() {
     let owner = identity();
     let live_identity = SharedNodeIdentity::new(owner.clone());
     let deadline = ten_second_deadline();
@@ -368,11 +377,7 @@ async fn sigterm_with_stalled_stages_retires_inside_the_enclosing_deadline() {
 
     assert!(tokio::time::Instant::now() <= enclosing);
     assert!(!live_identity.current().is_active());
-    assert_eq!(
-        retirements.lock().expect("lock").as_slice(),
-        &[(owner, true)],
-        "retired once, after disable and demotion, inside the deadline"
-    );
+    assert!(retirements.lock().expect("lock").is_empty());
 }
 
 /// An in-flight publication still holds the identity when SIGTERM arrives,
@@ -506,9 +511,15 @@ struct GatedRoomDrain {
 #[async_trait]
 impl LocallyClaimedEntities for GatedRoomDrain {
     async fn owned(&self) -> Vec<Entity> {
+        Vec::new()
+    }
+    async fn room_claim_fences_for_drain(
+        &self,
+        _owner: &NodeIdentity,
+    ) -> Option<Vec<(Entity, ClaimEpoch)>> {
         self.entered.notify_one();
         self.release.notified().await;
-        Vec::new()
+        Some(Vec::new())
     }
     async fn demote(&self, _entity: &Entity) {}
     async fn health_check(&self, _entity: &Entity) -> bool {
@@ -518,9 +529,8 @@ impl LocallyClaimedEntities for GatedRoomDrain {
 
 /// A clustering-only stop (for example the swarm's keypair-slot self-fence)
 /// starts the node-lease shutdown; SIGTERM then arrives while the room
-/// drain is still running. The node must still keep its identity
-/// authoritative for the Q6 drain, bounded by the drain phase of the
-/// enclosing deadline, before `disable()` and retirement.
+/// drain is still running. The node must keep its identity authoritative
+/// for the Q6 wait, bounded by the enclosing drain phase, before disable.
 #[tokio::test(start_paused = true)]
 async fn sigterm_during_a_clustering_only_room_drain_still_waits_for_q6() {
     let owner = identity();
@@ -571,11 +581,14 @@ async fn sigterm_during_a_clustering_only_room_drain_still_waits_for_q6() {
         .expect("node-lease shutdown must end inside the enclosing deadline")
         .expect("node-lease task");
 
-    assert_eq!(
-        retirements.lock().expect("lock").as_slice(),
-        &[(owner, true)],
-        "retired once, only after the Q6 wait reached the drain stage's end"
+    assert!(
+        tokio::time::Instant::now() >= shutdown.drain_deadline(),
+        "now={:?}, shutdown={:?}, drain deadline={:?}",
+        tokio::time::Instant::now(),
+        shutdown.start(),
+        shutdown.drain_deadline()
     );
+    assert!(retirements.lock().expect("lock").is_empty());
 }
 
 /// A heartbeat CAS that affects zero rows fences the node at once; the
@@ -619,6 +632,7 @@ async fn sigterm_during_reregistration_retires_both_identities() {
     }));
     let retirements = Arc::clone(&lease.retirements);
     let stop = CancellationToken::new();
+    let deadline = ten_second_deadline();
     let interval = Duration::from_millis(50);
     let task = tokio::spawn(run_node_lease(
         lease,
@@ -632,7 +646,7 @@ async fn sigterm_during_reregistration_retires_both_identities() {
             }),
             NodeLifecycle::new(),
             live_identity.clone(),
-            None,
+            Some(completed_q6(&stop, &deadline)),
         ),
     ));
 
@@ -652,10 +666,9 @@ async fn sigterm_during_reregistration_retires_both_identities() {
 }
 
 /// The production shape of the same path: the process itself is stopping
-/// and its Q6 drain never settles. Both identities are still retired after
-/// the barrier, inside the retirement stage of the enclosing deadline.
+/// and its Q6 drain never settles. Both identities remain for lease expiry.
 #[tokio::test(start_paused = true)]
-async fn process_sigterm_during_reregistration_retires_inside_the_deadline() {
+async fn process_sigterm_during_reregistration_leaves_unconfirmed_identities() {
     let initial = identity();
     let live_identity = SharedNodeIdentity::new(initial.clone());
     let deadline = ten_second_deadline();
@@ -699,12 +712,7 @@ async fn process_sigterm_during_reregistration_retires_inside_the_deadline() {
         .expect("shutdown during re-registration must end inside the deadline")
         .expect("node-lease task");
 
-    let retired = retirements.lock().expect("lock").clone();
-    assert_eq!(retired.len(), 2, "both identities retire: {retired:?}");
-    assert!(
-        retired.iter().all(|(_, in_stage)| *in_stage),
-        "each retirement follows disable() and demotion, inside its stage"
-    );
+    assert!(retirements.lock().expect("lock").is_empty());
 }
 
 /// If the barrier cannot close during a re-registration shutdown, neither
@@ -730,7 +738,7 @@ async fn process_sigterm_during_reregistration_with_a_held_guard_does_not_retire
             }),
             NodeLifecycle::new(),
             live_identity.clone(),
-            Some(stalled_q6(&process_stop, &deadline)),
+            Some(completed_q6(&process_stop, &deadline)),
         ),
     ));
     tokio::task::yield_now().await;
@@ -795,7 +803,7 @@ async fn fatal_fence_during_terminal_lease_step(step: TerminalLeaseStep) {
             }),
             lifecycle.clone(),
             live_identity.clone(),
-            Some(stalled_q6(&process_stop, &deadline)),
+            Some(completed_q6(&process_stop, &deadline)),
         ),
     ));
 
@@ -824,7 +832,7 @@ async fn fatal_fence_during_terminal_lease_step(step: TerminalLeaseStep) {
     assert!(lifecycle.is_terminally_fenced());
     assert!(
         departures.lock().expect("lock").is_empty(),
-        "unsettled Q6 cannot commit terminal departure"
+        "fatal fencing cannot commit terminal departure"
     );
     {
         let marked = draining.lock().expect("lock");
@@ -964,6 +972,8 @@ async fn terminal_departure_requires_both_exact_demotions() {
                     process_stop: process_stop.clone(),
                     complete: q6_complete,
                     connections_drained: Arc::new(AtomicBool::new(true)),
+                    connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1))
+                        .handle(),
                     deadline: deadline.clone(),
                 }),
             ),
@@ -1016,11 +1026,10 @@ async fn terminal_departure_requires_both_exact_demotions() {
     }
 }
 
-/// A fatal fence never invokes early graceful retirement. It can still
-/// commit terminal departure after process, Q6, and socket drains, once the
-/// identity barrier and both exact demotions have completed.
+/// A fatal fence leaves both identities to lease expiry, even if the socket
+/// drain flag was already set.
 #[tokio::test(start_paused = true)]
-async fn fatal_fence_terminal_departure_requires_a_completed_socket_drain() {
+async fn fatal_fence_never_retires_after_socket_drain() {
     for sockets_drained in [false, true] {
         let prior = identity();
         let live_identity = SharedNodeIdentity::new(prior.clone());
@@ -1068,6 +1077,8 @@ async fn fatal_fence_terminal_departure_requires_a_completed_socket_drain() {
                     process_stop: process_stop.clone(),
                     complete: q6_complete,
                     connections_drained: Arc::new(AtomicBool::new(sockets_drained)),
+                    connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1))
+                        .handle(),
                     deadline: deadline.clone(),
                 }),
             ),
@@ -1092,16 +1103,9 @@ async fn fatal_fence_terminal_departure_requires_a_completed_socket_drain() {
             "fatal fences skip early graceful retirement"
         );
         let departures = departures.lock().expect("lock");
-        if sockets_drained {
-            assert_eq!(
-                departures.as_slice(),
-                &[(attempted[0].clone(), true), (attempted[1].clone(), true)]
-            );
-        } else {
-            assert!(
-                departures.is_empty(),
-                "a live socket prevents terminal departure"
-            );
-        }
+        assert!(
+            departures.is_empty(),
+            "fatal fencing prevents terminal departure"
+        );
     }
 }

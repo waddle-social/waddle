@@ -498,6 +498,94 @@ async fn dropping_waiter_during_cleanup_does_not_interrupt_cleanup() {
     assert_connection_owned(&h.state);
     after_cleanup.release();
     wait_for_drain(&h.state).await;
+    assert_eq!(
+        h.state.deps.app_state.node_lifecycle.critical_failure(),
+        None
+    );
+}
+
+async fn owner_panic_keeps_guard_until_fenced(drop_waiter: bool, stopping: bool) {
+    let active = Arc::new(AdmissionTestBarrier::default());
+    let caught = Arc::new(AdmissionTestBarrier::default());
+    let fenced = Arc::new(AdmissionTestBarrier::default());
+    let control = Arc::new(CallbackWaiterTestControl::default());
+    let h = start(
+        1,
+        None,
+        AdmissionTestBarriers {
+            owner_panic_active: Some(Arc::clone(&active)),
+            owner_panic_caught: Some(Arc::clone(&caught)),
+            owner_panic_fenced: Some(Arc::clone(&fenced)),
+            callback_waiter: Some(Arc::clone(&control)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let permit = h
+        .state
+        .deps
+        .app_state
+        .node_lifecycle
+        .admit()
+        .expect("initial serving permit");
+    let _peer = connect(&h.url).await.expect("upgrade");
+    wait_entered(&active).await;
+    assert_connection_owned(&h.state);
+
+    if drop_waiter {
+        control.drop_waiter.cancel();
+        wait_for_waiter_drop(&control).await;
+    }
+    if stopping {
+        h.state.deps.shutdown.stop_token().cancel();
+    }
+    active.release();
+    wait_entered(&caught).await;
+    // The original owner has unwound, but its external guard still keeps
+    // shutdown from treating this connection as drained.
+    assert_eq!(h.state.deps.shutdown.active_connections(), 1);
+    assert!(h
+        .state
+        .deps
+        .app_state
+        .websocket_inventory_for_test()
+        .is_empty());
+    assert!(
+        !h.state
+            .deps
+            .shutdown
+            .wait_for_connections_drained_for(Duration::from_millis(20))
+            .await
+    );
+    caught.release();
+    wait_entered(&fenced).await;
+    assert_eq!(h.state.deps.shutdown.active_connections(), 1);
+    assert!(h.state.deps.shutdown.stop_token().is_cancelled());
+    assert_eq!(
+        h.state.deps.app_state.node_lifecycle.critical_failure(),
+        Some(waddle_server::clustering::CriticalNodeFailure::WebSocketOwnerPanicked)
+    );
+    assert!(permit.revalidate().is_err());
+    assert_unavailable(connect(&h.url).await);
+    assert!(
+        !h.state
+            .deps
+            .shutdown
+            .wait_for_connections_drained_for(Duration::from_millis(20))
+            .await
+    );
+    fenced.release();
+    wait_for_drain(&h.state).await;
+}
+
+#[tokio::test]
+async fn owner_panic_fences_before_releasing_drain_guard() {
+    owner_panic_keeps_guard_until_fenced(false, false).await;
+}
+
+#[tokio::test]
+async fn owner_panic_during_shutdown_fences_after_waiter_loss() {
+    owner_panic_keeps_guard_until_fenced(true, true).await;
 }
 
 #[tokio::test]

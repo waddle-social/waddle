@@ -332,6 +332,15 @@ struct LiveSocketState {
     outbound_rx: mpsc::Receiver<OutboundStanza>,
 }
 
+fn fence_panicked_owner(lifecycle: &crate::clustering::NodeLifecycle, stop: &CancellationToken) {
+    // Another socket can hold the lifecycle read lock in synchronous
+    // `start_send`. Wake the fatal and shutdown paths before waiting for it.
+    lifecycle.note_websocket_owner_panic();
+    lifecycle.fatal_fence_token().cancel();
+    stop.cancel();
+    lifecycle.fail(crate::clustering::CriticalNodeFailure::WebSocketOwnerPanicked);
+}
+
 impl LiveWebSocketConnection {
     /// Transfer the whole lifecycle to the runtime before returning a waiter.
     /// Dropping even an unpolled waiter requests a soft stop; it never aborts
@@ -340,17 +349,49 @@ impl LiveWebSocketConnection {
         let caller_gone = CancellationToken::new();
         let caller_guard = caller_gone.clone().drop_guard();
         let connection_ref = self.admission.connection_ref().clone();
+        // `run` owns the original guard. Keep this clone outside its future so
+        // unwinding cannot look like a completed connection drain before the
+        // fatal fence and stop request have been published.
+        let drain_guard = self._connection_guard.clone();
+        let node_lifecycle = self.state.deps.app_state.node_lifecycle.clone();
+        let stop = self.state.deps.shutdown.stop_token();
+        #[cfg(feature = "test-support")]
+        let panic_caught = self
+            .state
+            .deps
+            .app_state
+            .websocket_admission_test_barriers
+            .owner_panic_caught
+            .clone();
+        #[cfg(feature = "test-support")]
+        let panic_fenced = self
+            .state
+            .deps
+            .app_state
+            .websocket_admission_test_barriers
+            .owner_panic_fenced
+            .clone();
         let owner = tokio::spawn(async move {
             if AssertUnwindSafe(self.run(caller_gone))
                 .catch_unwind()
                 .await
                 .is_err()
             {
+                #[cfg(feature = "test-support")]
+                if let Some(barrier) = panic_caught {
+                    barrier.arrive().await;
+                }
+                fence_panicked_owner(&node_lifecycle, &stop);
                 error!(
                     ?connection_ref,
                     "WebSocket connection owner panicked; cleanup completion is unconfirmed"
                 );
+                #[cfg(feature = "test-support")]
+                if let Some(barrier) = panic_fenced {
+                    barrier.arrive().await;
+                }
             }
+            drop(drain_guard);
         });
         async move {
             let _caller_guard = caller_guard;
@@ -475,6 +516,16 @@ impl LiveWebSocketConnection {
             pending_tx,
             outbound_rx,
         }));
+        #[cfg(feature = "test-support")]
+        if let Some(barrier) = &state
+            .deps
+            .app_state
+            .websocket_admission_test_barriers
+            .owner_panic_active
+        {
+            barrier.arrive().await;
+            panic!("test WebSocket owner panic after activation");
+        }
         let LiveSocketPhase::Active(live) = &mut self.phase else {
             unreachable!("the connection was just activated");
         };
@@ -1629,11 +1680,7 @@ mod admission_tests {
         assert!(matches!(
             recovered.revalidate(),
             Err(SocketAdmissionError::Lifecycle(
-                crate::clustering::NodeAdmissionError::NotServing(
-                    crate::clustering::NodeAdmission::Failed(
-                        crate::clustering::CriticalNodeFailure::RoomRegistryTerminated
-                    )
-                )
+                crate::clustering::NodeAdmissionError::Revoked
             ))
         ));
     }
@@ -2565,6 +2612,100 @@ mod tests {
     use waddle_xmpp::stream_management::SmSessionRegistry;
 
     #[tokio::test]
+    async fn panic_fence_signals_stop_before_waiting_for_admission_lock() {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let probe = permit.clone();
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let active_send = std::thread::spawn(move || {
+            permit
+                .with_current(|| {
+                    let _ = entered.send(());
+                    release_rx.recv().expect("release send");
+                })
+                .expect("admitted send");
+        });
+        entered_rx.await.expect("send holds lifecycle read lock");
+
+        let stop = CancellationToken::new();
+        let signal_lifecycle = lifecycle.clone();
+        let signal_stop = stop.clone();
+        let fence = tokio::task::spawn_blocking(move || {
+            fence_panicked_owner(&signal_lifecycle, &signal_stop);
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), stop.cancelled())
+            .await
+            .expect("stop is signalled while the send holds its lock");
+        assert!(lifecycle.fatal_fence_token().is_cancelled());
+        assert_eq!(
+            lifecycle.critical_failure(),
+            Some(crate::clustering::CriticalNodeFailure::WebSocketOwnerPanicked)
+        );
+        assert_eq!(
+            lifecycle.admission(),
+            crate::clustering::NodeAdmission::Failed(
+                crate::clustering::CriticalNodeFailure::WebSocketOwnerPanicked
+            )
+        );
+        assert!(!lifecycle.is_ready());
+        assert!(lifecycle.admit().is_err());
+        assert!(probe.revalidate().is_err());
+        let started = std::sync::atomic::AtomicBool::new(false);
+        assert!(probe
+            .start_send_if_current(|| {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+            .is_err());
+        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::timeout(std::time::Duration::from_secs(1), probe.revoked())
+            .await
+            .expect("fatal fence wakes an existing permit");
+        let status_lifecycle = lifecycle.clone();
+        let status = tokio::task::spawn_blocking(move || {
+            crate::server::lifecycle::validate_node_shutdown(&status_lifecycle)
+        });
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), status)
+            .await
+            .expect("final status does not wait for the pending failure latch")
+            .expect("status task")
+            .expect_err("panic cannot report successful shutdown");
+        assert!(status.to_string().contains("WebSocketOwnerPanicked"));
+        assert!(
+            !fence.is_finished(),
+            "failure latch still waits for the send"
+        );
+        release.send(()).expect("release send");
+        active_send.join().expect("send thread");
+        fence.await.expect("panic fence completes");
+        lifecycle.serve();
+        assert!(!lifecycle.is_ready());
+        assert_eq!(
+            lifecycle.critical_failure(),
+            Some(crate::clustering::CriticalNodeFailure::WebSocketOwnerPanicked)
+        );
+    }
+
+    #[test]
+    fn shutdown_status_keeps_existing_critical_causes() {
+        for failure in [
+            crate::clustering::CriticalNodeFailure::RoomRegistryTerminated,
+            crate::clustering::CriticalNodeFailure::UserRegistryTerminated,
+        ] {
+            let lifecycle = crate::clustering::NodeLifecycle::new();
+            lifecycle.fail(failure);
+            let error = crate::server::lifecycle::validate_node_shutdown(&lifecycle)
+                .expect_err("critical node failure");
+            assert!(error.to_string().contains(&format!("{failure:?}")));
+        }
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        assert!(crate::server::lifecycle::validate_node_shutdown(&lifecycle).is_ok());
+        lifecycle.fatal_fence_token().cancel();
+        assert!(crate::server::lifecycle::validate_node_shutdown(&lifecycle).is_err());
+    }
+
+    #[tokio::test]
     async fn unfinished_live_resume_returns_when_socket_owner_drops() {
         let conn = WsConnState::new();
         let (outbound, _outbound_rx) = mpsc::channel(1);
@@ -3004,7 +3145,7 @@ mod tests {
     async fn post_upgrade_admission_revocation_sends_websocket_close() {
         let mut socket = UpgradeCloseSink::default();
 
-        close_revoked_upgraded_socket(&mut socket).await;
+        close_unstarted_upgraded_socket(&mut socket).await;
 
         assert_eq!(socket.sent, vec![Message::Close(None)]);
         assert!(socket.closed);

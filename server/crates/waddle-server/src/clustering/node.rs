@@ -18,6 +18,7 @@ use super::Arc;
 use super::CancellationToken;
 use super::ClusteringConfig;
 use super::{Database, DatabaseDriver};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A node's per-process clustering identity: freshly generated on every
 /// start, never reused across restarts. Names the node's keypair-slot lease
@@ -59,6 +60,7 @@ impl std::fmt::Display for NodeId {
 pub enum CriticalNodeFailure {
     RoomRegistryTerminated,
     UserRegistryTerminated,
+    WebSocketOwnerPanicked,
 }
 
 /// The single authority for client admission on this node.
@@ -107,6 +109,8 @@ pub struct NodeAdmissionPermit {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<super::NodeLifecycleState>>,
     pub(in crate::clustering) generation: NodeAdmissionGeneration,
     pub(in crate::clustering) generation_revoked: CancellationToken,
+    fatal_fence: CancellationToken,
+    websocket_owner_panicked: std::sync::Arc<AtomicBool>,
     // The WebSocket legacy path binds its permit to the identity revision
     // captured at upgrade. Other admission users need only the node lifecycle.
     identity: Option<(
@@ -134,7 +138,8 @@ impl NodeAdmissionPermit {
     /// re-enter either authority, or acquire actor/effect-owner locks. The guards
     /// are dropped as soon as that call returns; a later flush may
     /// still reach the underlying WebSocket after revocation as already-
-    /// authorized in-flight work.
+    /// authorized in-flight work. A fatal signal can arrive after the final
+    /// check; work that passed that check is already admitted and may finish.
     pub(crate) fn start_send_if_current<E>(
         &self,
         start_send: impl FnOnce() -> Result<(), E>,
@@ -161,6 +166,10 @@ impl NodeAdmissionPermit {
         &self,
         effect: impl FnOnce() -> R,
     ) -> Result<R, NodeAdmissionError> {
+        if self.websocket_owner_panicked.load(Ordering::Acquire) || self.fatal_fence.is_cancelled()
+        {
+            return Err(NodeAdmissionError::Revoked);
+        }
         match &self.identity {
             Some((source, stamp)) => source
                 .with_current_stamp(stamp, |_| self.with_current_generation(effect))
@@ -177,6 +186,10 @@ impl NodeAdmissionPermit {
             .state
             .read()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if self.websocket_owner_panicked.load(Ordering::Acquire) || self.fatal_fence.is_cancelled()
+        {
+            return Err(NodeAdmissionError::Revoked);
+        }
         if !matches!(state.admission, NodeAdmission::Serving) {
             return Err(NodeAdmissionError::NotServing(state.admission.clone()));
         }
@@ -189,15 +202,19 @@ impl NodeAdmissionPermit {
         Ok(result)
     }
 
-    /// Resolve when the serving generation or any bound identity revision is
-    /// revoked. Neither can become current again after recovery or rotation.
+    /// Resolve when the serving generation, fatal fence, or bound identity
+    /// revision is revoked. No revoked permit becomes current again.
     pub async fn revoked(&self) {
         match &self.identity {
             Some((_, stamp)) => tokio::select! {
                 _ = self.generation_revoked.cancelled() => {}
+                _ = self.fatal_fence.cancelled() => {}
                 _ = stamp.revoked() => {}
             },
-            None => self.generation_revoked.cancelled().await,
+            None => tokio::select! {
+                _ = self.generation_revoked.cancelled() => {}
+                _ = self.fatal_fence.cancelled() => {}
+            },
         }
     }
 }
@@ -207,7 +224,9 @@ impl NodeAdmissionPermit {
 pub enum NodeAdmissionError {
     #[error("node is not accepting connections: {0:?}")]
     NotServing(NodeAdmission),
-    #[error("node admission permit's serving generation or identity revision was revoked")]
+    #[error(
+        "node admission permit's serving generation, fatal fence, or identity revision was revoked"
+    )]
     Revoked,
 }
 
@@ -228,6 +247,9 @@ pub enum StartupServingTransition {
 pub struct NodeLifecycle {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     pub(in crate::clustering) fatal_fence: CancellationToken,
+    /// Set before signalling a WebSocket-owner panic. This permanent local
+    /// cause remains observable while a lifecycle writer waits for readers.
+    websocket_owner_panicked: std::sync::Arc<AtomicBool>,
     /// Cancelled once a clustering terminal exit reaches the end of
     /// `TerminalFenceContext::finish`, or the inline fatal-fence exit of
     /// `run_node_lease`'s registered loop. Read-only signal for liveness;
@@ -276,6 +298,7 @@ impl NodeLifecycle {
                 startup_blocked: false,
             })),
             fatal_fence: CancellationToken::new(),
+            websocket_owner_panicked: std::sync::Arc::new(AtomicBool::new(false)),
             terminal_fence_finished: CancellationToken::new(),
             node_lease_exited: CancellationToken::new(),
             clustering_scope: std::sync::Arc::new(std::sync::OnceLock::new()),
@@ -283,23 +306,39 @@ impl NodeLifecycle {
     }
 
     pub fn admission(&self) -> NodeAdmission {
-        self.state
+        if let Some(failure) = self.pending_websocket_owner_failure() {
+            return NodeAdmission::Failed(failure);
+        }
+        let admission = self
+            .state
             .read()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .admission
-            .clone()
+            .clone();
+        self.pending_websocket_owner_failure()
+            .map_or(admission, NodeAdmission::Failed)
     }
 
     pub fn admit(&self) -> Result<NodeAdmissionPermit, NodeAdmissionError> {
+        if self.websocket_owner_panicked.load(Ordering::Acquire) || self.fatal_fence.is_cancelled()
+        {
+            return Err(NodeAdmissionError::Revoked);
+        }
         let state = self
             .state
             .read()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if self.websocket_owner_panicked.load(Ordering::Acquire) || self.fatal_fence.is_cancelled()
+        {
+            return Err(NodeAdmissionError::Revoked);
+        }
         match state.admission {
             NodeAdmission::Serving => Ok(NodeAdmissionPermit {
                 state: std::sync::Arc::clone(&self.state),
                 generation: state.generation,
                 generation_revoked: state.generation_revoked.clone(),
+                fatal_fence: self.fatal_fence.clone(),
+                websocket_owner_panicked: std::sync::Arc::clone(&self.websocket_owner_panicked),
                 identity: None,
             }),
             _ => Err(NodeAdmissionError::NotServing(state.admission.clone())),
@@ -307,7 +346,14 @@ impl NodeLifecycle {
     }
 
     pub fn is_ready(&self) -> bool {
-        matches!(self.admission(), NodeAdmission::Serving)
+        if self.websocket_owner_panicked.load(Ordering::Acquire) || self.fatal_fence.is_cancelled()
+        {
+            return false;
+        }
+        let serving = matches!(self.admission(), NodeAdmission::Serving);
+        serving
+            && !self.websocket_owner_panicked.load(Ordering::Acquire)
+            && !self.fatal_fence.is_cancelled()
     }
 
     pub fn serve(&self) {
@@ -356,6 +402,14 @@ impl NodeLifecycle {
             .state
             .write()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if self.websocket_owner_panicked.load(Ordering::Acquire) {
+            return StartupServingTransition::Blocked(NodeAdmission::Failed(
+                CriticalNodeFailure::WebSocketOwnerPanicked,
+            ));
+        }
+        if self.fatal_fence.is_cancelled() {
+            return StartupServingTransition::Blocked(state.admission.clone());
+        }
         if state.startup_blocked {
             return StartupServingTransition::Blocked(state.admission.clone());
         }
@@ -397,10 +451,29 @@ impl NodeLifecycle {
     }
 
     pub fn critical_failure(&self) -> Option<CriticalNodeFailure> {
-        match self.admission() {
+        if let Some(failure) = self.pending_websocket_owner_failure() {
+            return Some(failure);
+        }
+        let admission = self.admission();
+        if let Some(failure) = self.pending_websocket_owner_failure() {
+            return Some(failure);
+        }
+        match admission {
             NodeAdmission::Failed(failure) => Some(failure),
             _ => None,
         }
+    }
+
+    pub(crate) fn note_websocket_owner_panic(&self) {
+        self.websocket_owner_panicked.store(true, Ordering::Release);
+    }
+
+    /// A panic takes precedence over an earlier or later lifecycle cause so
+    /// it remains observable even while the lifecycle writer is blocked.
+    pub(crate) fn pending_websocket_owner_failure(&self) -> Option<CriticalNodeFailure> {
+        self.websocket_owner_panicked
+            .load(Ordering::Acquire)
+            .then_some(CriticalNodeFailure::WebSocketOwnerPanicked)
     }
 
     pub(in crate::clustering) fn transition_nonterminal(&self, next: NodeAdmission) {
@@ -408,10 +481,16 @@ impl NodeLifecycle {
             .state
             .write()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if state.startup_blocked && next == NodeAdmission::Serving {
+        if (state.startup_blocked
+            || self.websocket_owner_panicked.load(Ordering::Acquire)
+            || self.fatal_fence.is_cancelled())
+            && next == NodeAdmission::Serving
+        {
             tracing::warn!(
                 current = ?state.admission,
-                "refusing Serving promotion: startup lineage attestation failed and the block is latched"
+                startup_blocked = state.startup_blocked,
+                fatal_fence = self.fatal_fence.is_cancelled(),
+                "refusing Serving promotion: startup or fatal failure is latched"
             );
             return;
         }
@@ -819,9 +898,12 @@ impl ClusteringShutdown {
 #[derive(Clone)]
 pub struct ShutdownSmDrain {
     pub process_stop: CancellationToken,
+    /// Q6 task exit, including early or failed exits; not settlement proof.
     pub complete: CancellationToken,
-    /// Closure proof, separate from Q6 settlement (which may time out).
+    /// An observed zero guard count, separate from Q6 settlement.
     pub connections_drained: Arc<std::sync::atomic::AtomicBool>,
+    /// The live guard count, observed again immediately before retirement.
+    pub connections: waddle_ecdysis::ShutdownHandle,
     /// The process-wide enclosing shutdown deadline (#2046 W1.10), shared
     /// with the Q6 drain and the HTTP server.
     pub deadline: crate::shutdown_deadline::ShutdownDeadline,
