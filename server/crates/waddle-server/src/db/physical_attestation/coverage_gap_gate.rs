@@ -163,11 +163,11 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/src/server/lifecycle.rs",
         "server/crates/waddle-xmpp/src/mam/storage/sqlx_store/schema.rs",
     ]),
-    gap!(SpacesMetadata, "The combined fixture now prepares the table through a legacy initializer, but the paired owner marker remains empty and the family is not jointly classified.", ["spaces_metadata"], [
+    gap!(SpacesMetadata, "The combined fixture now prepares and attaches the paired store through test support with an identity-bound marker, but this is sequential evidence and the family is not jointly classified.", ["spaces_metadata"], [
         "server/crates/waddle-server/src/spaces_metadata/schema.rs",
         "server/crates/waddle-server/tests/physical_attestation/combined_restricted_profile.rs",
     ]),
-    gap!(ChannelSpaceLinks, "The combined fixture now prepares the table through a legacy initializer, but the paired owner marker remains empty and the family is not jointly classified.", ["channel_space_links"], [
+    gap!(ChannelSpaceLinks, "The combined fixture now prepares and attaches the paired store through test support with an identity-bound marker, but this is sequential evidence and the family is not jointly classified.", ["channel_space_links"], [
         "server/crates/waddle-server/src/channel_space_links/schema.rs",
         "server/crates/waddle-server/tests/physical_attestation/combined_restricted_profile.rs",
     ]),

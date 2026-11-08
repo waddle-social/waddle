@@ -108,6 +108,17 @@ pub async fn initialize_room_observations_for_test(
     crate::ingress_uow::initialize_room_observations(database).await
 }
 
+/// Prepare both PostgreSQL space stores in a disposable owner fixture.
+/// The caller supplies the expected identity, which is checked inside the owner
+/// transaction. This does not attest its source or authorize serving.
+#[cfg(feature = "test-support")]
+pub async fn prepare_paired_space_stores_owner_for_test(
+    db: Database,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), crate::spaces_metadata::SpaceStoreAttachError> {
+    crate::spaces_metadata::prepare_space_stores_owner(db, identity).await
+}
+
 /// Exercise the production SM store selection and attachment path.
 #[cfg(feature = "test-support")]
 pub async fn attach_sm_startup(

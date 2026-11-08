@@ -1,4 +1,4 @@
-//! Additional fixture preparation, not a complete or selectable role profile.
+//! Additional sequential fixture preparation, not a complete or selectable role profile.
 
 use anyhow::{ensure, Context};
 use sqlx::PgPool;
@@ -11,7 +11,14 @@ use waddle_server::notification_outbox::NotificationOutboxStore;
 use waddle_server::push_registrations::DatabasePushRegistrationStore;
 use waddle_server::push_service::vapid_storage::VapidStorage;
 use waddle_server::push_service::DatabasePushServiceStore;
-use waddle_server::spaces_metadata::DatabaseSpacesMetadataStore;
+use waddle_server::spaces_metadata::{DatabaseSpacesMetadataStore, SpaceStoreAttachError};
+
+#[derive(Clone, Copy)]
+enum ExpectedAttachRefusal {
+    InvalidMarker,
+    MissingMarker,
+    UnsafeRuntimeRole,
+}
 
 struct TableGrant {
     table: &'static str,
@@ -115,6 +122,7 @@ const TABLES: &[TableGrant] = &[
 
 pub(super) async fn prepare_and_check(
     owner_db: &Database,
+    main: &Database,
     identity: &PgIdentity,
     admin: &PgPool,
     owner: &str,
@@ -130,6 +138,7 @@ pub(super) async fn prepare_and_check(
     for table in [
         "spaces_metadata",
         "channel_space_links",
+        "_waddle_space_store_owner",
         "push_registrations",
         "push_nodes",
         "push_service_vapid_keys",
@@ -148,15 +157,15 @@ pub(super) async fn prepare_and_check(
         ensure!(!exists, "{table} existed before additional preparation");
     }
 
-    // The public PostgreSQL initializers create the two tables but invalidate
-    // the paired owner marker. The strict paired preparation API is not public
-    // to integration tests; this fixture therefore cannot attach these stores.
-    DatabaseSpacesMetadataStore::initialize_owner(owner_db.clone())
-        .await
-        .context("legacy spaces owner initialization")?;
-    DatabaseChannelSpaceLinkStore::initialize_owner(owner_db.clone())
-        .await
-        .context("legacy channel links owner initialization")?;
+    // Keep both stores and their identity marker inside the owner transaction.
+    // This test-support API prepares fixture state only; it does not authorize
+    // server startup or serving.
+    waddle_server::test_support::prepare_paired_space_stores_owner_for_test(
+        owner_db.clone(),
+        identity,
+    )
+    .await
+    .context("paired space-store owner preparation")?;
     DatabasePushRegistrationStore::initialize_owner(owner_db.clone())
         .await
         .context("push registration owner initialization")?;
@@ -179,14 +188,8 @@ pub(super) async fn prepare_and_check(
         .await
         .context("VAPID owner preparation")?;
 
-    let space_marker_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM guarded._waddle_space_store_owner")
-            .fetch_one(admin)
-            .await?;
-    ensure!(
-        space_marker_rows == 0,
-        "legacy spaces preparation certified a paired marker"
-    );
+    assert_space_owner_boundary(admin, owner, runtime).await?;
+    assert_paired_space_marker(admin, identity).await?;
     let push_phase: i64 = sqlx::query_scalar(
         "SELECT owner_phase FROM guarded.push_service_schema_marker WHERE marker_id = 1",
     )
@@ -219,6 +222,91 @@ pub(super) async fn prepare_and_check(
             table.table
         );
     }
+
+    // The two runtime handles share the exact attested main pool, and both
+    // attach paths verify the same paired owner marker read-only.
+    let spaces = DatabaseSpacesMetadataStore::attach_existing(main.clone())
+        .await
+        .context("attach paired spaces metadata store")?;
+    let links = DatabaseChannelSpaceLinkStore::attach_existing(main.clone())
+        .await
+        .context("attach paired channel-space links store")?;
+    drop(links);
+    drop(spaces);
+
+    // Both attachment entry points refuse identity drift and a missing marker.
+    sqlx::query(
+        "UPDATE guarded._waddle_space_store_owner SET database_name = 'wrong' WHERE marker_id = 1",
+    )
+    .execute(admin)
+    .await?;
+    require_both_attach_refusals(main, ExpectedAttachRefusal::InvalidMarker, "wrong marker")
+        .await?;
+    sqlx::query(
+        "UPDATE guarded._waddle_space_store_owner SET database_name = $1 WHERE marker_id = 1",
+    )
+    .bind(&identity.database.name.0)
+    .execute(admin)
+    .await?;
+
+    sqlx::query("DELETE FROM guarded._waddle_space_store_owner WHERE marker_id = 1")
+        .execute(admin)
+        .await?;
+    require_both_attach_refusals(main, ExpectedAttachRefusal::MissingMarker, "missing marker")
+        .await?;
+    // Restore through the paired owner path so subsequent controls start from
+    // the exact owner-prepared state rather than hand-writing its certificate.
+    waddle_server::test_support::prepare_paired_space_stores_owner_for_test(
+        owner_db.clone(),
+        identity,
+    )
+    .await
+    .context("restore paired space stores after missing-marker refusal")?;
+    assert_paired_space_marker(admin, identity).await?;
+
+    // Exercise the runtime's real catalog verifier with one missing and one
+    // excess right. The exact table ACL assertions above also cover the
+    // SELECT-only owner marker grant.
+    sqlx::query(&format!(
+        "REVOKE INSERT ON guarded.spaces_metadata FROM {runtime}"
+    ))
+    .execute(admin)
+    .await?;
+    require_both_attach_refusals(
+        main,
+        ExpectedAttachRefusal::UnsafeRuntimeRole,
+        "missing spaces INSERT",
+    )
+    .await?;
+    sqlx::query(&format!(
+        "GRANT INSERT ON guarded.spaces_metadata TO {runtime}"
+    ))
+    .execute(admin)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT TRUNCATE ON guarded.spaces_metadata TO {runtime}"
+    ))
+    .execute(admin)
+    .await?;
+    require_both_attach_refusals(
+        main,
+        ExpectedAttachRefusal::UnsafeRuntimeRole,
+        "excess spaces TRUNCATE",
+    )
+    .await?;
+    sqlx::query(&format!(
+        "REVOKE TRUNCATE ON guarded.spaces_metadata FROM {runtime}"
+    ))
+    .execute(admin)
+    .await?;
+    let spaces = DatabaseSpacesMetadataStore::attach_existing(main.clone())
+        .await
+        .context("re-attach paired spaces metadata after ACL restoration")?;
+    let links = DatabaseChannelSpaceLinkStore::attach_existing(main.clone())
+        .await
+        .context("re-attach paired links after ACL restoration")?;
+    drop(links);
+    drop(spaces);
 
     // Demonstrate that this limited ACL witness rejects both missing and
     // excess rights; no reusable profile proof escapes the fixture.
@@ -256,6 +344,110 @@ pub(super) async fn prepare_and_check(
     .await?;
     ensure!(table_matches(admin, owner, runtime, registrations).await?);
     Ok(())
+}
+
+async fn assert_space_owner_boundary(
+    admin: &PgPool,
+    owner: &str,
+    runtime: &str,
+) -> anyhow::Result<()> {
+    let safe: bool = sqlx::query_scalar(
+        "SELECT namespace.nspowner = owner.oid \
+         AND owner.rolname = $1 AND NOT owner.rolcanlogin AND NOT owner.rolinherit \
+         AND NOT owner.rolsuper AND NOT owner.rolcreatedb AND NOT owner.rolcreaterole \
+         AND NOT owner.rolreplication AND NOT owner.rolbypassrls \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members membership \
+           WHERE membership.member = owner.oid) \
+         AND runtime.rolname = $2 AND runtime.rolcanlogin AND NOT runtime.rolinherit \
+         AND NOT runtime.rolsuper AND NOT runtime.rolcreatedb AND NOT runtime.rolcreaterole \
+         AND NOT runtime.rolreplication AND NOT runtime.rolbypassrls \
+         AND runtime.oid <> owner.oid AND runtime.oid <> database.datdba \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members membership \
+           WHERE membership.member = runtime.oid OR membership.roleid = runtime.oid) \
+         AND pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'USAGE') \
+         AND NOT pg_catalog.has_schema_privilege(runtime.oid, namespace.oid, 'CREATE') \
+         AND (SELECT count(*) = 3 AND COALESCE(bool_and(relation.relowner = owner.oid), false) \
+              FROM pg_catalog.pg_class relation \
+              WHERE relation.relnamespace = namespace.oid \
+                AND relation.relkind = 'r' \
+                AND relation.relname = ANY(ARRAY[ \
+                  'spaces_metadata', 'channel_space_links', '_waddle_space_store_owner'])) \
+         FROM pg_catalog.pg_namespace namespace \
+         JOIN pg_catalog.pg_roles owner ON owner.oid = namespace.nspowner \
+         JOIN pg_catalog.pg_roles runtime ON runtime.rolname = $2 \
+         JOIN pg_catalog.pg_database database \
+           ON database.datname = pg_catalog.current_database() \
+         WHERE namespace.nspname = 'guarded'",
+    )
+    .bind(owner)
+    .bind(runtime)
+    .fetch_one(admin)
+    .await?;
+    ensure!(
+        safe,
+        "paired space tables do not match owner/runtime role boundary"
+    );
+    Ok(())
+}
+
+async fn assert_paired_space_marker(admin: &PgPool, identity: &PgIdentity) -> anyhow::Result<()> {
+    let exact: bool = sqlx::query_scalar(
+        "SELECT count(*) = 1 AND COALESCE(bool_and( \
+           marker_id = 1 AND marker_version = 1 \
+           AND spaces_contract_version = 1 AND channel_links_contract_version = 1 \
+           AND system_identifier = $1 AND database_oid = $2 AND database_name = $3 \
+           AND schema_oid = $4 AND schema_name = $5), false) \
+         FROM guarded._waddle_space_store_owner",
+    )
+    .bind(identity.system_identifier.to_string())
+    .bind(i64::from(identity.database.oid))
+    .bind(&identity.database.name.0)
+    .bind(i64::from(identity.schema.oid))
+    .bind(&identity.schema.name.0)
+    .fetch_one(admin)
+    .await?;
+    ensure!(
+        exact,
+        "paired space marker differs from the supplied identity"
+    );
+    Ok(())
+}
+
+async fn require_both_attach_refusals(
+    main: &Database,
+    expected: ExpectedAttachRefusal,
+    label: &str,
+) -> anyhow::Result<()> {
+    let spaces = DatabaseSpacesMetadataStore::attach_existing(main.clone()).await;
+    let links = DatabaseChannelSpaceLinkStore::attach_existing(main.clone()).await;
+    ensure!(
+        refusal_matches(&spaces, expected),
+        "spaces metadata attachment did not reject {label}"
+    );
+    ensure!(
+        refusal_matches(&links, expected),
+        "channel-space link attachment did not reject {label}"
+    );
+    Ok(())
+}
+
+fn refusal_matches<T>(
+    result: &Result<T, SpaceStoreAttachError>,
+    expected: ExpectedAttachRefusal,
+) -> bool {
+    matches!(
+        (expected, result),
+        (
+            ExpectedAttachRefusal::InvalidMarker,
+            Err(SpaceStoreAttachError::OwnerMarkerInvalid)
+        ) | (
+            ExpectedAttachRefusal::MissingMarker,
+            Err(SpaceStoreAttachError::OwnerMarkerMissing)
+        ) | (
+            ExpectedAttachRefusal::UnsafeRuntimeRole,
+            Err(SpaceStoreAttachError::UnsafeRuntimeRole)
+        )
+    )
 }
 
 async fn table_matches(
