@@ -3,8 +3,10 @@
 //! Inbox, portable SM, and pending delivery receive legacy round trips. The
 //! partial v2 diagnostics inspect PubSub, the room-effect outbox, MAM and the
 //! V1009 epoch grants alongside v1 observation and, with clustering, MUC.
-//! Claims, push, notifications and other stores are not qualified here; these
-//! separate diagnostics are not an atomic all-store or serving test.
+//! The additional owner phase prepares selected Push, notification, call and
+//! space tables and checks their fixture ACLs. Space preparation uses the
+//! public legacy initializers, leaving the paired owner marker incomplete.
+//! These separate diagnostics are not an atomic all-store or serving test.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -53,6 +55,8 @@ use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenc
 use super::{test_url, CATALOG_GRANT_LOCK};
 use pinned_pubsub_inventory::{exercise_pinned_pubsub, pinned_pubsub_inventory};
 
+#[path = "combined_restricted_profile_extra.rs"]
+mod combined_restricted_profile_extra;
 #[path = "pinned_partial_profile.rs"]
 mod pinned_partial_profile;
 #[path = "pinned_pubsub_inventory.rs"]
@@ -1026,6 +1030,14 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
     RoomEffectOutboxStore::verify_effect_outbox_v2(main.clone(), &v2).await?;
     DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2).await?;
+
+    // Run only after the older partial profile checks, which intentionally
+    // begin with these additional families absent.
+    combined_restricted_profile_extra::prepare_and_check(
+        &owner_db, &identity, &admin, &owner, &runtime,
+    )
+    .await?;
+
     // A complete V1030 ledger is checked again for every pinned diagnostic.
     sqlx::query("DELETE FROM guarded._migrations WHERE version = 1030")
         .execute(&admin)
