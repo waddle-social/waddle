@@ -852,6 +852,7 @@ async fn ingress_post_registration_resume_settles_replayed_receipt() {
             &mut resumed,
             RegistrationChannels {
                 pending_tx: &mut pending_tx,
+                outbound_receiver: None,
                 force_detach_rx: &mut force_detach_rx
             },
             ConnectionIo {

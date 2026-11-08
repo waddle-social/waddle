@@ -8570,7 +8570,8 @@ async fn sm_resume_settles_pending_ack_before_expired_completion_and_reconnect()
     let owner = register_test_connection(state.as_ref(), &jid, sender).await;
     conn.registry_owner = Some(owner);
     let report =
-        finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
+        finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner, None)
+            .await;
     let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
         panic!("completion must discover expiry");
     };
@@ -8708,7 +8709,8 @@ async fn sm_resume_ack_survives_failed_completion_then_expiry_and_reconnect() {
     let owner = register_test_connection(state.as_ref(), &jid, sender).await;
     conn.registry_owner = Some(owner);
     let report =
-        finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
+        finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner, None)
+            .await;
     let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
         panic!("canonical delete failure must abort resume completion");
     };

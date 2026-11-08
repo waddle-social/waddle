@@ -13,7 +13,7 @@ use crate::server::dual_registration::MirrorRegisterOutcome;
 use crate::sm_promotion::DisplacedPromotionDeps;
 #[cfg(test)]
 use std::sync::Arc;
-use waddle_xmpp::registry::SocketOutboundEndpoint;
+use waddle_xmpp::registry::{SocketOutboundEndpoint, SocketOutboundReceiver};
 
 /// A resume can briefly observe the previous node's `UserActor` while its
 /// force-detach cleanup drains.  Bound retries keep that handoff from turning
@@ -438,7 +438,7 @@ where
     let permit = lifecycle.admit().expect("fresh serving lifecycle");
     let shutdown = tokio_util::sync::CancellationToken::new();
     register_bound_connection_after_frame_with_admission(
-        state, domain, conn, pending_tx, &permit, &shutdown,
+        state, domain, conn, pending_tx, &permit, &shutdown, None,
     )
     .await
 }
@@ -450,6 +450,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission<E>(
     pending_tx: &mut Option<E>,
     permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
+    outbound_receiver: Option<&SocketOutboundReceiver>,
 ) -> RegistrationAfterFrame
 where
     E: Into<SocketOutboundEndpoint>,
@@ -834,7 +835,8 @@ where
     #[cfg(feature = "test-support")]
     super::characterization_seams::pause_published_resume_finalization(state, conn, &jid, &owner)
         .await;
-    let sm_report = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
+    let sm_report =
+        finalize_sm_after_registry_registration(state, conn, &jid, &owner, outbound_receiver).await;
     #[cfg(test)]
     if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {
         reached.notify_one();

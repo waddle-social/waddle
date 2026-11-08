@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use tokio_util::sync::CancellationToken;
-use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint};
+use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint, SocketOutboundReceiver};
 use waddle_xmpp::stream_management::SmRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +260,7 @@ const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
 /// threshold, mirroring `SmCtx`'s identical rationale one file over.
 pub(super) struct RegistrationChannels<'a> {
     pub(super) pending_tx: &'a mut Option<SocketOutboundEndpoint>,
+    pub(super) outbound_receiver: Option<&'a SocketOutboundReceiver>,
     pub(super) force_detach_rx:
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
 }
@@ -329,7 +330,7 @@ struct LiveSocketState {
     pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest>,
     force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
     pending_tx: Option<SocketOutboundEndpoint>,
-    outbound_rx: mpsc::Receiver<OutboundStanza>,
+    outbound_rx: Option<SocketOutboundReceiver>,
 }
 
 fn fence_panicked_owner(lifecycle: &crate::clustering::NodeLifecycle, stop: &CancellationToken) {
@@ -459,7 +460,7 @@ impl LiveWebSocketConnection {
         // the registry replaces its entry, and our `recv()`
         // returns `None` — that's how we detect replacement and exit cleanly.
         let (outbound_endpoint, outbound_rx) =
-            SocketOutboundEndpoint::channel(OUTBOUND_CHANNEL_SIZE);
+            SocketOutboundEndpoint::channel_with_socket_receiver(OUTBOUND_CHANNEL_SIZE);
         let pending_tx: Option<SocketOutboundEndpoint> = Some(outbound_endpoint);
 
         // ADR-0017 Phase 3 Slice 6: the cross-node resume live-steal handshake's
@@ -514,7 +515,7 @@ impl LiveWebSocketConnection {
             pending_force_detach,
             force_detach_rx,
             pending_tx,
-            outbound_rx,
+            outbound_rx: Some(outbound_rx),
         }));
         #[cfg(feature = "test-support")]
         if let Some(barrier) = &state
@@ -542,6 +543,9 @@ impl LiveWebSocketConnection {
             outbound_rx,
             ..
         } = live.as_mut();
+        let Some(mut outbound_rx) = outbound_rx.take() else {
+            unreachable!("the live connection owns its outbound receiver");
+        };
         let Some(socket_halves) = socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
         };
@@ -758,6 +762,7 @@ impl LiveWebSocketConnection {
                             &mut *conn,
                             RegistrationChannels {
                                 pending_tx: &mut *pending_tx,
+                                outbound_receiver: Some(&outbound_rx),
                                 force_detach_rx: &mut *force_detach_rx,
                             },
                             ConnectionIo {
@@ -791,6 +796,7 @@ impl LiveWebSocketConnection {
                                 &mut *conn,
                                 RegistrationChannels {
                                     pending_tx: &mut *pending_tx,
+                                    outbound_receiver: Some(&outbound_rx),
                                     force_detach_rx: &mut *force_detach_rx,
                                 },
                                 ConnectionIo {
@@ -1010,6 +1016,7 @@ impl LiveWebSocketConnection {
         let Some(socket_io) = socket_io.take() else {
             unreachable!("the live connection owns its socket halves until settlement");
         };
+        let mut outbound_rx = outbound_rx.into_receiver();
         finish_connection(
             state,
             &mut *conn,
@@ -1020,7 +1027,7 @@ impl LiveWebSocketConnection {
             },
             *superseded,
             ConnectionShutdownChannels {
-                outbound_rx: &mut *outbound_rx,
+                outbound_rx: &mut outbound_rx,
                 handoff_rx: &mut *handoff_rx,
                 force_detach_rx: &mut *force_detach_rx,
                 pending_force_detach: &mut *pending_force_detach,
@@ -1759,6 +1766,7 @@ where
     }
     let RegistrationChannels {
         pending_tx,
+        outbound_receiver,
         force_detach_rx,
     } = channels;
     let ConnectionIo {
@@ -1821,6 +1829,7 @@ where
         pending_tx,
         admission_permit,
         shutdown_token,
+        outbound_receiver,
     )
     .await
     {

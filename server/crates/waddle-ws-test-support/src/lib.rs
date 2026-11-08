@@ -424,6 +424,18 @@ impl FailedResumeSeam {
         std::fs::write(&self.arm_file, stream_id).expect("arm failed-resume seam");
     }
 
+    /// Hold an old-binding queue reservation across failed resume and rebind.
+    pub fn arm_stream_with_reservation(&self, stream_id: &str) {
+        std::fs::write(&self.arm_file, format!("{stream_id}\nhold-reservation"))
+            .expect("arm failed-resume reservation seam");
+    }
+
+    /// Queue an accepted frame on the failed resume's exact binding.
+    pub fn arm_stream_with_accepted_frame(&self, stream_id: &str) {
+        std::fs::write(&self.arm_file, format!("{stream_id}\nqueue-accepted-frame"))
+            .expect("arm failed-resume accepted-frame seam");
+    }
+
     /// Wait for an exact event line written by the server process.
     pub async fn wait_for_event(&self, expected: &str) -> Result<(), String> {
         timeout(Duration::from_secs(20), async {

@@ -638,7 +638,25 @@ impl ConnectionEntry {
         }
         let Self { endpoint, .. } = self;
         endpoint
-            .into_socket_endpoint_if_empty(owner, binding_ref)
+            .into_socket_endpoint_if_empty(owner, binding_ref, None)
+            .ok()
+    }
+
+    /// Recover an exact sealed binding when its paired socket receiver is
+    /// empty. Reservations on the old binding remain sealed and cannot commit.
+    /// The socket owner must not have an outbound handler in flight.
+    pub fn into_socket_outbound_endpoint_if_receiver_empty(
+        self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+        receiver: &super::SocketOutboundReceiver,
+    ) -> Option<SocketOutboundEndpoint> {
+        if self.binding_id != owner || self.binding_ref.as_ref() != Some(binding_ref) {
+            return None;
+        }
+        let Self { endpoint, .. } = self;
+        endpoint
+            .into_socket_endpoint_if_empty(owner, binding_ref, Some(receiver))
             .ok()
     }
 
