@@ -22,11 +22,15 @@ pub struct IngressFixture {
 }
 
 impl IngressFixture {
-    /// Attach the real ingress repositories to an already migrated, enrolled
-    /// PostgreSQL fixture without changing its provisioning or lineage.
-    pub async fn existing(db: Database, lineage: LineageConfig) -> Self {
-        let uow = IngressUnitOfWork::open(db.clone(), lineage.clone())
-            .expect("existing ingress unit of work");
+    /// Attach ingress repositories to an already migrated, enrolled database,
+    /// retaining any fixture-owned PostgreSQL schema for cleanup.
+    pub async fn existing(
+        db: Database,
+        lineage: LineageConfig,
+        postgres: Option<(sqlx::PgPool, String)>,
+    ) -> Self {
+        let uow =
+            IngressUnitOfWork::open(db.clone(), lineage.clone()).expect("ingress unit of work");
         let principal = AuthenticatedPrincipalRef::new(
             "romeo@example.com".parse().expect("sender"),
             AuthContextId::new(Uuid::new_v4()),
@@ -37,7 +41,7 @@ impl IngressFixture {
             db,
             uow,
             principal,
-            postgres: None,
+            postgres,
             sqlite_directory: None,
             lineage,
         };
@@ -123,25 +127,7 @@ impl IngressFixture {
         lineage::enroll(&db, &lineage)
             .await
             .expect("enroll lineage");
-        let uow =
-            IngressUnitOfWork::open(db.clone(), lineage.clone()).expect("ingress unit of work");
-        let principal = AuthenticatedPrincipalRef::new(
-            "romeo@example.com".parse().expect("sender"),
-            AuthContextId::new(Uuid::new_v4()),
-            AuthContextVersion::new(3),
-            PrincipalAuthEpoch::new(5),
-        );
-        let fixture = Self {
-            db,
-            uow,
-            principal,
-            postgres,
-            sqlite_directory: None,
-            lineage,
-        };
-        fixture.execute("INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", waddle_server::db_params![fixture.principal.bare_jid().to_string(), "romeo".to_string(), "romeo".to_string(), "romeo".to_string(), chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
-        fixture.execute("INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, auth_context_version, principal_auth_epoch, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", waddle_server::db_params!["ingress-session".to_string(), fixture.principal.bare_jid().to_string(), "ingress-token".to_string(), fixture.principal.auth_context_id().as_uuid().to_string(), 3_i64, 5_i64, chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
-        fixture
+        Self::existing(db, lineage, postgres).await
     }
 
     pub fn submission(&self, origin: Option<&str>, body: &str) -> IngressSubmission {

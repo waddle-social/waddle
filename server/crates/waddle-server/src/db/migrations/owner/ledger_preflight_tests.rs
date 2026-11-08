@@ -46,32 +46,34 @@ async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_an
     )
     .await
     .expect("read-only boundary");
-    let mut proof = acquire_dark_shared_migration_ledger_v1030_read(
-        &mut tx,
-        &fixture.schema,
-        pins,
-        RESTORE_PATH,
-    )
-    .await
-    .expect("complete registered V1030 prefix");
-    assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
-    assert!(
-        holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await
-    );
-    let boundary: (String, String) = sqlx::query_as(
-        "SELECT pg_catalog.current_setting('transaction_isolation'), \
+    {
+        let mut proof = acquire_dark_shared_migration_ledger_v1030_read(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH,
+        )
+        .await
+        .expect("complete registered V1030 prefix");
+        assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
+        assert!(
+            holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+                .await
+        );
+        let boundary: (String, String) = sqlx::query_as(
+            "SELECT pg_catalog.current_setting('transaction_isolation'), \
                 pg_catalog.current_setting('transaction_read_only')",
-    )
-    .fetch_one(
-        &mut *proof
-            .transaction()
-            .postgres_connection()
-            .expect("postgres tx"),
-    )
-    .await
-    .expect("read transaction boundary");
-    assert_eq!(boundary, ("read committed".to_owned(), "on".to_owned()));
-    drop(proof);
+        )
+        .fetch_one(
+            &mut *proof
+                .transaction()
+                .postgres_connection()
+                .expect("postgres tx"),
+        )
+        .await
+        .expect("read transaction boundary");
+        assert_eq!(boundary, ("read committed".to_owned(), "on".to_owned()));
+    }
     tx.rollback().await.expect("release read-only proof");
 
     let mut tx = db.begin().await.expect("read-write transaction");
@@ -169,57 +171,59 @@ async fn postgres17_ledger_preflight_v1030_read_only_locks_in_order() {
         .fetch_one(&mut *tx.postgres_connection().expect("postgres tx"))
         .await
         .expect("backend pid");
-    let mut proof_future = Box::pin(acquire_dark_shared_migration_ledger_v1030_read(
-        &mut tx,
-        &fixture.schema,
-        pins,
-        RESTORE_PATH,
-    ));
+    {
+        let mut proof_future = Box::pin(acquire_dark_shared_migration_ledger_v1030_read(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH,
+        ));
 
-    // Each tuple records (lineage held, lineage waiting, ledger held, ledger
-    // waiting, relation held, relation waiting) on the proof's backend.
-    for (stage, expected) in [
-        ("lineage", (false, true, false, false, false, false)),
-        ("ledger", (true, false, false, true, false, false)),
-        ("relation", (true, false, true, false, false, true)),
-    ] {
-        tokio::select! {
-            result = &mut proof_future => match result {
-                Ok(_) => panic!("proof completed before {stage} wait"),
-                Err(error) => panic!("proof failed before {stage} wait: {error}"),
-            },
-            () = wait_for_preflight_lock_stage(&fixture.admin, backend_pid, pins.ledger_relation_oid, expected) => {}
+        // Each tuple records (lineage held, lineage waiting, ledger held, ledger
+        // waiting, relation held, relation waiting) on the proof's backend.
+        for (stage, expected) in [
+            ("lineage", (false, true, false, false, false, false)),
+            ("ledger", (true, false, false, true, false, false)),
+            ("relation", (true, false, true, false, false, true)),
+        ] {
+            tokio::select! {
+                result = &mut proof_future => match result {
+                    Ok(_) => panic!("proof completed before {stage} wait"),
+                    Err(error) => panic!("proof failed before {stage} wait: {error}"),
+                },
+                () = wait_for_preflight_lock_stage(&fixture.admin, backend_pid, pins.ledger_relation_oid, expected) => {}
+            }
+            match stage {
+                "lineage" => lineage_blocker
+                    .take()
+                    .expect("lineage blocker")
+                    .rollback()
+                    .await
+                    .expect("release lineage blocker"),
+                "ledger" => ledger_blocker
+                    .take()
+                    .expect("ledger blocker")
+                    .rollback()
+                    .await
+                    .expect("release ledger blocker"),
+                "relation" => relation_blocker
+                    .take()
+                    .expect("relation blocker")
+                    .rollback()
+                    .await
+                    .expect("release relation blocker"),
+                _ => unreachable!("fixed lock stages"),
+            }
         }
-        match stage {
-            "lineage" => lineage_blocker
-                .take()
-                .expect("lineage blocker")
-                .rollback()
+        let mut proof = proof_future
+            .await
+            .expect("read-only proof after blockers release");
+        assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
+        assert!(
+            holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
                 .await
-                .expect("release lineage blocker"),
-            "ledger" => ledger_blocker
-                .take()
-                .expect("ledger blocker")
-                .rollback()
-                .await
-                .expect("release ledger blocker"),
-            "relation" => relation_blocker
-                .take()
-                .expect("relation blocker")
-                .rollback()
-                .await
-                .expect("release relation blocker"),
-            _ => unreachable!("fixed lock stages"),
-        }
+        );
     }
-    let mut proof = proof_future
-        .await
-        .expect("read-only proof after blockers release");
-    assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
-    assert!(
-        holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await
-    );
-    drop(proof);
     tx.rollback().await.expect("release proof locks");
     fixture.close().await;
 }
@@ -486,27 +490,29 @@ async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() 
     )
     .await
     .expect("read-write boundary");
-    let mut proof = acquire_dark_shared_migration_ledger_v1030_write(
-        &mut tx,
-        &fixture.schema,
-        pins,
-        RESTORE_PATH,
-    )
-    .await
-    .expect("complete registered V1030 prefix");
-    assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
-    assert!(
-        holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY).await
-    );
-    proof
-        .transaction()
-        .execute(
-            &format!("INSERT INTO {}.write_probe (id) VALUES (1)", fixture.schema),
-            (),
+    {
+        let mut proof = acquire_dark_shared_migration_ledger_v1030_write(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            RESTORE_PATH,
         )
         .await
-        .expect("write durable row after proof");
-    drop(proof);
+        .expect("complete registered V1030 prefix");
+        assert!(holds_shared_advisory_lock(proof.transaction(), LINEAGE_ADVISORY_LOCK_KEY).await);
+        assert!(
+            holds_shared_advisory_lock(proof.transaction(), MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+                .await
+        );
+        proof
+            .transaction()
+            .execute(
+                &format!("INSERT INTO {}.write_probe (id) VALUES (1)", fixture.schema),
+                (),
+            )
+            .await
+            .expect("write durable row after proof");
+    }
     tx.commit().await.expect("commit durable write after proof");
     let durable: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM {}.write_probe WHERE id=1",
@@ -609,10 +615,7 @@ async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() 
     drop(proof_future);
     let sqlstate = match result {
         Err(error) => error_sqlstate(&error),
-        Ok(proof) => {
-            drop(proof);
-            None
-        }
+        Ok(_) => None,
     };
     assert_eq!(
         sqlstate.as_deref(),
@@ -885,15 +888,16 @@ async fn postgres17_ledger_preflight_bounds_restore_input_and_ignores_large_inhe
         .execute(&mut *tx.postgres_connection().expect("postgres transaction"))
         .await
         .expect("set large inherited path");
-    let proof = acquire_dark_shared_migration_ledger_v1023(
-        &mut tx,
-        &fixture.schema,
-        pins,
-        CUSTOM_RESTORE_PATH,
-    )
-    .await
-    .expect("bounded caller restore despite huge inherited setting");
-    drop(proof);
+    {
+        let _proof = acquire_dark_shared_migration_ledger_v1023(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            CUSTOM_RESTORE_PATH,
+        )
+        .await
+        .expect("bounded caller restore despite huge inherited setting");
+    }
     let restored: String = sqlx::query_scalar("SELECT pg_catalog.current_setting('search_path')")
         .fetch_one(&mut *tx.postgres_connection().expect("postgres transaction"))
         .await
@@ -1107,38 +1111,39 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     tx.execute("SET LOCAL search_path = public, pg_catalog", ())
         .await
         .expect("set path");
-    let mut proof = acquire_dark_shared_migration_ledger_v1023(
-        &mut tx,
-        &fixture.schema,
-        pins,
-        CUSTOM_RESTORE_PATH,
-    )
-    .await
-    .expect("valid committed V1023 prefix");
-    let mut rows = proof
-        .transaction()
-        .query("SELECT pg_catalog.current_setting('search_path')", ())
+    {
+        let mut proof = acquire_dark_shared_migration_ledger_v1023(
+            &mut tx,
+            &fixture.schema,
+            pins,
+            CUSTOM_RESTORE_PATH,
+        )
         .await
-        .expect("proof remains on transaction");
-    assert_eq!(
-        rows.next()
+        .expect("valid committed V1023 prefix");
+        let mut rows = proof
+            .transaction()
+            .query("SELECT pg_catalog.current_setting('search_path')", ())
             .await
-            .expect("path row")
-            .expect("path")
-            .get::<String>(0)
-            .expect("path"),
-        CUSTOM_RESTORE_PATH
-    );
-    drop(rows);
-    let mut other = fixture.admin.begin().await.expect("competing owner");
-    let exclusive: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
-        .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
-        .fetch_one(&mut *other)
-        .await
-        .expect("try exclusive owner lock");
-    assert!(!exclusive, "proof must hold the shared advisory lock");
-    other.rollback().await.expect("end competitor");
-    drop(proof);
+            .expect("proof remains on transaction");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("path row")
+                .expect("path")
+                .get::<String>(0)
+                .expect("path"),
+            CUSTOM_RESTORE_PATH
+        );
+        drop(rows);
+        let mut other = fixture.admin.begin().await.expect("competing owner");
+        let exclusive: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+            .bind(MIGRATION_LEDGER_ADVISORY_LOCK_KEY)
+            .fetch_one(&mut *other)
+            .await
+            .expect("try exclusive owner lock");
+        assert!(!exclusive, "proof must hold the shared advisory lock");
+        other.rollback().await.expect("end competitor");
+    }
     tx.rollback().await.expect("release shared locks");
     let mut other = fixture.admin.begin().await.expect("next owner");
     let exclusive: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")

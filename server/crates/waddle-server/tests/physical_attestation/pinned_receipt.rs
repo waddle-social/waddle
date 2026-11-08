@@ -1082,6 +1082,7 @@ async fn live_ingress_fixture(fixture: &Fixture) -> crate::ingress_support::Ingr
             deployment_uuid: Some(fixture.lineage.deployment_uuid),
             action: None,
         },
+        None,
     )
     .await
 }

@@ -475,7 +475,7 @@ async fn exercise(db: Database, second_db: Database) {
     };
     b.apply(&reopened).await.expect("new generation");
     assert!(
-        matches!(a.apply(&retire).await, Ok(_)),
+        a.apply(&retire).await.is_ok(),
         "exact old operation remains readable"
     );
     let stale_retire = Request {

@@ -111,9 +111,12 @@ impl ConnectionActorCore {
     }
 
     /// Stop admitting new driver work after the current handler returns.
-    #[expect(
-        dead_code,
-        reason = "the dormant connection actor core has no production startup caller yet"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the dormant connection actor core has no production startup caller yet"
+        )
     )]
     pub(super) fn request_stop(&self, reason: StopReason) -> bool {
         self.lifecycle.request_stop(reason)

@@ -147,17 +147,6 @@ impl NotificationOutboxStore {
 
     /// Reused, already marked pending custody must retain the exact existing
     /// approval and its live jobs, without inserting a new candidate or receipt.
-    #[cfg(test)]
-    pub(crate) async fn attach_existing_candidate_lineage_in_transaction(
-        tx: &mut Transaction<'_>,
-        message_key: waddle_xmpp::ingress::MessageKey,
-        effect: &waddle_xmpp::ingress::IngressEffectKey,
-        expected: &NotificationCandidate,
-    ) -> Result<bool, IngressUowError> {
-        Self::attach_existing_candidate_lineage_with_api(tx, None, message_key, effect, expected)
-            .await
-    }
-
     pub(crate) async fn attach_existing_candidate_lineage_with_api(
         tx: &mut Transaction<'_>,
         api: Option<&DefinerApiCandidateContext<'_>>,
