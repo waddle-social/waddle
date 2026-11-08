@@ -5,14 +5,18 @@ review used `718f47a9e08f29cf2e6157803770e2f495fe201e`, whose server tree
 matched `5763923e`; the changed owner-update ordering paths were re-inspected
 for this refresh. The inputs were [A01–A31](actor-mirror-edge-ledger.md), the
 [WebSocket borrowed-write narrative](ws-state-semantic-inventory.md#borrowed-writes-and-callers),
-and selected production paths from the [independent discovery](independent-edge-discovery-4219.md).
+selected paths from the [independent discovery](independent-edge-discovery-4219.md),
+and selected paths from the [supervised-I/O source review](supervised-io-review-4219.md).
 This is not an independent all-source discovery or a complete caller inventory.
 
-The two TSVs contain **179 individual links**: 116 from 29 actor/relay ledger
+The two TSVs contain **241 individual links**: 116 from 29 actor/relay ledger
 groups, five owner-update queue links, 32 selected WebSocket borrow and
 control-flow links, and 26 production links reviewed from the independent
 discovery and its immediate remote-presence helper chain. The latter comprise
 three rollback, 19 room-presence/routing/outbox, and four carbons links. The
+remaining 62 links cover selected test-only, test-support and dormant paths:
+20 from the independent discovery and 42 supervised-I/O fixture and supporting
+owner/custody links. The
 [candidate table](indirect-edge-candidates.tsv) is the seven identity columns
 projected from the [review table](indirect-edge-reviews.tsv); the matching rows
 are not an independent second discovery. Each row names a concrete call site,
@@ -65,7 +69,11 @@ obsolete.
   fanout helper reads enabled entries independently. Selection is not evidence
   that a carbon was sent.
 - `test-actor-ask` records observed `cfg(test)` unit-test senders to otherwise
-  release-compiled handlers. The physical continuation integration sender is
+  release-compiled handlers; `test-integration-actor-ask` names source in
+  integration-test targets. The selected ingress integration modules have no
+  `test-support` source gate; the server's
+  [development dependency](../../../server/crates/waddle-server/Cargo.toml#L159)
+  enables XMPP `test-utils` for those tests. The physical continuation integration sender is
   itself [`test-support` gated](../../../server/crates/waddle-server/tests/physical_continuation.rs#L1).
   A31's publication asks are also `test-support` gated and the child handlers
   require `test` or `test-utils`; `test-support` enables the latter in the
@@ -73,6 +81,24 @@ obsolete.
   A31 retirement is separately labeled dormant: the endpoint's own
   [module documentation](../../../server/crates/waddle-server/src/server/routes/websocket/actor_local_endpoint.rs#L1)
   says `/ws` does not select it. These facts do not establish live bind use.
+- The additional supervised-I/O cases use a `test-support`-gated `/actor-owner`
+  fixture over an in-memory duplex WebSocket. Publication and confirmation
+  operate on a provisional candidate; error or a vanished waiter causes a
+  separately owned retirement attempt. The failure result can reach the waiter
+  before retirement finishes, and actor timeout or stop alone is not evidence
+  of compensation. The fixture source separately waits for registry/actor
+  cleanup and joined pumps in its publication-loss scenarios.
+- The direct-custody handler can return `AcceptedOrSettled` after local
+  acceptance or existing settlement; neither proves a physical write. The
+  supervised fixture source distinguishes a peer frame and `Flushed` stage
+  from its still-unresolved acceptance receiver. Other fixture assertions
+  distinguish `NotAttempted` from `AttemptedUncertain` and retrieve retained
+  envelopes only after joined cleanup. These describe source assertions, not
+  executed tests, safe replay of an uncertain write, or completed settlement.
+- The actor driver and generic inbound core are release compiled but dormant
+  for `/ws`; their physical-driver test fixture has a separate `test-support`
+  gate. Calls that create the core or lend its mutable state to the frame
+  handler do not establish that a live producer selects that path.
 - A16 is a **shared-state** connection, not a message from the presence
   handler to the routing handler: registered entries share atomics as described
   by the [registration contract](../../../server/crates/waddle-xmpp/src/registry/user_registry.rs#L1077).
@@ -97,19 +123,19 @@ profile, including other registration and teardown callers, all selection
 consumers and their distinct fallback behavior, actor lifecycle/claim rotation,
 subscriptions and carbons operations, remote update and side-effect downstream
 fanout, ordered relay and room delivery, receipts and detached/physical custody,
-and alternative tests and support harnesses. The independent discovery's
-additional test-only, test-support and dormant actor-state findings remain
-pending; they are not represented as production by these additions. A test of a release-compiled
-handler does not prove production reachability; a retry or enqueue result does
-not prove drain or a physical socket write. These notes leave all such work
-open rather than treating the candidate list as exhaustive.
+and alternative tests and support harnesses. The added test and dormant paths
+are a selected subset, not a complete review of fixture calls, marker rows or
+all test configurations. A test of a release-compiled handler does not prove
+production reachability; a retry or enqueue result does not prove drain or a
+physical socket write. These notes leave all such work open rather than
+treating the candidate list as exhaustive.
 
 Manual source inspection checked the cited message implementations, selected
 senders, wrappers, borrowed contexts and relevant feature gates. The inventory
 edge-validation helper reconciled candidate and review keys, unique IDs,
 operation/class labels, source-commit values and cited source locations for all
-179 supplied links. The earlier full validator run reparsed both retained
-compiler streams against the then-supplied 153 links. Independent discovery
+241 supplied links. The full validator also reparsed both retained compiler
+streams and reconciled the current 241 supplied links. Independent discovery
 and semantic review remain integration work. No Cargo command, runtime
 exercise, Git mutation, remote push or CI check was performed for this
 reconciliation; the checks do not prove discovery completeness or semantic

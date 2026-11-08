@@ -5,8 +5,9 @@ documented in [`capture-4219bdd`](capture-4219bdd/README.md). The
 [independent edge discovery](independent-edge-discovery-4219.md) identifies
 additional paths and explicitly remains partial. The support-only library
 references have grouped source notes for [actor](support-actor-review-4219.md)
-and [endpoint](support-endpoint-review-4219.md) paths; those notes are not
-individual site classifications. Test-target captures, semantic review and
+and [endpoint](support-endpoint-review-4219.md) paths, plus a grouped
+[supervised-I/O test-target review](supervised-io-review-4219.md). These notes
+are not individual site classifications. Test-target captures, semantic review and
 exhaustive indirect discovery remain open; neither the capture nor a matching
 supplied candidate list proves runtime behavior.
 
