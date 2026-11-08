@@ -4,6 +4,18 @@ use super::namespace::MigrationNamespace;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MigrationLedgerError {
+    #[error("migration startup cannot identify a safe PostgreSQL target schema")]
+    UnsafeTargetSchema,
+
+    #[error("migration startup refuses a malformed or changed PostgreSQL ledger catalog")]
+    UnsafeCatalog,
+
+    #[error("migration startup refuses enabled PostgreSQL event triggers")]
+    EnabledEventTrigger,
+
+    #[error("migration startup timed out waiting for the PostgreSQL ledger relation lock")]
+    RelationLockTimeout,
+
     #[error(
         "migration startup is refusing to continue rather than repairing the ledger: found \
          unknown migration v{version} ({description}), but this binary expects every owned \

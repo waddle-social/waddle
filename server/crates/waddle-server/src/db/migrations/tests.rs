@@ -956,6 +956,51 @@ async fn migration_apply_error_names_the_failing_migration_and_preserves_its_sou
 }
 
 #[tokio::test]
+async fn postgres_preflight_restores_timeouts_before_migration_body() {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration timeout restoration)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("ledger_timeouts");
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("postgres administrator");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create isolated schema");
+    let mut timed_url = url::Url::parse(&postgres_url_with_search_path(&database_url, &schema))
+        .expect("parse postgres URL");
+    timed_url
+        .query_pairs_mut()
+        .append_pair("options", "-c statement_timeout=20s -c lock_timeout=6s");
+    let db = Database::from_config(
+        "migration-timeout-restoration",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, timed_url.to_string()),
+    )
+    .await
+    .expect("open isolated postgres database");
+    let runner = MigrationRunner::new(vec![Migration {
+        version: 42,
+        description: "capture migration timeouts".to_string(),
+        sql_sqlite: "SELECT 1;",
+        sql_postgres: "CREATE TABLE timeout_capture (statement_timeout TEXT, lock_timeout TEXT); \
+            INSERT INTO timeout_capture VALUES (pg_catalog.current_setting('statement_timeout'), \
+            pg_catalog.current_setting('lock_timeout'));",
+    }]);
+    runner.run(&db).await.expect("run migration");
+    let timeouts: (String, String) = sqlx::query_as(&format!(
+        "SELECT statement_timeout, lock_timeout FROM {schema}.timeout_capture"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("read migration-body timeouts");
+    assert_eq!(timeouts, ("20s".to_string(), "6s".to_string()));
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
 async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger adoption)");
