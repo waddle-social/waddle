@@ -301,6 +301,24 @@ async fn verify_mam_catalog(
     authority: &PinnedRuntimeAuthority,
     pins: PinnedMamLookupPins,
 ) -> Result<(), PinnedMamLookupError> {
+    verify_mam_catalog_with_acl(tx, authority, pins, false).await
+}
+
+#[cfg(feature = "test-support")]
+pub(super) async fn verify_mam_append_messages_catalog(
+    tx: &mut Transaction<'_>,
+    authority: &PinnedRuntimeAuthority,
+    pins: PinnedMamLookupPins,
+) -> Result<(), PinnedMamLookupError> {
+    verify_mam_catalog_with_acl(tx, authority, pins, true).await
+}
+
+async fn verify_mam_catalog_with_acl(
+    tx: &mut Transaction<'_>,
+    authority: &PinnedRuntimeAuthority,
+    pins: PinnedMamLookupPins,
+    append_acl: bool,
+) -> Result<(), PinnedMamLookupError> {
     let connection = tx
         .postgres_connection()
         .ok_or(PinnedMamLookupError::InvalidPins)?;
@@ -335,6 +353,7 @@ async fn verify_mam_catalog(
         .bind(owner)
         .bind(runtime)
         .bind(&indexes)
+        .bind(append_acl)
         .fetch_one(&mut *connection)
         .await?;
     if !exact {
@@ -419,9 +438,12 @@ SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid=$1
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class=c.oid)
   AND pg_catalog.has_table_privilege($4,c.oid,'SELECT')
-  AND NOT pg_catalog.has_table_privilege($4,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
+  AND CASE WHEN $6 THEN pg_catalog.has_table_privilege($4,c.oid,'INSERT')
+           ELSE NOT pg_catalog.has_table_privilege($4,c.oid,'INSERT') END
+  AND NOT pg_catalog.has_table_privilege($4,c.oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
   AND NOT pg_catalog.has_table_privilege($4,c.oid,'SELECT WITH GRANT OPTION,INSERT WITH GRANT OPTION,UPDATE WITH GRANT OPTION,DELETE WITH GRANT OPTION,TRUNCATE WITH GRANT OPTION,REFERENCES WITH GRANT OPTION,TRIGGER WITH GRANT OPTION,MAINTAIN WITH GRANT OPTION')
-  AND NOT pg_catalog.has_any_column_privilege($4,c.oid,'INSERT,UPDATE,REFERENCES')
+  AND NOT pg_catalog.has_any_column_privilege($4,c.oid,'UPDATE,REFERENCES')
+  AND ($6 OR NOT pg_catalog.has_any_column_privilege($4,c.oid,'INSERT'))
   AND NOT pg_catalog.has_any_column_privilege($4,c.oid,'SELECT WITH GRANT OPTION,INSERT WITH GRANT OPTION,UPDATE WITH GRANT OPTION,REFERENCES WITH GRANT OPTION')
   AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(c.relacl) acl
     WHERE acl.grantee=$4 AND acl.grantor=c.relowner
@@ -429,7 +451,8 @@ SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid=$1
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
     COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) acl
     WHERE acl.grantee=0::pg_catalog.oid OR (acl.grantee=$4 AND
-      (acl.grantor<>c.relowner OR acl.is_grantable OR acl.privilege_type<>'SELECT')))
+      (acl.grantor<>c.relowner OR acl.is_grantable OR NOT (
+        acl.privilege_type='SELECT' OR ($6 AND acl.privilege_type='INSERT')))))
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
     CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl
     WHERE a.attrelid=c.oid AND (acl.grantee=0::pg_catalog.oid OR

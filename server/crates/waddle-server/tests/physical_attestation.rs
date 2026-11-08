@@ -66,6 +66,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(url: String) -> Self {
+        Self::new_with_database_options(url, "").await
+    }
+
+    async fn new_with_database_options(url: String, database_options: &str) -> Self {
         let cluster_admin = PgPool::connect(&url).await.expect("admin PostgreSQL pool");
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let database_name = format!("attest_db_{suffix}");
@@ -75,10 +79,12 @@ impl Fixture {
         let installer = format!("waddle_attest_i_{suffix}");
         let runtime = format!("waddle_attest_r_{suffix}");
         let outsider = format!("waddle_attest_o_{suffix}");
-        sqlx::query(&format!("CREATE DATABASE {database_name}"))
-            .execute(&cluster_admin)
-            .await
-            .expect("isolated test database");
+        sqlx::query(&format!(
+            "CREATE DATABASE {database_name} {database_options}"
+        ))
+        .execute(&cluster_admin)
+        .await
+        .expect("isolated test database");
         sqlx::query(&format!(
             "REVOKE TEMPORARY ON DATABASE {database_name} FROM PUBLIC"
         ))
@@ -7600,6 +7606,9 @@ mod pinned_receipt_tests;
 #[path = "physical_attestation/pinned_receipt_caller.rs"]
 mod pinned_receipt_caller_tests;
 
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/pinned_mam_append.rs"]
+mod pinned_mam_append_tests;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/pinned_mam_lookup.rs"]
 mod pinned_mam_lookup_tests;

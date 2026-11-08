@@ -444,6 +444,26 @@ async fn lookup_rejects_public_and_runtime_write_acl_or_unpinned_index() {
         ),
         (
             format!(
+                "GRANT INSERT ON {}.mam_messages TO {}",
+                fixture.target, fixture.runtime
+            ),
+            format!(
+                "REVOKE INSERT ON {}.mam_messages FROM {}",
+                fixture.target, fixture.runtime
+            ),
+        ),
+        (
+            format!(
+                "GRANT INSERT (id) ON {}.mam_messages TO {}",
+                fixture.target, fixture.runtime
+            ),
+            format!(
+                "REVOKE INSERT (id) ON {}.mam_messages FROM {}",
+                fixture.target, fixture.runtime
+            ),
+        ),
+        (
+            format!(
                 "GRANT UPDATE (id) ON {}.mam_messages TO {}",
                 fixture.target, fixture.runtime
             ),

@@ -61,6 +61,12 @@ pub use pinned_receipt::{PinnedReceiptAuthority, PinnedReceiptCommit, PinnedRece
 mod pinned_mam;
 #[cfg(feature = "test-support")]
 pub use pinned_mam::{PinnedMamLookupAuthority, PinnedMamLookupError, PinnedMamLookupPins};
+#[cfg(feature = "test-support")]
+mod pinned_mam_append;
+#[cfg(feature = "test-support")]
+pub use pinned_mam_append::{
+    PinnedMamAppendDiagnostic, PinnedMamAppendError, PinnedMamAppendJob, PinnedMamAppendPins,
+};
 mod pinned_pubsub;
 pub use pinned_pubsub::{
     PinnedPubSubInventoryError, PinnedPubSubInventoryJob, PinnedPubSubRelationInventory,

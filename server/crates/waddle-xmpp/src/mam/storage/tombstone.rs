@@ -40,15 +40,36 @@ pub(super) fn origin_id_tombstone_match(
     existing: &ArchivedMessage,
     incoming: &ArchivedMessage,
 ) -> bool {
-    !groupchat_subject_is_state_update(incoming)
-        && matches!(
-            (&existing.message_type, &incoming.message_type),
-            (MessageType::Groupchat, MessageType::Groupchat)
-        )
+    let scope = incoming
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.muc_sender.as_ref())
+        .map(|sender| sender.jid.to_bare());
+    origin_id_tombstone_match_parts(
+        existing,
+        incoming.origin_id.as_ref(),
+        &incoming.from,
+        scope.as_ref(),
+        incoming.message_type == MessageType::Groupchat
+            && !groupchat_subject_is_state_update(incoming),
+    )
+}
+
+/// Match the same typed facts after they have been captured independently of
+/// the full incoming message. This is shared with the bounded diagnostic.
+pub(super) fn origin_id_tombstone_match_parts(
+    existing: &ArchivedMessage,
+    origin: Option<&waddle_xmpp_core::xep0359::OriginId>,
+    from: &jid::Jid,
+    sender_scope: Option<&jid::BareJid>,
+    eligible: bool,
+) -> bool {
+    eligible
+        && existing.message_type == MessageType::Groupchat
         && existing.origin_id.is_some()
-        && existing.origin_id == incoming.origin_id
-        && existing.from == incoming.from
-        && tombstone_sender_scope_matches(existing, incoming)
+        && existing.origin_id.as_ref() == origin
+        && &existing.from == from
+        && tombstone_sender_scope_matches(existing, sender_scope)
 }
 
 /// The existing row must be a tombstone, and — when it retained the
@@ -57,7 +78,10 @@ pub(super) fn origin_id_tombstone_match(
 /// was retained fall back to the occupant-JID-only match (fail closed
 /// toward swallowing, the pre-existing carve-out). Content matching is
 /// impossible either way: XEP-0424 wipes it by design.
-fn tombstone_sender_scope_matches(existing: &ArchivedMessage, incoming: &ArchivedMessage) -> bool {
+fn tombstone_sender_scope_matches(
+    existing: &ArchivedMessage,
+    sender_scope: Option<&jid::BareJid>,
+) -> bool {
     let Some(rich) = existing.rich.as_ref() else {
         return false;
     };
@@ -67,11 +91,7 @@ fn tombstone_sender_scope_matches(existing: &ArchivedMessage, incoming: &Archive
     let Some(retained_scope) = tombstone.sender_scope.as_ref() else {
         return true;
     };
-    incoming
-        .rich
-        .as_ref()
-        .and_then(|rich| rich.muc_sender.as_ref())
-        .is_some_and(|sender| sender.jid.to_bare() == *retained_scope)
+    sender_scope.is_some_and(|sender| sender == retained_scope)
 }
 
 /// XEP-0045 §8.1 subject-only updates modify room state and remain replayable
@@ -105,7 +125,10 @@ mod tests {
     use waddle_xmpp_core::xep0359::OriginId;
     use xmpp_parsers::message::MessageType;
 
-    use super::origin_id_tombstone_match;
+    use super::{
+        groupchat_subject_is_state_update, origin_id_tombstone_match,
+        origin_id_tombstone_match_parts,
+    };
 
     fn jid(value: &str) -> Jid {
         value.parse().expect("valid test JID")
@@ -247,5 +270,96 @@ mod tests {
             8,
         );
         assert!(!origin_id_tombstone_match(&tombstone, &missing_identity));
+    }
+
+    #[test]
+    fn captured_origin_facts_preserve_legacy_matching() {
+        let mut tombstone =
+            groupchat_message("room@conference.example.com/alice", None, "origin-1", "", 1);
+        tombstone.rich = Some(ArchivedRichMessage {
+            payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {
+                retraction_id: None,
+                stamp: Utc::now(),
+                moderation: None,
+                sender_scope: None,
+            })),
+            ..ArchivedRichMessage::default()
+        });
+        let check = |stored: &ArchivedMessage, incoming: &ArchivedMessage, expected| {
+            let scope = incoming
+                .rich
+                .as_ref()
+                .and_then(|rich| rich.muc_sender.as_ref())
+                .map(|sender| sender.jid.to_bare());
+            let eligible = incoming.message_type == MessageType::Groupchat
+                && !groupchat_subject_is_state_update(incoming);
+            assert_eq!(origin_id_tombstone_match(stored, incoming), expected);
+            assert_eq!(
+                origin_id_tombstone_match_parts(
+                    stored,
+                    incoming.origin_id.as_ref(),
+                    &incoming.from,
+                    scope.as_ref(),
+                    eligible,
+                ),
+                expected
+            );
+        };
+        let incoming = groupchat_message(
+            "room@conference.example.com/alice",
+            None,
+            "origin-1",
+            "hello",
+            2,
+        );
+        // Legacy tombstones without a scope still match an unknown sender.
+        check(&tombstone, &incoming, true);
+        let mut changed = incoming.clone();
+        changed.message_type = MessageType::Chat;
+        check(&tombstone, &changed, false);
+        changed = incoming.clone();
+        changed.from = jid("room@conference.example.com/bob");
+        check(&tombstone, &changed, false);
+        changed = incoming.clone();
+        changed.origin_id = Some(OriginId::new("another"));
+        check(&tombstone, &changed, false);
+        changed = incoming.clone();
+        changed.body = None;
+        changed.rich = Some(ArchivedRichMessage::default());
+        changed
+            .rich
+            .as_mut()
+            .expect("rich")
+            .subjects
+            .insert(String::new(), "topic".into());
+        check(&tombstone, &changed, false);
+        tombstone.message_type = MessageType::Chat;
+        check(&tombstone, &incoming, false);
+        tombstone.message_type = MessageType::Groupchat;
+        let Some(ArchivedRichPayload::Tombstone(value)) = tombstone
+            .rich
+            .as_mut()
+            .and_then(|rich| rich.payload.as_mut())
+        else {
+            panic!("fixture tombstone");
+        };
+        value.sender_scope = Some("alice@example.com".parse().expect("scope"));
+        check(&tombstone, &incoming, false);
+        changed = groupchat_message(
+            "room@conference.example.com/alice",
+            Some("alice@example.com/new"),
+            "origin-1",
+            "hello",
+            2,
+        );
+        check(&tombstone, &changed, true);
+        changed = groupchat_message(
+            "room@conference.example.com/alice",
+            Some("mallory@example.com/new"),
+            "origin-1",
+            "hello",
+            2,
+        );
+        check(&tombstone, &changed, false);
     }
 }
