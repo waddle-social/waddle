@@ -13,8 +13,8 @@ use waddle_xmpp::stream_management::persistence::{
     PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::stream_management::{
-    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmIngressAppendKey,
-    SmSessionRegistry,
+    DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmClaimCompletion,
+    SmIngressAppendKey, SmSessionRegistry,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
@@ -58,6 +58,21 @@ fn chat_stanza(to: &FullJid, body: &str) -> Stanza {
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     Stanza::Message(message)
+}
+
+fn detached_unacked(
+    stanza: &Stanza,
+    sequence: u32,
+    original_receipt_at: chrono::DateTime<chrono::Utc>,
+) -> DetachedUnackedStanza {
+    DetachedUnackedStanza {
+        provenance: Default::default(),
+        ingress_receipts: Vec::new(),
+        sequence,
+        stanza_xml: waddle_xmpp::parser::element_to_string(&stanza.to_element())
+            .expect("serialize typed stanza"),
+        original_receipt_at,
+    }
 }
 
 fn queued_stanza_xml(id: &str, body: &str) -> String {
@@ -157,13 +172,9 @@ async fn promotion_inventory_late_append_prevents_old_snapshot_confirmation() {
         .await
         .expect("register");
     let receipt = chrono::Utc::now();
+    let entry = detached_unacked(&chat_stanza(&session.jid, "late suffix"), 12, receipt);
     registry
-        .append_promotion_stanza(
-            &session,
-            &chat_stanza(&session.jid, "late suffix"),
-            12,
-            receipt,
-        )
+        .append_promotion_stanza(&session, &entry)
         .await
         .expect("append suffix");
     assert!(
@@ -306,13 +317,14 @@ async fn promotion_inventory_append_advances_a_wrapped_sequence_once() {
         .expect("register");
     let stanza = chat_stanza(&session.jid, "wrapped suffix");
     let receipt = chrono::Utc::now();
+    let entry = detached_unacked(&stanza, 0, receipt);
     for expected in [
         waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::Appended,
         waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::AlreadyRecorded,
     ] {
         assert_eq!(
             registry
-                .append_promotion_stanza(&session, &stanza, 0, receipt)
+                .append_promotion_stanza(&session, &entry)
                 .await
                 .expect("append"),
             expected
@@ -430,9 +442,10 @@ async fn promotion_inventory_failed_suffix_survives_registration_and_reinsertion
         .await
         .expect("register prefix");
     let stanza = chat_stanza(&capture.jid, "retained failed suffix");
+    let entry = detached_unacked(&stanza, 12, chrono::Utc::now());
     storage.reject_append.store(true, Ordering::SeqCst);
     assert!(registry
-        .append_promotion_stanza(&capture, &stanza, 12, chrono::Utc::now())
+        .append_promotion_stanza(&capture, &entry)
         .await
         .is_err());
     capture.outbound_count = 12;

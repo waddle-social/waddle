@@ -2021,9 +2021,7 @@ mod tests {
         status: Option<&str>,
         priority: i8,
         payloads: Vec<Element>,
-        carbons_enabled: bool,
-        roster_interested: bool,
-        blocklist_interested: bool,
+        (carbons_enabled, roster_interested, blocklist_interested): (bool, bool, bool),
         stream_management_ref: Option<SmBinding>,
     ) -> AccountResourceSnapshot {
         AccountResourceSnapshot {
@@ -2050,9 +2048,7 @@ mod tests {
                     .parse()
                     .expect("valid caps payload"),
             ],
-            true,
-            true,
-            false,
+            (true, true, false),
             Some(sm_binding(1, 1)),
         )
     }
@@ -2090,9 +2086,7 @@ mod tests {
                 None,
                 0,
                 vec![payload],
-                false,
-                false,
-                false,
+                (false, false, false),
                 None,
             ),
         });
@@ -2381,9 +2375,7 @@ mod tests {
             Some("offline"),
             -1,
             Vec::new(),
-            false,
-            false,
-            true,
+            (false, false, true),
             Some(sm_binding(1, 1)),
         );
         commit(
@@ -2506,9 +2498,7 @@ mod tests {
                     .parse()
                     .expect("equivalent caps payload"),
             ],
-            true,
-            true,
-            false,
+            (true, true, false),
             Some(sm_binding(1, 1)),
         );
         let equivalent_replay = AccountResourceOperation::new(
@@ -2540,9 +2530,7 @@ mod tests {
                     Some("different status"),
                     7,
                     original.presence_payloads.clone(),
-                    true,
-                    true,
-                    false,
+                    (true, true, false),
                     original.stream_management_ref,
                 ),
             },
@@ -2573,9 +2561,7 @@ mod tests {
             Some("out for lunch"),
             7,
             original.presence_payloads.clone(),
-            true,
-            true,
-            false,
+            (true, true, false),
             Some(sm_binding(3, 1)),
         );
         reject(
@@ -2596,9 +2582,7 @@ mod tests {
             Some(&"x".repeat(ACCOUNT_RESOURCE_MAX_STATUS_BYTES + 1)),
             0,
             Vec::new(),
-            false,
-            false,
-            false,
+            (false, false, false),
             None,
         );
         let oversized_operation = operation(AccountResourceMutation::UpdateSnapshot {
@@ -2632,9 +2616,7 @@ mod tests {
             None,
             0,
             vec![oversized_payload],
-            false,
-            false,
-            false,
+            (false, false, false),
             None,
         );
         let oversized_payload_operation = operation(AccountResourceMutation::UpdateSnapshot {
@@ -2671,9 +2653,7 @@ mod tests {
             None,
             0,
             vec![payload_with_prefix_one],
-            false,
-            false,
-            false,
+            (false, false, false),
             None,
         );
         let second_prefix_snapshot = snapshot(
@@ -2682,9 +2662,7 @@ mod tests {
             None,
             0,
             vec![payload_with_prefix_two],
-            false,
-            false,
-            false,
+            (false, false, false),
             None,
         );
         assert_ne!(first_prefix_snapshot, second_prefix_snapshot);
@@ -2817,9 +2795,7 @@ mod tests {
                 None,
                 0,
                 vec![wide_payload],
-                false,
-                false,
-                false,
+                (false, false, false),
                 None,
             ),
         });
@@ -2849,18 +2825,16 @@ mod tests {
         let large_text = Element::builder("payload", "urn:example")
             .append("x".repeat(6 * 1024))
             .build();
-        assert!(presence_payloads_within_serialized_upper_bound(&[
-            large_text.clone()
-        ]));
+        assert!(presence_payloads_within_serialized_upper_bound(
+            std::slice::from_ref(&large_text)
+        ));
         assert!(snapshot(
             true,
             None,
             None,
             0,
             vec![large_text],
-            false,
-            false,
-            false,
+            (false, false, false),
             None,
         )
         .within_bounds());
@@ -2922,9 +2896,7 @@ mod tests {
             None,
             0,
             vec![payload],
-            false,
-            false,
-            false,
+            (false, false, false),
             None,
         );
         assert!(snapshot.within_bounds());
@@ -2966,9 +2938,7 @@ mod tests {
                 None,
                 0,
                 vec![deep_payload(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH)],
-                false,
-                false,
-                false,
+                (false, false, false),
                 None,
             ),
         });
@@ -2987,9 +2957,7 @@ mod tests {
                     None,
                     0,
                     vec![deep_payload(100_000)],
-                    false,
-                    false,
-                    false,
+                    (false, false, false),
                     None,
                 ),
             },
@@ -3036,9 +3004,7 @@ mod tests {
                                 None,
                                 0,
                                 vec![accepted_payload],
-                                false,
-                                false,
-                                false,
+                                (false, false, false),
                                 None,
                             ),
                         }));
@@ -3053,9 +3019,7 @@ mod tests {
                                 None,
                                 0,
                                 vec![rejected_payload],
-                                false,
-                                false,
-                                false,
+                                (false, false, false),
                                 None,
                             ),
                         }));
@@ -3098,9 +3062,7 @@ mod tests {
             None,
             0,
             vec![deep_payload(ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOAD_DEPTH)],
-            false,
-            false,
-            false,
+            (false, false, false),
             Some(sm_binding(2, 1)),
         );
         commit(
@@ -3467,9 +3429,7 @@ mod tests {
             Some("available"),
             2,
             Vec::new(),
-            true,
-            true,
-            true,
+            (true, true, true),
             None,
         );
         commit(
@@ -3855,9 +3815,7 @@ mod tests {
             None,
             -1,
             Vec::new(),
-            false,
-            false,
-            false,
+            (false, false, false),
             previous.stream_management_ref,
         );
         reject(
