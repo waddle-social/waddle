@@ -8,6 +8,7 @@ pub mod postgres_proxy;
 pub mod ingress_support;
 
 use std::str::FromStr;
+#[cfg(feature = "test-support")]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,8 +21,10 @@ use waddle_server::db::bootstrap::{
     verify_global_runtime, verify_store_lineage_runtime, ControlPlanePoolLimits,
     RuntimeAttachmentError, RuntimePoolLimits, MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS,
 };
+#[cfg(feature = "test-support")]
+use waddle_server::db::lineage::LineageUuid;
 use waddle_server::db::lineage::{
-    self, AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseName, PgSchemaName,
+    self, AttestedLineage, DeploymentUuid, PgDatabaseName, PgSchemaName,
 };
 use waddle_server::db::physical_attestation::{
     attest_connection, attest_dark_catalog_pinned, attested_pool, inspect_installation, install,
@@ -29,9 +32,9 @@ use waddle_server::db::physical_attestation::{
     DarkPhysicalAttestationPins, InstallationStatus, PgRoleName, PhysicalAttestationConfig,
     PhysicalAttestationError, TransactionBounds,
 };
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 #[cfg(feature = "test-support")]
-use waddle_server::db::{DatabaseError, MigrationLedgerError, MigrationRunner};
+use waddle_server::db::{DatabaseError, MigrationLedgerError};
 use waddle_server::ingress::EffectReceiptKey;
 use waddle_server::ingress_substrate::EffectReceiptKind;
 #[cfg(feature = "test-support")]
@@ -924,6 +927,7 @@ async fn misplaced_admin_identity_is_rejected_before_ddl() {
     fixture.cleanup().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn cancelled_attestation_hook_does_not_lend_a_connection() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -1025,6 +1029,7 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
     fixture.cleanup().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn attestation_hooks_preserve_role_and_session_wait_limits() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -1166,6 +1171,7 @@ async fn attestation_hooks_preserve_role_and_session_wait_limits() {
     fixture.cleanup().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn poisoned_idle_session_is_discarded_before_checkout() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -1264,6 +1270,7 @@ async fn poisoned_idle_session_is_discarded_before_checkout() {
     fixture.cleanup().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn raw_repeatable_read_snapshot_cannot_attest_stale_lineage() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -4098,6 +4105,7 @@ async fn wait_for_active_query(observer: &PgPool, marker: &str) {
     .expect("guard query acquired its main-lane permit");
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn committed_function_attests_every_physical_connection_and_replacement() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -4201,6 +4209,7 @@ async fn committed_function_attests_every_physical_connection_and_replacement() 
     fixture.cleanup().await;
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn wrong_identity_revoked_grant_and_spoofed_schema_never_lend_a_connection() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
