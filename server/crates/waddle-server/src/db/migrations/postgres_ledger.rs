@@ -54,17 +54,6 @@ impl PreparedLedger {
 /// The transaction must stay alive through all dependent migration work.
 pub(super) async fn prepare(tx: &mut Transaction<'_>) -> Result<PreparedLedger, DatabaseError> {
     let connection = postgres_connection(tx)?;
-    // current_schema reflects the configured target before the path is made
-    // catalog-only. It is observed on this backend, not independently pinned.
-    let name: Option<String> = sqlx::query_scalar("SELECT pg_catalog.current_schema()::text")
-        .fetch_one(&mut *connection)
-        .await?;
-    let name = name.ok_or(MigrationLedgerError::UnsafeTargetSchema)?;
-    if name.is_empty() || name.len() > 63 || name.starts_with("pg_") || name == "information_schema"
-    {
-        return Err(MigrationLedgerError::UnsafeTargetSchema.into());
-    }
-
     let (lock_timeout, statement_timeout): (String, String) = sqlx::query_as(
         "SELECT pg_catalog.current_setting('lock_timeout'), \
          pg_catalog.current_setting('statement_timeout')",
@@ -79,6 +68,19 @@ pub(super) async fn prepare(tx: &mut Transaction<'_>) -> Result<PreparedLedger, 
         STATEMENT_TIMEOUT_MS,
     )
     .await?;
+
+    // This runs before the catalog-only search path: qualify the cast type as
+    // well as the function, so a leading schema cannot inject a domain check.
+    // The resulting schema is observed on this backend, not independently pinned.
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT pg_catalog.current_schema()::pg_catalog.text")
+            .fetch_one(&mut *connection)
+            .await?;
+    let name = name.ok_or(MigrationLedgerError::UnsafeTargetSchema)?;
+    if name.is_empty() || name.len() > 63 || name.starts_with("pg_") || name == "information_schema"
+    {
+        return Err(MigrationLedgerError::UnsafeTargetSchema.into());
+    }
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;

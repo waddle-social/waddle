@@ -398,6 +398,76 @@ async fn postgres_temp_and_alternate_schema_shadows_are_not_used() {
 }
 
 #[tokio::test]
+async fn postgres_leading_schema_cannot_shadow_catalog_text_during_target_discovery() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url, "type_shadow").await;
+    let s = &fixture.schema;
+    fixture
+        .execute(&format!(
+            "CREATE SEQUENCE {s}.probe; \
+             CREATE FUNCTION {s}.check_name(pg_catalog.name) RETURNS pg_catalog.bool \
+             LANGUAGE plpgsql AS $$ BEGIN \
+               PERFORM pg_catalog.nextval('{s}.probe'::pg_catalog.regclass); \
+               PERFORM pg_catalog.pg_sleep(0.25); RETURN true; END $$; \
+             CREATE DOMAIN {s}.text AS pg_catalog.name CHECK ({s}.check_name(VALUE))"
+        ))
+        .await;
+
+    // The former unqualified cast resolves to the hostile domain and times
+    // out after advancing the nontransactional sequence. This establishes
+    // that the witness detects both user code and an obstructed discovery.
+    let mut control = fixture.admin.begin().await.expect("start positive control");
+    sqlx::query(&format!("SET LOCAL search_path = {s}, pg_catalog"))
+        .execute(&mut *control)
+        .await
+        .expect("install hostile search path");
+    sqlx::query("SET LOCAL statement_timeout = '50ms'")
+        .execute(&mut *control)
+        .await
+        .expect("bound positive control");
+    let error = sqlx::query("SELECT pg_catalog.current_schema()::text")
+        .execute(&mut *control)
+        .await
+        .expect_err("unqualified cast must invoke the hostile domain");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("57014")
+    );
+    control
+        .rollback()
+        .await
+        .expect("roll back positive control");
+    assert!(fixture.probe_called().await);
+    fixture.reset_probe().await;
+
+    let mut timed_url = url::Url::parse(&url).expect("parse test URL");
+    timed_url
+        .query_pairs_mut()
+        .append_pair("options", "-c statement_timeout=2s");
+    let db = open_database(
+        timed_url.as_str(),
+        &format!("{s},pg_catalog"),
+        "ledger_type_shadow",
+    )
+    .await;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        MigrationRunner::new(Vec::new()).run(&db),
+    )
+    .await
+    .expect("qualified discovery must not wait for the hostile domain")
+    .expect("qualified discovery and ledger creation");
+    assert!(!fixture.probe_called().await);
+    drop(db);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn postgres_replaced_name_after_lock_wait_is_refused() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;

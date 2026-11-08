@@ -70,6 +70,7 @@ package(waddle-server) & (
     | binary(liveness_readiness_split)
     | binary(sqlx_cancelled_begin)
     | binary(postgres_admission_cleanup)
+    | binary(postgres_migration_ledger_catalog)
     | binary(owner_bootstrap)
     | binary(physical_attestation)
     | binary(ingress_relation_guard_lab)
