@@ -8,9 +8,13 @@ use waddle_server::db::lineage::PgIdentity;
 use waddle_server::db::Database;
 use waddle_server::notification_activity::NotificationActivityStore;
 use waddle_server::notification_outbox::NotificationOutboxStore;
+use waddle_server::pubsub::{DatabasePubSubStorage, PubSubRuntimeAttachError};
 use waddle_server::push_registrations::DatabasePushRegistrationStore;
 use waddle_server::push_service::vapid_storage::VapidStorage;
 use waddle_server::push_service::DatabasePushServiceStore;
+use waddle_server::server::push_notification_custody::{
+    verify_attested_push_notification_custody, PushNotificationCustodyError,
+};
 use waddle_server::spaces_metadata::{DatabaseSpacesMetadataStore, SpaceStoreAttachError};
 
 #[derive(Clone, Copy)]
@@ -23,6 +27,13 @@ enum ExpectedAttachRefusal {
 struct TableGrant {
     table: &'static str,
     privileges: &'static [&'static str],
+}
+
+pub(super) struct FixtureRoles<'a> {
+    pub(super) owner: &'a str,
+    pub(super) api: &'a str,
+    pub(super) helper: &'a str,
+    pub(super) runtime: &'a str,
 }
 
 const READ: &[&str] = &["SELECT"];
@@ -125,9 +136,14 @@ pub(super) async fn prepare_and_check(
     main: &Database,
     identity: &PgIdentity,
     admin: &PgPool,
-    owner: &str,
-    runtime: &str,
+    roles: FixtureRoles<'_>,
 ) -> anyhow::Result<()> {
+    let FixtureRoles {
+        owner,
+        api,
+        helper,
+        runtime,
+    } = roles;
     // Never import an operator's VAPID bootstrap secret into a disposable
     // database. Owner preparation otherwise reads this process environment.
     ensure!(
@@ -343,6 +359,114 @@ pub(super) async fn prepare_and_check(
     .execute(admin)
     .await?;
     ensure!(table_matches(admin, owner, runtime, registrations).await?);
+
+    assert_push_custody_refusals(admin, main, identity, owner, api, helper, runtime).await?;
+    Ok(())
+}
+
+/// Preserve the existing A/H/R split while proving why the current joint
+/// Push reader cannot complete on this fixture. The migrated Foundation heap
+/// remains schema-owner-owned; A has its candidate DML grant and R has no
+/// direct SELECT grant. The joint reader first reaches the legacy PubSub
+/// verifier, whose helper check requires schema ownership, before attempting
+/// its later ACCESS SHARE lock on Foundation.
+async fn assert_push_custody_refusals(
+    admin: &PgPool,
+    main: &Database,
+    identity: &PgIdentity,
+    schema_owner: &str,
+    api: &str,
+    helper: &str,
+    runtime: &str,
+) -> anyhow::Result<()> {
+    let role_matrix: bool = sqlx::query_scalar(
+        "SELECT foundation.relowner = namespace.nspowner \
+         AND schema_role.oid = namespace.nspowner \
+         AND api_role.rolname = $2 AND helper_role.rolname = $3 \
+         AND runtime_role.rolname = $4 \
+         AND api_role.oid <> namespace.nspowner \
+         AND pg_catalog.has_table_privilege(api_role.oid, foundation.oid, 'SELECT') \
+         AND pg_catalog.has_table_privilege(api_role.oid, foundation.oid, 'INSERT') \
+         AND pg_catalog.has_table_privilege(api_role.oid, foundation.oid, 'UPDATE') \
+         AND pg_catalog.has_table_privilege(api_role.oid, foundation.oid, 'DELETE') \
+         AND NOT pg_catalog.has_table_privilege(runtime_role.oid, foundation.oid, 'SELECT') \
+         AND NOT pg_catalog.has_any_column_privilege(runtime_role.oid, foundation.oid, 'SELECT') \
+         AND pubsub_lock.proowner = helper_role.oid \
+         AND pubsub_lock.proowner <> namespace.nspowner \
+         FROM pg_catalog.pg_class foundation \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = foundation.relnamespace \
+         JOIN pg_catalog.pg_roles schema_role ON schema_role.rolname = $1 \
+         JOIN pg_catalog.pg_roles api_role ON api_role.rolname = $2 \
+         JOIN pg_catalog.pg_roles helper_role ON helper_role.rolname = $3 \
+         JOIN pg_catalog.pg_roles runtime_role ON runtime_role.rolname = $4 \
+         JOIN pg_catalog.pg_proc pubsub_lock ON pubsub_lock.pronamespace = namespace.oid \
+           AND pubsub_lock.proname = 'pubsub_runtime_attach_lock' AND pubsub_lock.pronargs = 0 \
+         WHERE namespace.nspname = $5 AND foundation.relname = 'ingress_effect_descendants' \
+           AND foundation.relkind = 'r'",
+    )
+    .bind(schema_owner)
+    .bind(api)
+    .bind(helper)
+    .bind(runtime)
+    .bind(&identity.schema.name.0)
+    .fetch_one(admin)
+    .await?;
+    ensure!(
+        role_matrix,
+        "combined Push custody role matrix drifted: expected schema-owned Foundation heap, A DML, H helper, and no R SELECT"
+    );
+
+    // This public runtime attachment uses the legacy verifier directly. It
+    // must refuse the H-owned helper instead of returning a PubSub handle.
+    match DatabasePubSubStorage::attach_existing(main.clone()).await {
+        Err(PubSubRuntimeAttachError::InvalidAttachLock) => {}
+        Err(error) => anyhow::bail!("legacy PubSub verifier refused unexpectedly: {error}"),
+        Ok(store) => {
+            drop(store);
+            anyhow::bail!("legacy PubSub verifier accepted the H-owned helper")
+        }
+    }
+
+    // PostgreSQL requires SELECT for this exact ACCESS SHARE lock used by the
+    // joint diagnostic. Exercise it as R without widening any fixture grant.
+    let mut runtime_tx = admin.begin().await?;
+    sqlx::query(&format!("SET LOCAL ROLE {runtime}"))
+        .execute(&mut *runtime_tx)
+        .await?;
+    let current_role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&mut *runtime_tx)
+        .await?;
+    ensure!(
+        current_role == runtime,
+        "Foundation refusal did not run as R"
+    );
+    let lock = sqlx::query("LOCK TABLE guarded.ingress_effect_descendants IN ACCESS SHARE MODE")
+        .execute(&mut *runtime_tx)
+        .await;
+    let lock_error = lock.expect_err("R unexpectedly acquired the Foundation read lock");
+    let sqlstate = lock_error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .map(|code| code.into_owned());
+    ensure!(
+        sqlstate.as_deref() == Some("42501"),
+        "Foundation ACCESS SHARE refusal returned unexpected SQLSTATE: {sqlstate:?}"
+    );
+    runtime_tx.rollback().await?;
+
+    // The public joint diagnostic returns evidence only; it does not expose
+    // functional store handles. Its stage ordering checks Push/outbox first,
+    // then the legacy PubSub helper, and attempts Foundation only after that
+    // helper succeeds. Preserve the exact H-stage refusal in this fixture.
+    match verify_attested_push_notification_custody(main.clone(), &[7_u8; 32]).await {
+        Err(PushNotificationCustodyError::PubSub(PubSubRuntimeAttachError::InvalidAttachLock)) => {}
+        Err(error) => {
+            anyhow::bail!("joint Push custody diagnostic refused at an unexpected stage: {error}")
+        }
+        Ok(evidence) => {
+            anyhow::bail!("joint Push custody diagnostic unexpectedly reached evidence: {evidence}")
+        }
+    }
     Ok(())
 }
 

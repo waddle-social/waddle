@@ -166,7 +166,7 @@ pub(super) async fn wire_messages(
         .iter()
         .flat_map(|obligation| obligation.frames.iter().cloned())
         .map(|stanza| {
-            let Stanza::Message(message) = stanza else {
+            let Stanza::Message(message) = stanza.stanza else {
                 panic!("message frame")
             };
             let element = minidom::Element::from(message);

@@ -85,7 +85,7 @@ async fn assert_error_wire(
         .flat_map(|entry| &entry.frames)
         .collect();
     assert_eq!(frames.len(), 1);
-    let Stanza::Message(message) = frames[0] else {
+    let Stanza::Message(message) = &frames[0].stanza else {
         panic!("message error frame")
     };
     let element: minidom::Element = message.clone().into();

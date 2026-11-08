@@ -547,7 +547,7 @@ async fn receipts_retention(fixture: IngressFixture) {
     )
     .await;
     assert_eq!(report.frame_obligations.len(), 1);
-    let Stanza::Message(frame) = &report.frame_obligations[0].frames[0] else {
+    let Stanza::Message(frame) = &report.frame_obligations[0].frames[0].stanza else {
         panic!("reply frame");
     };
     let xml: minidom::Element = frame.clone().into();

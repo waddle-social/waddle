@@ -11,6 +11,7 @@ use crate::db::Rows;
 use crate::db::Transaction;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use minidom::Element;
 use waddle_xmpp::push::{PushError, PushSubscription, PushSubscriptionStore};
@@ -44,25 +45,39 @@ pub struct DatabasePushRegistrationStore {
     db: Database,
 }
 
+/// Failures from the owner-only registration schema initializer.
+#[derive(Debug, thiserror::Error)]
+pub enum PushRegistrationOwnerError {
+    #[error(transparent)]
+    Storage(#[from] PushError),
+    /// The original backend might still hold its transaction and catalog lock.
+    #[error("push-registration initialization rollback was not acknowledged; reconcile the original backend before retrying")]
+    RollbackUnconfirmed,
+    /// An old table or index cannot establish whether this attempt committed.
+    #[error("push-registration initialization COMMIT is indeterminate; reconcile the original backend and authoritative primary before retrying")]
+    CommitIndeterminate,
+}
+
 impl DatabasePushRegistrationStore {
-    pub async fn try_new(db: Database) -> Result<Self, PushError> {
+    pub async fn try_new(db: Database) -> Result<Self, PushRegistrationOwnerError> {
         Self::initialize_owner(db).await
     }
 
     /// Initialize the registration schema through this exact owner database
     /// handle. Existing callers retain the historical bootstrap behavior via
     /// [`Self::try_new`].
-    pub async fn initialize_owner(db: Database) -> Result<Self, PushError> {
+    pub async fn initialize_owner(db: Database) -> Result<Self, PushRegistrationOwnerError> {
         if db.attested_pg_writer_capability().is_some() {
             return Err(PushError::StorageError(
                 "push-registration owner initialization cannot use an attested runtime handle"
                     .to_owned(),
-            ));
+            )
+            .into());
         }
         Self::build_initialized(db).await
     }
 
-    async fn build_initialized(db: Database) -> Result<Self, PushError> {
+    async fn build_initialized(db: Database) -> Result<Self, PushRegistrationOwnerError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)
@@ -82,7 +97,10 @@ impl DatabasePushRegistrationStore {
         Ok(Self { db })
     }
 
-    async fn initialize(&self) -> Result<(), PushError> {
+    async fn initialize(&self) -> Result<(), PushRegistrationOwnerError> {
+        if self.db.driver() == DatabaseDriver::Postgres {
+            return self.initialize_postgres().await;
+        }
         let i64_type = crate::db::i64_sql_type(self.db.driver());
         self.execute(
             &format!(
@@ -114,6 +132,49 @@ impl DatabasePushRegistrationStore {
         Ok(())
     }
 
+    /// Keep both PostgreSQL DDL statements on the backend holding catalog-X.
+    /// The fence coordinates only participating mutators; it does not replace
+    /// operator-enforced quiescence of older or privileged writers.
+    async fn initialize_postgres(&self) -> Result<(), PushRegistrationOwnerError> {
+        const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(35);
+        const END_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let mut tx = self
+            .db
+            .begin_catalog_fenced_with_idle_bound(&[])
+            .await
+            .map_err(|error| match error {
+                crate::db::DatabaseError::CatalogMutationRollbackUnconfirmed => {
+                    PushRegistrationOwnerError::RollbackUnconfirmed
+                }
+                other => PushError::StorageError(other.to_string()).into(),
+            })?;
+        let result = tokio::time::timeout(INITIALIZE_TIMEOUT, prepare_postgres(&mut tx)).await;
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(PushError::StorageError(
+                "push-registration PostgreSQL initialization timed out".to_owned(),
+            )),
+        };
+        if let Some(error) = error {
+            if !tx.rollback_bounded_discard(END_TIMEOUT).await {
+                return Err(PushRegistrationOwnerError::RollbackUnconfirmed);
+            }
+            return Err(error.into());
+        }
+
+        // An old successful schema cannot prove whether this particular COMMIT
+        // completed. Discard an unacknowledged lease and return no store.
+        if !matches!(
+            tokio::time::timeout(END_TIMEOUT, tx.commit()).await,
+            Ok(Ok(()))
+        ) {
+            return Err(PushRegistrationOwnerError::CommitIndeterminate);
+        }
+        Ok(())
+    }
+
     async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, PushError> {
         let conn = self
             .db
@@ -135,6 +196,81 @@ impl DatabasePushRegistrationStore {
             .await
             .map_err(|error| PushError::StorageError(error.to_string()))
     }
+}
+
+/// Capture the effective persistent schema under catalog-X, reject a temporary
+/// table shadow, then use catalog-first name resolution and qualified DDL.
+async fn prepare_postgres(tx: &mut Transaction<'_>) -> Result<(), PushError> {
+    let connection = tx.postgres_connection().ok_or_else(|| {
+        PushError::StorageError("push-registration initialization requires PostgreSQL".to_owned())
+    })?;
+    let schema: Option<String> =
+        sqlx::query_scalar("SELECT pg_catalog.current_schema()::pg_catalog.text")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| PushError::StorageError(error.to_string()))?;
+    sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?;
+    for (setting, cap) in [("lock_timeout", "5s"), ("statement_timeout", "30s")] {
+        sqlx::query(
+            "SELECT pg_catalog.set_config($1, \
+             CASE WHEN pg_catalog.current_setting($1)::pg_catalog.interval = '0'::pg_catalog.interval \
+               OR pg_catalog.current_setting($1)::pg_catalog.interval > $2::pg_catalog.interval \
+             THEN $2 ELSE pg_catalog.current_setting($1) END, true)",
+        )
+        .bind(setting)
+        .bind(cap)
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?;
+    }
+    let schema = schema
+        .filter(|schema| !schema.starts_with("pg_") && schema != "information_schema")
+        .ok_or_else(|| {
+            PushError::StorageError(
+                "push-registration initialization requires a persistent application schema"
+                    .to_owned(),
+            )
+        })?;
+    let shadow: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class \
+         WHERE relnamespace = pg_catalog.pg_my_temp_schema() \
+           AND relname = 'push_registrations')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| PushError::StorageError(error.to_string()))?;
+    if shadow {
+        return Err(PushError::StorageError(
+            "push-registration initialization refused a temporary table shadow".to_owned(),
+        ));
+    }
+    let table = format!("\"{}\".push_registrations", schema.replace('"', "\"\""));
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {table} (\
+         owner_bare_jid TEXT NOT NULL, \
+         push_service_jid TEXT NOT NULL, \
+         node TEXT NOT NULL DEFAULT '', \
+         publish_options_xml TEXT, \
+         status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled', 'backoff')), \
+         failure_count INTEGER NOT NULL DEFAULT 0, \
+         last_error TEXT, next_retry_at_ms BIGINT, \
+         created_at_ms BIGINT NOT NULL, updated_at_ms BIGINT NOT NULL, \
+         PRIMARY KEY (owner_bare_jid, push_service_jid, node))"
+    ))
+    .execute(&mut *connection)
+    .await
+    .map_err(|error| PushError::StorageError(error.to_string()))?;
+    sqlx::query(&format!(
+        "CREATE INDEX IF NOT EXISTS idx_push_registrations_owner_status \
+         ON {table} (owner_bare_jid, status)"
+    ))
+    .execute(&mut *connection)
+    .await
+    .map_err(|error| PushError::StorageError(error.to_string()))?;
+    Ok(())
 }
 
 impl PushSubscriptionStore for DatabasePushRegistrationStore {
