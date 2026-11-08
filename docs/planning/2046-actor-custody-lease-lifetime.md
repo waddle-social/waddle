@@ -45,6 +45,7 @@ new binding while a prior generation still has outstanding leases.
 
 ## Scope limits
 
-The lease represents the current serialized-byte accounting model. It is not a
-proof of actual `Stanza`/minidom heap bytes, does not bound temporary typed or
-writer copies, and does not change the live legacy `/ws` queue selection.
+The lease represents the current serialized-byte accounting model. Borrowed
+`OutboundStanza` remains `Clone`; clones and temporary typed or writer copies
+are not charged by this lease. It is not a proof of actual `Stanza`/minidom
+heap bytes and does not change the live legacy `/ws` queue selection.

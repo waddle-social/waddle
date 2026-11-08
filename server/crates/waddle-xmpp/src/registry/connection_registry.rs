@@ -40,7 +40,8 @@ mod subscriptions;
 mod write_interruption;
 
 pub use actor_outbound::{
-    ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver, ActorOutboundStage,
+    ActorOutboundCustody, ActorOutboundId, ActorOutboundLease, ActorOutboundReceiver,
+    ActorOutboundStage,
 };
 pub use archive_dispatch::{ArchiveDispatchRefusal, ArchiveDispatchRefusalReason};
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};

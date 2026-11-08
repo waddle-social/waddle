@@ -1593,8 +1593,8 @@ async fn real_socket_actor_owner_keeps_exact_envelope_until_joined_terminal_sett
     assert_eq!(terminal.len(), 1);
     let (_, retained, stage) = terminal.into_iter().next().expect("one retained envelope");
     assert_eq!(stage, ActorOutboundStage::Flushed);
-    assert_eq!(retained.stanza.to_element(), stanza.to_element());
-    assert!(retained.write_acceptance.is_some());
+    assert_eq!(retained.outbound().stanza.to_element(), stanza.to_element());
+    assert!(retained.outbound().write_acceptance.is_some());
     timeout(TEST_TIMEOUT, async {
         while index.contains(&connection) {
             tokio::task::yield_now().await;
@@ -1779,8 +1779,8 @@ async fn actor_owner_panic_keeps_unwritten_envelope_in_app_held_terminal_invento
     assert_eq!(terminal.len(), 1);
     let (_, retained, stage) = terminal.into_iter().next().expect("one envelope");
     assert_eq!(stage, ActorOutboundStage::NotAttempted);
-    assert_eq!(retained.stanza.to_element(), stanza.to_element());
-    assert!(retained.write_acceptance.is_some());
+    assert_eq!(retained.outbound().stanza.to_element(), stanza.to_element());
+    assert!(retained.outbound().write_acceptance.is_some());
     assert!(matches!(
         acknowledged.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
@@ -1915,8 +1915,8 @@ async fn real_socket_stop_at_physical_attempt(after_attempt: bool) {
     assert_eq!(terminal.len(), 1);
     let (_, retained, stage) = terminal.into_iter().next().expect("one envelope");
     assert_eq!(stage, expected_stage);
-    assert_eq!(retained.stanza.to_element(), stanza.to_element());
-    assert!(retained.write_acceptance.is_some());
+    assert_eq!(retained.outbound().stanza.to_element(), stanza.to_element());
+    assert!(retained.outbound().write_acceptance.is_some());
     assert!(matches!(
         acknowledged.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)

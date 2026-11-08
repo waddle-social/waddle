@@ -42,9 +42,51 @@ pub enum ActorOutboundStage {
 }
 
 struct ActorOutboundRecord {
-    outbound: Mutex<Option<Arc<OutboundStanza>>>,
-    payload_bytes: usize,
+    outbound: Mutex<Option<Arc<ActorOutboundLease>>>,
     stage: Mutex<ActorOutboundStage>,
+}
+
+#[derive(Default)]
+struct OutboundLeaseBudgetState {
+    count: usize,
+    payload_bytes: usize,
+}
+
+#[derive(Default)]
+struct OutboundLeaseBudget {
+    state: Mutex<OutboundLeaseBudgetState>,
+}
+
+/// An opaque shared handle for an accepted outbound envelope. The original
+/// serialized-byte charge remains live until the last handle is dropped.
+/// Consumers may inspect the envelope by reference but cannot move its fields
+/// out from under the charge.
+pub struct ActorOutboundLease {
+    outbound: OutboundStanza,
+    _charge: OutboundLeaseCharge,
+}
+
+impl ActorOutboundLease {
+    pub fn outbound(&self) -> &OutboundStanza {
+        &self.outbound
+    }
+}
+
+struct OutboundLeaseCharge {
+    budget: Arc<OutboundLeaseBudget>,
+    payload_bytes: usize,
+}
+
+impl Drop for OutboundLeaseCharge {
+    fn drop(&mut self) {
+        let mut state = self
+            .budget
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.count -= 1;
+        state.payload_bytes -= self.payload_bytes;
+    }
 }
 
 struct AttemptGuard(Arc<ActorOutboundRecord>);
@@ -64,7 +106,6 @@ impl Drop for AttemptGuard {
 
 struct CustodyState {
     next_nonce: u64,
-    payload_bytes: usize,
     records: HashMap<ActorOutboundId, Arc<ActorOutboundRecord>>,
     sealed: bool,
 }
@@ -77,6 +118,7 @@ pub struct ActorOutboundCustody {
     max_count: usize,
     max_payload_bytes: usize,
     state: Mutex<CustodyState>,
+    lease_budget: Arc<OutboundLeaseBudget>,
 }
 
 struct CappedByteCount {
@@ -126,10 +168,10 @@ impl ActorOutboundCustody {
             max_payload_bytes,
             state: Mutex::new(CustodyState {
                 next_nonce: 0,
-                payload_bytes: 0,
                 records: HashMap::new(),
                 sealed: false,
             }),
+            lease_budget: Arc::new(OutboundLeaseBudget::default()),
         }))
     }
 
@@ -175,7 +217,15 @@ impl ActorOutboundCustody {
             return Err(outbound);
         };
         let mut state = self.lock_state();
-        let Some(next_bytes) = state.payload_bytes.checked_add(payload_bytes) else {
+        let mut budget = self
+            .lease_budget
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(next_bytes) = budget.payload_bytes.checked_add(payload_bytes) else {
+            return Err(outbound);
+        };
+        let Some(next_lease_count) = budget.count.checked_add(1) else {
             return Err(outbound);
         };
         let Some(next_nonce) = state.next_nonce.checked_add(1) else {
@@ -184,6 +234,7 @@ impl ActorOutboundCustody {
         if state.sealed
             || state.records.len() >= self.max_count
             || next_bytes > self.max_payload_bytes
+            || next_lease_count > self.max_count
         {
             return Err(outbound);
         }
@@ -194,21 +245,44 @@ impl ActorOutboundCustody {
             nonce: next_nonce,
         };
         state.next_nonce = next_nonce;
-        state.payload_bytes = next_bytes;
+        budget.count = next_lease_count;
+        budget.payload_bytes = next_bytes;
+        // The checked nonce is unique within this custody, so this insert
+        // cannot replace an earlier record and drop its charge under the
+        // budget lock.
         state.records.insert(
             id.clone(),
             Arc::new(ActorOutboundRecord {
-                outbound: Mutex::new(Some(Arc::new(outbound))),
-                payload_bytes,
+                outbound: Mutex::new(Some(Arc::new(ActorOutboundLease {
+                    outbound,
+                    _charge: OutboundLeaseCharge {
+                        budget: Arc::clone(&self.lease_budget),
+                        payload_bytes,
+                    },
+                }))),
                 stage: Mutex::new(ActorOutboundStage::Queued),
             }),
         );
         Ok(id)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    #[expect(
+        clippy::result_large_err,
+        reason = "test admission preserves the exact owned refusal envelope"
+    )]
+    pub fn insert_for_test(
+        &self,
+        owner: LocalConnectionBindingId,
+        binding: &BindingRef,
+        outbound: OutboundStanza,
+    ) -> Result<ActorOutboundId, OutboundStanza> {
+        self.insert(owner, binding, outbound)
+    }
+
     /// The actor may derive a typed output without moving callback or durable
     /// metadata out of the custody record.
-    pub fn snapshot(&self, id: &ActorOutboundId) -> Option<Arc<OutboundStanza>> {
+    pub fn snapshot(&self, id: &ActorOutboundId) -> Option<Arc<ActorOutboundLease>> {
         let record = self.lock_state().records.get(id)?.clone();
         let outbound = record
             .outbound
@@ -293,7 +367,7 @@ impl ActorOutboundCustody {
     pub fn take_terminal(
         &self,
         id: &ActorOutboundId,
-    ) -> Option<(Arc<OutboundStanza>, ActorOutboundStage)> {
+    ) -> Option<(Arc<ActorOutboundLease>, ActorOutboundStage)> {
         let mut state = self.lock_state();
         let record = state.records.get(id)?.clone();
         let stage = *record
@@ -306,7 +380,6 @@ impl ActorOutboundCustody {
             return None;
         }
         state.records.remove(id)?;
-        state.payload_bytes -= record.payload_bytes;
         let outbound = record
             .outbound
             .lock()
@@ -317,6 +390,31 @@ impl ActorOutboundCustody {
 
     pub fn retained_count(&self) -> usize {
         self.lock_state().records.len()
+    }
+
+    /// Whether this sealed generation has no records or outstanding leased
+    /// envelopes and can be replaced by a new binding channel.
+    pub fn ready_for_replacement(&self) -> bool {
+        let state = self.lock_state();
+        if !state.sealed || !state.records.is_empty() {
+            return false;
+        }
+        let budget = self
+            .lease_budget
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        budget.count == 0 && budget.payload_bytes == 0
+    }
+
+    /// Number of original envelopes whose serialized-byte charge is still
+    /// live, including terminal envelopes held by external snapshot handles.
+    pub fn outstanding_lease_count(&self) -> usize {
+        self.lease_budget
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .count
     }
 
     /// The independent cleanup owner can recover even IDs lost from a
@@ -407,6 +505,7 @@ mod tests {
     #[test]
     fn seal_during_attempt_never_labels_it_not_attempted() {
         let (custody, id) = prepared();
+        let snapshot = custody.snapshot(&id).expect("external snapshot");
         let (entered, seen) = std::sync::mpsc::channel();
         let (release, resume) = std::sync::mpsc::channel();
         let writer = std::thread::spawn({
@@ -423,14 +522,19 @@ mod tests {
         custody.seal();
         assert_eq!(custody.stage(&id), Some(ActorOutboundStage::Attempting));
         assert!(custody.take_terminal(&id).is_none());
+        let drop_snapshot = std::thread::spawn(move || drop(snapshot));
         release.send(()).expect("release writer");
         assert_eq!(writer.join().expect("writer joined"), Some(()));
+        drop_snapshot.join().expect("snapshot drop joined");
         assert_eq!(
             custody.stage(&id),
             Some(ActorOutboundStage::AttemptedUncertain)
         );
-        let (_, stage) = custody.take_terminal(&id).expect("terminal custody");
+        let (terminal, stage) = custody.take_terminal(&id).expect("terminal custody");
         assert_eq!(stage, ActorOutboundStage::AttemptedUncertain);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+        drop(terminal);
+        assert_eq!(custody.outstanding_lease_count(), 0);
     }
 
     #[test]
@@ -442,7 +546,7 @@ mod tests {
             .is_none());
         let (outbound, stage) = custody.take_terminal(&id).expect("terminal custody");
         assert_eq!(stage, ActorOutboundStage::NotAttempted);
-        assert!(outbound.pending_row_id.is_none());
+        assert!(outbound.outbound().pending_row_id.is_none());
     }
 
     #[test]
@@ -512,5 +616,169 @@ mod tests {
             .expect_err("XML exceeds the capped serialization bound");
         assert_eq!(refused.stanza.to_element(), expected);
         assert_eq!(small.retained_count(), 0);
+    }
+
+    fn flushed_one(custody: &ActorOutboundCustody, id: &ActorOutboundId) {
+        assert_eq!(custody.attempt_with(id, || ()), Some(()));
+        custody.mark_flushed(id);
+    }
+
+    fn one_message_cost() -> (OutboundStanza, usize) {
+        let outbound = OutboundStanza::new(Stanza::Message(Message::new(None)));
+        let mut serialized = CappedByteCount {
+            count: 0,
+            limit: usize::MAX,
+        };
+        outbound
+            .stanza
+            .to_element()
+            .write_to(&mut serialized)
+            .expect("message XML size");
+        let charge = envelope_budget_bytes(&outbound, serialized.count).expect("message cost");
+        (outbound, charge)
+    }
+
+    #[test]
+    fn terminal_charge_blocks_replacement_until_last_snapshot_is_dropped() {
+        let connection = ConnectionRef::fresh(crate::ownership::NodeLeaseIdentity::local_process());
+        let binding = BindingRef::fresh(connection.clone());
+        let custody = ActorOutboundCustody::new(connection, 1, 4096).expect("valid bound");
+        let (outbound, charge) = one_message_cost();
+        let id = custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, outbound)
+            .expect("one frame fits");
+        let snapshot = custody.snapshot(&id).expect("shared snapshot");
+        flushed_one(&custody, &id);
+        custody.seal();
+        let (terminal, stage) = custody.take_terminal(&id).expect("terminal transfer");
+
+        assert_eq!(stage, ActorOutboundStage::Flushed);
+        assert_eq!(custody.retained_count(), 0);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+        assert_eq!(
+            custody
+                .lease_budget
+                .state
+                .lock()
+                .expect("budget")
+                .payload_bytes,
+            charge
+        );
+        assert!(!custody.ready_for_replacement());
+
+        drop(terminal);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+        assert!(!custody.ready_for_replacement());
+
+        drop(snapshot);
+        assert_eq!(custody.outstanding_lease_count(), 0);
+        assert_eq!(
+            custody
+                .lease_budget
+                .state
+                .lock()
+                .expect("budget")
+                .payload_bytes,
+            0
+        );
+        assert!(custody.ready_for_replacement());
+    }
+
+    #[test]
+    fn outstanding_count_limit_is_held_by_terminal_snapshot() {
+        let connection = ConnectionRef::fresh(crate::ownership::NodeLeaseIdentity::local_process());
+        let binding = BindingRef::fresh(connection.clone());
+        let custody = ActorOutboundCustody::new(connection, 1, 4096).expect("one slot");
+        let (first, _) = one_message_cost();
+        let (second, _) = one_message_cost();
+        let expected = second.stanza.to_element();
+        let id = custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, first)
+            .expect("first fits");
+        let snapshot = custody.snapshot(&id).expect("snapshot");
+        flushed_one(&custody, &id);
+        let (terminal, _) = custody.take_terminal(&id).expect("terminal transfer");
+
+        let refused = custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, second)
+            .expect_err("outstanding lease still occupies the count budget");
+        assert_eq!(refused.stanza.to_element(), expected);
+        assert_eq!(custody.retained_count(), 0);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+
+        drop(terminal);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+        drop(snapshot);
+        let (next, _) = one_message_cost();
+        assert!(custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, next)
+            .is_ok());
+    }
+
+    #[test]
+    fn outstanding_byte_limit_is_held_by_terminal_snapshot() {
+        let connection = ConnectionRef::fresh(crate::ownership::NodeLeaseIdentity::local_process());
+        let binding = BindingRef::fresh(connection.clone());
+        let (first, charge) = one_message_cost();
+        let (second, _) = one_message_cost();
+        let expected = second.stanza.to_element();
+        let custody = ActorOutboundCustody::new(connection, 2, charge).expect("byte slot");
+        let id = custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, first)
+            .expect("first fits exactly");
+        let snapshot = custody.snapshot(&id).expect("snapshot");
+        flushed_one(&custody, &id);
+        let (terminal, _) = custody.take_terminal(&id).expect("terminal transfer");
+
+        let refused = custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, second)
+            .expect_err("outstanding lease still occupies the byte budget");
+        assert_eq!(refused.stanza.to_element(), expected);
+        assert_eq!(custody.retained_count(), 0);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+        assert_eq!(
+            custody
+                .lease_budget
+                .state
+                .lock()
+                .expect("budget")
+                .payload_bytes,
+            charge
+        );
+
+        drop(terminal);
+        assert_eq!(custody.outstanding_lease_count(), 1);
+        drop(snapshot);
+        let (next, _) = one_message_cost();
+        assert!(custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, next)
+            .is_ok());
+    }
+
+    #[test]
+    fn lease_budget_outlives_custody_until_the_last_handle_drops() {
+        let connection = ConnectionRef::fresh(crate::ownership::NodeLeaseIdentity::local_process());
+        let binding = BindingRef::fresh(connection.clone());
+        let custody = ActorOutboundCustody::new(connection, 1, 4096).expect("valid bound");
+        let budget = Arc::clone(&custody.lease_budget);
+        let (outbound, charge) = one_message_cost();
+        let id = custody
+            .insert(LocalConnectionBindingId::fresh(), &binding, outbound)
+            .expect("frame fits");
+        let snapshot = custody.snapshot(&id).expect("snapshot");
+        flushed_one(&custody, &id);
+        custody.seal();
+        let (terminal, _) = custody.take_terminal(&id).expect("terminal transfer");
+
+        drop(custody);
+        assert_eq!(budget.state.lock().expect("budget").count, 1);
+        assert_eq!(budget.state.lock().expect("budget").payload_bytes, charge);
+        drop(terminal);
+        assert_eq!(budget.state.lock().expect("budget").count, 1);
+        drop(snapshot);
+
+        let state = budget.state.lock().expect("budget");
+        assert_eq!(state.count, 0);
+        assert_eq!(state.payload_bytes, 0);
     }
 }
