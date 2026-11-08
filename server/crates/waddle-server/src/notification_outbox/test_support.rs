@@ -1,6 +1,6 @@
 //! Shared fixtures for the notification outbox unit tests.
 
-use super::drain::{enqueue_outbox_job_tx, mark_candidate_outboxed_tx};
+use super::candidate_persistence::{enqueue_outbox_job_tx, mark_candidate_outboxed_tx};
 use super::publish::OUTBOX_CLAIM_TIMEOUT_MS;
 use super::{
     build_waddle_context, BareJid, DndReader, DndState, InboxStorage, Jid, NotificationActivity,

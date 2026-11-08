@@ -9,7 +9,9 @@ use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress, MessageEnvelope, 
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
-use crate::notification_outbox::drain::{enqueue_outbox_job_tx, mark_candidate_outboxed_tx};
+use crate::notification_outbox::candidate_persistence::{
+    enqueue_outbox_job_tx, mark_candidate_outboxed_tx,
+};
 use crate::notification_outbox::test_support::{candidate, target_named};
 use crate::notification_outbox::{
     NotificationOutboxTarget, NotificationReason, PushServiceNodeName, RichSummary,

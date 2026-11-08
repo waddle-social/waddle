@@ -410,10 +410,48 @@ async fn postgres_owner_shared_ingress_lane_continues_after_caller_cancellation(
         pool.global()
     ));
     let socket = websocket_state().await;
-    bind_receipt_custody_fatal_fence(&authority, &socket);
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&socket);
+
+    // Saturate the one-slot main lane. Both the ordinary executor and frame
+    // completion must still persist through the authority's reserved lane.
+    let (generic, _) = call_decision_named(&fixture, "writer-generic-lane").await;
+    let (mut frame, _) = call_decision_named(&fixture, "writer-frame-lane").await;
+    frame.external[0] = ExternalEffect::Frame(Box::new(Stanza::Message(
+        xmpp_parsers::message::Message::new(None),
+    )));
+    let main = pool.global().begin().await.expect("occupy main lane");
+    let generic_report = tokio::time::timeout(
+        Duration::from_secs(2),
+        authority.execute(&generic, &ImmediateSink, &deps),
+    )
+    .await
+    .expect("generic receipt must not wait for the main lane");
+    assert_eq!(generic_report.outcomes[0].1, ExternalOutcome::Done);
+    assert!(generic_report.receipt_failures.is_empty());
+    let mut frame_report = tokio::time::timeout(
+        Duration::from_secs(2),
+        authority.execute(&frame, &ImmediateSink, &deps),
+    )
+    .await
+    .expect("prepare frame on the ingress lane");
+    assert_eq!(
+        frame_report.outcomes[0].1,
+        ExternalOutcome::AwaitingFrameDelivery
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert!(tokio::time::timeout(
+        Duration::from_secs(2),
+        authority.complete_frame_obligations(&mut frame_report),
+    )
+    .await
+    .expect("frame receipt must not wait for the main lane")
+    .expect("complete written frame"));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    main.rollback().await.expect("release main lane");
+
+    bind_receipt_custody_fatal_fence(&authority, &socket);
     let (decision, state) = call_decision(&fixture).await;
     let message = decision.message_key.expect("message");
     let key = &decision.external_receipts[0][0];
@@ -447,6 +485,87 @@ async fn postgres_owner_shared_ingress_lane_continues_after_caller_cancellation(
     drop(ingress);
     drop(outbox);
     drop(pool);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn frame_receipt_partial_progress_retries_without_rewriting_frames() {
+    let fixture = IngressFixture::sqlite().await;
+    let authority = fixture.authority().await;
+    let registry = ConnectionRegistry::new();
+    let deps = Deps::new(&registry, "example.com");
+    let mut decision = three_call_decision(&fixture).await;
+    decision.external.truncate(2);
+    decision.external_dependencies.truncate(2);
+    decision.external_receipts.truncate(2);
+    for effect in &mut decision.external {
+        *effect = ExternalEffect::Frame(Box::new(Stanza::Message(
+            xmpp_parsers::message::Message::new(None),
+        )));
+    }
+    fixture
+        .execute(
+            "CREATE TRIGGER fail_second_frame_receipt BEFORE INSERT ON ingress_effect_receipts \
+             WHEN (SELECT COUNT(*) FROM ingress_effect_receipts) >= 1 \
+             BEGIN SELECT RAISE(FAIL, 'second frame receipt'); END",
+            (),
+        )
+        .await;
+    let mut report = authority.execute(&decision, &ImmediateSink, &deps).await;
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingFrameDelivery));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert!(matches!(
+        authority.complete_frame_obligations(&mut report).await,
+        Err(waddle_server::ingress::execute::ExecutionPersistenceFailure::Storage(_))
+    ));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    let message = decision.message_key.expect("message");
+    let first = &decision.external_receipts[0][0];
+    let second = &decision.external_receipts[1][0];
+    let mut tx = fixture.uow.begin().await.expect("inspect partial receipts");
+    assert!(EffectReceiptRepository::contains(
+        &mut tx,
+        message,
+        first.kind,
+        &first.semantic_identity_hash,
+    )
+    .await
+    .expect("inspect first receipt"));
+    assert!(!EffectReceiptRepository::contains(
+        &mut tx,
+        message,
+        second.kind,
+        &second.semantic_identity_hash,
+    )
+    .await
+    .expect("inspect second receipt"));
+    tx.commit().await.expect("close partial receipt inspection");
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::AwaitingFrameDelivery));
+    fixture
+        .execute("DROP TRIGGER fail_second_frame_receipt", ())
+        .await;
+    assert!(!authority
+        .complete_frame_obligations(&mut report)
+        .await
+        .expect("retry written-frame receipts"));
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert!(!authority
+        .complete_frame_obligations(&mut report)
+        .await
+        .expect("receipt retry is idempotent"));
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert!(authority.drain_and_join(Duration::from_secs(10)).await);
+    drop(authority);
     fixture.close().await;
 }
 

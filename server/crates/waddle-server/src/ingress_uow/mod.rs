@@ -60,6 +60,8 @@ mod relation_guard;
 pub use relation_guard::{RelationGuardCapability, RelationGuardCapabilityError};
 mod settlement;
 pub(crate) use settlement::settle_recorded;
+mod standalone_receipt_writer;
+pub(crate) use standalone_receipt_writer::StandaloneReceiptWriter;
 
 pub use error::IngressUowError;
 pub use extension_grants::{
@@ -103,6 +105,7 @@ pub(crate) async fn candidate_boolean(
 
 pub(super) const DEFINER_API_PAGE_SIZE: i64 = 256;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::LineageConfig;
@@ -133,7 +136,8 @@ pub enum IngressFencing {
 #[derive(Clone)]
 pub struct IngressUnitOfWork {
     observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    db: Database,
+    db: Arc<Database>,
+    standalone_receipt_writer: StandaloneReceiptWriter,
     lineage: LineageConfig,
     /// Optional full-identity writer capability retained by the exact
     /// physically attested pool.
@@ -178,6 +182,10 @@ impl IngressUnitOfWork {
         &self.db
     }
 
+    pub(crate) fn standalone_receipt_writer(&self) -> &StandaloneReceiptWriter {
+        &self.standalone_receipt_writer
+    }
+
     pub(crate) fn enable_room_observations(&self) {
         self.observations
             .store(true, std::sync::atomic::Ordering::Release);
@@ -194,9 +202,12 @@ impl IngressUnitOfWork {
     /// [`Self::open_with_node_identity`] where fenced SM writes are needed.
     pub fn open(db: Database, lineage: LineageConfig) -> Result<Self, IngressUowError> {
         let attested_pg_writer = db.attested_pg_writer_capability();
+        let db = Arc::new(db);
+        let standalone_receipt_writer = StandaloneReceiptWriter::from_shared(Arc::clone(&db));
         Ok(Self {
             observations: Default::default(),
             db,
+            standalone_receipt_writer,
             lineage,
             attested_pg_writer,
             fencing: IngressFencing::SingleNode,

@@ -190,9 +190,10 @@ impl NestedIngressOperation {
                 if let Some(gate) = &continuation.before_execute {
                     gate.wait().await;
                 }
-                let mut report = execute::execute_effects(
+                let mut report = execute::execute_effects_with_writer(
                     &authority.uow,
                     &authority.database,
+                    authority.uow.standalone_receipt_writer(),
                     &decision,
                     &ImmediateSink,
                     &continuation.deps(),
@@ -352,7 +353,11 @@ async fn settle(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let result = report
-            .complete_frame_obligations(&authority.uow, &authority.database, remaining)
+            .complete_frame_obligations_with_writer(
+                &authority.uow,
+                authority.uow.standalone_receipt_writer(),
+                remaining,
+            )
             .await;
         if result.is_ok() || tokio::time::Instant::now() + SETTLEMENT_RETRY_DELAY >= deadline {
             return result;

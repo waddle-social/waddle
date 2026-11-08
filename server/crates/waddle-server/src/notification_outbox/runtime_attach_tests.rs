@@ -320,6 +320,10 @@ impl Fixture {
         ).await?;
         let before = custody_snapshot(&owner_database).await?;
         drop(owner_conn);
+        let pending = attached.pending_candidates(16).await?;
+        if pending.len() != 1 || pending[0].archive_stanza_id().id != "legacy-candidate" {
+            bail!("attached store did not scan the prepared candidate");
+        }
 
         let legacy_url = outbox_attach_url_with_schema(&self.base_url, &self.target);
         let mut legacy_config = DatabaseConfig::new(DatabaseDriver::Postgres, legacy_url);
@@ -396,7 +400,14 @@ impl Fixture {
         };
         let pooled_schema_check = pooled_store.verify_owner_transaction(&mut pooled_tx).await;
         pooled_tx.rollback().await?;
+        let pooled_scan_check = pooled_store.pending_candidates(16).await;
         probe_gate.rollback().await?;
+        match pooled_scan_check {
+            Err(super::NotificationOutboxError::Database(error))
+                if error.to_string().contains("changed its gate schema") => {}
+            Err(error) => bail!("temp-shadowed pending scan returned the wrong error: {error}"),
+            Ok(_) => bail!("pending scan bypassed its owner transaction verification"),
+        }
         match pooled_schema_check {
             Err(error) if error.to_string().contains("changed its gate schema") => {}
             Err(error) => {
