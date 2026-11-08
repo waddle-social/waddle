@@ -1,5 +1,11 @@
 # #2046 type-resolved connection inventory
 
+The refreshed production-profile capture at `5763923e` is documented in
+[`capture-5763923`](capture-5763923/README.md). The historical results and
+commands below describe the #2286 pass; to reproduce that older pass, use the
+scripts from its pinned commit. The current scripts target the refreshed
+commit and require a separate handler-candidate output.
+
 Compiler inventory target: `main@3ae674c121c06b44934c915ecc0ef469dca54833`.
 Current-main review target: `4b1fd1f348393337c827fb98ac4dea64f0f9dcf3` (#2287).
 All 56 unique files in the marker manifest and selected P3 edge review are
