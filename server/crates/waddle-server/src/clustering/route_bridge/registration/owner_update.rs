@@ -44,7 +44,7 @@ impl OrderedRelayDeliveryBridge {
                         ?full,
                         registration_limit = MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS,
                         queue_limit = MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION,
-                        "clustered remote-resource update order is full; \
+                        "clustered remote-resource update order rejected admission; \
                          answering unavailable without applying"
                     );
                     return RelayRemoteResourceUpdateReply {
@@ -52,7 +52,16 @@ impl OrderedRelayDeliveryBridge {
                     };
                 }
             };
-            turn.wait_for_predecessors().await;
+            if turn.wait_for_predecessors().await.is_err() {
+                tracing::warn!(
+                    jid = %msg.jid,
+                    "clustered remote-resource update order closed before readiness; \
+                     answering unavailable without applying"
+                );
+                return RelayRemoteResourceUpdateReply {
+                    status: RelayRemoteResourceUpdateStatus::Unavailable,
+                };
+            }
             let reply = bridge.update_remote_user_resource_on_owner(msg).await;
             // Release the successor only after this update has applied.
             drop(turn);
@@ -593,6 +602,63 @@ mod tests {
             bridge.remote_resource_update_order.tracked_registrations(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_interior_update_does_not_release_the_next_update() {
+        let (bridge, services) = wired_bridge().await;
+        let (jid, registration) =
+            seed_owner_registration(&bridge, &services, "juliet@example.test/phone").await;
+
+        let first =
+            bridge.admit_remote_user_resource_update(presence_update(&jid, &registration, 1));
+        let cancelled =
+            bridge.admit_remote_user_resource_update(presence_update(&jid, &registration, 2));
+        let mut third = tokio::spawn(bridge.admit_remote_user_resource_update(presence_update(
+            &jid,
+            &registration,
+            3,
+        )));
+        drop(cancelled);
+
+        assert!(
+            timeout(BLOCKED_WINDOW, &mut third).await.is_err(),
+            "the third update must wait for the live first update"
+        );
+        assert_eq!(mirrored_priority(&services, &jid), None);
+        assert_eq!(first.await.status, RelayRemoteResourceUpdateStatus::Updated);
+        assert_eq!(
+            timeout(Duration::from_secs(5), third)
+                .await
+                .expect("third update finishes")
+                .expect("third task")
+                .status,
+            RelayRemoteResourceUpdateStatus::Updated
+        );
+        assert_eq!(mirrored_priority(&services, &jid), Some(3));
+        assert_eq!(
+            bridge.remote_resource_update_order.tracked_registrations(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_order_returns_unavailable_for_queued_update_without_mutation() {
+        let (bridge, services) = wired_bridge().await;
+        let (jid, registration) =
+            seed_owner_registration(&bridge, &services, "juliet@example.test/phone").await;
+        let first =
+            bridge.admit_remote_user_resource_update(presence_update(&jid, &registration, 1));
+        let second =
+            bridge.admit_remote_user_resource_update(presence_update(&jid, &registration, 2));
+
+        bridge.remote_resource_update_order.poison_for_test();
+        drop(first);
+        assert_eq!(
+            second.await.status,
+            RelayRemoteResourceUpdateStatus::Unavailable
+        );
+        assert_eq!(mirrored_priority(&services, &jid), None);
     }
 
     #[tokio::test]
