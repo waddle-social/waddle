@@ -71,7 +71,7 @@ impl Candidate {
 
     async fn with_prepared(prepared: bool) -> Self {
         // Unlike the older optional fixtures, this suite cannot silently skip.
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL")
+        let url = waddle_ws_test_support::require_test_postgres_url()
             .expect("SM custody requires WADDLE_TEST_POSTGRES_URL and PostgreSQL 17");
         let fixture = Fixture::new(url).await;
         let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")

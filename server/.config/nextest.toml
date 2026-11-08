@@ -6,12 +6,16 @@
 # defeats the process-local serial mutexes some Postgres-backed tests use,
 # and lets table-wide DELETEs in the clustering/xep0198 integration binaries
 # interleave with other tests on the shared WADDLE_TEST_POSTGRES_URL
-# database. Every test that touches that database must run in this
-# single-threaded group. If you add a new test module that reads
+# database. Tests that mutate shared application tables or assert
+# database-wide advisory-lock availability must run in this single-threaded
+# group. If a test only uses a unique schema with no shared lock assertions,
+# list it in scripts/postgres-schema-isolated.txt. Per-test databases are
+# isolated from both shared tables and database-scoped advisory locks.
+# If you add a new test module that reads
 # WADDLE_TEST_POSTGRES_URL (through
 # waddle_ws_test_support::require_test_postgres_url), add it to the filter
-# below, or, if every such test creates and drops its own uniquely named
-# schema, list it in scripts/postgres-schema-isolated.txt.
+# below, or, if every such test uses only a unique schema or per-test
+# database, list it in scripts/postgres-schema-isolated.txt.
 # scripts/check_postgres_test_group.py checks detected call patterns
 # (ciHelperContracts); review new database fixtures and callers too because
 # its source-level analysis cannot resolve every Rust call.
@@ -71,6 +75,11 @@ package(waddle-server) & (
     | binary(sqlx_cancelled_begin)
     | binary(postgres_admission_cleanup)
     | binary(postgres_migration_ledger_catalog)
+    | binary(inbox_owner_catalog_fence)
+    | binary(owner_shared_main_pool)
+    | binary(singleton_lease)
+    | binary(sm_revision_participation)
+    | binary(vapid_postgres_first_key)
     | binary(owner_bootstrap)
     | binary(physical_attestation)
     | binary(ingress_relation_guard_lab)
@@ -99,6 +108,7 @@ package(waddle-server) & (
     | test(muc_durable::)
     | test(notification_outbox::)
     | test(notification_activity::runtime_attach_tests::)
+    | test(postgres_joint_custody_classifier_preserves_and_fails_closed)
     | test(pending_delivery::)
     | test(pubsub::)
     | test(spaces_metadata::tests::postgres_attach_existing_accepts_owner_prepared_stores_and_rejects_drift)
