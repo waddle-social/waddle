@@ -510,7 +510,7 @@ async fn xep0160_pending_row_survives_pre_ack_session_death_for_reflush() {
             &session_b,
             0,
             2,
-            crate::pending_delivery::storage::PendingAckAuthority::NonResumable,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
         )
         .await
         .unwrap();

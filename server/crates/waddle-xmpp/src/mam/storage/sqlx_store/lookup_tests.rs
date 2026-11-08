@@ -305,8 +305,10 @@ async fn sqlite_connection_helpers_ignore_temp_archive_shadows() {
     .expect("query main");
     assert_eq!(page.messages.len(), 1);
     assert_eq!(page.messages[0].id, message_id);
-    let mut cursor_query = MamQuery::default();
-    cursor_query.before_id = Some(message_id.clone());
+    let cursor_query = MamQuery {
+        before_id: Some(message_id.clone()),
+        ..Default::default()
+    };
     assert!(SqlxMamStorage::query_on_sqlite_connection(
         &mut tx,
         &archive,
