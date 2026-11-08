@@ -64,7 +64,7 @@ The inventory validator reparsed both retained, hash-checked compiler streams
 and matched all 7,958 review keys, including this shard, to the refreshed use
 tables. It checked source locations, citations, semantic-label syntax, both
 coverage tables and all 52 declaration-file hashes. It also reconciled 83
-handler candidates and 153 supplied indirect edges with their reviews. These
+handler candidates and 179 supplied indirect edges with their reviews. These
 checks do not establish capture authenticity, semantic classification
 correctness, or discovery of every indirect edge. Independent review remains
 separate integration work; no runtime or Cargo test was run for this

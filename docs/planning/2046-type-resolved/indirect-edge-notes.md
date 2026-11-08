@@ -3,15 +3,17 @@
 Source target: `4219bdd71af9fb0116c82a5c33ab1ed98eecc35d`. The original
 review used `718f47a9e08f29cf2e6157803770e2f495fe201e`, whose server tree
 matched `5763923e`; the changed owner-update ordering paths were re-inspected
-for this refresh. The input was
-[A01–A31](actor-mirror-edge-ledger.md) and the [WebSocket borrowed-write
-narrative](ws-state-semantic-inventory.md#borrowed-writes-and-callers). This is
-not an independent all-source discovery or a complete caller inventory.
+for this refresh. The inputs were [A01–A31](actor-mirror-edge-ledger.md), the
+[WebSocket borrowed-write narrative](ws-state-semantic-inventory.md#borrowed-writes-and-callers),
+and selected production paths from the [independent discovery](independent-edge-discovery-4219.md).
+This is not an independent all-source discovery or a complete caller inventory.
 
-The two TSVs contain **153 individual links**: 116 from 29 actor/relay ledger
-groups, five additional owner-update queue links, and 32 from the selected
-WebSocket borrow and control-flow paths. The [candidate table](indirect-edge-candidates.tsv)
-is the seven identity columns
+The two TSVs contain **179 individual links**: 116 from 29 actor/relay ledger
+groups, five owner-update queue links, 32 selected WebSocket borrow and
+control-flow links, and 26 production links reviewed from the independent
+discovery and its immediate remote-presence helper chain. The latter comprise
+three rollback, 19 room-presence/routing/outbox, and four carbons links. The
+[candidate table](indirect-edge-candidates.tsv) is the seven identity columns
 projected from the [review table](indirect-edge-reviews.tsv); the matching rows
 are not an independent second discovery. Each row names a concrete call site,
 message ask/tell and handler, explicit turn drop and destructor, or, in A16,
@@ -42,6 +44,26 @@ obsolete.
   or turn drop observes the lock; granted heads may finish, and poison alone
   need not immediately wake waiters. These selected links are not exhaustive
   discovery of queue internals or other remote update paths.
+- The rollback links distinguish permit or shutdown failure before and after
+  the registration mirror. The helper attempts owner-qualified mirror removal
+  through a bounded tell; enqueue admission is not completed removal.
+- Room presence tries the registered-remote wrapper first. Its `Retryable`
+  result is treated as handled, while `Absent` reaches the local helper. The
+  local helper retries `DroppedFull` once, logs and counts a second drop, and
+  then returns `true`, suppressing the later clustering fallback. Its preceding
+  [comment](../../../server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs#L425)
+  says persistent full is not reported as success, but the
+  [return](../../../server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs#L456)
+  is `true`; this inventory records the code's branch behavior. The registry's
+  `Delivered` result maps from `AcceptedOrUnknown`, not proof of a socket write.
+- The room outbox waits for local writer-acceptance receivers on its non-inline
+  completion path. Only a `NotConnected` local result tries the remote
+  write-accepted helper; without clustering that helper returns `Absent`.
+  Enqueue alone does not establish writer acceptance or row completion.
+- Carbon planning selects from the recipient inventory; registry-only planners
+  without a user actor registry use a separate registry fallback. The registry
+  fanout helper reads enabled entries independently. Selection is not evidence
+  that a carbon was sent.
 - `test-actor-ask` records observed `cfg(test)` unit-test senders to otherwise
   release-compiled handlers. The physical continuation integration sender is
   itself [`test-support` gated](../../../server/crates/waddle-server/tests/physical_continuation.rs#L1).
@@ -75,16 +97,19 @@ profile, including other registration and teardown callers, all selection
 consumers and their distinct fallback behavior, actor lifecycle/claim rotation,
 subscriptions and carbons operations, remote update and side-effect downstream
 fanout, ordered relay and room delivery, receipts and detached/physical custody,
-and alternative tests and support harnesses. A test of a release-compiled
+and alternative tests and support harnesses. The independent discovery's
+additional test-only, test-support and dormant actor-state findings remain
+pending; they are not represented as production by these additions. A test of a release-compiled
 handler does not prove production reachability; a retry or enqueue result does
 not prove drain or a physical socket write. These notes leave all such work
 open rather than treating the candidate list as exhaustive.
 
 Manual source inspection checked the cited message implementations, selected
-senders, wrappers, borrowed contexts and relevant feature gates. Inventory
-validator reconciled candidate and review keys, unique IDs, operation/class
-labels, source-commit values and cited source locations for all 153 supplied
-links. It also reparsed both retained compiler streams. Independent discovery
+senders, wrappers, borrowed contexts and relevant feature gates. The inventory
+edge-validation helper reconciled candidate and review keys, unique IDs,
+operation/class labels, source-commit values and cited source locations for all
+179 supplied links. The earlier full validator run reparsed both retained
+compiler streams against the then-supplied 153 links. Independent discovery
 and semantic review remain integration work. No Cargo command, runtime
 exercise, Git mutation, remote push or CI check was performed for this
 reconciliation; the checks do not prove discovery completeness or semantic

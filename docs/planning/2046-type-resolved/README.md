@@ -3,9 +3,12 @@
 The current production and partial test-support captures at `4219bdd71` are
 documented in [`capture-4219bdd`](capture-4219bdd/README.md). The
 [independent edge discovery](independent-edge-discovery-4219.md) identifies
-additional paths and explicitly remains partial. Test-target captures,
-semantic review and exhaustive indirect discovery remain open; neither the
-capture nor a matching supplied candidate list proves runtime behavior.
+additional paths and explicitly remains partial. The support-only library
+references have grouped source notes for [actor](support-actor-review-4219.md)
+and [endpoint](support-endpoint-review-4219.md) paths; those notes are not
+individual site classifications. Test-target captures, semantic review and
+exhaustive indirect discovery remain open; neither the capture nor a matching
+supplied candidate list proves runtime behavior.
 
 The previous production capture remains in
 [`capture-5763923`](capture-5763923/README.md), with its pinned checkpoint
