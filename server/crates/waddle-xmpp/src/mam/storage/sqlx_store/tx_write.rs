@@ -11,7 +11,7 @@ use super::write::{
 use crate::mam::storage::MamStorageError;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
-use sqlx::{PgConnection, Row, SqliteConnection};
+use sqlx::{Connection, PgConnection, Row, SqliteConnection};
 use std::num::TryFromIntError;
 use thiserror::Error;
 use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, ArchivedRichMessage};
@@ -57,6 +57,8 @@ pub enum MamTxEncodingError {
 
 #[derive(Debug, Error)]
 pub enum MamTxStoreError {
+    #[error("MAM archive store requires an SQLx-tracked transaction")]
+    TransactionRequired,
     #[error("MAM archive database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("MAM archive encoding error: {0}")]
@@ -74,6 +76,14 @@ pub enum MamTxStoreError {
         stanza_id: StanzaId,
         ordinal: ArchiveOrdinal,
     },
+}
+
+fn require_transaction(in_transaction: bool) -> Result<(), MamTxStoreError> {
+    if in_transaction {
+        Ok(())
+    } else {
+        Err(MamTxStoreError::TransactionRequired)
+    }
 }
 
 fn expected_message(
@@ -139,7 +149,11 @@ fn same_projection(
         && xml(stored)? == xml(expected)?)
 }
 
-/// Store using a caller-owned connection; transaction boundaries remain with the caller.
+/// Store using a caller-owned, SQLx-tracked transaction. This checks SQLx's
+/// local transaction depth, not backend state: raw `COMMIT`/`ROLLBACK` or an
+/// automatic backend rollback can leave the depth stale. Callers must avoid
+/// raw transaction control and roll back after an error. Raw `BEGIN` alone
+/// does not establish this guard.
 /// MAM currently has unbounded retention, so absent recorded identities are repaired.
 pub async fn store_archived_message_on_connection(
     conn: &mut PgConnection,
@@ -150,7 +164,9 @@ pub async fn store_archived_message_on_connection(
     store_postgres(conn, None, archive, message, expectation).await
 }
 
-/// Store an ingress archive on the caller's transaction using a fixed PostgreSQL schema.
+/// Store an ingress archive in a fixed PostgreSQL schema on the caller's
+/// SQLx-tracked transaction. The depth-check limitation and caller duties
+/// are the same as for [`store_archived_message_on_connection`].
 pub async fn store_archived_message_on_connection_in_schema(
     conn: &mut PgConnection,
     schema: &str,
@@ -175,6 +191,7 @@ async fn store_postgres(
     message: &ArchivedMessage,
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
+    require_transaction(conn.is_in_transaction())?;
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
     let existing = if matches!(expectation, ArchiveExpectation::Fresh) {
         // Fresh only needs to know whether the global primary key exists. A
@@ -298,7 +315,9 @@ async fn store_postgres(
 #[path = "tx_write/fresh_postgres_tests.rs"]
 mod fresh_postgres_tests;
 
-/// Store using a caller-owned connection; transaction boundaries remain with the caller.
+/// Store using a caller-owned, SQLx-tracked transaction. The depth-check
+/// limitation and caller duties are the same as for
+/// [`store_archived_message_on_connection`].
 /// MAM currently has unbounded retention, so absent recorded identities are repaired.
 pub async fn store_archived_message_on_sqlite_connection(
     conn: &mut SqliteConnection,
@@ -306,6 +325,7 @@ pub async fn store_archived_message_on_sqlite_connection(
     message: &ArchivedMessage,
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
+    require_transaction(conn.is_in_transaction())?;
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
     let existing = sqlx::query(&format!(
         "SELECT {SELECT_COLUMNS} FROM main.mam_messages WHERE id = $1"
