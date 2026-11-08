@@ -27,6 +27,10 @@ its narrower physical/ledger/epoch proof and remains unchanged. The diagnostic
 compares the supplied integers only; the independent operator handoff and any
 live verification remain separate work.
 
+The [enabled caller-to-object map](./2116-enabled-caller-object-map.md) tracks
+the candidate's source-backed callers and names the boundaries of each
+partial family check. It is an inventory aid, not a catalog closure proof.
+
 The gap list records the source paths and representative names for: the joint
 role graph and global migrations; identity, sessions, roster, blocking,
 profile, uploads and permissions; inbox, SM, pending delivery, ingress, epoch,
@@ -34,23 +38,25 @@ receipt journal and PubSub projections; MAM, spaces and links; MUC and room
 effect outboxes; Push, VAPID, notification outbox and activity; call teardown;
 and extension data. Representative names are not a complete per-family
 object list. The `DurableStore` registry alone misses global-schema consumers,
-so it cannot establish this list's completeness. No privilege matrix,
+so it cannot establish this list's completeness. No complete privilege matrix,
 function/dependency inventory, source-to-object closure, or added/removed
 object detector is claimed.
 
-The existing combined fixture prepares several pieces but does not prepare
-all named families. When clustering is compiled, it also prepares clustered MUC
-heaps even though runtime-disabled clustering does not select that store. The
-fixture observation in this slice checks representative present/absent heaps
-and owner OIDs; it does not stand in for a correctly configured whole-family
-fixture. Runtime-disabled clustering has no claim pair, and the compiled
-attested MAM selector currently rejects that case; the combined fixture calls
-that selector and checks the specific refusal. Current startup also invokes
-owner-only constructors for room effects, Push registration, Push Service and
-notification activity. The fixture witnesses room effects, Push registration
-and activity refusing an attested handle; the Push Service conflict is recorded
-from source. These are recorded conflicts, not waived gates. Both
-existing startup refusals remain in place.
+The combined fixture first checks representative present/absent heaps and
+owner OIDs, then owner-prepares selected previously absent space, Push,
+notification and call tables in a separate phase. Its 21 named table ACL
+witnesses are not a whole-family or joint role profile. The public legacy
+space initializers leave their paired owner marker empty, so restricted
+space attachment is still unproved. When clustering is compiled, the fixture
+also prepares clustered MUC heaps even though runtime-disabled clustering does
+not select that store. Runtime-disabled clustering has no claim pair, and the
+compiled attested MAM selector currently rejects that case; the fixture checks
+that specific refusal. Current startup also invokes owner-only constructors
+for room effects, Push registration, Push Service and notification activity.
+The fixture witnesses room effects, Push registration and activity refusing an
+attested handle; the Push Service conflict is recorded from source. These are
+recorded conflicts, not waived gates. Both existing startup refusals remain in
+place.
 
 Completing Gate 1 requires a separately reviewed enabled-caller-to-object map,
 a versioned complete role and ACL matrix, a real combined owner-prepared fixture

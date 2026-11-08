@@ -163,11 +163,11 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/src/server/lifecycle.rs",
         "server/crates/waddle-xmpp/src/mam/storage/sqlx_store/schema.rs",
     ]),
-    gap!(SpacesMetadata, "The combined profile fixture does not prepare or jointly classify the spaces metadata family.", ["spaces_metadata"], [
+    gap!(SpacesMetadata, "The combined fixture now prepares the table through a legacy initializer, but the paired owner marker remains empty and the family is not jointly classified.", ["spaces_metadata"], [
         "server/crates/waddle-server/src/spaces_metadata/schema.rs",
         "server/crates/waddle-server/tests/physical_attestation/combined_restricted_profile.rs",
     ]),
-    gap!(ChannelSpaceLinks, "The combined profile fixture does not prepare or jointly classify channel-space links.", ["channel_space_links"], [
+    gap!(ChannelSpaceLinks, "The combined fixture now prepares the table through a legacy initializer, but the paired owner marker remains empty and the family is not jointly classified.", ["channel_space_links"], [
         "server/crates/waddle-server/src/channel_space_links/schema.rs",
         "server/crates/waddle-server/tests/physical_attestation/combined_restricted_profile.rs",
     ]),
@@ -189,30 +189,30 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/src/server/http.rs",
         "server/crates/waddle-server/src/room_effect_outbox/store.rs",
     ]),
-    gap!(PushRegistrations, "The combined fixture omits Push registrations and current startup invokes its owner-only constructor.", ["push_registrations"], [
+    gap!(PushRegistrations, "The combined fixture prepares the registration table and checks its table ACL, but current startup still invokes its owner-only constructor and the joint profile is absent.", ["push_registrations"], [
         "server/crates/waddle-server/src/server/http.rs",
         "server/crates/waddle-server/src/push_registrations.rs",
     ]),
-    gap!(PushService, "The combined fixture omits Push Service objects and current startup invokes an owner-only constructor.", ["push_nodes", "push_devices", "push_publish_jobs", "push_service_schema_marker"], [
+    gap!(PushService, "The combined fixture owner-prepares and checks named Push Service tables, but current startup invokes an owner-only constructor and the function and dependency graph remains unclassified.", ["push_nodes", "push_devices", "push_publish_jobs", "push_service_schema_marker"], [
         "server/crates/waddle-server/src/server/http.rs",
         "server/crates/waddle-server/src/push_service/store.rs",
         "server/crates/waddle-server/src/push_service/runtime_attach.rs",
     ]),
-    gap!(Vapid, "The VAPID key and owner marker are outside the combined profile fixture and joint ACL contract.", ["push_service_vapid_keys", "push_service_vapid_schema_marker"], [
+    gap!(Vapid, "The combined fixture prepares the VAPID key and owner marker and checks table ACLs, but the key-handling role and dependency graph is not part of a joint profile.", ["push_service_vapid_keys", "push_service_vapid_schema_marker"], [
         "server/crates/waddle-server/src/push_service/vapid_storage.rs",
         "server/crates/waddle-server/src/push_service/runtime_attach.rs",
         "server/crates/waddle-server/src/server/push_notification_owner.rs",
     ]),
-    gap!(NotificationOutbox, "Notification outbox and ancestry owner phases are separate and omitted from the combined profile fixture.", ["notification_candidates", "notification_outbox", "notification_outbox_lineage", "notification_outbox_owner_state"], [
+    gap!(NotificationOutbox, "The combined fixture prepares notification outbox and ancestry owner phases and checks named table ACLs, but their complete role and dependency graph is not jointly classified.", ["notification_candidates", "notification_outbox", "notification_outbox_lineage", "notification_outbox_owner_state"], [
         "server/crates/waddle-server/src/notification_outbox/schema.rs",
         "server/crates/waddle-server/src/server/push_notification_owner.rs",
     ]),
-    gap!(NotificationActivity, "The combined fixture omits activity and current startup invokes its owner-only constructor.", ["notification_activity", "notification_activity_owner_state"], [
+    gap!(NotificationActivity, "The combined fixture prepares activity and checks named table ACLs, but current startup invokes its owner-only constructor and the joint graph is absent.", ["notification_activity", "notification_activity_owner_state"], [
         "server/crates/waddle-server/src/server/http.rs",
         "server/crates/waddle-server/src/notification_activity.rs",
         "server/crates/waddle-server/src/notification_activity/schema.rs",
     ]),
-    gap!(CallTeardown, "Call teardown owner preparation and attachment have not been joined into the combined profile.", ["call_teardown_outbox"], [
+    gap!(CallTeardown, "The combined fixture prepares call teardown and checks its table ACL, but owner preparation and runtime attachment have not been joined into a complete profile.", ["call_teardown_outbox"], [
         "server/crates/waddle-server/src/call_teardown_outbox/store.rs",
         "server/crates/waddle-server/src/call_teardown_outbox/runtime_attach.rs",
     ]),
