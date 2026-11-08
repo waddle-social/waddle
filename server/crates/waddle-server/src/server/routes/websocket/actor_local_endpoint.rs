@@ -42,9 +42,9 @@ use waddle_xmpp::registry::user_actor::{
 };
 use waddle_xmpp::registry::user_actor::{UnregisterConnectionAndReportEmpty, UserActor};
 use waddle_xmpp::registry::{
-    ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver, ActorOutboundStage,
-    ActorProvisionalConnectionEntry, ActorSocketOutboundEndpoint, ConnectionRegistry, DeliveryKind,
-    LocalConnectionBindingId, OutboundStanza,
+    ActorOutboundCustody, ActorOutboundId, ActorOutboundLease, ActorOutboundReceiver,
+    ActorOutboundStage, ActorProvisionalConnectionEntry, ActorSocketOutboundEndpoint,
+    ConnectionRegistry, DeliveryKind, LocalConnectionBindingId,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -683,7 +683,7 @@ impl ActorEndpointCleanupIndex {
     pub fn take_joined_terminal(
         &self,
         id: &ActorOutboundId,
-    ) -> Option<(Arc<OutboundStanza>, ActorOutboundStage)> {
+    ) -> Option<(Arc<ActorOutboundLease>, ActorOutboundStage)> {
         let mut index = self
             .state
             .lock()
@@ -718,7 +718,7 @@ impl ActorEndpointCleanupIndex {
     pub fn drain_joined_terminal(
         &self,
         connection: &ConnectionRef,
-    ) -> Option<Vec<(ActorOutboundId, Arc<OutboundStanza>, ActorOutboundStage)>> {
+    ) -> Option<Vec<(ActorOutboundId, Arc<ActorOutboundLease>, ActorOutboundStage)>> {
         let mut index = self
             .state
             .lock()
@@ -1113,7 +1113,7 @@ impl ActorLocalEndpointOwner {
         }
         if custodies
             .iter()
-            .any(|custody| !custody.is_sealed() || custody.retained_count() != 0)
+            .any(|custody| !custody.ready_for_replacement())
         {
             return Err(ActorLocalEndpointError::PriorBindingActive);
         }
@@ -1166,16 +1166,17 @@ impl ActorLocalEndpointOwner {
             return Err(ActorLocalWriteError::WrongOwner);
         }
         let custody = receiver.custody();
-        let outbound = custody
+        let outbound_lease = custody
             .snapshot(&id)
             .ok_or(ActorLocalWriteError::MissingCustody)?;
+        let outbound = outbound_lease.outbound();
         if outbound.kind != DeliveryKind::DirectFrame {
             return Err(ActorLocalWriteError::RecipientPassRequired);
         }
         let mut encoded = Vec::new();
         outbound.stanza.to_element().write_to(&mut encoded)?;
         let text = String::from_utf8(encoded)?;
-        drop(outbound);
+        drop(outbound_lease);
         let frame =
             output.actor_data_frame(Message::Text(text.into()), Arc::clone(custody), id.clone())?;
         poll_fn(|cx| Pin::new(&mut *output).poll_ready(cx)).await?;

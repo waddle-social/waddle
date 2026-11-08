@@ -34,8 +34,8 @@ use waddle_server::websocket_transport::{
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef};
 use waddle_xmpp::registry::user_actor::UserActor;
 use waddle_xmpp::registry::{
-    ConnectionEntry, ConnectionRegistry, LocalRetryDispatchOutcome, OutboundStanza,
-    TrySendDirectWithCustody,
+    ActorOutboundStage, ConnectionEntry, ConnectionRegistry, LocalConnectionBindingId,
+    LocalRetryDispatchOutcome, OutboundStanza, TrySendDirectWithCustody,
 };
 use waddle_xmpp::stream_management::{
     SmAck, SmIngressAppendKey, SmIngressReceiptKind, SmRelayedAppendObligation, SmRequest,
@@ -596,10 +596,109 @@ async fn existing_actor_channel_rejects_physical_attach_and_keeps_terminal_custo
         .expect("one terminal transfer");
     assert_eq!(stage, ActorOutboundStage::NotAttempted);
     assert!(Arc::ptr_eq(&original, &recovered));
-    assert_eq!(recovered.ingress_append.as_ref(), Some(&obligation));
+    assert_eq!(
+        recovered.outbound().ingress_append.as_ref(),
+        Some(&obligation)
+    );
     assert!(index.take_joined_terminal(&id).is_none());
     actor.kill();
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binding_replacement_waits_for_terminal_snapshot_lease_and_outlives_owner() {
+    let UnattachedFixture {
+        mut owner,
+        input: _input,
+        output: _output,
+        peer,
+        server,
+        inventory,
+        index,
+        connection,
+    } = unattached_fixture(None, DEADLINE).await;
+
+    let (endpoint, receiver) = owner.new_binding_channel().expect("first channel");
+    let custody = receiver.custody().clone();
+    let binding = BindingRef::fresh(connection.clone());
+    let id = custody
+        .insert_for_test(
+            LocalConnectionBindingId::fresh(),
+            &binding,
+            OutboundStanza::new(stanza()),
+        )
+        .expect("test frame retained by custody");
+    let snapshot = custody.snapshot(&id).expect("snapshot");
+    assert_eq!(custody.attempt_with(&id, || ()), Some(()));
+    custody.mark_flushed(&id);
+    custody.seal();
+    let (terminal, stage) = custody.take_terminal(&id).expect("terminal transfer");
+    assert_eq!(stage, ActorOutboundStage::Flushed);
+    assert_eq!(custody.retained_count(), 0);
+    assert_eq!(custody.outstanding_lease_count(), 1);
+
+    assert!(matches!(
+        owner.new_binding_channel(),
+        Err(ActorLocalEndpointError::PriorBindingActive)
+    ));
+    drop(terminal);
+    assert_eq!(custody.outstanding_lease_count(), 1);
+    assert!(matches!(
+        owner.new_binding_channel(),
+        Err(ActorLocalEndpointError::PriorBindingActive)
+    ));
+    drop(snapshot);
+    assert_eq!(custody.outstanding_lease_count(), 0);
+    drop(endpoint);
+    drop(receiver);
+    drop(custody);
+
+    let (endpoint, receiver) = owner
+        .new_binding_channel()
+        .expect("replacement after final lease drop");
+    let custody = receiver.custody().clone();
+    let id = custody
+        .insert_for_test(
+            LocalConnectionBindingId::fresh(),
+            &BindingRef::fresh(connection.clone()),
+            OutboundStanza::new(stanza()),
+        )
+        .expect("second generation frame retained");
+    let snapshot = custody.snapshot(&id).expect("second snapshot");
+    assert_eq!(custody.attempt_with(&id, || ()), Some(()));
+    custody.mark_flushed(&id);
+    custody.seal();
+    let (terminal, _) = custody.take_terminal(&id).expect("second terminal");
+    drop(endpoint);
+    drop(receiver);
+
+    owner.request_stop(StopReason::Requested);
+    let observer = inventory.observe(&connection).expect("pump observer");
+    assert_eq!(
+        timeout(DEADLINE, observer.wait_until_joined())
+            .await
+            .expect("pump join"),
+        CustodianState::Joined
+    );
+    timeout(DEADLINE, async {
+        while index.contains(&connection) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup index release");
+    server.abort();
+
+    drop(owner);
+    drop(index);
+    drop(inventory);
+    drop(peer);
+    assert_eq!(custody.retained_count(), 0);
+    assert_eq!(custody.outstanding_lease_count(), 1);
+    drop(terminal);
+    assert_eq!(custody.outstanding_lease_count(), 1);
+    drop(snapshot);
+    assert_eq!(custody.outstanding_lease_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

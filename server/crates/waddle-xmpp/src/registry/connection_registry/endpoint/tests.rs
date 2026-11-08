@@ -130,7 +130,10 @@ fn actor_queue_retains_complete_envelope_after_id_dequeue_and_seal() {
     assert_eq!(id.owner(), owner);
     assert_eq!(id.binding(), &binding_ref);
     assert_payload(
-        &custody.snapshot(&id).expect("custody retains envelope"),
+        custody
+            .snapshot(&id)
+            .expect("custody retains envelope")
+            .outbound(),
         &expected,
         &mut accepted,
     );
@@ -150,7 +153,7 @@ fn actor_queue_retains_complete_envelope_after_id_dequeue_and_seal() {
     let (outbound, _) = custody
         .take_terminal(&id)
         .expect("exact terminal retrieval");
-    assert_payload(&outbound, &expected, &mut accepted);
+    assert_payload(outbound.outbound(), &expected, &mut accepted);
     assert_eq!(custody.retained_count(), 0);
     assert!(receiver.try_recv().is_err());
 }

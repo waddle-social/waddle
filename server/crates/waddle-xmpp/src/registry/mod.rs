@@ -22,18 +22,18 @@ pub mod user_actor;
 pub mod user_registry;
 
 pub use connection_registry::{
-    ActorOutboundCustody, ActorOutboundId, ActorOutboundReceiver, ActorOutboundStage,
-    ActorProvisionalConnectionEntry, ActorSocketOutboundEndpoint, ArchiveDispatchRefusal,
-    ArchiveDispatchRefusalReason, BindingAdmissionState, BroadcastOutcome, ConnectionBindGuard,
-    ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachInterruption,
-    ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
-    LiveResumeControl, LocalBindingPermit, LocalConnectionBindingId, LocalIoRelinquishment,
-    LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo, OutboundStanza,
-    OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
-    PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,
-    SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
-    SocketOutboundReceiver, SocketWriteInterruption, TerminalOrderingRetryLease,
-    WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
+    ActorOutboundCustody, ActorOutboundId, ActorOutboundLease, ActorOutboundReceiver,
+    ActorOutboundStage, ActorProvisionalConnectionEntry, ActorSocketOutboundEndpoint,
+    ArchiveDispatchRefusal, ArchiveDispatchRefusalReason, BindingAdmissionState, BroadcastOutcome,
+    ConnectionBindGuard, ConnectionEntry, ConnectionRegistry, DeliveryKind,
+    ForceDetachInterruption, ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome,
+    ForceDetachRequest, LiveResumeControl, LocalBindingPermit, LocalConnectionBindingId,
+    LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo,
+    OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
+    PendingFlushCommitRejection, PendingFlushReservation, PendingFlushReserveError, PresenceState,
+    ProvisionalConnectionEntry, SendResult, SocketCleanupState, SocketLifecycle,
+    SocketLifecycleProbe, SocketOutboundEndpoint, SocketOutboundReceiver, SocketWriteInterruption,
+    TerminalOrderingRetryLease, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 pub use selection::{
     available_resources_for_user, get_resources_for_user, routing_resources_for_user,
