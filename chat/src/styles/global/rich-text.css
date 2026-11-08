@@ -25,6 +25,10 @@
    styled-body wider than the grid cell instead of scrolling internally. */
 .styled-body {
   overflow-wrap: anywhere;
+  /* Combining marks can paint far beyond the line box without increasing
+     layout height. Bound that ink, allowing a little normal glyph overhang. */
+  overflow: clip;
+  overflow-clip-margin: 0.25em;
   min-width: 0;
   width: 100%;
   max-width: 100%;
