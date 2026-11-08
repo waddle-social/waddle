@@ -18,18 +18,27 @@ use thiserror::Error;
 use waddle_xmpp::ingress::ProtocolEpoch;
 
 use super::pinned_catalog::verify_pinned_epoch_manifest_catalog_sqlx;
-use super::preflight::{attest_dark_catalog_pinned, DarkPhysicalAttestationError};
+use super::preflight::{
+    attest_dark_catalog_pinned, attest_dark_catalog_pinned_with_partial_profile,
+    DarkPhysicalAttestationError,
+};
 use super::DarkIngressAuthorityError;
 use super::{
     read_epoch_after_prelock, AttestationMode, AttestedPgPool, PhysicalAttestationError,
-    PinnedCatalogError, PinnedRuntimeAuthority, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+    PinnedCatalogError, PinnedPartialProfileError, PinnedPartialProfilePinsV1,
+    PinnedRuntimeAuthority, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use crate::db::migrations::{
+    verify_dark_shared_migration_ledger_v1030_partial_profile_sqlx,
     verify_dark_shared_migration_ledger_v1030_read_sqlx, DarkLedgerPreflightError,
 };
 
 const ENTRY_DEADLINE: Duration = Duration::from_secs(20);
 const RETRY_INTERVAL: Duration = Duration::from_millis(20);
+type EntryPause = (
+    tokio::sync::oneshot::Sender<i32>,
+    tokio::sync::oneshot::Receiver<()>,
+);
 
 #[derive(Debug, Error)]
 pub enum PinnedSelectedEntryError {
@@ -45,6 +54,8 @@ pub enum PinnedSelectedEntryError {
     Ledger(#[from] DarkLedgerPreflightError),
     #[error(transparent)]
     Catalog(#[from] PinnedCatalogError),
+    #[error(transparent)]
+    PartialProfile(#[from] PinnedPartialProfileError),
     #[error(transparent)]
     Epoch(#[from] DarkIngressAuthorityError),
     #[error(transparent)]
@@ -80,7 +91,48 @@ impl PinnedSelectedEntry {
     /// server has already released its locks. Dropping the caller future also
     /// marks any acquired session for close-on-drop.
     pub async fn observe_protocol_epoch(&self) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, None).await
+        self.observe_with_deadline(ENTRY_DEADLINE, None, None, None)
+            .await
+    }
+
+    /// Inspect the explicitly limited V1 principal, heap and direct-ACL
+    /// profile on the same rollback-only transaction as the existing pinned
+    /// physical, V1030 ledger, epoch and manifest checks. No reusable proof or
+    /// serving authority escapes. The pool hook runs its separate pinned
+    /// attestor before this method can start its own transaction. The provider
+    /// must enforce no login trigger and privileged DDL, role, ACL and index
+    /// quiescence from before connection until the rollback is acknowledged.
+    pub async fn inspect_partial_profile_v1(
+        &self,
+        profile: &PinnedPartialProfilePinsV1,
+    ) -> Result<(), PinnedSelectedEntryError> {
+        self.observe_with_deadline(ENTRY_DEADLINE, None, Some(profile), None)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn inspect_partial_profile_v1_paused_for_test(
+        &self,
+        profile: &PinnedPartialProfilePinsV1,
+        ready: tokio::sync::oneshot::Sender<i32>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), PinnedSelectedEntryError> {
+        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)), Some(profile), None)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn inspect_partial_profile_v1_before_attestor_paused_for_test(
+        &self,
+        profile: &PinnedPartialProfilePinsV1,
+        ready: tokio::sync::oneshot::Sender<i32>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), PinnedSelectedEntryError> {
+        self.observe_with_deadline(ENTRY_DEADLINE, None, Some(profile), Some((ready, release)))
+            .await
+            .map(|_| ())
     }
 
     #[cfg(feature = "test-support")]
@@ -89,7 +141,7 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)))
+        self.observe_with_deadline(ENTRY_DEADLINE, Some((ready, release)), None, None)
             .await
     }
 
@@ -100,22 +152,26 @@ impl PinnedSelectedEntry {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
-        self.observe_with_deadline(timeout, Some((ready, release)))
+        self.observe_with_deadline(timeout, Some((ready, release)), None, None)
             .await
     }
 
     async fn observe_with_deadline(
         &self,
         timeout: Duration,
-        pause: Option<(
-            tokio::sync::oneshot::Sender<i32>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
+        pause: Option<EntryPause>,
+        partial_profile: Option<&PinnedPartialProfilePinsV1>,
+        before_attestor: Option<EntryPause>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
         let mut backend_pid = None;
         match tokio::time::timeout(
             timeout,
-            self.observe_protocol_epoch_inner(&mut backend_pid, pause),
+            self.observe_protocol_epoch_inner(
+                &mut backend_pid,
+                pause,
+                partial_profile,
+                before_attestor,
+            ),
         )
         .await
         {
@@ -127,14 +183,16 @@ impl PinnedSelectedEntry {
     async fn observe_protocol_epoch_inner(
         &self,
         backend_pid: &mut Option<i32>,
-        pause: Option<(
-            tokio::sync::oneshot::Sender<i32>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
+        pause: Option<EntryPause>,
+        partial_profile: Option<&PinnedPartialProfilePinsV1>,
+        mut before_attestor: Option<EntryPause>,
     ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
         let AttestationMode::Pinned(authority) = &self.pool.writer_capability.mode else {
             return Err(PinnedSelectedEntryError::NotPinned);
         };
+        if partial_profile.is_some_and(|profile| !profile.valid_for(authority)) {
+            return Err(PinnedPartialProfileError::InvalidPins.into());
+        }
         let mut connection = DiscardOnDrop::new(self.pool.acquire().await?);
         let pid: i32 = match sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
             .fetch_one(&mut *connection)
@@ -190,7 +248,14 @@ impl PinnedSelectedEntry {
                 }
             }
 
-            let epoch = match prepare_selected_transaction(&mut tx, authority).await {
+            let epoch = match prepare_selected_transaction(
+                &mut tx,
+                authority,
+                partial_profile,
+                before_attestor.take(),
+            )
+            .await
+            {
                 Ok(epoch) => epoch,
                 Err(error) => {
                     if !rollback_transaction(tx).await {
@@ -278,6 +343,8 @@ pub(super) async fn rollback_transaction(tx: Transaction<'_, Postgres>) -> bool 
 async fn prepare_selected_transaction(
     tx: &mut Transaction<'_, Postgres>,
     authority: &PinnedRuntimeAuthority,
+    partial_profile: Option<&PinnedPartialProfilePinsV1>,
+    before_attestor: Option<EntryPause>,
 ) -> Result<ProtocolEpoch, PinnedSelectedEntryError> {
     for statement in [
         "SET LOCAL lock_timeout = '5s'",
@@ -289,15 +356,52 @@ async fn prepare_selected_transaction(
     }
     let schema_name = &authority.config.postgres().schema.name.0;
     let restore_path = format!("{}, pg_temp", super::quote_identifier(schema_name));
-    attest_dark_catalog_pinned(tx, &authority.config, authority.attestor, &restore_path).await?;
-    verify_dark_shared_migration_ledger_v1030_read_sqlx(
-        tx,
-        schema_name,
-        authority.ledger,
-        &restore_path,
-    )
-    .await?;
+    if let Some(profile) = partial_profile {
+        sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+            .execute(&mut **tx)
+            .await?;
+        super::verify_pinned_partial_profile(tx, authority, profile).await?;
+        if let Some((ready, release)) = before_attestor {
+            let pid = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+                .fetch_one(&mut **tx)
+                .await?;
+            if ready.send(pid).is_err() || release.await.is_err() {
+                return Err(PinnedSelectedEntryError::PauseCancelled);
+            }
+        }
+        attest_dark_catalog_pinned_with_partial_profile(tx, authority, profile, &restore_path)
+            .await?;
+        verify_dark_shared_migration_ledger_v1030_partial_profile_sqlx(
+            tx,
+            authority,
+            profile,
+            schema_name,
+            authority.ledger,
+            &restore_path,
+        )
+        .await?;
+    } else {
+        attest_dark_catalog_pinned(tx, &authority.config, authority.attestor, &restore_path)
+            .await?;
+        verify_dark_shared_migration_ledger_v1030_read_sqlx(
+            tx,
+            schema_name,
+            authority.ledger,
+            &restore_path,
+        )
+        .await?;
+    }
     verify_pinned_epoch_manifest_catalog_sqlx(tx, authority).await?;
+    if let Some(profile) = partial_profile {
+        sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
+            .execute(&mut **tx)
+            .await?;
+        super::verify_pinned_partial_profile(tx, authority, profile).await?;
+        sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
+            .bind(&restore_path)
+            .execute(&mut **tx)
+            .await?;
+    }
     let connection: &mut PgConnection = tx;
     let epoch = read_epoch_after_prelock(
         connection,

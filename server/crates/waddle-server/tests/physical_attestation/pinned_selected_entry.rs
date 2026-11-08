@@ -41,6 +41,10 @@ async fn selected_entry_and_pool_hook_coordinate_with_catalog_mutator() {
 
     let selected_pool = pinned_pool(&fixture, None).await;
     let selected = PinnedSelectedEntry::new(selected_pool).expect("closed pinned entry");
+    // This helper installs and verifies the attestor under catalog-X. Prepare
+    // the lazy pool before the test acquires its competing exclusive fence;
+    // the runtime checkout itself is still started while that fence is held.
+    let hook_pool = std::sync::Arc::new(pinned_pool(&fixture, None).await);
 
     // A hook arriving while the exclusive mutator is active may only poll the
     // session try-lock. It must not begin the attestor transaction or acquire
@@ -52,7 +56,6 @@ async fn selected_entry_and_pool_hook_coordinate_with_catalog_mutator() {
     )
     .await
     .expect("exclusive catalog mutator");
-    let hook_pool = std::sync::Arc::new(pinned_pool(&fixture, None).await);
     let checkout_pool = hook_pool.clone();
     let checkout = tokio::spawn(async move { checkout_pool.acquire_for_test().await });
     let hook_pid = wait_for_runtime_hook_try(&fixture).await;

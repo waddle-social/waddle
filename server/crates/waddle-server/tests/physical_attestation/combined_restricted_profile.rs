@@ -53,6 +53,8 @@ use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenc
 use super::{test_url, CATALOG_GRANT_LOCK};
 use pinned_pubsub_inventory::{exercise_pinned_pubsub, pinned_pubsub_inventory};
 
+#[path = "pinned_partial_profile.rs"]
+mod pinned_partial_profile;
 #[path = "pinned_pubsub_inventory.rs"]
 mod pinned_pubsub_inventory;
 
@@ -224,7 +226,10 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     }
     for role in [&migrator, &runtime, &installer] {
         resources
-            .role(role, &format!("LOGIN PASSWORD '{password}' {restricted}"))
+            .role(
+                role,
+                &format!("LOGIN NOINHERIT PASSWORD '{password}' {restricted}"),
+            )
             .await?;
     }
     for statement in [
@@ -826,6 +831,12 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     )
     .await?;
     exercise_pinned_pubsub(&admin, &runtime, &owner, &definer, &pinned).await?;
+    pinned_partial_profile::exercise(
+        &admin,
+        &pinned,
+        (&runtime, &api, &helper, &migrator, &owner),
+    )
+    .await?;
     let owner_role = PgRoleName::new(&owner)?;
     DatabasePubSubStorage::verify_restricted_profile_v2(main, &v2).await?;
     #[cfg(feature = "clustering")]

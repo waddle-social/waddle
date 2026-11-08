@@ -59,6 +59,8 @@ pub enum DarkLedgerPreflightError {
     #[error("migration ledger catalog or ACL does not match the pinned shape")]
     CatalogDrift,
     #[error(transparent)]
+    PartialProfile(#[from] crate::db::physical_attestation::PinnedPartialProfileError),
+    #[error(transparent)]
     Database(#[from] DatabaseError),
     #[error("migration ledger PostgreSQL operation failed")]
     Postgres(#[from] sqlx::Error),
@@ -166,8 +168,36 @@ pub async fn verify_dark_shared_migration_ledger_v1030_read_sqlx(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
 ) -> Result<(), DarkLedgerPreflightError> {
-    verify_dark_shared_migration_ledger_v1030_sqlx(tx, schema, pins, restore_search_path, true)
-        .await
+    verify_dark_shared_migration_ledger_v1030_sqlx(
+        tx,
+        schema,
+        pins,
+        restore_search_path,
+        true,
+        None,
+    )
+    .await
+}
+
+/// Recheck the selected diagnostic's partial profile after the ledger wait,
+/// before reading the ledger rows on this same transaction.
+pub(crate) async fn verify_dark_shared_migration_ledger_v1030_partial_profile_sqlx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    authority: &crate::db::physical_attestation::PinnedRuntimeAuthority,
+    profile: &crate::db::physical_attestation::PinnedPartialProfilePinsV1,
+    schema: &str,
+    pins: DarkMigrationLedgerPins,
+    restore_search_path: &str,
+) -> Result<(), DarkLedgerPreflightError> {
+    verify_dark_shared_migration_ledger_v1030_sqlx(
+        tx,
+        schema,
+        pins,
+        restore_search_path,
+        true,
+        Some((authority, profile)),
+    )
+    .await
 }
 
 /// Verify the same pinned ledger on a closed READ COMMITTED READ WRITE SQLx
@@ -179,8 +209,15 @@ pub(crate) async fn verify_dark_shared_migration_ledger_v1030_write_sqlx(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
 ) -> Result<(), DarkLedgerPreflightError> {
-    verify_dark_shared_migration_ledger_v1030_sqlx(tx, schema, pins, restore_search_path, false)
-        .await
+    verify_dark_shared_migration_ledger_v1030_sqlx(
+        tx,
+        schema,
+        pins,
+        restore_search_path,
+        false,
+        None,
+    )
+    .await
 }
 
 async fn verify_dark_shared_migration_ledger_v1030_sqlx(
@@ -189,6 +226,10 @@ async fn verify_dark_shared_migration_ledger_v1030_sqlx(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
     require_read_only: bool,
+    partial_profile: Option<(
+        &crate::db::physical_attestation::PinnedRuntimeAuthority,
+        &crate::db::physical_attestation::PinnedPartialProfilePinsV1,
+    )>,
 ) -> Result<(), DarkLedgerPreflightError> {
     if !pins.valid() {
         return Err(DarkLedgerPreflightError::InvalidPins);
@@ -206,7 +247,16 @@ async fn verify_dark_shared_migration_ledger_v1030_sqlx(
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;
-    let result = verify_locked(connection, schema, pins, 1030, require_read_only, false).await;
+    let result = verify_locked(
+        connection,
+        schema,
+        pins,
+        1030,
+        require_read_only,
+        false,
+        partial_profile,
+    )
+    .await;
     let restored = sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
         .bind(restore_search_path)
         .execute(&mut *connection)
@@ -266,6 +316,7 @@ async fn acquire_dark_shared_migration_ledger<'a, 'connection>(
         required_version,
         require_read_only,
         require_lineage_lock,
+        None,
     )
     .await;
     let restored = sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
@@ -284,6 +335,10 @@ async fn verify_locked(
     required_version: i64,
     require_read_only: bool,
     require_lineage_lock: bool,
+    partial_profile: Option<(
+        &crate::db::physical_attestation::PinnedRuntimeAuthority,
+        &crate::db::physical_attestation::PinnedPartialProfilePinsV1,
+    )>,
 ) -> Result<(), DarkLedgerPreflightError> {
     let boundary: bool = sqlx::query_scalar(
         "SELECT \
@@ -317,6 +372,12 @@ async fn verify_locked(
     // COMMITTED catalog snapshot must still identify the independently pinned
     // relation, and all structure and ACL checks must still hold.
     verify_catalog(connection, schema, pins).await?;
+    if let Some((authority, profile)) = partial_profile {
+        crate::db::physical_attestation::verify_pinned_partial_profile(
+            connection, authority, profile,
+        )
+        .await?;
+    }
     MigrationRunner::single()
         .verify_applied_through_locked_postgres(connection, &table, required_version)
         .await?;
