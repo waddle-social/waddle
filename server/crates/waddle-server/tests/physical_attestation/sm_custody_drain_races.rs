@@ -452,7 +452,7 @@ async fn postgres_portable_incremental_preserves_delayed_counted_frames() {
         .copied()
         .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
     assert_eq!(message, Some("injected panic while writer is blocked"));
-    let url = std::env::var("WADDLE_TEST_POSTGRES_URL").expect("PostgreSQL test URL");
+    let url = waddle_ws_test_support::require_test_postgres_url().expect("PostgreSQL test URL");
     let mut admin = PgConnection::connect(&url).await.expect("verify cleanup");
     let database_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1)",

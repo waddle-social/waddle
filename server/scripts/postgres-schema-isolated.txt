@@ -1,9 +1,11 @@
 # Postgres-backed tests that may run outside nextest's `postgres` test group.
 #
-# Every test listed here connects to WADDLE_TEST_POSTGRES_URL only to create
-# its own uniquely named (UUID-suffixed) schema, runs against that schema via
-# search_path, and never resets or alters the shared `public` schema, so it
-# cannot observe or disturb the table-resetting tests serialized in the group.
+# Every test listed here uses only a per-test UUID-suffixed schema or a
+# per-test database. Schema-isolated tests run against their schema via
+# search_path and never reset or alter shared application tables. Database-
+# isolated tests also have a private PostgreSQL advisory-lock namespace. Tests
+# that assert availability of database-wide locks stay in the `postgres`
+# group, even when their application tables use a unique schema.
 # scripts/check_postgres_test_group.py requires every other Postgres-backed
 # test to match the group filter in .config/nextest.toml, and fails on entries
 # here that no longer need listing.
@@ -40,3 +42,9 @@ crates/waddle-server/src/sm_promotion/tests.rs  # quota_bounce_<uuid>
 crates/waddle-xmpp/tests/account_claim_binding_lab.rs  # synthetic waddle_claim_lab_<uuid> schema
 crates/waddle-server/tests/db_lineage_multiprocess.rs  # SchemaFixture: one UUID schema per test
 crates/waddle-server/tests/xep0313_mam_integration.rs  # waddle_test_xep0313_uow_<uuid>
+crates/waddle-server/src/push_service/runtime_attach_tests.rs  # unique per-test database and UUID roles
+crates/waddle-server/tests/inbox_owner_commit_unknown.rs  # unique per-test database, role, and schema
+crates/waddle-server/tests/lineage_catalog_fence.rs  # unique per-test database; isolates database-scoped advisory locks
+crates/waddle-server/tests/notification_activity_catalog_fence.rs  # unique per-test database
+crates/waddle-server/tests/notification_activity_commit_unknown.rs  # unique per-test database, role, and schema
+crates/waddle-xmpp/tests/p3_joint_identity_pg.rs  # unique UUID schema per fixture; no shared lock assertions

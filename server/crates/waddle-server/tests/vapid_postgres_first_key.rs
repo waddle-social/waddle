@@ -781,8 +781,8 @@ async fn pg17_commit_reply_timeout_is_indeterminate_and_retry_reuses_committed_k
         return;
     };
     let target = PgConnectOptions::from_str(&url).expect("PostgreSQL connection options");
-    if postgres_proxy::ensure_local_target(&target).is_err() {
-        eprintln!("skipping plaintext proxy witness for nonlocal PostgreSQL target");
+    if let Err(error) = postgres_proxy::ensure_local_target(&target) {
+        waddle_ws_test_support::skip_unavailable_test_postgres_proxy_target(error);
         return;
     }
     let f = Fixture::new(&url).await;
@@ -1089,8 +1089,8 @@ async fn pg17_catalog_lock_reply_stall_respects_idle_transaction_caps() {
         return;
     };
     let target = PgConnectOptions::from_str(&url).expect("PostgreSQL options");
-    if postgres_proxy::ensure_local_target(&target).is_err() {
-        eprintln!("skipping plaintext proxy witness for nonlocal PostgreSQL target");
+    if let Err(error) = postgres_proxy::ensure_local_target(&target) {
+        waddle_ws_test_support::skip_unavailable_test_postgres_proxy_target(error);
         return;
     }
     exercise_pre_fence_idle_cap(&url, "0").await;

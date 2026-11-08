@@ -38,6 +38,23 @@ pub fn require_test_postgres_url() -> Option<String> {
     }
 }
 
+/// Skips a PostgreSQL proxy witness when its configured target is not local.
+///
+/// The proxy harness can only connect to a local PostgreSQL target. Optional
+/// local runs may skip that witness, but a lane that requires PostgreSQL must
+/// fail so it cannot report the witness as passed without running it.
+#[track_caller]
+pub fn skip_unavailable_test_postgres_proxy_target(reason: impl fmt::Display) {
+    let required = match parse_requirement(env::var_os(REQUIRE_TEST_POSTGRES_ENV)) {
+        Ok(required) => required,
+        Err(error) => panic!("{error}"),
+    };
+    if let Some(message) = unavailable_proxy_target_message(required, &reason.to_string()) {
+        panic!("{message}");
+    }
+    eprintln!("skipping PostgreSQL proxy witness: {reason}");
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TestPostgresError {
     Missing,
@@ -66,16 +83,9 @@ impl fmt::Display for TestPostgresError {
 
 fn resolve(
     url: Option<OsString>,
-    requirement: Option<OsString>,
+    requirement_value: Option<OsString>,
 ) -> Result<Option<String>, TestPostgresError> {
-    let required = match requirement {
-        None => false,
-        Some(value) => match value.to_str() {
-            Some("" | "0") => false,
-            Some("1") => true,
-            _ => return Err(TestPostgresError::InvalidRequirement(value)),
-        },
-    };
+    let required = parse_requirement(requirement_value)?;
     match url {
         Some(url) if !url.is_empty() => url
             .into_string()
@@ -86,9 +96,28 @@ fn resolve(
     }
 }
 
+fn parse_requirement(requirement_value: Option<OsString>) -> Result<bool, TestPostgresError> {
+    match requirement_value {
+        None => Ok(false),
+        Some(value) => match value.to_str() {
+            Some("" | "0") => Ok(false),
+            Some("1") => Ok(true),
+            _ => Err(TestPostgresError::InvalidRequirement(value)),
+        },
+    }
+}
+
+fn unavailable_proxy_target_message(required: bool, reason: &str) -> Option<String> {
+    required.then(|| {
+        format!(
+            "WADDLE_TEST_REQUIRE_POSTGRES=1 but the PostgreSQL proxy witness requires a local target: {reason}"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{resolve, TestPostgresError};
+    use super::{resolve, unavailable_proxy_target_message, TestPostgresError};
     use std::ffi::OsString;
 
     const URL: &str = "postgresql:///waddle_test";
@@ -148,5 +177,21 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("WADDLE_TEST_POSTGRES_URL"), "{message}");
+    }
+
+    #[test]
+    fn optional_proxy_witness_can_skip_a_nonlocal_target() {
+        assert_eq!(
+            unavailable_proxy_target_message(false, "target is not loopback"),
+            None
+        );
+    }
+
+    #[test]
+    fn required_proxy_witness_fails_for_a_nonlocal_target() {
+        assert_eq!(
+            unavailable_proxy_target_message(true, "target is not loopback"),
+            Some("WADDLE_TEST_REQUIRE_POSTGRES=1 but the PostgreSQL proxy witness requires a local target: target is not loopback".to_owned())
+        );
     }
 }
