@@ -25,4 +25,6 @@ pub use sqlx_store::{
     ArchiveExpectation, MamSchemaBootstrapError, MamSchemaVerificationError, MamTxStoreError,
     MamTxStoreOutcome, SqlxMamStorage,
 };
+#[cfg(feature = "test-utils")]
+pub use sqlx_store::{BoundedMamOriginError, BoundedMamOriginProbe};
 pub use traits::{MamArchiveKind, MamStorage, StoreOutcome, TerminalTombstoneOutcome};

@@ -22,10 +22,15 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 use tracing::info;
 
 use super::MamStorageError;
+
+#[cfg(feature = "test-utils")]
+mod bounded_origin;
 pub use allocation::{
     lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
     lock_archive_sequence_on_sqlite_connection,
 };
+#[cfg(feature = "test-utils")]
+pub use bounded_origin::{BoundedMamOriginError, BoundedMamOriginProbe};
 pub use schema::MamSchemaBootstrapError;
 use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
