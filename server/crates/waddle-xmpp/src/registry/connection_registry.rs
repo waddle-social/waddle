@@ -37,7 +37,10 @@ pub use actor_outbound::{
 pub use archive_dispatch::{ArchiveDispatchRefusal, ArchiveDispatchRefusalReason};
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
 pub use binding_permit::LocalBindingPermit;
-pub use endpoint::{ActorSocketOutboundEndpoint, BindingAdmissionState, SocketOutboundEndpoint};
+pub use endpoint::{
+    ActorSocketOutboundEndpoint, BindingAdmissionState, SocketOutboundEndpoint,
+    SocketOutboundReceiver,
+};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};
 pub use outbound::{

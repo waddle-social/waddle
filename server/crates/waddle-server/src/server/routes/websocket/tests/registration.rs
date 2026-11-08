@@ -28,6 +28,7 @@ async fn revoked_authority_cannot_publish_a_bound_connection() {
         &mut pending_tx,
         &permit,
         &shutdown,
+        None,
     )
     .await;
 
@@ -228,6 +229,7 @@ async fn busy_registration_sends_resource_constraint_and_rolls_back() {
         &mut conn,
         RegistrationChannels {
             pending_tx: &mut pending_tx,
+            outbound_receiver: None,
             force_detach_rx: &mut force_detach_rx,
         },
         ConnectionIo {
@@ -683,6 +685,7 @@ async fn cancelled_fresh_bind_publishes_no_replacement() {
                 &mut pending,
                 &permit,
                 &shutdown,
+                None,
             )
             .await;
             (outcome, conn, pending.is_some())
@@ -1025,6 +1028,7 @@ async fn early_resume_registration_exit_retires_pending_binding_identity() {
             &mut pending,
             &permit,
             &shutdown,
+            None,
         )
         .await;
         match reason {
@@ -1163,6 +1167,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             &mut conn,
             RegistrationChannels {
                 pending_tx: &mut pending_tx,
+                outbound_receiver: None,
                 force_detach_rx: &mut force_detach_rx,
             },
             ConnectionIo {
@@ -1660,6 +1665,7 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
             &mut pending_tx,
             &permit,
             &shutdown,
+            None,
         )
         .await;
         (outcome, conn)

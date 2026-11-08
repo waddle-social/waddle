@@ -405,6 +405,119 @@ mod seams {
     }
 
     #[tokio::test]
+    async fn failed_resume_with_held_reservation_rebinds_the_same_socket() {
+        let (server, seam) =
+            TestServer::start_with_failed_resume_seam(ACCOUNTS, ALICE_BARE, ALICE_PHONE);
+        let (mut owner, stream) = original(&server).await;
+        let stream_id = stream.as_str();
+        seam.arm_stream_with_reservation(stream_id);
+
+        let mut peer = authenticate(&server, 1).await;
+        peer.bind("observer").await.expect("peer binds");
+        let mut replacement = authenticate(&server, 0).await;
+        send(
+            &mut replacement,
+            Element::builder("resume", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), stream_id)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )
+        .await;
+        wait_for(
+            &seam,
+            format!("reservation-held {stream_id} {ALICE_PHONE} old-binding"),
+        )
+        .await;
+        wait_for(
+            &seam,
+            format!("published {stream_id} {ALICE_PHONE} lifecycle=running"),
+        )
+        .await;
+        seam.continue_finalization();
+        let failed = recv(&mut replacement).await;
+        assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+        assert!(failed
+            .get_child("resource-constraint", xmpp_parsers::ns::XMPP_STANZAS)
+            .is_some());
+        assert_replaced_transport_closes(&mut owner).await;
+
+        replacement
+            .bind("phone")
+            .await
+            .expect("fresh bind with the old reservation held");
+        assert_eq!(replacement.full_jid.as_deref(), Some(ALICE_PHONE));
+        send(
+            &mut replacement,
+            Element::builder("enable", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+        )
+        .await;
+        let enabled = recv(&mut replacement).await;
+        assert!(enabled.is("enabled", SM_NS));
+        assert_ne!(enabled.attr("id"), Some(stream_id));
+        send(
+            &mut replacement,
+            Element::builder("presence", xmpp_parsers::ns::JABBER_CLIENT).build(),
+        )
+        .await;
+        ping(&mut replacement, "fresh-route-ready").await;
+        let jid: FullJid = ALICE_PHONE.parse().expect("fresh full JID");
+        send_message(&mut peer, jid.clone(), "before-reservation-release").await;
+        receive_message(&mut replacement, "before-reservation-release").await;
+
+        seam.release_stale_cleanup();
+        wait_for(
+            &seam,
+            format!("reservation-commit {stream_id} {ALICE_PHONE} DefinitelyNotEnqueued(BindingMismatch)"),
+        )
+        .await;
+        wait_for(
+            &seam,
+            format!("cleanup-finished {stream_id} {ALICE_PHONE} removed=false replacement=true"),
+        )
+        .await;
+        send_message(&mut peer, jid, "after-reservation-release").await;
+        receive_message(&mut replacement, "after-reservation-release").await;
+
+        replacement.close().await.expect("fresh session closes");
+        peer.close().await.expect("peer closes");
+    }
+
+    #[tokio::test]
+    async fn failed_resume_with_accepted_frame_does_not_hand_back_the_queue() {
+        let (server, seam) =
+            TestServer::start_with_failed_resume_seam(ACCOUNTS, ALICE_BARE, ALICE_PHONE);
+        let (mut owner, stream) = original(&server).await;
+        let stream_id = stream.as_str();
+        seam.arm_stream_with_accepted_frame(stream_id);
+        let mut replacement = authenticate(&server, 0).await;
+        send(
+            &mut replacement,
+            Element::builder("resume", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), stream_id)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )
+        .await;
+        wait_for(
+            &seam,
+            format!("queue-attempt {stream_id} {ALICE_PHONE} Delivered"),
+        )
+        .await;
+        seam.continue_finalization();
+        wait_for(
+            &seam,
+            format!("handoff {stream_id} {ALICE_PHONE} blocked=true"),
+        )
+        .await;
+        let failed = recv(&mut replacement).await;
+        assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+        assert_replaced_transport_closes(&mut owner).await;
+        replacement.close().await.expect("replacement closes");
+    }
+
+    #[tokio::test]
     #[ignore = "unignore after every local and remote endpoint enqueue path is provisional-gated"]
     async fn published_resume_gap_detaches_then_same_socket_rebind_survives_delayed_cleanup() {
         let (server, seam) =

@@ -198,8 +198,15 @@ impl FailedResumeSeam {
     fn armed_stream(&self) -> Option<String> {
         std::fs::read_to_string(&self.arm_file)
             .ok()
-            .map(|stream_id| stream_id.trim().to_owned())
+            .and_then(|armed| armed.lines().next().map(str::trim).map(str::to_owned))
             .filter(|stream_id| !stream_id.is_empty())
+    }
+
+    fn armed_mode(&self, expected: &str) -> bool {
+        std::fs::read_to_string(&self.arm_file)
+            .ok()
+            .and_then(|armed| armed.lines().nth(1).map(str::to_owned))
+            .is_some_and(|mode| mode == expected)
     }
 
     fn record(&self, event: &str, stream_id: &str, jid: &FullJid, details: &str) {
@@ -255,6 +262,67 @@ pub(in crate::server::routes::websocket) async fn pause_published_resume_finaliz
         );
         return;
     }
+    if seam.armed_mode("hold-reservation") {
+        match state
+            .deps
+            .protocol
+            .connection_registry
+            .try_reserve_pending_flush(jid, Some(owner))
+        {
+            Ok(reservation) => {
+                seam.record("reservation-held", stream_id, jid, "old-binding");
+                let seam = seam.clone();
+                let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
+                let jid = jid.clone();
+                let stream_id = stream_id.to_owned();
+                tokio::spawn(async move {
+                    while !seam.cleanup_release_file.exists() {
+                        tokio::time::sleep(HOLD_POLL_INTERVAL).await;
+                    }
+                    let mut message = xmpp_parsers::message::Message::new(Some(jid.clone().into()));
+                    message.id = Some(xmpp_parsers::message::Id(
+                        "stale-reservation-must-not-arrive".to_owned(),
+                    ));
+                    let outcome = registry.send_reserved_pending_flush(
+                        reservation,
+                        waddle_xmpp::registry::OutboundStanza::new(waddle_xmpp::Stanza::Message(
+                            message,
+                        )),
+                    );
+                    seam.record(
+                        "reservation-commit",
+                        &stream_id,
+                        &jid,
+                        &format!("{outcome:?}"),
+                    );
+                });
+            }
+            Err(error) => {
+                seam.record(
+                    "reservation-not-held",
+                    stream_id,
+                    jid,
+                    &format!("{error:?}"),
+                );
+            }
+        }
+    }
+    if seam.armed_mode("queue-accepted-frame") {
+        let mut message = xmpp_parsers::message::Message::new(Some(jid.clone().into()));
+        message.id = Some(xmpp_parsers::message::Id(
+            "accepted-before-failed-resume".to_owned(),
+        ));
+        let outcome = state
+            .deps
+            .protocol
+            .connection_registry
+            .try_send_outbound_if_owner(
+                jid,
+                owner,
+                waddle_xmpp::registry::OutboundStanza::new(waddle_xmpp::Stanza::Message(message)),
+            );
+        seam.record("queue-attempt", stream_id, jid, &format!("{outcome:?}"));
+    }
     seam.record("published", stream_id, jid, "lifecycle=running");
     while !seam.continue_file.exists() {
         tokio::time::sleep(HOLD_POLL_INTERVAL).await;
@@ -269,6 +337,24 @@ pub(in crate::server::routes::websocket) async fn pause_published_resume_finaliz
         Ok(true) => seam.record("gap-injected", stream_id, jid, "claimed-session"),
         Ok(false) => seam.record("gap-not-injected", stream_id, jid, "claim-missing"),
         Err(error) => seam.record("gap-not-injected", stream_id, jid, &error.to_string()),
+    }
+}
+
+/// Record the accepted-frame handback decision while the socket still owns
+/// its receiver and before the failed-resume handler returns to the loop.
+pub(in crate::server::routes::websocket) fn observe_failed_resume_handoff(
+    jid: &FullJid,
+    stream_id: &str,
+    blocked: bool,
+) {
+    let Some(seam) = FAILED_RESUME_SEAM.as_ref() else {
+        return;
+    };
+    if seam.jid == *jid
+        && seam.armed_stream().as_deref() == Some(stream_id)
+        && seam.armed_mode("queue-accepted-frame")
+    {
+        seam.record("handoff", stream_id, jid, &format!("blocked={blocked}"));
     }
 }
 

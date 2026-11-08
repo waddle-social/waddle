@@ -299,6 +299,94 @@ fn reserved_commit_refusals_return_the_envelope_and_capacity() {
 }
 
 #[test]
+fn sealed_empty_socket_can_rebind_while_old_reservation_is_held() {
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    );
+    let old_binding = BindingRef::fresh(connection.clone());
+    let old_owner = LocalConnectionBindingId::fresh();
+    let (socket, receiver) = SocketOutboundEndpoint::channel_with_socket_receiver(1);
+    let old = socket.bind(
+        old_owner,
+        Some(old_binding.clone()),
+        BindingAdmissionState::Active,
+    );
+    let permit = old.try_reserve_owned().expect("reserve the old queue");
+    assert!(old.seal(old_owner, &old_binding));
+    let recovered = old
+        .clone()
+        .into_socket_endpoint_if_empty(old_owner, &old_binding, Some(&receiver))
+        .expect("the paired receiver has no accepted frames");
+    let fresh_binding = BindingRef::fresh(connection);
+    let fresh = recovered.bind(
+        LocalConnectionBindingId::fresh(),
+        Some(fresh_binding),
+        BindingAdmissionState::Active,
+    );
+
+    let (waiting, expected_waiting, mut waiting_accepted) = payload();
+    let waiting = refused(
+        fresh.try_send(waiting),
+        EndpointEnqueueRejection::Full,
+        &expected_waiting,
+        &mut waiting_accepted,
+    );
+    acknowledge(waiting, &mut waiting_accepted);
+    let (outbound, expected, mut accepted) = payload();
+    let outbound = refused(
+        old.commit_reserved(permit, outbound),
+        EndpointEnqueueRejection::Sealed,
+        &expected,
+        &mut accepted,
+    );
+    acknowledge(outbound, &mut accepted);
+    let (fresh_outbound, _, _fresh_accepted) = payload();
+    assert!(matches!(
+        fresh.try_send(fresh_outbound),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    let mut receiver = receiver.into_receiver();
+    assert!(receiver.try_recv().is_ok());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn receiver_proof_rejects_queued_frames_and_other_queues() {
+    let connection = crate::ownership::ConnectionRef::fresh(
+        crate::ownership::NodeLeaseIdentity::local_process(),
+    );
+    let binding_ref = BindingRef::fresh(connection);
+    let owner = LocalConnectionBindingId::fresh();
+    let (socket, receiver) = SocketOutboundEndpoint::channel_with_socket_receiver(2);
+    let (_other_socket, other_receiver) = SocketOutboundEndpoint::channel_with_socket_receiver(2);
+    let endpoint = socket.bind(
+        owner,
+        Some(binding_ref.clone()),
+        BindingAdmissionState::Active,
+    );
+    let permit = endpoint.try_reserve_owned().expect("hold one slot");
+    let (outbound, expected, mut accepted) = payload();
+    assert!(matches!(
+        endpoint.try_send(outbound),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    assert!(endpoint.seal(owner, &binding_ref));
+    assert!(endpoint
+        .clone()
+        .into_socket_endpoint_if_empty(owner, &binding_ref, Some(&receiver))
+        .is_err());
+    assert!(endpoint
+        .into_socket_endpoint_if_empty(owner, &binding_ref, Some(&other_receiver))
+        .is_err());
+    drop(permit);
+    let mut receiver = receiver.into_receiver();
+    let retained = receiver.try_recv().expect("accepted frame remains queued");
+    assert_payload(&retained, &expected, &mut accepted);
+    acknowledge(retained, &mut accepted);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
 fn actor_reserved_permit_racing_seal_returns_full_envelope_without_custody_insert() {
     let connection = crate::ownership::ConnectionRef::fresh(
         crate::ownership::NodeLeaseIdentity::local_process(),

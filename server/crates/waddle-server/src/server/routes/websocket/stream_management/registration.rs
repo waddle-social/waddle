@@ -59,9 +59,18 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
     conn: &mut WsConnState,
     jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
 ) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-        return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
+        return complete_pending_resume_claim(
+            state,
+            conn,
+            jid,
+            owner,
+            stream_id,
+            outbound_receiver,
+        )
+        .await;
     }
 
     SmFinalizationReport {
@@ -89,6 +98,7 @@ async fn complete_pending_resume_claim(
     jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: String,
+    outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
 ) -> SmFinalizationReport {
     if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
         .await
@@ -216,7 +226,15 @@ async fn complete_pending_resume_claim(
                 replay_gap_through = ?detached.replay_gap_through,
                 "SM resume claim gained a replay gap before completion"
             );
-            reset_resume_attempt(state, conn, jid, Some(owner), Some(&stream_id)).await;
+            reset_resume_attempt(
+                state,
+                conn,
+                jid,
+                Some(owner),
+                Some(&stream_id),
+                outbound_receiver,
+            )
+            .await;
             resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
@@ -315,7 +333,7 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     }
     conn.pending_resume_stream_id = None;
     conn.pending_resume_h = None;
-    reset_resume_attempt(state, conn, jid, None, None).await;
+    reset_resume_attempt(state, conn, jid, None, None, None).await;
     conn.pending_finalized_resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
     SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
         "item-not-found",
@@ -329,13 +347,15 @@ async fn reset_resume_attempt(
     jid: &FullJid,
     owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     _failed_stream_id: Option<&str>,
+    outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
 ) {
     // This rollback runs inline while the sole live WebSocket task handles the
     // client's inbound SM request. That task owns the only receiver for this
     // socket queue, and it cannot concurrently dequeue or handle another
     // outbound stanza while this function is on the stack. After sealing the
-    // exact endpoint, full sender capacity therefore proves there is no queued
-    // frame, reserved permit, or in-flight receiver handler to retarget.
+    // exact endpoint, its paired receiver proves whether any accepted frame is
+    // queued. Old reservations may still hold capacity, but their commits must
+    // recheck this sealed admission and cannot enqueue into a fresh binding.
     let failed_binding = conn.binding_ref.clone();
     conn.retire_binding_ref();
     let mut removed_owner = false;
@@ -351,8 +371,15 @@ async fn reset_resume_attempt(
                         removed_owner = true;
                         exact_binding_match = failed_binding.as_ref() == Some(&binding);
                         if exact_binding_match {
-                            recovered_endpoint =
-                                removed.into_socket_outbound_endpoint_if_empty(*owner, &binding);
+                            recovered_endpoint = match outbound_receiver {
+                                Some(receiver) => removed
+                                    .into_socket_outbound_endpoint_if_receiver_empty(
+                                        *owner, &binding, receiver,
+                                    ),
+                                None => {
+                                    removed.into_socket_outbound_endpoint_if_empty(*owner, &binding)
+                                }
+                            };
                         }
                     }
                 } else {
@@ -382,9 +409,9 @@ async fn reset_resume_attempt(
                     );
                 }
             } else {
-                // Accepted frames and/or reserved permits may still belong to
-                // the old binding. Keep the receiver's existing queue in place,
-                // but do not hand it to a fresh stream attempt.
+                // Accepted frames or an unproven receiver may still belong to
+                // the old binding. Keep its queue in place, but do not hand it
+                // to a fresh stream attempt.
                 conn.resume_endpoint_handoff_blocked = true;
                 if exact_binding_match {
                     warn!(
@@ -397,6 +424,14 @@ async fn reset_resume_attempt(
                         "failed resume binding identity changed before outbound handback"
                     );
                 }
+            }
+            #[cfg(feature = "test-support")]
+            if let Some(stream_id) = _failed_stream_id {
+                super::super::characterization_seams::observe_failed_resume_handoff(
+                    jid,
+                    stream_id,
+                    conn.resume_endpoint_handoff_blocked,
+                );
             }
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
@@ -588,7 +623,8 @@ mod tests {
         conn.registry_owner = Some(owner);
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
-        let report = finalize_sm_after_registry_registration(&state, &mut conn, &jid, &owner).await;
+        let report =
+            finalize_sm_after_registry_registration(&state, &mut conn, &jid, &owner, None).await;
         let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
             panic!("expired resume must produce failed, never resumed or replay");
         };

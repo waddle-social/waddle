@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 struct OutboundQueue {
     sender: QueueSender,
+    receiver_identity: Option<Arc<()>>,
 }
 
 #[derive(Debug)]
@@ -75,6 +76,27 @@ pub struct SocketOutboundEndpoint {
     queue: Arc<OutboundQueue>,
 }
 
+/// The sole receiving half of a socket queue, paired with its endpoint.
+///
+/// While this wrapper exists, callers cannot replace the receiver used to
+/// prove that an exact sealed endpoint has no accepted queued frames.
+pub struct SocketOutboundReceiver {
+    receiver: mpsc::Receiver<OutboundStanza>,
+    identity: Arc<()>,
+}
+
+impl SocketOutboundReceiver {
+    /// Receive one outbound envelope on the connection's owning task.
+    pub async fn recv(&mut self) -> Option<OutboundStanza> {
+        self.receiver.recv().await
+    }
+
+    /// Give shutdown cleanup the receiver after live registration has ended.
+    pub fn into_receiver(self) -> mpsc::Receiver<OutboundStanza> {
+        self.receiver
+    }
+}
+
 /// Only this opaque endpoint can enter actor-owned provisional publication.
 /// It has no conversion into the legacy Active entry constructors.
 #[derive(Debug)]
@@ -111,9 +133,26 @@ impl SocketOutboundEndpoint {
             Self {
                 queue: Arc::new(OutboundQueue {
                     sender: QueueSender::Legacy(sender),
+                    receiver_identity: None,
                 }),
             },
             receiver,
+        )
+    }
+
+    /// Create a queue whose sole receiver can prove its identity and emptiness
+    /// to the socket owner during a sealed-binding handback.
+    pub fn channel_with_socket_receiver(capacity: usize) -> (Self, SocketOutboundReceiver) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        let identity = Arc::new(());
+        (
+            Self {
+                queue: Arc::new(OutboundQueue {
+                    sender: QueueSender::Legacy(sender),
+                    receiver_identity: Some(identity.clone()),
+                }),
+            },
+            SocketOutboundReceiver { receiver, identity },
         )
     }
 
@@ -134,6 +173,7 @@ impl SocketOutboundEndpoint {
                     sender,
                     custody: custody.clone(),
                 },
+                receiver_identity: None,
             }),
         };
         Some((
@@ -166,6 +206,7 @@ impl From<mpsc::Sender<OutboundStanza>> for SocketOutboundEndpoint {
         Self {
             queue: Arc::new(OutboundQueue {
                 sender: QueueSender::Legacy(sender),
+                receiver_identity: None,
             }),
         }
     }
@@ -258,12 +299,13 @@ impl BindingOutboundEndpoint {
         sealed
     }
 
-    /// Recover the socket queue only after this exact binding is sealed and
-    /// the queue has no accepted work or outstanding reserved permits.
+    /// Recover a sealed socket queue only after proving it contains no frames.
+    /// Without the paired receiver, full capacity is the conservative proof.
     pub(super) fn into_socket_endpoint_if_empty(
         self,
         owner: LocalConnectionBindingId,
         binding_ref: &BindingRef,
+        receiver: Option<&SocketOutboundReceiver>,
     ) -> Result<SocketOutboundEndpoint, Self> {
         let sealed_for_binding = {
             let admission = self
@@ -275,7 +317,18 @@ impl BindingOutboundEndpoint {
         };
         let queue_empty = match &self.queue.sender {
             QueueSender::Legacy(sender) => {
-                !sender.is_closed() && sender.capacity() == sender.max_capacity()
+                !sender.is_closed()
+                    && match receiver {
+                        Some(receiver) => {
+                            self.queue
+                                .receiver_identity
+                                .as_ref()
+                                .is_some_and(|identity| Arc::ptr_eq(identity, &receiver.identity))
+                                && !receiver.receiver.is_closed()
+                                && receiver.receiver.is_empty()
+                        }
+                        None => sender.capacity() == sender.max_capacity(),
+                    }
             }
             // A sealed actor custody table cannot be reopened for another
             // binding. The physical owner creates a fresh actor channel.
