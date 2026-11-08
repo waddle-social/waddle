@@ -15,6 +15,8 @@ use waddle_xmpp::stream_management::SmFrameProvenance;
 use super::super::super::super::wait_for_blocked_application;
 use super::{uow, Candidate, CATALOG_GRANT_LOCK};
 
+type FrameOccurrenceRow = (Uuid, Uuid, i64, Vec<u8>, Vec<u8>);
+
 fn frame(c: &Candidate, id: Uuid, wire: Option<String>) -> RetainedFrameOccurrence {
     let payload = wire.map_or_else(
         || {
@@ -67,7 +69,7 @@ async fn postgres_frame_occurrences_keep_distinct_ids_exact_bytes_and_refusals()
         assert_eq!(position(item), ((index + 1) as u64, (index + 1) as u32));
     }
     let q = &c.fixture.target;
-    let rows: Vec<(Uuid, Uuid, i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(&format!(
+    let rows: Vec<FrameOccurrenceRow> = sqlx::query_as(&format!(
         "SELECT occurrence_id,operation_id,ordinal,payload,provenance FROM {q}.sm_custody_frame_occurrences ORDER BY ordinal"
     ))
     .fetch_all(&c.fixture.admin).await.expect("independent frame readback");
