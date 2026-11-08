@@ -23,6 +23,9 @@ fn require_transaction(in_transaction: bool) -> Result<(), sqlx::Error> {
 /// Take the archive counter row lock on an SQLx-tracked transaction,
 /// creating a zero-valued row if needed. Callers should lock multiple
 /// archives in canonical order and roll back the transaction after errors.
+/// This checks SQLx's local transaction depth, not backend state: raw
+/// `COMMIT`/`ROLLBACK` or an automatic backend rollback can leave it stale.
+/// Callers must avoid raw transaction control.
 pub async fn lock_archive_sequence_on_connection(
     conn: &mut PgConnection,
     archive: &BareJid,
@@ -36,7 +39,8 @@ pub async fn lock_archive_sequence_on_connection(
 }
 
 /// Lock the counter in the supplied PostgreSQL schema on the caller's
-/// SQLx-tracked transaction. The caller must roll it back after an error.
+/// SQLx-tracked transaction. The depth-check limitation and caller duties
+/// are the same as for [`lock_archive_sequence_on_connection`].
 pub async fn lock_archive_sequence_on_connection_in_schema(
     conn: &mut PgConnection,
     schema: &str,
@@ -53,7 +57,8 @@ pub async fn lock_archive_sequence_on_connection_in_schema(
 }
 
 /// Lock the counter on the caller's SQLx-tracked SQLite transaction. The
-/// caller must roll it back after an error.
+/// depth-check limitation and caller duties are the same as for
+/// [`lock_archive_sequence_on_connection`].
 pub async fn lock_archive_sequence_on_sqlite_connection(
     conn: &mut SqliteConnection,
     archive: &BareJid,

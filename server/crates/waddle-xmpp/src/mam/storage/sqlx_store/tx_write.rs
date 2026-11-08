@@ -149,8 +149,11 @@ fn same_projection(
         && xml(stored)? == xml(expected)?)
 }
 
-/// Store using a caller-owned, SQLx-tracked transaction. The caller must roll
-/// it back after an error; issuing raw `BEGIN` does not establish this guard.
+/// Store using a caller-owned, SQLx-tracked transaction. This checks SQLx's
+/// local transaction depth, not backend state: raw `COMMIT`/`ROLLBACK` or an
+/// automatic backend rollback can leave the depth stale. Callers must avoid
+/// raw transaction control and roll back after an error. Raw `BEGIN` alone
+/// does not establish this guard.
 /// MAM currently has unbounded retention, so absent recorded identities are repaired.
 pub async fn store_archived_message_on_connection(
     conn: &mut PgConnection,
@@ -162,7 +165,8 @@ pub async fn store_archived_message_on_connection(
 }
 
 /// Store an ingress archive in a fixed PostgreSQL schema on the caller's
-/// SQLx-tracked transaction. The caller must roll it back after an error.
+/// SQLx-tracked transaction. The depth-check limitation and caller duties
+/// are the same as for [`store_archived_message_on_connection`].
 pub async fn store_archived_message_on_connection_in_schema(
     conn: &mut PgConnection,
     schema: &str,
@@ -311,8 +315,9 @@ async fn store_postgres(
 #[path = "tx_write/fresh_postgres_tests.rs"]
 mod fresh_postgres_tests;
 
-/// Store using a caller-owned, SQLx-tracked transaction. The caller must roll
-/// it back after an error; issuing raw `BEGIN` does not establish this guard.
+/// Store using a caller-owned, SQLx-tracked transaction. The depth-check
+/// limitation and caller duties are the same as for
+/// [`store_archived_message_on_connection`].
 /// MAM currently has unbounded retention, so absent recorded identities are repaired.
 pub async fn store_archived_message_on_sqlite_connection(
     conn: &mut SqliteConnection,
