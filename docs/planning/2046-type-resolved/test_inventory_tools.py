@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import csv
 import gzip
 import hashlib
+import io
 import json
 import pathlib
 import subprocess
@@ -124,6 +126,11 @@ class ParserTests(unittest.TestCase):
             out.write("\t".join(self.row.values()) + "\n")
         with self.assertRaisesRegex(ValueError, "duplicate"):
             parser.load_manifest(manifest, expected_digest=digest)
+
+    def test_historical_manifest_cannot_be_mistaken_for_current_source(self) -> None:
+        historical = pathlib.Path(__file__).parent / "capture-5763923/targets.tsv"
+        with self.assertRaisesRegex(ValueError, "pinned discovery fingerprint"):
+            parser.load_manifest(historical)
 
     def test_cargo_stream_rejects_truncation_duplicate_and_failure(self) -> None:
         good = '{"reason":"build-finished","success":true}'
@@ -253,6 +260,8 @@ class TestCaptureTests(unittest.TestCase):
             (crate / "src/bin/cluster.rs").write_text("fn main() {}\n")
             (crate / "tests").mkdir()
             (crate / "tests/selected.rs").write_text("fn fixture() { marker_reference(); }\n")
+            (crate / "tests/support_only.rs").write_text('#![cfg(feature = "test-support")]\nfn fixture() { marker_reference(); }\n')
+            (crate / "tests/support_gated.rs").write_text("fn fixture() {}\n")
             (crate / "tests/nested").mkdir()
             (crate / "tests/nested/main.rs").write_text("fn main() {}\n")
             manifest = '[package]\nname = "' + package + '"\n'
@@ -269,6 +278,8 @@ class TestCaptureTests(unittest.TestCase):
                 {"kind": ["lib"], "name": lib, "src_path": str(base / "src/lib.rs"), "test": True},
                 {"kind": ["test"], "name": "selected", "src_path": str(base / "tests/selected.rs"), "test": True},
                 {"kind": ["test"], "name": "nested", "src_path": str(base / "tests/nested/main.rs"), "test": True},
+                {"kind": ["test"], "name": "support_only", "src_path": str(base / "tests/support_only.rs"), "test": True},
+                {"kind": ["test"], "name": "support_gated", "src_path": str(base / "tests/support_gated.rs"), "test": True, "required-features": ["test-support"]},
                 {"kind": ["test"], "name": "custom", "src_path": str(base / "src/custom_explicit_test.rs"), "test": True, "required-features": ["extra"]},
             ]
             if package == "waddle-server":
@@ -292,7 +303,7 @@ class TestCaptureTests(unittest.TestCase):
         return {
             "reason": "compiler-artifact", "package_id": f"path+file://{self.captured}/server/crates/{package}#0.1.0",
             "target": {"kind": [kind], "name": name, "src_path": str(self.captured / "server/crates" / package / source)},
-            "profile": {**parser.DEV_PROFILE, "test": test}, "features": features, "fresh": False,
+            "profile": {**parser.DEV_PROFILE, "test": test}, "features": list(features), "fresh": False,
         }
 
     def test_mode_inventories_are_explicit_and_profile_specific(self) -> None:
@@ -305,6 +316,8 @@ class TestCaptureTests(unittest.TestCase):
             ("server-unit", "clustering", set(), [server(True, ["clustering"]), xmpp(False)]),
             ("server-integration", "default", {"selected"}, [server(False, []), xmpp(False), self.artifact("waddle-server", "test", "selected", True, [])]),
             ("server-integration", "clustering", {"selected"}, [server(False, ["clustering"]), xmpp(False), self.artifact("waddle-server", "test", "selected", True, ["clustering"])]),
+            ("server-support-integration", "default", {"selected"}, [server(False, ["test-support"]), xmpp(False), self.artifact("waddle-server", "test", "selected", True, ["test-support"])]),
+            ("server-support-integration", "clustering", {"selected"}, [server(False, ["clustering", "test-support"]), xmpp(False), self.artifact("waddle-server", "test", "selected", True, ["clustering", "test-support"])]),
             ("xmpp-unit", "test-utils", set(), [xmpp(True)]),
             ("xmpp-integration", "test-utils", {"selected"}, [xmpp(False), self.artifact("waddle-xmpp", "test", "selected", True, ["test-utils"])]),
         ]
@@ -315,6 +328,124 @@ class TestCaptureTests(unittest.TestCase):
         targets = self.metadata["waddle-server"]["targets"]
         self.assertEqual(targets[("test", "custom")]["source"], "server/crates/waddle-server/src/custom_explicit_test.rs")
         self.assertEqual(targets[("test", "custom")]["required_features"], ["extra"])
+
+    def test_support_integration_rejects_missing_or_extra_features_on_every_artifact(self) -> None:
+        for profile, features in (("default", ["test-support"]), ("clustering", ["clustering", "test-support"])):
+            messages = [
+                self.artifact("waddle-server", "lib", "waddle_server", False, features),
+                self.artifact("waddle-xmpp", "lib", "waddle_xmpp", False, ["test-utils"]),
+                self.artifact("waddle-server", "test", "selected", True, features),
+            ]
+            for index, artifact in enumerate(messages):
+                for missing in artifact["features"]:
+                    bad = copy.deepcopy(messages)
+                    bad[index]["features"].remove(missing)
+                    with self.subTest(profile=profile, index=index, missing=missing), self.assertRaisesRegex(ValueError, "feature set"):
+                        test_capture.test_inventory(bad, self.root, self.captured, "server-support-integration", profile, {"selected"}, self.metadata)
+                bad = copy.deepcopy(messages)
+                bad[index]["features"].append("unexpected")
+                with self.subTest(profile=profile, index=index, extra=True), self.assertRaisesRegex(ValueError, "feature set"):
+                    test_capture.test_inventory(bad, self.root, self.captured, "server-support-integration", profile, {"selected"}, self.metadata)
+            with self.subTest(profile=profile, mode="server-integration"), self.assertRaisesRegex(ValueError, "feature set"):
+                test_capture.test_inventory(messages, self.root, self.captured, "server-integration", profile, {"selected"}, self.metadata)
+
+    def test_support_integration_selection_and_bins_use_metadata(self) -> None:
+        for profile, features in (("default", ["test-support"]), ("clustering", ["clustering", "test-support"])):
+            server = self.artifact("waddle-server", "lib", "waddle_server", False, features)
+            xmpp = self.artifact("waddle-xmpp", "lib", "waddle_xmpp", False, ["test-utils"])
+            selected = self.artifact("waddle-server", "test", "support_gated", True, features)
+            binary = self.artifact("waddle-server", "bin", "waddle-server", False, features, source="src/main.rs")
+            messages = [server, xmpp, selected, binary]
+            artifacts = test_capture.test_inventory(messages, self.root, self.captured, "server-support-integration", profile, {"support_gated"}, self.metadata)
+            self.assertFalse(artifacts[(binary["package_id"], "bin", "waddle-server")]["test"])
+            with self.subTest(profile=profile, selected="missing"), self.assertRaisesRegex(ValueError, "unknown or feature-ineligible selected"):
+                test_capture.test_inventory(messages, self.root, self.captured, "server-support-integration", profile, {"missing"}, self.metadata)
+            with self.subTest(profile=profile, selected="not compiled"), self.assertRaisesRegex(ValueError, "missing required"):
+                test_capture.test_inventory([server, xmpp, binary], self.root, self.captured, "server-support-integration", profile, {"support_gated"}, self.metadata)
+            with self.subTest(profile=profile, selected="unselected artifact"), self.assertRaisesRegex(ValueError, "unknown or unselected"):
+                test_capture.test_inventory(messages, self.root, self.captured, "server-support-integration", profile, {"selected"}, self.metadata)
+            bad_binary = copy.deepcopy(binary)
+            bad_binary["profile"]["test"] = True
+            with self.subTest(profile=profile, binary="wrong test mode"), self.assertRaisesRegex(ValueError, "profile"):
+                test_capture.test_inventory([server, xmpp, selected, bad_binary], self.root, self.captured, "server-support-integration", profile, {"support_gated"}, self.metadata)
+            bad_binary = copy.deepcopy(binary)
+            bad_binary["features"] = []
+            with self.subTest(profile=profile, binary="wrong features"), self.assertRaisesRegex(ValueError, "feature set"):
+                test_capture.test_inventory([server, xmpp, selected, bad_binary], self.root, self.captured, "server-support-integration", profile, {"support_gated"}, self.metadata)
+            cluster_bin = self.artifact("waddle-server", "bin", "clustering-bin", False, features, source="src/bin/cluster.rs")
+            if profile == "clustering":
+                artifacts = test_capture.test_inventory([*messages, cluster_bin], self.root, self.captured, "server-support-integration", profile, {"support_gated"}, self.metadata)
+                self.assertIn((cluster_bin["package_id"], "bin", "clustering-bin"), artifacts)
+            else:
+                with self.assertRaisesRegex(ValueError, "feature-ineligible metadata target"):
+                    test_capture.test_inventory([*messages, cluster_bin], self.root, self.captured, "server-support-integration", profile, {"support_gated"}, self.metadata)
+            with self.subTest(profile=profile, old_mode=True), self.assertRaisesRegex(ValueError, "feature-ineligible selected"):
+                test_capture.test_inventory(messages, self.root, self.captured, "server-integration", profile, {"support_gated"}, self.metadata)
+
+    def test_support_integration_all_targets_selects_support_required_metadata_targets(self) -> None:
+        tag = "EXAMPLE::TYPE@L1C1"
+        manifest = [{"file": "server/crates/waddle-server/src/lib.rs", "line": "1", "tag": tag}]
+        for profile, features in (("default", ["test-support"]), ("clustering", ["clustering", "test-support"])):
+            messages = [
+                self.artifact("waddle-server", "lib", "waddle_server", False, features),
+                self.artifact("waddle-xmpp", "lib", "waddle_xmpp", False, ["test-utils"]),
+                self.artifact("waddle-server", "test", "selected", True, features),
+                self.artifact("waddle-server", "test", "nested", True, features, source="tests/nested/main.rs"),
+                self.artifact("waddle-server", "test", "support_only", True, features),
+                self.artifact("waddle-server", "test", "support_gated", True, features),
+            ]
+            capture_path = self.root / f"{profile}.jsonl"
+            output = self.root / f"{profile}-uses.tsv"
+            coverage = self.root / f"{profile}-coverage.tsv"
+            inventory_path = self.root / f"{profile}-inventory.tsv"
+
+            def run_capture(records: list[dict[str, object]]) -> dict[str, object]:
+                capture_path.write_text("".join(json.dumps(record) + "\n" for record in [*records, {"reason": "build-finished", "success": True}]))
+                args = ["parse_test_diagnostics.py", "--capture-mode", "server-support-integration", "--feature-profile", profile,
+                        "--all-test-targets", "--metadata", str(self.metadata_path), "--metadata-sha256", self.metadata_digest,
+                        "--diagnostics", str(capture_path), "--capture-sha256", hashlib.sha256(capture_path.read_bytes()).hexdigest(),
+                        "--capture-root", str(self.captured), "--patched-root", str(self.root), "--manifest", str(self.root / "manifest.tsv"),
+                        "--output", str(output), "--coverage", str(coverage), "--inventory", str(inventory_path)]
+                stdout = io.StringIO()
+                with mock.patch("sys.argv", args), mock.patch.object(test_capture, "load_manifest", return_value=manifest), \
+                        mock.patch.object(test_capture, "validate_patched_checkout"), contextlib.redirect_stdout(stdout):
+                    test_capture.main()
+                return json.loads(stdout.getvalue())
+
+            with self.subTest(profile=profile):
+                summary = run_capture(messages)
+                self.assertEqual(summary["selected_integration_targets"], ["nested", "selected", "support_gated", "support_only"])
+                self.assertEqual(summary["typed_use_sites"], 0)
+                self.assertIn("cfg-gated target bodies", summary["evidence_limit"])
+                with inventory_path.open(newline="") as source:
+                    rows = list(csv.DictReader(source, delimiter="\t"))
+                self.assertEqual(len(rows), len(messages))
+                self.assertTrue(all(row["capture_mode"] == "server-support-integration" for row in rows))
+                with self.assertRaisesRegex(SystemExit, "missing required Cargo targets"):
+                    run_capture(messages[:-1])
+
+    def test_cfg_gated_target_artifact_alone_does_not_imply_body_compilation(self) -> None:
+        tag = "EXAMPLE::TYPE@L1C1"
+        manifest = [{"file": "server/crates/waddle-server/src/lib.rs", "line": "1", "tag": tag}]
+        xmpp = self.artifact("waddle-xmpp", "lib", "waddle_xmpp", False, ["test-utils"])
+        for mode, features in (("server-integration", []), ("server-support-integration", ["test-support"])):
+            server = self.artifact("waddle-server", "lib", "waddle_server", False, features)
+            selected = self.artifact("waddle-server", "test", "support_only", True, features)
+            messages = [server, xmpp, selected]
+            artifacts = test_capture.test_inventory(messages, self.root, self.captured, mode, "default", {"support_only"}, self.metadata)
+            rows = test_capture.diagnostic_rows(messages, self.root, self.captured, manifest, artifacts, mode, "default", "a" * 64, "b" * 64)
+            self.assertEqual(rows, [])
+            self.assertTrue(artifacts[(selected["package_id"], "test", "support_only")]["test"])
+        diagnostic = {
+            "reason": "compiler-message", "package_id": selected["package_id"], "target": copy.deepcopy(selected["target"]),
+            "message": {"code": {"code": "deprecated"}, "message": "use of deprecated item W2046|" + tag,
+                        "spans": [{"is_primary": True, "file_name": "crates/waddle-server/tests/support_only.rs", "line_start": 2, "column_start": 4}]},
+        }
+        rows = test_capture.diagnostic_rows([diagnostic], self.root, self.captured, manifest, artifacts, "server-support-integration", "default", "a" * 64, "b" * 64)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["compiled_target_name"], "support_only")
+        self.assertEqual(json.loads(rows[0]["compiled_target_features"]), ["test-support"])
+        self.assertIn("marker_reference", rows[0]["source"])
 
     def test_dual_artifacts_are_ambiguous_regardless_of_order(self) -> None:
         unit = self.artifact("waddle-server", "lib", "waddle_server", True, [])

@@ -1,9 +1,10 @@
 # Account site review shard
 
-Source target: `5763923e0cb15d3bbab9cf53800e5b1bdd41e183`. The
-[site ledger](account-site-reviews.tsv) covers the `DUAL`, `UA`, `UAF`,
-`UAMSG`, `UR`, `URE`, `URF`, and `URMSG` target families in
-[capture-5763923](capture-5763923/README.md): 828 default-profile rows and
+The original shard reviewed source `5763923e0cb15d3bbab9cf53800e5b1bdd41e183`.
+Its [site ledger](account-site-reviews.tsv) has been carried forward to
+[`4219bdd71`](capture-4219bdd/README.md), with the shifted owner-update
+locations rechecked. It covers the `DUAL`, `UA`, `UAF`, `UAMSG`, `UR`,
+`URE`, `URF`, and `URMSG` target families: 828 default-profile rows and
 904 clustering-profile rows. All 251 scoped manifest tags have coverage rows
 in both profiles; 191 have at least one recorded use across the profiles.
 The capture is a set of compiler references, not a complete runtime caller or

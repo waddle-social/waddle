@@ -20,12 +20,12 @@ import subprocess
 import sys
 
 
-SOURCE_COMMIT = "5763923e0cb15d3bbab9cf53800e5b1bdd41e183"
+SOURCE_COMMIT = "4219bdd71af9fb0116c82a5c33ab1ed98eecc35d"
 MARKER = "W2046|"
 # Recompute intentionally when the pinned source or reviewed target scope changes.
 # This makes a mutually truncated manifest and patched tree fail closed.
-MANIFEST_SHA256 = "c7f6c65de824d78e8df57a4b408d702a2f1f86cfd7197eb7389be96ca29745a9"
-HANDLERS_SHA256 = "c8f8d58306eb14871af9398700b429315cd01e22da65099085946143266b82e4"
+MANIFEST_SHA256 = "3818d887b776f9ca5fa22c51aea0b5b0fc1ca02ba29ff55e6b5d24d9dc15df5c"
+HANDLERS_SHA256 = "7dc13ab0a37126e9f751852823e8458d8a30335492fd2fab52e8859387a3652f"
 HANDLER_ACTORS = ("UserActor", "UserRegistryActor", "RelayActor")
 HANDLER_FIELDS = ("source_commit", "path", "line", "column", "actor", "message", "sha256_before", "cfg_test_classification", "review_status")
 

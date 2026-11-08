@@ -5,9 +5,13 @@ Each capture is scoped to an explicit mode and, for integration tests, a list
 of selected test targets. A Cargo compiler-message has no profile.test field;
 when more than one artifact shares its package/kind/name, attribution is
 ambiguous and the entire capture is rejected. Source-region hints are lexical
-and never determine compiled target mode. Test captures do not prove execution,
-all-test coverage, the original capture's authenticity, or absence of uses for
-which rustc did not emit a warning.
+and never determine compiled target mode. A target artifact does not establish
+that its cfg-gated body compiled. Test captures do not prove execution, all-test
+coverage, the original capture's authenticity, or absence of uses for which
+rustc did not emit a warning.
+
+The server-support-integration mode selects server integration targets with
+test-support enabled (and clustering for that profile); XMPP uses test-utils.
 
 Integration target selection is limited to targets marked test=true in the
 retained metadata, including explicit selections. This excludes test=false
@@ -37,7 +41,7 @@ from parse_diagnostics import (
     strip_marker_lines, validate_patched_checkout,
 )
 
-MODES = ("support-lib", "server-unit", "server-integration", "xmpp-unit", "xmpp-integration")
+MODES = ("support-lib", "server-unit", "server-integration", "server-support-integration", "xmpp-unit", "xmpp-integration")
 SCHEMA_VERSION = "test-capture-v2"
 USE_FIELDS = (
     "schema_version", "capture_mode", "feature_profile", "capture_sha256", "metadata_sha256", "tag", "kind", "source_class_hint",
@@ -124,7 +128,7 @@ def expected_features(mode: str, profile: str, package: str) -> list[str]:
     if package == "waddle-xmpp":
         return ["test-utils"]
     result = ["clustering"] if profile == "clustering" else []
-    if mode == "support-lib":
+    if mode in {"support-lib", "server-support-integration"}:
         result.append("test-support")
     return sorted(result)
 
@@ -192,7 +196,7 @@ def test_inventory(
             test_mode = (mode == "server-unit" and package_name == "waddle-server") or (mode == "xmpp-unit" and package_name == "waddle-xmpp")
         elif integration and package_name == package and kind == "test" and name in selected:
             target_source, test_mode = metadata_target["source"], True
-        elif mode == "server-integration" and package_name == "waddle-server" and kind == "bin":
+        elif mode in {"server-integration", "server-support-integration"} and package_name == "waddle-server" and kind == "bin":
             target_source, test_mode = metadata_target["source"], False
         else:
             raise ValueError(f"unknown or unselected target in {mode}: {logical_key}")
@@ -392,7 +396,7 @@ def main() -> None:
         write_table(paths[4], INVENTORY_FIELDS, inventory)
     except (OSError, EOFError, ValueError, KeyError, TypeError, csv.Error, subprocess.CalledProcessError) as error:
         raise SystemExit(f"invalid test/support capture: {error}") from error
-    print(json.dumps({"schema_version": SCHEMA_VERSION, "capture_mode": args.capture_mode, "feature_profile": args.feature_profile, "capture_root": str(capture_root), "capture_sha256_uncompressed": hashlib.sha256(capture).hexdigest(), "metadata_sha256_uncompressed": args.metadata_sha256, "target_declarations": len(manifest), "typed_use_sites": len(rows), "in_scope_artifact_targets": len(artifacts), "selected_integration_targets": sorted(selected), "evidence_limit": "compiled marker warnings only; Cargo metadata invocation, dependency inventory, test execution and runtime reachability are not established"}, sort_keys=True))
+    print(json.dumps({"schema_version": SCHEMA_VERSION, "capture_mode": args.capture_mode, "feature_profile": args.feature_profile, "capture_root": str(capture_root), "capture_sha256_uncompressed": hashlib.sha256(capture).hexdigest(), "metadata_sha256_uncompressed": args.metadata_sha256, "target_declarations": len(manifest), "typed_use_sites": len(rows), "in_scope_artifact_targets": len(artifacts), "selected_integration_targets": sorted(selected), "evidence_limit": "compiled marker warnings only; cfg-gated target bodies, Cargo metadata invocation, dependency inventory, test execution and runtime reachability are not established by artifact presence"}, sort_keys=True))
 
 
 if __name__ == "__main__":

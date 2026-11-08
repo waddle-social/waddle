@@ -1,10 +1,19 @@
 # #2046 type-resolved connection inventory
 
-The refreshed production-profile capture at `5763923e` is documented in
-[`capture-5763923`](capture-5763923/README.md). The historical results and
-commands below describe the #2286 pass; to reproduce that older pass, use the
-scripts from its pinned commit. The current scripts target the refreshed
-commit and require a separate handler-candidate output.
+The current production and partial test-support captures at `4219bdd71` are
+documented in [`capture-4219bdd`](capture-4219bdd/README.md). The
+[independent edge discovery](independent-edge-discovery-4219.md) identifies
+additional paths and explicitly remains partial. Test-target captures,
+semantic review and exhaustive indirect discovery remain open; neither the
+capture nor a matching supplied candidate list proves runtime behavior.
+
+The previous production capture remains in
+[`capture-5763923`](capture-5763923/README.md), with its pinned checkpoint
+scripts needed for reproduction. The historical results and commands below
+describe the earlier #2286 pass and require the scripts from its pinned commit.
+The current scripts target `4219bdd71` and require a separate handler output.
+
+## Historical #2286 pass
 
 Compiler inventory target: `main@3ae674c121c06b44934c915ecc0ef469dca54833`.
 Current-main review target: `4b1fd1f348393337c827fb98ac4dea64f0f9dcf3` (#2287).

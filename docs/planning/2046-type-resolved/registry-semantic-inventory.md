@@ -1,7 +1,9 @@
 # Connection registry semantic inventory shard
 
-Source review: `718f47a9e08f29cf2e6157803770e2f495fe201e` (source-tree base
-`5763923e`; the later planning commit has the same tree). This is a **bounded declaration and
+Initial source review: `718f47a9e08f29cf2e6157803770e2f495fe201e` (source-tree base
+`5763923e`). The owner-update locations below are refreshed for
+`4219bdd71af9fb0116c82a5c33ab1ed98eecc35d`; classifications were carried forward
+where the captured site text matched. This is a **bounded declaration and
 selected-edge review**, not an every-caller read/write inventory or evidence
 that a migration phase is complete. The tables classify current operations;
 they do not prescribe a future owner. **A** means authority for the named
@@ -733,15 +735,15 @@ coverage remain open.
 
 | [owner_update.rs:2:20](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L2) | `CEF::TYPE` | — | type import; no runtime action at this span. |
 | [owner_update.rs:2:37](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L2) | `CRF::TYPE` | — | type import; no runtime action at this span. |
-| [owner_update.rs:167:25](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L167) | `CEF.carbons_enabled` | A/I/O | store the remote carbons update on the owner mirror after currency checks. |
-| [owner_update.rs:187:21](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L187) | `CEF.roster_interested` | A/I/O | store remote roster interest on the owner mirror after currency checks. |
-| [owner_update.rs:208:25](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L208) | `CEF.blocklist_interested` | A/I/O | store remote blocklist interest on the owner mirror after currency checks. |
-| [owner_update.rs:253:16](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L253) | `CRF::TYPE` | — | helper parameter type; no runtime action at this span. |
-| [owner_update.rs:256:13](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L256) | `CEF::TYPE` | — | helper return type; no runtime action at this span. |
-| [owner_update.rs:267:20](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L267) | `CE::binding_id` | A | compare the actor entry token with the remote registration owner. |
-| [owner_update.rs:270:41](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L270) | `CR::entry_if_owner` | A/I | fetch the registry entry only if the remote registration owner remains current. |
-| [owner_update.rs:274:10](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L274) | `CEF.carbons_enabled` | A/I/O | compare the registry mirror's shared carbons allocation with the actor copy. |
-| [owner_update.rs:275:10](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L275) | `CEF.carbons_enabled` | A/I/O | compare the actor copy's shared carbons allocation with the registry mirror. |
+| [owner_update.rs:176:25](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L176) | `CEF.carbons_enabled` | A/I/O | store the remote carbons update on the owner mirror after currency checks. |
+| [owner_update.rs:196:21](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L196) | `CEF.roster_interested` | A/I/O | store remote roster interest on the owner mirror after currency checks. |
+| [owner_update.rs:217:25](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L217) | `CEF.blocklist_interested` | A/I/O | store remote blocklist interest on the owner mirror after currency checks. |
+| [owner_update.rs:262:16](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L262) | `CRF::TYPE` | — | helper parameter type; no runtime action at this span. |
+| [owner_update.rs:265:13](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L265) | `CEF::TYPE` | — | helper return type; no runtime action at this span. |
+| [owner_update.rs:276:20](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L276) | `CE::binding_id` | A | compare the actor entry token with the remote registration owner. |
+| [owner_update.rs:279:41](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L279) | `CR::entry_if_owner` | A/I | fetch the registry entry only if the remote registration owner remains current. |
+| [owner_update.rs:283:10](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L283) | `CEF.carbons_enabled` | A/I/O | compare the registry mirror's shared carbons allocation with the actor copy. |
+| [owner_update.rs:284:10](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L284) | `CEF.carbons_enabled` | A/I/O | compare the actor copy's shared carbons allocation with the registry mirror. |
 | [types.rs:2:42](../../../server/crates/waddle-server/src/clustering/route_bridge/types.rs#L2) | `CEF::TYPE` | — | type import; no runtime action at this span. |
 | [types.rs:150:17](../../../server/crates/waddle-server/src/clustering/route_bridge/types.rs#L150) | `CEF::TYPE` | — | snapshot-constructor parameter type; no runtime action at this span. |
 | [types.rs:154:35](../../../server/crates/waddle-server/src/clustering/route_bridge/types.rs#L154) | `CE::connection_ref` | A/T/O | copy physical connection identity into the remote state snapshot. |

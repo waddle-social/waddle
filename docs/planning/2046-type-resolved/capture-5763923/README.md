@@ -48,9 +48,12 @@ The retained Cargo artifacts contain the original absolute checkout path.
 Reparsing supplies that path as `--capture-root` and independently validates a
 pinned annotated checkout supplied as `--patched-root`; the two may differ.
 
-To reparse the retained streams, first create a clean disposable checkout at
-the source commit and use the current injector from this PR checkout. For
-example, set `INVENTORY_SCRATCH` to the absolute disposable checkout path:
+To reparse these historical streams, use the injector and parser from signed
+checkpoint `95a1f378c15ce2f41fa9029f7096cf9861796206`, whose scripts are
+pinned to this source. Later versions of these scripts may target a newer
+commit. Create a clean disposable checkout at the source commit and run the
+commands from a separate checkout of that checkpoint. For example, set
+`INVENTORY_SCRATCH` to the absolute disposable source checkout path:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 docs/planning/2046-type-resolved/mark_targets.py --root "$INVENTORY_SCRATCH" --manifest /private/tmp/w2046-targets.tsv --handlers /private/tmp/w2046-handlers.tsv

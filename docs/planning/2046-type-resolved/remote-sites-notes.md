@@ -1,22 +1,23 @@
 # Remote-route compiler-site review
 
-Source target: `5763923e0cb15d3bbab9cf53800e5b1bdd41e183`.
+Source target: `4219bdd71af9fb0116c82a5c33ab1ed98eecc35d`.
 The [site review](remote-site-reviews.tsv) covers the exact compiler keys in
-`capture-5763923` for `RRE`, `RRETYPE`, `RRECOMPAT`, `RRESERVED`, `BRIDGE`,
-`RELAY`, and `MUCKIND`. There are 1,888 clustering keys and no default-profile
-keys for these tags. The table records the operation at each marked span; a
-call or constructed request does not by itself prove that its effect completed.
+[`capture-4219bdd`](capture-4219bdd/README.md) for `RRE`, `RRETYPE`,
+`RRECOMPAT`, `RRESERVED`, `BRIDGE`, `RELAY`, and `MUCKIND`. There are 1,892
+clustering keys and no default-profile keys for these tags. The table records
+the operation at each marked span; a call or constructed request does not by
+itself prove that its effect completed.
 
 | Kind | Reviewed keys |
 | --- | ---: |
-| RRE | 874 |
+| RRE | 878 |
 | RRETYPE | 594 |
 | RRECOMPAT | 90 |
 | RRESERVED | 8 |
 | BRIDGE | 221 |
 | RELAY | 1 |
 | MUCKIND | 100 |
-| **Total** | **1,888** |
+| **Total** | **1,892** |
 
 The compatibility route and frame codecs are used by the registered baseline
 and live handlers. A second baseline ask is allowed only after an
@@ -42,6 +43,16 @@ Fresh-bind retirement and the separate early acknowledgement policy must be
 read with their respective custody checks
 ([socket handling](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/socket.rs#L1214)).
 
+Owner-update admission uses a bounded queue per registration identity. Removing
+an interior turn does not grant its successor; only removal of the head grants
+the next live turn ([queue removal](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update_order.rs#L193)).
+If readiness closes before a turn is granted, the bridge returns `Unavailable`
+without applying that update ([wait](../../../server/crates/waddle-server/src/clustering/route_bridge/registration/owner_update.rs#L55)).
+On observing a poisoned lock, admission or turn drop drains the queues and
+closes ungranted waiters; an already granted head may finish, and poisoning
+alone need not wake waiters immediately. Owner arrival ordering does not fence
+in-flight reorder or an update that may commit after a sender timeout.
+
 Two capture rows carry a `test` source-class hint at
 [mod.rs:363](../../../server/crates/waddle-server/src/clustering/route_bridge/mod.rs#L363)
 and [mod.rs:366](../../../server/crates/waddle-server/src/clustering/route_bridge/mod.rs#L366).
@@ -49,11 +60,12 @@ The containing timeout helper is not `cfg(test)`; the `cfg(test)` immediately
 below applies to the following helper. Both rows have non-test compiled-target
 provenance. Source hints and compilation do not prove runtime selection.
 
-The scoped check matched all review keys to the retained use tables, checked
-all source lines, columns and citations, validated semantic label syntax and
-required commit, reconciled 352 target tags against both coverage tables, and
-matched the 27 declaration-file hashes. It found no missing, extra or duplicate
-keys. This scoped check does not establish capture authenticity, semantic
-classification correctness, or discovery of every indirect edge. The full
-combined inventory and handler/edge validator are separate integration work;
-no runtime or Cargo test was run for this documentation shard.
+The inventory validator reparsed both retained, hash-checked compiler streams
+and matched all 7,958 review keys, including this shard, to the refreshed use
+tables. It checked source locations, citations, semantic-label syntax, both
+coverage tables and all 52 declaration-file hashes. It also reconciled 83
+handler candidates and 153 supplied indirect edges with their reviews. These
+checks do not establish capture authenticity, semantic classification
+correctness, or discovery of every indirect edge. Independent review remains
+separate integration work; no runtime or Cargo test was run for this
+reconciliation.

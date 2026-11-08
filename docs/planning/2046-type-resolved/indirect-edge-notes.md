@@ -1,18 +1,21 @@
 # Bounded indirect-edge candidates and source review
 
-Source target: `5763923e0cb15d3bbab9cf53800e5b1bdd41e183`. The inspected
-checkout is `718f47a9e08f29cf2e6157803770e2f495fe201e`; a read-only
-`git diff 5763923e -- server` produced no changed server paths. The input was
+Source target: `4219bdd71af9fb0116c82a5c33ab1ed98eecc35d`. The original
+review used `718f47a9e08f29cf2e6157803770e2f495fe201e`, whose server tree
+matched `5763923e`; the changed owner-update ordering paths were re-inspected
+for this refresh. The input was
 [A01–A31](actor-mirror-edge-ledger.md) and the [WebSocket borrowed-write
 narrative](ws-state-semantic-inventory.md#borrowed-writes-and-callers). This is
 not an independent all-source discovery or a complete caller inventory.
 
-The two TSVs contain **148 individual links**: 116 from 29 actor/relay ledger
-groups and 32 from the selected WebSocket borrow and control-flow paths. The
-[candidate table](indirect-edge-candidates.tsv) is the seven identity columns
+The two TSVs contain **153 individual links**: 116 from 29 actor/relay ledger
+groups, five additional owner-update queue links, and 32 from the selected
+WebSocket borrow and control-flow paths. The [candidate table](indirect-edge-candidates.tsv)
+is the seven identity columns
 projected from the [review table](indirect-edge-reviews.tsv); the matching rows
 are not an independent second discovery. Each row names a concrete call site,
-message ask/tell and handler, or, in A16, the shared-entry state connection.
+message ask/tell and handler, explicit turn drop and destructor, or, in A16,
+the shared-entry state connection.
 `kind` records the observed source gate and edge mechanism, while `operation`
 and `classification` use the validator's vocabulary. A call or message edge
 can exist without the preceding branch being selected or the operation
@@ -33,6 +36,12 @@ obsolete.
   conditions. Remote asks cite the matching registered handler, including both
   live and baseline compatibility variants where present. Compatibility can
   retry only under its explicit conditions; it is not unconditional fanout.
+- The five added A23 queue links cover the explicit admission, initial grant,
+  readiness wait, turn destructor and successor grant. Interior cancellation
+  removes only that turn. Poison drains ungranted senders when a later admission
+  or turn drop observes the lock; granted heads may finish, and poison alone
+  need not immediately wake waiters. These selected links are not exhaustive
+  discovery of queue internals or other remote update paths.
 - `test-actor-ask` records observed `cfg(test)` unit-test senders to otherwise
   release-compiled handlers. The physical continuation integration sender is
   itself [`test-support` gated](../../../server/crates/waddle-server/tests/physical_continuation.rs#L1).
@@ -72,11 +81,11 @@ not prove drain or a physical socket write. These notes leave all such work
 open rather than treating the candidate list as exhaustive.
 
 Manual source inspection checked the cited message implementations, selected
-senders, wrappers, borrowed contexts and relevant feature gates. The candidate
-and review tables were checked for equal row count, unique IDs, canonical
-operation/class labels, source-commit value, and existing endpoint paths using
-ordinary text tools. No inventory validation script, Cargo command, tests,
-runtime exercise, Git mutation, remote push, or CI check was performed as part
-of this shard. The table checks do not independently establish discovery
-completeness, semantic correctness, or every line and evidence citation; the
-integrator must run the full validator and broader independent review.
+senders, wrappers, borrowed contexts and relevant feature gates. Inventory
+validator reconciled candidate and review keys, unique IDs, operation/class
+labels, source-commit values and cited source locations for all 153 supplied
+links. It also reparsed both retained compiler streams. Independent discovery
+and semantic review remain integration work. No Cargo command, runtime
+exercise, Git mutation, remote push or CI check was performed for this
+reconciliation; the checks do not prove discovery completeness or semantic
+correctness.
