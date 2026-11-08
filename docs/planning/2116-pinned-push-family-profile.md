@@ -14,9 +14,11 @@ serving path and both restricted-startup refusals remain closed.
    PubSub relations, and an explicitly versioned Push, VAPID, registration,
    notification outbox and activity relation/ACL inventory. Refactor the
    existing H-aware PubSub verifier so the pinned SQLx path and legacy adapter
-   share its catalog checks. Revalidate before invoking the exact H-owned
-   `NOWAIT` lock helper. Choose the compatible profile with no optional
-   monitor SELECT on the H-verified PubSub tables.
+   share its catalog checks. Bound the namespace, database, parameter,
+   relation, attribute, trigger, constraint, function, and ACL inputs read by
+   that verifier before either pass. Revalidate before invoking the exact
+   H-owned `NOWAIT` lock helper. Choose the compatible profile with no
+   effective monitor SELECT on the H-verified PubSub tables.
 3. Exercise the actual owner-prepared PostgreSQL 17 combined fixture on a
    one-slot pinned pool. Refuse wrong role/function/relation OIDs, body,
    search path, missing or excess grants, incompatible monitor rights,
@@ -29,7 +31,8 @@ serving path and both restricted-startup refusals remain closed.
 The method returns no pool, connection, transaction, store handle, source row,
 or custody verdict. It does not read `ingress_effect_descendants`, add an
 A-owned classifier or R grant, call the legacy joint custody reader, select
-workers, or change XMPP wire behavior. Privileged catalog mutators and old
-backends still require independent quiescence from before the pool hook until
-rollback; a discarded checkout alone does not prove backend exit. GitHub
+workers, or change XMPP wire behavior. All mutations of catalogs scanned by
+the shared H verifier, including temporary-schema creation by other sessions,
+and old backends require independent quiescence from before the pool hook
+until rollback; a discarded checkout alone does not prove backend exit. GitHub
 Actions and workflow files stay disabled until all of #2046 is implemented.

@@ -48,6 +48,8 @@ pub use pinned_selected_entry::{PinnedSelectedEntry, PinnedSelectedEntryError};
 mod pinned_partial_profile;
 pub(crate) use pinned_partial_profile::verify_pinned_partial_profile;
 pub use pinned_partial_profile::{PinnedPartialProfileError, PinnedPartialProfilePinsV1};
+mod pinned_push_profile;
+pub use pinned_push_profile::{PinnedPushProfileError, PinnedPushProfilePinsV1};
 #[cfg(feature = "test-support")]
 mod coverage_gap_gate;
 #[cfg(feature = "test-support")]

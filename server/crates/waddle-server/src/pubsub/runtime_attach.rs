@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use sqlx::{PgConnection, Row as _};
+
 use crate::db::physical_attestation::PgRoleName;
 use crate::db::{CatalogFenceLock, Database, DatabaseDriver, DatabaseError, Transaction};
 
@@ -776,6 +778,20 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
     definer: &str,
     profile: &RestrictedServingProfileV1,
 ) -> Result<(), PubSubRuntimeAttachError> {
+    let connection = tx.postgres_connection().ok_or_else(|| {
+        DatabaseError::QueryFailed("restricted PubSub profile requires PostgreSQL".to_owned())
+    })?;
+    verify_restricted_v1_graph_connection(connection, identity, definer, profile).await
+}
+
+/// Shared catalog proof for callers which already own the pinned transaction.
+/// This does not begin a transaction or call the verified helper.
+pub(crate) async fn verify_restricted_v1_graph_connection(
+    connection: &mut PgConnection,
+    identity: &crate::db::lineage::PgIdentity,
+    definer: &str,
+    profile: &RestrictedServingProfileV1,
+) -> Result<(), PubSubRuntimeAttachError> {
     let invalid = || PubSubRuntimeAttachError::InvalidAttachLock;
     let mut unique = std::collections::HashSet::new();
     if TABLES.len() != profile.helper_relation_oids.len()
@@ -792,7 +808,7 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
         return Err(invalid());
     }
     let schema = &identity.schema.name.0;
-    let mut rows = tx.query(
+    let valid = query_boolean(connection,
         r#"SELECT pg_catalog.current_setting('server_version_num')::integer / 10000 = 17
           AND n.oid::bigint = ? AND a.oid::bigint = ? AND h.oid::bigint = ?
           AND session_user::text = r.rolname AND current_user::text = r.rolname
@@ -840,10 +856,9 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
             profile.helper.as_str(), schema
         ],
     ).await?;
-    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+    if !valid {
         return Err(invalid());
     }
-    drop(rows);
 
     let source = include_str!("../db/migrations/owner/serving_role_graph_v1_candidate.sql")
         .split_once("AS $v1_pubsub_lock$")
@@ -853,9 +868,9 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
             "__SCHEMA__",
             &crate::db::physical_attestation::quote_identifier(schema),
         );
-    let mut rows = tx
-        .query(
-            r#"SELECT p.oid::bigint = ? AND p.proowner=h.oid AND n.oid::bigint = ?
+    let valid = query_boolean(
+        connection,
+        r#"SELECT p.oid::bigint = ? AND p.proowner=h.oid AND n.oid::bigint = ?
           AND p.prokind='f' AND p.prosecdef AND p.pronargs=0 AND p.pronargdefaults=0
           AND p.proargdefaults IS NULL AND p.provariadic=0 AND p.proallargtypes IS NULL
           AND p.proargmodes IS NULL AND p.proargnames IS NULL AND NOT p.proretset
@@ -880,26 +895,25 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
           JOIN pg_catalog.pg_roles h ON h.rolname=?
           JOIN pg_catalog.pg_roles r ON r.rolname=current_user
           WHERE n.nspname=? AND p.proname='pubsub_runtime_attach_lock' LIMIT 2"#,
-            crate::db_params![
-                i64::from(profile.helper_function_oid),
-                i64::from(identity.schema.oid),
-                source,
-                profile.helper.as_str(),
-                schema
-            ],
-        )
-        .await?;
-    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        crate::db_params![
+            i64::from(profile.helper_function_oid),
+            i64::from(identity.schema.oid),
+            source,
+            profile.helper.as_str(),
+            schema
+        ],
+    )
+    .await?;
+    if !valid {
         return Err(invalid());
     }
-    drop(rows);
 
     for (table, oid) in TABLES.iter().zip(profile.helper_relation_oids) {
         // This catalog-only shape check happens before the name-based helper.
-        verify_table(tx, schema, table).await?;
-        let mut rows = tx
-            .query(
-                r#"SELECT c.oid::bigint=? AND c.relowner=n.nspowner
+        verify_table_connection(connection, schema, table).await?;
+        let valid = query_boolean(
+            connection,
+            r#"SELECT c.oid::bigint=? AND c.relowner=n.nspowner
               AND pg_catalog.has_table_privilege(h.oid,c.oid,'UPDATE')
               AND NOT pg_catalog.has_table_privilege(h.oid,c.oid,
                 'SELECT,INSERT,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
@@ -915,15 +929,15 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
               FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
               JOIN pg_catalog.pg_roles h ON h.rolname=?
               WHERE n.oid::bigint=? AND c.relname=?"#,
-                crate::db_params![
-                    i64::from(oid),
-                    profile.helper.as_str(),
-                    i64::from(identity.schema.oid),
-                    table.name
-                ],
-            )
-            .await?;
-        if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+            crate::db_params![
+                i64::from(oid),
+                profile.helper.as_str(),
+                i64::from(identity.schema.oid),
+                table.name
+            ],
+        )
+        .await?;
+        if !valid {
             return Err(invalid());
         }
     }
@@ -947,16 +961,68 @@ pub(crate) async fn verify_restricted_v1_graph_tx(
            WHEN c.relkind='S' THEN pg_catalog.has_sequence_privilege(h.oid,c.oid,'SELECT,USAGE,UPDATE') \
            ELSE false END)"
     );
-    let mut rows = tx
-        .query(
-            &query,
-            crate::db_params![profile.helper.as_str(), i64::from(identity.schema.oid)],
-        )
-        .await?;
-    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+    let valid = query_boolean(
+        connection,
+        &query,
+        crate::db_params![profile.helper.as_str(), i64::from(identity.schema.oid)],
+    )
+    .await?;
+    if !valid {
         return Err(invalid());
     }
     Ok(())
+}
+
+/// Try the established PubSub gate on an already catalog-fenced transaction.
+pub(crate) async fn try_restricted_pubsub_gate(
+    connection: &mut PgConnection,
+) -> Result<bool, PubSubRuntimeAttachError> {
+    sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)")
+        .bind(PUBSUB_SCHEMA_ADVISORY_LOCK_KEY)
+        .fetch_one(connection)
+        .await
+        .map_err(DatabaseError::from)
+        .map_err(Into::into)
+}
+
+/// Check the exact H-owned helper immediately before invoking its fixed body.
+/// The caller must already own the catalog fence and the PubSub gate.
+pub(crate) async fn verify_and_call_restricted_pubsub_lock(
+    connection: &mut PgConnection,
+    identity: &crate::db::lineage::PgIdentity,
+    definer: &str,
+    profile: &RestrictedServingProfileV1,
+) -> Result<(), PubSubRuntimeAttachError> {
+    verify_restricted_v1_graph_connection(connection, identity, definer, profile).await?;
+    call_restricted_pubsub_lock(connection, identity).await
+}
+
+async fn call_restricted_pubsub_lock(
+    connection: &mut PgConnection,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let function = format!(
+        "{}.{}",
+        crate::db::physical_attestation::quote_identifier(&identity.schema.name.0),
+        crate::db::physical_attestation::quote_identifier(PUBSUB_ATTACH_LOCK_FUNCTION)
+    );
+    match sqlx::query(&format!("SELECT {function}()"))
+        .fetch_optional(connection)
+        .await
+    {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(PubSubRuntimeAttachError::InvalidAttachLock),
+        Err(error) => {
+            let source = DatabaseError::from(error);
+            if postgres_lock_not_available(&source) {
+                Err(PubSubRuntimeAttachError::ConcurrentSchemaChange {
+                    table: attach_lock_error_table(&source),
+                })
+            } else {
+                Err(source.into())
+            }
+        }
+    }
 }
 
 /// Check the partial v2 role graph on the same attested transaction as a
@@ -1287,12 +1353,46 @@ async fn verify_marker_data(
     Ok(owner_phase == 1)
 }
 
+async fn query_boolean(
+    connection: &mut PgConnection,
+    sql: &str,
+    params: Vec<crate::db::Value>,
+) -> Result<bool, PubSubRuntimeAttachError> {
+    let sql = crate::db::rewrite_positional_for_postgres(sql);
+    let mut query = sqlx::query(&sql);
+    for value in params {
+        query = crate::db::bind_postgres(query, value);
+    }
+    let row = query
+        .fetch_optional(connection)
+        .await
+        .map_err(DatabaseError::from)?;
+    match row {
+        Some(row) => row
+            .try_get(0)
+            .map_err(DatabaseError::from)
+            .map_err(Into::into),
+        None => Ok(false),
+    }
+}
+
 async fn verify_table(
     tx: &mut Transaction<'_>,
     schema: &str,
     table: &Table,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    let mut rows = tx.query(
+    let connection = tx.postgres_connection().ok_or_else(|| {
+        DatabaseError::QueryFailed("PubSub verification requires PostgreSQL".to_owned())
+    })?;
+    verify_table_connection(connection, schema, table).await
+}
+
+async fn verify_table_connection(
+    connection: &mut PgConnection,
+    schema: &str,
+    table: &Table,
+) -> Result<(), PubSubRuntimeAttachError> {
+    let valid = query_boolean(connection,
         "SELECT c.relkind = 'r' AND c.relpersistence = 'p' AND NOT c.relispartition \
          AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND c.reloftype = 0 \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
@@ -1315,7 +1415,7 @@ async fn verify_table(
          WHERE n.nspname = ? AND c.relname = ?",
         crate::db_params![schema, table.name],
     ).await?;
-    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+    if !valid {
         return Err(PubSubRuntimeAttachError::InvalidTable { table: table.name });
     }
     Ok(())
