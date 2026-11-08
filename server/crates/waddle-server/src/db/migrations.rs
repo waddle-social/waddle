@@ -15,6 +15,7 @@ pub mod global;
 mod ledger_error;
 mod namespace;
 mod owner;
+mod postgres_ledger;
 mod runner;
 mod sql;
 #[cfg(test)]

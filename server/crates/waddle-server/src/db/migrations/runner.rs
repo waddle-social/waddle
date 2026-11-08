@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use tracing::{debug, info, instrument};
 
+use super::postgres_ledger::{self, PreparedLedger};
 use super::sql::migrations_table_sql;
 use super::{
     global, migration_checksum, waddle, Migration, MigrationLedgerError, MigrationNamespace,
@@ -88,7 +89,34 @@ impl MigrationRunner {
             DatabaseDriver::Sqlite => db.begin_immediate().await?,
         };
 
-        let newly_applied = self.apply_pending_in_transaction(&mut tx, driver).await?;
+        let result = match driver {
+            DatabaseDriver::Postgres => {
+                async {
+                    let ledger = postgres_ledger::prepare(&mut tx).await?;
+                    self.apply_pending_to_ledger(
+                        &mut tx,
+                        driver,
+                        &ledger.table,
+                        ledger.checksum_column_added,
+                        Some(&ledger),
+                    )
+                    .await
+                }
+                .await
+            }
+            DatabaseDriver::Sqlite => self.apply_pending_in_transaction(&mut tx, driver).await,
+        };
+        let newly_applied = match result {
+            Ok(applied) => applied,
+            Err(error) if driver == DatabaseDriver::Postgres => {
+                // Do not report a preflight or application failure until the
+                // transaction's rollback is acknowledged. On an uncertain
+                // end, discard the checkout and surface that uncertainty.
+                rollback_migration_attempt(tx).await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
 
         tx.commit().await?;
 
@@ -110,7 +138,19 @@ impl MigrationRunner {
         driver: DatabaseDriver,
     ) -> Result<Vec<i64>, DatabaseError> {
         let checksum_column_added = self.bootstrap(tx, driver).await?;
-        let applied_rows = self.read_ledger(tx).await?;
+        self.apply_pending_to_ledger(tx, driver, "_migrations", checksum_column_added, None)
+            .await
+    }
+
+    async fn apply_pending_to_ledger(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+        ledger_table: &str,
+        checksum_column_added: bool,
+        prepared: Option<&PreparedLedger>,
+    ) -> Result<Vec<i64>, DatabaseError> {
+        let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
         let adoption_backfill =
@@ -118,7 +158,9 @@ impl MigrationRunner {
 
         for (version, checksum) in adoption_backfill {
             tx.execute(
-                "UPDATE _migrations SET checksum = ? WHERE version = ? AND checksum IS NULL",
+                &format!(
+                    "UPDATE {ledger_table} SET checksum = ? WHERE version = ? AND checksum IS NULL"
+                ),
                 (checksum, version),
             )
             .await?;
@@ -146,6 +188,10 @@ impl MigrationRunner {
                 description = %migration.description,
                 "Applying migration"
             );
+            if let Some(ledger) = prepared {
+                // A previous migration body may have changed its local path.
+                ledger.set_search_path(tx).await?;
+            }
             let apply_result = if migration.version == 1029
                 && migration.sql_sqlite == waddle::V1029_SM_FRAME_PROVENANCE
                 && migration.sql_postgres == waddle::V1029_SM_FRAME_PROVENANCE_POSTGRES
@@ -160,7 +206,9 @@ impl MigrationRunner {
                 source: Box::new(source),
             })?;
             tx.execute(
-                "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
+                &format!(
+                    "INSERT INTO {ledger_table} (version, description, checksum) VALUES (?, ?, ?)"
+                ),
                 crate::db_params![
                     migration.version,
                     migration.description.as_str(),
@@ -234,10 +282,6 @@ impl MigrationRunner {
             }
         }
         Ok(false)
-    }
-
-    async fn read_ledger(&self, tx: &mut Transaction<'_>) -> Result<Vec<LedgerRow>, DatabaseError> {
-        self.read_ledger_from(tx, "_migrations").await
     }
 
     async fn read_ledger_from(
@@ -671,17 +715,27 @@ impl MigrationRunner {
 async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, DatabaseError> {
     let deadline = tokio::time::Instant::now() + MIGRATION_LOCK_WAIT;
     loop {
-        let mut tx = tokio::time::timeout_at(deadline, db.begin())
+        let mut tx = tokio::time::timeout_at(deadline, db.begin_discard_postgres_on_drop())
             .await
             .map_err(|_| DatabaseError::MigrationLockTimeout)??;
         // This utility statement takes no data snapshot. READ COMMITTED makes
         // the post-ledger-lock read observe a competing runner's commit.
-        tokio::time::timeout_at(
+        let isolation = tokio::time::timeout_at(
             deadline,
             tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ()),
         )
-        .await
-        .map_err(|_| DatabaseError::MigrationLockTimeout)??;
+        .await;
+        match isolation {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                rollback_migration_attempt(tx).await?;
+                return Err(error);
+            }
+            Err(_) => {
+                rollback_migration_attempt(tx).await?;
+                return Err(DatabaseError::MigrationLockTimeout);
+            }
+        }
         let mut contended = None;
         for (key, contention_error) in [
             (
@@ -741,10 +795,10 @@ async fn begin_fenced_postgres(db: &Database) -> Result<Transaction<'_>, Databas
 }
 
 async fn rollback_migration_attempt(tx: Transaction<'_>) -> Result<(), DatabaseError> {
-    if !matches!(
-        tokio::time::timeout(MIGRATION_LOCK_ROLLBACK_WAIT, tx.rollback()).await,
-        Ok(Ok(()))
-    ) {
+    if !tx
+        .rollback_bounded_discard(MIGRATION_LOCK_ROLLBACK_WAIT)
+        .await
+    {
         return Err(DatabaseError::MigrationLockRollbackUnconfirmed);
     }
     Ok(())
