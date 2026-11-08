@@ -110,11 +110,12 @@ on one source line. Type imports, type annotations and re-exports need separate
   delay stale-owner cleanup at
   [`characterization_seams.rs:229`](../../../server/crates/waddle-server/src/server/routes/websocket/characterization_seams.rs#L229)
   and [`:365`](../../../server/crates/waddle-server/src/server/routes/websocket/characterization_seams.rs#L365).
-  It can wait for a queue to become nonempty at
+  It can wait while queue capacity remains at its maximum unless the sender closes, at
   [`:454`](../../../server/crates/waddle-server/src/server/routes/websocket/characterization_seams.rs#L454)
   and pause SM enable before start at [`:519`](../../../server/crates/waddle-server/src/server/routes/websocket/characterization_seams.rs#L519).
   These branches can affect `authority`, `derived-index`, and `transport` in
-  the instrumented fixture; they are not all read-only observations. The
+  the instrumented fixture; they are not all read-only observations. A reserved
+  permit can satisfy the capacity observation without an enqueued item. The
   live-queue wait is documented as unbounded; SM-enable hold has its own
   bounded timeout and refusal path. Arming, matching JID/stream, registry owner,
   release and feature conditions matter to each edge.
@@ -122,10 +123,12 @@ on one source line. Type imports, type annotations and re-exports need separate
   [`test_state.rs:321`](../../../server/crates/waddle-server/src/server/routes/websocket/test_state.rs#L321)
   constructs both a connection registry and user actor registry. Its
   [`register_test_connection` at `:509`](../../../server/crates/waddle-server/src/server/routes/websocket/test_state.rs#L509)
-  registers, retrieves the same entry and calls the test/support-only
+  registers, separately looks up the current entry and calls the test/support-only
   [`mirror_register` at `dual_registration.rs:109`](../../../server/crates/waddle-server/src/server/dual_registration.rs#L109),
   which delegates at `:115` to the bounded production-shaped mirror ask.
-  These are registry `derived-index` and actor `authority` operations, not a
+  A concurrent replacement or removal can intervene before the lookup; the
+  fetched entry itself is passed to the actor. These are registry `derived-index`
+  and actor `authority` operations, not a
   successful network bind. Test-only roster/blocklist/carbons setters in
   [`resources.rs:12`](../../../server/crates/waddle-xmpp/src/registry/connection_registry/resources.rs#L12),
   [`:63`](../../../server/crates/waddle-xmpp/src/registry/connection_registry/resources.rs#L63),
@@ -197,8 +200,9 @@ on one source line. Type imports, type annotations and re-exports need separate
    -> [`mirror_register`](../../../server/crates/waddle-server/src/server/dual_registration.rs#L109)
    -> [`mirror_register_outcome` at `:120`](../../../server/crates/waddle-server/src/server/dual_registration.rs#L120)
    at `:115` -> [`RegisterUserResource` handler](../../../server/crates/waddle-xmpp/src/registry/user_registry.rs#L1090)
-   at `:134`. Its same-entry alias is explicit at `test_state.rs:518-532`;
-   actor ask completion, later shared atomic reads and socket output are
+   at `:134`. The entry fetched at `test_state.rs:518-532` is passed onward,
+   though it need not be the originally registered owner after a concurrent
+   change. Actor ask completion, later shared atomic reads and socket output are
    distinct evidence boundaries.
 
 ## Reproduction and limitations

@@ -6,10 +6,13 @@ documented in [`capture-4219bdd`](capture-4219bdd/README.md). The
 additional paths and explicitly remains partial. The support-only library
 references have grouped source notes for [actor](support-actor-review-4219.md)
 and [endpoint](support-endpoint-review-4219.md) paths, plus a grouped
-[supervised-I/O test-target review](supervised-io-review-4219.md). These notes
-are not individual site classifications. Test-target captures, semantic review and
-exhaustive indirect discovery remain open; neither the capture nor a matching
-supplied candidate list proves runtime behavior.
+[supervised-I/O test-target review](supervised-io-review-4219.md). Separate
+site ledgers and validators cover the 352 support-only keys in each library
+profile and the 105 keys from that one supervised-I/O target. The validators
+check supplied evidence, not semantic truth or test execution. Other
+test-target captures and reviews, profile-specific production-site semantics,
+and exhaustive indirect discovery remain open; none of these captures proves
+runtime behavior.
 
 The previous production capture remains in
 [`capture-5763923`](capture-5763923/README.md), with its pinned checkpoint

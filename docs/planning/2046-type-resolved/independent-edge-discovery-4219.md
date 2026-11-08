@@ -123,7 +123,8 @@ completed. Test senders establish neither production reachability nor live
 - [`sm_promotion/tests.rs:69`](../../../server/crates/waddle-server/src/sm_promotion/tests.rs#L69)
   -> [`RegisterUserResource` handler at `user_registry.rs:1090`](../../../server/crates/waddle-xmpp/src/registry/user_registry.rs#L1090):
   `call`, `authority`, test actor ask. The helper registers on the connection
-  registry and extracts the same entry at `:66-67`; callers include
+  registry and then separately fetches its current entry at `:66-67`; a concurrent
+  replacement or removal can intervene. Callers include
   [`:567`](../../../server/crates/waddle-server/src/sm_promotion/tests.rs#L567)
   and [`:806-807`](../../../server/crates/waddle-server/src/sm_promotion/tests.rs#L806).
 - [`execute_local_carbons_tests.rs:83`](../../../server/crates/waddle-server/src/ingress/execute_local_carbons_tests.rs#L83),
@@ -134,8 +135,9 @@ completed. Test senders establish neither production reachability nor live
   -> [`user_registry.rs:1090`](../../../server/crates/waddle-xmpp/src/registry/user_registry.rs#L1090):
   `call`, `authority`, test actor asks. The module is
   [`cfg(test)`](../../../server/crates/waddle-server/src/ingress/execute.rs#L262).
-  At `:80-85` the first path registers, sets carbons on, and passes the same
-  entry to the actor; its [`:91`](../../../server/crates/waddle-server/src/ingress/execute_local_carbons_tests.rs#L91)
+  At `:80-85` the first path registers, sets carbons on, then separately
+  fetches the current entry and passes it to the actor. A concurrent replacement
+  or removal can intervene between operations; its [`:91`](../../../server/crates/waddle-server/src/ingress/execute_local_carbons_tests.rs#L91)
   calls the planning helper at [`:16`](../../../server/crates/waddle-server/src/ingress/execute_local_carbons_tests.rs#L16).
   The receiver's shared-entry contract is documented at
   [`user_registry.rs:1077`](../../../server/crates/waddle-xmpp/src/registry/user_registry.rs#L1077),
@@ -154,8 +156,9 @@ completed. Test senders establish neither production reachability nor live
 - [`websocket/test_state.rs:529`](../../../server/crates/waddle-server/src/server/routes/websocket/test_state.rs#L529)
   and [`interpret/tests/mod.rs:99`](../../../server/crates/waddle-server/src/server/routes/interpret/tests/mod.rs#L99)
   -> [`mirror_register` at `dual_registration.rs:109`](../../../server/crates/waddle-server/src/server/dual_registration.rs#L109):
-  `call`, `authority`. Both obtain the just-registered `ConnectionEntry` from
-  the connection registry before mirroring. The helper and the websocket test
+  `call`, `authority`. Both register and then separately obtain a current
+  `ConnectionEntry` from the connection registry before mirroring; a concurrent
+  replacement or removal can intervene. The helper and the websocket test
   module require `test` or `test-support`, as shown at
   [`dual_registration.rs:108`](../../../server/crates/waddle-server/src/server/dual_registration.rs#L108)
   and [`websocket/mod.rs:116`](../../../server/crates/waddle-server/src/server/routes/websocket/mod.rs#L116).
