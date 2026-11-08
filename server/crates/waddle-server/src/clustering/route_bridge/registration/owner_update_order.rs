@@ -14,7 +14,7 @@
 //! (`MaybeCommitted`) whose update still commits after a later one, are not
 //! fenced here; #1685 stays open for that.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
@@ -40,9 +40,9 @@ pub(in super::super) struct RemoteResourceUpdateKey {
     pub(in super::super) socket_generation: RemoteResourceSocketGeneration,
 }
 
-/// Why an update was refused admission. Full policy: the caller answers
-/// `Unavailable` without applying anything, which every sender path
-/// already treats as "no effect, resync the full snapshot".
+/// Why an update was refused admission. The caller answers `Unavailable`
+/// without applying anything, which every sender path already treats as
+/// "no effect, resync the full snapshot".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum RemoteResourceUpdateOrderFull {
     /// [`MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS`] distinct
@@ -52,64 +52,84 @@ pub(in super::super) enum RemoteResourceUpdateOrderFull {
     /// [`MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION`] admitted
     /// updates.
     RegistrationQueue,
-    /// A panic during a map edit poisoned the order lock. The queue then
-    /// fails closed for the rest of the process: every later update is
-    /// refused instead of being admitted into state of unknown shape.
+    /// A panic during a map edit poisoned the order lock. All later
+    /// admissions fail closed instead of relying on state of unknown shape.
     Poisoned,
 }
 
-struct Slot {
-    /// Completion signal of the most recently admitted turn: its sender is
-    /// dropped when that turn ends, however it ends.
-    tail: oneshot::Receiver<()>,
-    admitted: usize,
+/// The order lock was poisoned and the turn was not granted readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct RemoteResourceUpdateOrderClosed;
+
+struct QueuedTurn {
+    // Both the queue entry and its live turn retain this allocation, so an
+    // identity cannot be reused while a turn can still try to remove it.
+    identity: Arc<()>,
+    readiness: Option<oneshot::Sender<()>>,
 }
 
-type Slots = Arc<Mutex<HashMap<RemoteResourceUpdateKey, Slot>>>;
+impl QueuedTurn {
+    fn grant(&mut self) {
+        if let Some(readiness) = self.readiness.take() {
+            let _ = readiness.send(());
+        }
+    }
+}
 
-/// Bounded per-registration FIFO of update handlers. A slot exists only
-/// while its registration has at least one admitted turn; the last turn to
-/// end removes it, so the map never retains idle registrations.
+type Slots = Arc<Mutex<HashMap<RemoteResourceUpdateKey, VecDeque<QueuedTurn>>>>;
+
+/// Bounded per-registration FIFO of update handlers. Each queue contains
+/// every live admitted turn, including its active head. An idle registration
+/// is removed immediately so its capacity can be reused.
 #[derive(Default)]
 pub(in super::super) struct RemoteResourceUpdateOrder {
     slots: Slots,
 }
 
 impl RemoteResourceUpdateOrder {
-    /// Admit one update. Synchronous by design: the caller invokes it in
-    /// the relay actor's turn, which fixes the position at arrival. The
-    /// lock is a plain mutex held only for this map edit, never across an
-    /// await, so unrelated registrations do not serialize on it.
+    /// Admit one update synchronously in the relay actor's turn. The mutex
+    /// is held only for a queue edit, never across an await.
     pub(in super::super) fn admit(
         &self,
         key: RemoteResourceUpdateKey,
     ) -> Result<RemoteResourceUpdateTurn, RemoteResourceUpdateOrderFull> {
-        let (release, tail) = oneshot::channel();
-        let Ok(mut slots) = self.slots.lock() else {
-            return Err(RemoteResourceUpdateOrderFull::Poisoned);
-        };
-        let predecessor = match slots.get_mut(&key) {
-            Some(slot) => {
-                if slot.admitted >= MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION {
-                    return Err(RemoteResourceUpdateOrderFull::RegistrationQueue);
-                }
-                slot.admitted += 1;
-                Some(std::mem::replace(&mut slot.tail, tail))
-            }
-            None => {
-                if slots.len() >= MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS {
-                    return Err(RemoteResourceUpdateOrderFull::Registrations);
-                }
-                slots.insert(key.clone(), Slot { tail, admitted: 1 });
-                None
+        let mut slots = match self.slots.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => {
+                // Drop all ungranted senders without granting successors.
+                // The already-granted head of each queue may finish.
+                poisoned.into_inner().clear();
+                return Err(RemoteResourceUpdateOrderFull::Poisoned);
             }
         };
+        let (sender, receiver) = oneshot::channel();
+        let identity = Arc::new(());
+        let queued = QueuedTurn {
+            identity: Arc::clone(&identity),
+            readiness: Some(sender),
+        };
+        if let Some(queue) = slots.get_mut(&key) {
+            if queue.len() >= MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION {
+                return Err(RemoteResourceUpdateOrderFull::RegistrationQueue);
+            }
+            queue.push_back(queued);
+        } else {
+            if slots.len() >= MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS {
+                return Err(RemoteResourceUpdateOrderFull::Registrations);
+            }
+            let mut queue = VecDeque::new();
+            queue.push_back(queued);
+            if let Some(head) = queue.front_mut() {
+                head.grant();
+            }
+            slots.insert(key.clone(), queue);
+        }
         drop(slots);
         Ok(RemoteResourceUpdateTurn {
             slots: Arc::clone(&self.slots),
             key,
-            predecessor,
-            _release: release,
+            identity,
+            readiness: TurnReadiness::Waiting(receiver),
         })
     }
 
@@ -117,45 +137,85 @@ impl RemoteResourceUpdateOrder {
     pub(in super::super) fn tracked_registrations(&self) -> usize {
         self.slots.lock().expect("order lock").len()
     }
+
+    #[cfg(test)]
+    pub(in super::super) fn poison_for_test(&self) {
+        let slots = Arc::clone(&self.slots);
+        let poisoner = std::thread::spawn(move || {
+            let _guard = slots.lock().expect("order lock");
+            panic!("poison the order lock");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(self.slots.is_poisoned());
+    }
 }
 
-/// One admitted update. Hold it for the whole handler; dropping it (on
-/// completion, cancellation or panic) releases the next update for the
-/// same registration.
+enum TurnReadiness {
+    Waiting(oneshot::Receiver<()>),
+    Ready,
+    Closed,
+}
+
+/// One admitted update. Hold it for the whole handler. Only dropping the
+/// head grants the next live turn; cancelling an interior turn merely
+/// removes that turn from the queue.
 pub(in super::super) struct RemoteResourceUpdateTurn {
     slots: Slots,
     key: RemoteResourceUpdateKey,
-    predecessor: Option<oneshot::Receiver<()>>,
-    _release: oneshot::Sender<()>,
+    identity: Arc<()>,
+    readiness: TurnReadiness,
 }
 
 impl RemoteResourceUpdateTurn {
-    /// Wait until every earlier-admitted update for this registration has
-    /// ended. Never waits on a later turn, so the wait graph is acyclic;
-    /// each predecessor's handler is bounded by its own ask timeouts.
-    pub(in super::super) async fn wait_for_predecessors(&mut self) {
-        if let Some(predecessor) = self.predecessor.take() {
-            // The sender is never used to send: `Err` means the
-            // predecessor turn ended, which is the only signal.
-            let _ = predecessor.await;
-        }
+    /// Wait for an explicit grant from the queue. The receiver stays in the
+    /// turn while this borrowed future is pending, so cancelling that future
+    /// cannot bypass the queue on a later retry. A closed sender is failure,
+    /// never permission to run.
+    pub(in super::super) async fn wait_for_predecessors(
+        &mut self,
+    ) -> Result<(), RemoteResourceUpdateOrderClosed> {
+        let result = match &mut self.readiness {
+            TurnReadiness::Waiting(receiver) => {
+                receiver.await.map_err(|_| RemoteResourceUpdateOrderClosed)
+            }
+            TurnReadiness::Ready => return Ok(()),
+            TurnReadiness::Closed => return Err(RemoteResourceUpdateOrderClosed),
+        };
+        self.readiness = if result.is_ok() {
+            TurnReadiness::Ready
+        } else {
+            TurnReadiness::Closed
+        };
+        result
     }
 }
 
 impl Drop for RemoteResourceUpdateTurn {
     fn drop(&mut self) {
-        // A poisoned lock means `admit` already refuses every new update,
-        // so the slot bookkeeping no longer matters. Successors still
-        // wake: `_release` drops after this body whatever it does.
-        let Ok(mut slots) = self.slots.lock() else {
-            return;
-        };
-        let idle = match slots.get_mut(&self.key) {
-            Some(slot) => {
-                slot.admitted = slot.admitted.saturating_sub(1);
-                slot.admitted == 0
+        let mut slots = match self.slots.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => {
+                // Draining wakes ungranted waiters with an error. Poison is
+                // observed only on the next admission or turn drop, so a
+                // panic alone does not guarantee an immediate wakeup.
+                poisoned.into_inner().clear();
+                return;
             }
-            None => false,
+        };
+        let idle = if let Some(queue) = slots.get_mut(&self.key) {
+            let Some(position) = queue
+                .iter()
+                .position(|queued| Arc::ptr_eq(&queued.identity, &self.identity))
+            else {
+                return;
+            };
+            drop(queue.remove(position));
+            if let (0, Some(next)) = (position, queue.front_mut()) {
+                next.grant();
+            }
+            queue.is_empty()
+        } else {
+            false
         };
         if idle {
             slots.remove(&self.key);
@@ -166,6 +226,7 @@ impl Drop for RemoteResourceUpdateTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Poll;
     use std::time::Duration;
 
     fn key(jid: &str, registration_id: RemoteResourceRegistrationId) -> RemoteResourceUpdateKey {
@@ -176,68 +237,145 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn same_registration_handlers_finish_in_arrival_order_when_the_first_is_delayed() {
-        let order = RemoteResourceUpdateOrder::default();
-        let registration = key(
+    fn registration() -> RemoteResourceUpdateKey {
+        key(
             "juliet@example.test/phone",
             RemoteResourceRegistrationId::fresh(),
-        );
-        let first = order.admit(registration.clone()).expect("admit first");
-        let second = order.admit(registration).expect("admit second");
-        let state = Arc::new(Mutex::new(Vec::new()));
-        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        )
+    }
 
-        // The second-arrived handler is scheduled first and is not delayed.
-        let mut second_task = tokio::spawn({
-            let state = Arc::clone(&state);
-            async move {
-                let mut turn = second;
-                turn.wait_for_predecessors().await;
-                state.lock().expect("state").push("B");
-            }
-        });
-        // The first-arrived handler is delayed mid-handler.
-        let first_task = tokio::spawn({
-            let state = Arc::clone(&state);
-            async move {
-                let mut turn = first;
-                turn.wait_for_predecessors().await;
-                let _ = gate_rx.await;
-                state.lock().expect("state").push("A");
-            }
-        });
+    #[tokio::test]
+    async fn cancelling_an_unpolled_interior_turn_does_not_release_its_successor() {
+        let order = RemoteResourceUpdateOrder::default();
+        let key = registration();
+        let mut first = order.admit(key.clone()).expect("admit first");
+        let second = order.admit(key.clone()).expect("admit second");
+        let mut third = order.admit(key).expect("admit third");
+        first.wait_for_predecessors().await.expect("first is ready");
 
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), &mut second_task)
-                .await
-                .is_err(),
-            "the later update must not run while the earlier one is in progress"
-        );
-        assert!(state.lock().expect("state").is_empty());
-
-        gate_tx.send(()).expect("release first handler");
-        first_task.await.expect("first handler");
-        second_task.await.expect("second handler");
-        assert_eq!(*state.lock().expect("state"), vec!["A", "B"]);
+        drop(second);
         assert_eq!(
-            state.lock().expect("state").last(),
-            Some(&"B"),
-            "final state is the last-arrived update"
+            futures::poll!(std::pin::pin!(third.wait_for_predecessors())),
+            Poll::Pending
         );
+        drop(first);
+        third.wait_for_predecessors().await.expect("third is ready");
+        drop(third);
         assert_eq!(order.tracked_registrations(), 0);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
+    async fn cancelling_a_waiting_interior_turn_does_not_release_its_successor() {
+        let order = RemoteResourceUpdateOrder::default();
+        let key = registration();
+        let first = order.admit(key.clone()).expect("admit first");
+        let mut second = order.admit(key.clone()).expect("admit second");
+        let mut third = order.admit(key).expect("admit third");
+
+        assert_eq!(
+            futures::poll!(std::pin::pin!(second.wait_for_predecessors())),
+            Poll::Pending
+        );
+        drop(second);
+        assert_eq!(
+            futures::poll!(std::pin::pin!(third.wait_for_predecessors())),
+            Poll::Pending
+        );
+        drop(first);
+        third.wait_for_predecessors().await.expect("third is ready");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_borrowed_wait_can_be_retried_without_bypassing_the_head() {
+        let order = RemoteResourceUpdateOrder::default();
+        let key = registration();
+        let first = order.admit(key.clone()).expect("admit first");
+        let mut second = order.admit(key).expect("admit second");
+
+        assert_eq!(
+            futures::poll!(std::pin::pin!(second.wait_for_predecessors())),
+            Poll::Pending
+        );
+        assert_eq!(
+            futures::poll!(std::pin::pin!(second.wait_for_predecessors())),
+            Poll::Pending
+        );
+        drop(first);
+        second
+            .wait_for_predecessors()
+            .await
+            .expect("second is ready");
+        second
+            .wait_for_predecessors()
+            .await
+            .expect("readiness persists");
+    }
+
+    #[tokio::test]
+    async fn multiple_interior_cancellations_preserve_the_live_turn_order() {
+        let order = RemoteResourceUpdateOrder::default();
+        let key = registration();
+        let first = order.admit(key.clone()).expect("admit first");
+        let second = order.admit(key.clone()).expect("admit second");
+        let mut third = order.admit(key.clone()).expect("admit third");
+        let fourth = order.admit(key.clone()).expect("admit fourth");
+        let mut fifth = order.admit(key).expect("admit fifth");
+
+        drop((second, fourth));
+        assert_eq!(
+            futures::poll!(std::pin::pin!(third.wait_for_predecessors())),
+            Poll::Pending
+        );
+        assert_eq!(
+            futures::poll!(std::pin::pin!(fifth.wait_for_predecessors())),
+            Poll::Pending
+        );
+        drop(first);
+        third.wait_for_predecessors().await.expect("third is ready");
+        assert_eq!(
+            futures::poll!(std::pin::pin!(fifth.wait_for_predecessors())),
+            Poll::Pending
+        );
+        drop(third);
+        fifth.wait_for_predecessors().await.expect("fifth is ready");
+    }
+
+    #[tokio::test]
+    async fn concurrently_dropping_the_head_and_an_interior_turn_releases_the_next_live_turn() {
+        for _ in 0..128 {
+            let order = RemoteResourceUpdateOrder::default();
+            let key = registration();
+            let first = order.admit(key.clone()).expect("admit first");
+            let second = order.admit(key.clone()).expect("admit second");
+            let mut third = order.admit(key).expect("admit third");
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let first_barrier = Arc::clone(&barrier);
+            let second_barrier = Arc::clone(&barrier);
+            let first_drop = std::thread::spawn(move || {
+                first_barrier.wait();
+                drop(first);
+            });
+            let second_drop = std::thread::spawn(move || {
+                second_barrier.wait();
+                drop(second);
+            });
+            barrier.wait();
+            first_drop.join().expect("drop first");
+            second_drop.join().expect("drop second");
+            tokio::time::timeout(Duration::from_secs(1), third.wait_for_predecessors())
+                .await
+                .expect("the live head wakes")
+                .expect("the live head is granted readiness");
+            drop(third);
+            assert_eq!(order.tracked_registrations(), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn different_registrations_do_not_wait_for_each_other() {
         let order = RemoteResourceUpdateOrder::default();
-        let held = order
-            .admit(key(
-                "juliet@example.test/phone",
-                RemoteResourceRegistrationId::fresh(),
-            ))
-            .expect("admit held");
-        // Same full JID, different registration: a distinct key.
+        let held_key = registration();
+        let held = order.admit(held_key.clone()).expect("admit held");
         let mut replacement = order
             .admit(key(
                 "juliet@example.test/phone",
@@ -250,148 +388,158 @@ mod tests {
                 RemoteResourceRegistrationId::fresh(),
             ))
             .expect("admit other registration");
-        // Same JID and registration id, newer socket generation: distinct.
-        let shared_id = RemoteResourceRegistrationId::fresh();
-        let older_generation = order
-            .admit(key("nurse@example.test/tablet", shared_id))
-            .expect("admit older generation");
         let mut newer_generation = order
             .admit(RemoteResourceUpdateKey {
                 socket_generation: RemoteResourceSocketGeneration::next(Some(
-                    RemoteResourceSocketGeneration::next(None),
+                    held_key.socket_generation,
                 )),
-                ..key("nurse@example.test/tablet", shared_id)
+                ..held_key.clone()
             })
             .expect("admit newer generation");
+        let mut blocked = order.admit(held_key).expect("admit blocked");
 
-        tokio::time::timeout(Duration::from_secs(1), replacement.wait_for_predecessors())
+        replacement
+            .wait_for_predecessors()
             .await
-            .expect("a replacement registration runs while the old one is held");
-        tokio::time::timeout(Duration::from_secs(1), other.wait_for_predecessors())
+            .expect("replacement is ready");
+        other.wait_for_predecessors().await.expect("other is ready");
+        newer_generation
+            .wait_for_predecessors()
             .await
-            .expect("another JID's registration runs while the first is held");
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            newer_generation.wait_for_predecessors(),
-        )
-        .await
-        .expect("a newer socket generation runs while the older one is held");
-        assert_eq!(order.tracked_registrations(), 5);
-        drop((held, replacement, other, older_generation, newer_generation));
+            .expect("new generation is ready");
+        assert_eq!(
+            futures::poll!(std::pin::pin!(blocked.wait_for_predecessors())),
+            Poll::Pending
+        );
+        drop(held);
+        blocked
+            .wait_for_predecessors()
+            .await
+            .expect("blocked turn is ready");
+        drop((replacement, other, newer_generation, blocked));
         assert_eq!(order.tracked_registrations(), 0);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn an_abandoned_predecessor_releases_its_successor() {
+    #[tokio::test]
+    async fn admission_capacity_is_bounded_and_reused_immediately() {
         let order = RemoteResourceUpdateOrder::default();
-        let registration = key(
-            "juliet@example.test/phone",
-            RemoteResourceRegistrationId::fresh(),
-        );
-        let first = order.admit(registration.clone()).expect("admit first");
-        let mut second = order.admit(registration).expect("admit second");
-        // A handler cancelled or panicking before it ran drops its turn.
-        drop(first);
-        tokio::time::timeout(Duration::from_secs(1), second.wait_for_predecessors())
-            .await
-            .expect("successor proceeds once the predecessor turn is dropped");
-        drop(second);
-        assert_eq!(order.tracked_registrations(), 0);
-    }
-
-    #[test]
-    fn admission_is_bounded_per_registration_and_across_registrations() {
-        let order = RemoteResourceUpdateOrder::default();
-        let registration = key(
-            "juliet@example.test/phone",
-            RemoteResourceRegistrationId::fresh(),
-        );
+        let key = registration();
         let mut queued = Vec::new();
         for _ in 0..MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION {
-            queued.push(
-                order
-                    .admit(registration.clone())
-                    .expect("within queue bound"),
-            );
+            queued.push(order.admit(key.clone()).expect("within queue bound"));
         }
         assert_eq!(
-            order.admit(registration.clone()).err(),
+            order.admit(key.clone()).err(),
             Some(RemoteResourceUpdateOrderFull::RegistrationQueue)
         );
-        queued.pop();
-        queued.push(
-            order
-                .admit(registration.clone())
-                .expect("a freed queue position is reusable"),
+        drop(queued.remove(1));
+        let mut replacement = order
+            .admit(key.clone())
+            .expect("interior capacity is immediately reusable");
+        assert_eq!(
+            futures::poll!(std::pin::pin!(replacement.wait_for_predecessors())),
+            Poll::Pending
+        );
+        assert_eq!(
+            order.admit(key).err(),
+            Some(RemoteResourceUpdateOrderFull::RegistrationQueue)
         );
 
         let mut others = Vec::new();
         for index in 1..MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS {
             others.push(
                 order
-                    .admit(key(
-                        &format!("user{index}@example.test/r"),
-                        RemoteResourceRegistrationId::fresh(),
-                    ))
+                    .admit(key_for_index(index))
                     .expect("within registration bound"),
             );
         }
+        let late_key = key_for_index(MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS);
+        assert_eq!(
+            order.admit(late_key.clone()).err(),
+            Some(RemoteResourceUpdateOrderFull::Registrations)
+        );
+        drop(others.pop());
+        let late = order
+            .admit(late_key)
+            .expect("registration capacity is immediately reusable");
         assert_eq!(
             order.tracked_registrations(),
             MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS
         );
-        assert_eq!(
-            order
-                .admit(key(
-                    "late@example.test/r",
-                    RemoteResourceRegistrationId::fresh()
-                ))
-                .err(),
-            Some(RemoteResourceUpdateOrderFull::Registrations)
-        );
+        drop((queued, replacement, others, late));
+        assert_eq!(order.tracked_registrations(), 0);
+    }
 
-        drop(others);
-        drop(queued);
-        assert_eq!(
-            order.tracked_registrations(),
-            0,
-            "idle registrations are removed, not retained"
-        );
-        order
-            .admit(key(
-                "late@example.test/r",
-                RemoteResourceRegistrationId::fresh(),
-            ))
-            .expect("capacity returns once registrations go idle");
+    fn key_for_index(index: usize) -> RemoteResourceUpdateKey {
+        key(
+            &format!("user{index}@example.test/r"),
+            RemoteResourceRegistrationId::fresh(),
+        )
     }
 
     #[tokio::test]
-    async fn a_poisoned_order_lock_refuses_new_updates_and_still_releases_successors() {
+    async fn poison_rejects_admission_and_closes_waiters_without_granting_them() {
         let order = RemoteResourceUpdateOrder::default();
-        let registration = key(
-            "juliet@example.test/phone",
-            RemoteResourceRegistrationId::fresh(),
+        let key = registration();
+        let mut first = order.admit(key.clone()).expect("admit first");
+        let mut second = order.admit(key.clone()).expect("admit second");
+        let mut third = order.admit(key.clone()).expect("admit third");
+        let other_key = key_for_index(1);
+        let mut other_head = order.admit(other_key.clone()).expect("admit other head");
+        let mut other_waiter = order.admit(other_key).expect("admit other waiter");
+        first
+            .wait_for_predecessors()
+            .await
+            .expect("first is granted");
+        other_head
+            .wait_for_predecessors()
+            .await
+            .expect("other head is granted");
+        assert_eq!(
+            futures::poll!(std::pin::pin!(second.wait_for_predecessors())),
+            Poll::Pending
         );
-        let first = order.admit(registration.clone()).expect("admit first");
-        let mut second = order.admit(registration.clone()).expect("admit second");
-
-        let slots = Arc::clone(&order.slots);
-        let poisoner = std::thread::spawn(move || {
-            let _guard = slots.lock().expect("order lock");
-            panic!("poison the order lock");
-        });
-        assert!(poisoner.join().is_err(), "the poisoning thread must panic");
-        assert!(order.slots.is_poisoned());
+        assert_eq!(
+            futures::poll!(std::pin::pin!(other_waiter.wait_for_predecessors())),
+            Poll::Pending
+        );
+        order.poison_for_test();
 
         assert_eq!(
-            order.admit(registration).err(),
-            Some(RemoteResourceUpdateOrderFull::Poisoned),
-            "a poisoned queue must fail closed, not admit into unknown state"
+            order.admit(key).err(),
+            Some(RemoteResourceUpdateOrderFull::Poisoned)
         );
+        assert_eq!(
+            second.wait_for_predecessors().await,
+            Err(RemoteResourceUpdateOrderClosed)
+        );
+        assert_eq!(
+            second.wait_for_predecessors().await,
+            Err(RemoteResourceUpdateOrderClosed)
+        );
+        assert_eq!(
+            third.wait_for_predecessors().await,
+            Err(RemoteResourceUpdateOrderClosed)
+        );
+        assert_eq!(
+            other_waiter.wait_for_predecessors().await,
+            Err(RemoteResourceUpdateOrderClosed)
+        );
+        assert_eq!(first.wait_for_predecessors().await, Ok(()));
+        assert_eq!(other_head.wait_for_predecessors().await, Ok(()));
+    }
 
+    #[tokio::test]
+    async fn observing_poison_on_drop_closes_waiters_without_granting_them() {
+        let order = RemoteResourceUpdateOrder::default();
+        let key = registration();
+        let first = order.admit(key.clone()).expect("admit first");
+        let mut second = order.admit(key).expect("admit second");
+        order.poison_for_test();
         drop(first);
-        tokio::time::timeout(Duration::from_secs(1), second.wait_for_predecessors())
-            .await
-            .expect("an admitted successor still runs once its predecessor ends");
+        assert_eq!(
+            second.wait_for_predecessors().await,
+            Err(RemoteResourceUpdateOrderClosed)
+        );
     }
 }
