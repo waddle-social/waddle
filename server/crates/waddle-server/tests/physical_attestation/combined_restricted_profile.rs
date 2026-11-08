@@ -3,10 +3,10 @@
 //! Inbox, portable SM, and pending delivery receive legacy round trips. The
 //! partial v2 diagnostics inspect PubSub, the room-effect outbox, MAM and the
 //! V1009 epoch grants alongside v1 observation and, with clustering, MUC.
-//! The additional owner phase prepares selected Push, notification, call and
-//! space tables and checks their fixture ACLs. Space preparation uses the
-//! public legacy initializers, leaving the paired owner marker incomplete.
-//! These separate diagnostics are not an atomic all-store or serving test.
+//! The additional sequential owner phase prepares selected Push, notification,
+//! call and space tables and checks fixture ACLs. Space metadata and channel
+//! links use paired owner preparation and read-only attachment diagnostics.
+//! These separate checks are not an atomic all-store or serving test.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -1034,9 +1034,16 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     // Run only after the older partial profile checks, which intentionally
     // begin with these additional families absent.
     combined_restricted_profile_extra::prepare_and_check(
-        &owner_db, &identity, &admin, &owner, &runtime,
+        &owner_db, main, &identity, &admin, &owner, &runtime,
     )
     .await?;
+
+    // The extra owner preparation is a later sequential phase. Recheck the
+    // closed MAM profile afterward while keeping its clustering-disabled
+    // selector refusal and all serving paths unchanged.
+    DatabaseMamStorage::verify_restricted_profile_v2(main, &owner_role, &v2)
+        .await
+        .context("closed MAM profile after sequential extra owner phase")?;
 
     // A complete V1030 ledger is checked again for every pinned diagnostic.
     sqlx::query("DELETE FROM guarded._migrations WHERE version = 1030")

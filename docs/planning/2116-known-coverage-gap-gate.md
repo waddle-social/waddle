@@ -45,9 +45,12 @@ object detector is claimed.
 The combined fixture first checks representative present/absent heaps and
 owner OIDs, then owner-prepares selected previously absent space, Push,
 notification and call tables in a separate phase. Its 21 named table ACL
-witnesses are not a whole-family or joint role profile. The public legacy
-space initializers leave their paired owner marker empty, so restricted
-space attachment is still unproved. When clustering is compiled, the fixture
+witnesses are not a whole-family or joint role profile. The test-support-only
+strict paired space preparation writes an identity-bound owner marker; both
+space-store attachment diagnostics then pass on the attested main pool and
+refuse marker or runtime-grant drift. These are sequential fixture checks,
+not selected startup or one all-store transaction. When clustering is compiled,
+the fixture
 also prepares clustered MUC heaps even though runtime-disabled clustering does
 not select that store. Runtime-disabled clustering has no claim pair, and the
 compiled attested MAM selector currently rejects that case; the fixture checks
