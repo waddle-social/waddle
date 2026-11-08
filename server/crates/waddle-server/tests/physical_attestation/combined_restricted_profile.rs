@@ -1034,7 +1034,16 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     // Run only after the older partial profile checks, which intentionally
     // begin with these additional families absent.
     combined_restricted_profile_extra::prepare_and_check(
-        &owner_db, main, &identity, &admin, &owner, &runtime,
+        &owner_db,
+        main,
+        &identity,
+        &admin,
+        combined_restricted_profile_extra::FixtureRoles {
+            owner: &owner,
+            api: &api,
+            helper: &helper,
+            runtime: &runtime,
+        },
     )
     .await?;
 

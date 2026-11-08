@@ -367,7 +367,9 @@ pub(super) async fn exercise_combined_fixture(
     ));
     ensure!(matches!(
         waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(main.clone()).await,
-        Err(waddle_xmpp::push::PushError::StorageError(message))
+        Err(waddle_server::push_registrations::PushRegistrationOwnerError::Storage(
+            waddle_xmpp::push::PushError::StorageError(message)
+        ))
             if message == "push-registration owner initialization cannot use an attested runtime handle"
     ));
 

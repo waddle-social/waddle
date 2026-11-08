@@ -1157,6 +1157,7 @@ async fn cluster_exit_criteria_end_to_end() {
         sender_claim,
         target_claim,
         payload: ordered_message_payload("ordered-gap", 32, &ordered_target_full),
+        provenance: Default::default(),
         origin_proof: None,
     };
     sign_ordered_envelope(&mut gap, &origin_keypair);

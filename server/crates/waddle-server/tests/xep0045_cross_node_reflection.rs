@@ -91,6 +91,7 @@ fn receiver_reserves_full_jid_groupchat_from_room_entity() {
                 stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
                 received_at: None,
             },
+            provenance: Default::default(),
             origin_proof: None,
         };
         match receiver.reserve(envelope) {
@@ -148,6 +149,7 @@ fn receiver_nacks_groupchat_vouched_by_a_user_claim() {
             stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
             received_at: None,
         },
+        provenance: Default::default(),
         origin_proof: None,
     };
     assert!(matches!(
@@ -236,6 +238,7 @@ fn receiver_reflects_when_room_ownership_moves_between_nodes() {
                 stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza.clone())),
                 received_at: None,
             },
+            provenance: Default::default(),
             origin_proof: None,
         };
         let expected_channel = envelope.channel.clone();

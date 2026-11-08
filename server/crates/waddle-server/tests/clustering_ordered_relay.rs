@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use waddle_server::clustering::codec::RemoteStanza;
+use waddle_server::clustering::codec::{RemoteReplyFrame, RemoteStanza};
 use waddle_server::clustering::ordered_relay::{
     MucProxyOrigin, OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDiversion,
     OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims, OrderedRelayMucProxyKind,
@@ -13,6 +13,7 @@ use waddle_server::clustering::ordered_relay::{
 use waddle_server::clustering::NodeId;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::SmFrameProvenance;
 use xmpp_parsers::message::{Lang, Message};
 
 const MAX_TRACKED_ORDERED_RELAY_CHANNELS: usize = 8_192;
@@ -324,6 +325,7 @@ fn receiver_acks_in_order_and_duplicate_envelopes() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -358,6 +360,7 @@ fn receiver_nacks_recent_duplicate_with_different_payload() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     assert!(matches!(
@@ -394,6 +397,7 @@ fn receiver_replays_duplicate_ack_across_asserted_node_changes() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     assert!(matches!(
@@ -439,12 +443,21 @@ fn receiver_duplicate_ack_replays_client_reply_stanzas() {
             origin: connection_origin(),
             stanza: presence_stanza(),
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
-    let client_replies = vec![presence_stanza_to(
+    let client_reply_stanzas = vec![presence_stanza_to(
         "romeo@example.test/garden",
         xmpp_parsers::presence::Type::None,
     )];
+    let client_replies: Vec<RemoteReplyFrame> = client_reply_stanzas
+        .iter()
+        .cloned()
+        .map(|stanza| RemoteReplyFrame {
+            stanza,
+            provenance: SmFrameProvenance::Unknown,
+        })
+        .collect();
 
     let reserved = match receiver.reserve(envelope.clone()) {
         OrderedRelayReservation::Reserved(reserved) => reserved,
@@ -456,7 +469,16 @@ fn receiver_duplicate_ack_replays_client_reply_stanzas() {
             duplicate: false,
             client_replies: replies,
             ..
-        }) => assert_eq!(replies, client_replies),
+        }) => {
+            assert_eq!(replies, client_replies);
+            assert_eq!(
+                replies
+                    .iter()
+                    .map(|frame| frame.stanza.clone())
+                    .collect::<Vec<_>>(),
+                client_reply_stanzas
+            );
+        }
         other => panic!("expected first ack with replies, got {other:?}"),
     }
 
@@ -465,7 +487,16 @@ fn receiver_duplicate_ack_replays_client_reply_stanzas() {
             duplicate: true,
             client_replies: replies,
             ..
-        })) => assert_eq!(replies, client_replies),
+        })) => {
+            assert_eq!(replies, client_replies);
+            assert_eq!(
+                replies
+                    .iter()
+                    .map(|frame| frame.stanza.clone())
+                    .collect::<Vec<_>>(),
+                client_reply_stanzas
+            );
+        }
         other => panic!("expected duplicate ack with replies, got {other:?}"),
     }
 }
@@ -483,6 +514,7 @@ fn receiver_nacks_channel_payload_and_claim_mismatch() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload_to("wrong-recipient", "romeo@example.test"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -508,6 +540,7 @@ fn receiver_nacks_full_jid_payload_on_bare_channel() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload_to("full-as-bare", "juliet@example.test/phone"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -538,6 +571,7 @@ fn receiver_nacks_bare_jid_groupchat_on_user_message_payload() {
             stanza: groupchat_stanza_to("juliet@example.test"),
             received_at: None,
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -564,6 +598,7 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     let second = RemoteStanzaEnvelope {
@@ -575,6 +610,7 @@ fn receiver_reservation_does_not_advance_expected_until_commit() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("two"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -617,6 +653,7 @@ fn receiver_duplicate_pending_envelope_does_not_reserve_second_effect() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -664,6 +701,7 @@ fn receiver_accepts_entity_origin_when_claim_matches_channel_origin() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("entity-origin"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -700,6 +738,7 @@ fn receiver_rejects_entity_origin_when_claim_differs_from_channel_origin() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("wrong-entity-origin"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -725,6 +764,7 @@ fn receiver_rejects_sender_claim_that_does_not_match_stanza_from() {
         sender_claim: claim(EntityType::UserActor, "mallory@example.test", 5),
         target_claim: target_claim(),
         payload: message_payload("forged-from"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -751,6 +791,7 @@ fn receiver_nacks_gaps_without_advancing_expected_sequence() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("two"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -773,6 +814,7 @@ fn receiver_nacks_gaps_without_advancing_expected_sequence() {
         sender_claim: sender_claim(),
         target_claim: target_claim(),
         payload: message_payload("one"),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     assert!(matches!(
@@ -802,6 +844,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
                 sender_claim: sender_claim(),
                 target_claim: target_claim(),
                 payload: message_payload(&format!("m{sequence}")),
+                provenance: SmFrameProvenance::Unknown,
                 origin_proof: None,
             },
         );
@@ -819,6 +862,7 @@ fn receiver_replays_only_recent_duplicate_acks() {
             sender_claim: sender_claim(),
             target_claim: target_claim(),
             payload: message_payload("too-old"),
+            provenance: SmFrameProvenance::Unknown,
             origin_proof: None,
         },
     );
@@ -852,6 +896,7 @@ fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
             stanza: presence_stanza(),
             received_at: None,
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -980,6 +1025,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
             origin: connection_origin(),
             stanza: presence_stanza(),
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -1009,6 +1055,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
             origin: MucProxyOrigin::Server,
             stanza: presence_stanza(),
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
 
@@ -1045,6 +1092,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
                 xmpp_parsers::presence::Type::Unavailable,
             ),
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     let bare_groupchat = RemoteStanzaEnvelope {
@@ -1115,6 +1163,7 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
             origin: MucProxyOrigin::Server,
             stanza: iq_stanza_to("room@example.test"),
         },
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     let full_jid_as_bare_room_iq = RemoteStanzaEnvelope {
@@ -1243,6 +1292,7 @@ fn receiver_enforces_room_lane_kind_binding() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: muji_payload(),
+        provenance: SmFrameProvenance::Unknown,
         origin_proof: None,
     };
     let muji_on_muc_lane = RemoteStanzaEnvelope {
