@@ -10,7 +10,7 @@ use uuid::Uuid;
 use waddle_server::db::physical_attestation::{
     attested_pool, pinned_attested_pool, DarkPhysicalAttestationPins, PhysicalAttestationConfig,
     PinnedPubSubInventoryError, PinnedPubSubRelationInventory, PinnedRuntimeAuthority,
-    CATALOG_MUTATION_ADVISORY_LOCK_KEY,
+    PinnedSelectedEntry, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::DarkMigrationLedgerPins;
 use waddle_server::pubsub::DatabasePubSubStorage;
@@ -127,6 +127,16 @@ pub(super) struct InventoryFixture {
 }
 
 impl InventoryFixture {
+    pub(super) fn selected(&self) -> anyhow::Result<PinnedSelectedEntry> {
+        Ok(PinnedSelectedEntry::new(pinned_attested_pool(
+            self.runtime_options.clone(),
+            self.config.clone(),
+            self.authority.clone(),
+            1,
+            Duration::from_secs(5),
+        )?)?)
+    }
+
     fn new_with_oids(
         &self,
         relation_oids: [u32; 12],

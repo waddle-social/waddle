@@ -80,6 +80,8 @@ pub enum DarkPhysicalAttestationError {
     #[error("pre-attestor catalog, ownership, ACL, or object identity drifted")]
     CatalogDrift,
     #[error(transparent)]
+    PartialProfile(#[from] super::PinnedPartialProfileError),
+    #[error(transparent)]
     Attestation(#[from] PhysicalAttestationError),
     #[error("pre-attestor PostgreSQL operation failed")]
     Postgres(#[from] sqlx::Error),
@@ -111,7 +113,25 @@ pub async fn attest_dark_catalog_pinned(
     pins: DarkPhysicalAttestationPins,
     restore_search_path: &str,
 ) -> Result<(), DarkPhysicalAttestationError> {
-    attest_dark_catalog_pinned_connection(tx, config, pins, restore_search_path).await
+    attest_dark_catalog_pinned_connection(tx, config, pins, restore_search_path, None).await
+}
+
+/// The selected diagnostic adds its partial role/ACL check immediately after
+/// the lineage relation wait, before the attestor reads or executes anything.
+pub(super) async fn attest_dark_catalog_pinned_with_partial_profile(
+    tx: &mut Transaction<'_, Postgres>,
+    authority: &super::PinnedRuntimeAuthority,
+    profile: &super::PinnedPartialProfilePinsV1,
+    restore_search_path: &str,
+) -> Result<(), DarkPhysicalAttestationError> {
+    attest_dark_catalog_pinned_connection(
+        tx,
+        &authority.config,
+        authority.attestor,
+        restore_search_path,
+        Some((authority, profile)),
+    )
+    .await
 }
 
 /// The database adapter owns the transaction lifetime and its lease. Keep
@@ -126,7 +146,7 @@ pub(super) async fn attest_dark_catalog_pinned_db_transaction(
     let connection = tx
         .postgres_connection()
         .ok_or(DarkPhysicalAttestationError::TransactionBoundary)?;
-    attest_dark_catalog_pinned_connection(connection, config, pins, restore_search_path).await
+    attest_dark_catalog_pinned_connection(connection, config, pins, restore_search_path, None).await
 }
 
 async fn attest_dark_catalog_pinned_connection(
@@ -134,6 +154,10 @@ async fn attest_dark_catalog_pinned_connection(
     config: &PhysicalAttestationConfig,
     pins: DarkPhysicalAttestationPins,
     restore_search_path: &str,
+    partial_profile: Option<(
+        &super::PinnedRuntimeAuthority,
+        &super::PinnedPartialProfilePinsV1,
+    )>,
 ) -> Result<(), DarkPhysicalAttestationError> {
     if !pins.valid() {
         return Err(DarkPhysicalAttestationError::InvalidPins);
@@ -150,7 +174,7 @@ async fn attest_dark_catalog_pinned_connection(
     sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
         .execute(&mut *connection)
         .await?;
-    let result = verify_and_attest(connection, config, pins).await;
+    let result = verify_and_attest(connection, config, pins, partial_profile).await;
     let restored = sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
         .bind(restore_search_path)
         .execute(&mut *connection)
@@ -164,6 +188,10 @@ async fn verify_and_attest(
     connection: &mut PgConnection,
     config: &PhysicalAttestationConfig,
     pins: DarkPhysicalAttestationPins,
+    partial_profile: Option<(
+        &super::PinnedRuntimeAuthority,
+        &super::PinnedPartialProfilePinsV1,
+    )>,
 ) -> Result<(), DarkPhysicalAttestationError> {
     let version: String = sqlx::query_scalar("SHOW server_version_num")
         .fetch_one(&mut *connection)
@@ -209,6 +237,9 @@ async fn verify_and_attest(
     // A name-based LOCK can wait while the name is replaced. READ COMMITTED
     // gives these statements a fresh snapshot after that wait.
     verify_catalog(connection, config, pins).await?;
+    if let Some((authority, profile)) = partial_profile {
+        super::verify_pinned_partial_profile(connection, authority, profile).await?;
+    }
     // The installed function returns text fields. Bound the result before it
     // crosses the client boundary, while the proven heap is still locked.
     let bounded: bool = sqlx::query_scalar(&format!(
