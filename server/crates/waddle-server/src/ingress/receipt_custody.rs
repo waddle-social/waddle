@@ -24,8 +24,7 @@ use crate::db::physical_attestation::{
     CustodiedReceiptAttempt, PinnedReceiptAuthority, PinnedReceiptCommit, ReceiptOperation,
     ReceiptReadback,
 };
-use crate::db::Database;
-use crate::ingress_uow::EffectReceiptRepository;
+use crate::ingress_uow::StandaloneReceiptWriter;
 
 const MAX_BATCHES: usize = 256;
 const MAX_RECEIPTS: usize = 4096;
@@ -68,7 +67,7 @@ struct Queue {
 }
 
 struct Shared {
-    database: Database,
+    writer: StandaloneReceiptWriter,
     admission: Arc<RwLock<bool>>,
     force_stop: CancellationToken,
     fatal_fence: OnceLock<CancellationToken>,
@@ -86,13 +85,13 @@ pub(super) struct ReceiptCustody {
 
 impl ReceiptCustody {
     pub(super) fn new(
-        database: Database,
+        writer: StandaloneReceiptWriter,
         admission: Arc<RwLock<bool>>,
         force_stop: CancellationToken,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
-                database,
+                writer,
                 admission,
                 force_stop,
                 fatal_fence: OnceLock::new(),
@@ -138,10 +137,7 @@ impl ReceiptCustody {
         if self.pinned_selected() {
             return true;
         }
-        self.shared
-            .database
-            .attested_pg_writer_capability()
-            .is_none()
+        !self.shared.writer.has_attested_writer()
     }
 
     pub(super) fn pinned_selected(&self) -> bool {
@@ -149,8 +145,8 @@ impl ReceiptCustody {
     }
 
     #[cfg(feature = "test-support")]
-    pub(super) fn shares_ingress_lane(&self, database: &Database) -> bool {
-        self.shared.database.shares_ingress_lane(database)
+    pub(super) fn shares_writer(&self, writer: &StandaloneReceiptWriter) -> bool {
+        self.shared.writer.same_writer(writer)
     }
 
     /// Retain the complete eligible set synchronously, or reject it in full.
@@ -521,16 +517,9 @@ async fn run_worker(shared: Arc<Shared>, fatal_fence: CancellationToken) {
             .await
         } else {
             let key = &batch.receipts[batch.next];
-            let result = tokio::time::timeout(
-                ATTEMPT_BUDGET,
-                EffectReceiptRepository::record_receipt_pooled(
-                    &shared.database,
-                    batch.message,
-                    key.kind,
-                    &key.semantic_identity_hash,
-                ),
-            )
-            .await;
+            let result =
+                tokio::time::timeout(ATTEMPT_BUDGET, shared.writer.record(batch.message, key))
+                    .await;
             matches!(result, Ok(Ok(())))
         };
         #[cfg(feature = "test-support")]

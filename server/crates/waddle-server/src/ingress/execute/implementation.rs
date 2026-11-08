@@ -33,7 +33,7 @@ use super::Stanza;
 use super::TerminalizeOutcome;
 use super::{
     CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-    IngressUowTransaction,
+    IngressUowTransaction, StandaloneReceiptWriter,
 };
 use super::{Deps, FullJidDeliveryOutcome, SmIngressAppendContext};
 use super::{
@@ -327,6 +327,17 @@ impl ExecutionReport {
         db: &Database,
         budget: Duration,
     ) -> Result<bool, ExecutionPersistenceFailure> {
+        let writer = StandaloneReceiptWriter::new(db.clone());
+        self.complete_frame_obligations_with_writer(uow, &writer, budget)
+            .await
+    }
+
+    pub(in crate::ingress) async fn complete_frame_obligations_with_writer(
+        &mut self,
+        uow: &IngressUnitOfWork,
+        writer: &StandaloneReceiptWriter,
+        budget: Duration,
+    ) -> Result<bool, ExecutionPersistenceFailure> {
         if budget.is_zero() {
             return Err(ExecutionPersistenceFailure::BudgetExhausted);
         }
@@ -336,13 +347,7 @@ impl ExecutionReport {
         let started = tokio::time::Instant::now();
         tokio::time::timeout(budget, async {
             for key in &self.frame_completion_receipts {
-                EffectReceiptRepository::record_receipt_pooled(
-                    db,
-                    message_key,
-                    key.kind,
-                    &key.semantic_identity_hash,
-                )
-                .await?;
+                writer.record(message_key, key).await?;
             }
             Ok::<(), IngressUowError>(())
         })
@@ -415,7 +420,29 @@ pub async fn execute_effects(
     deps: &Deps<'_>,
     budget: Duration,
 ) -> ExecutionReport {
-    execute_effects_inner(uow, db, decision, sink, deps, budget, None).await
+    let writer = StandaloneReceiptWriter::new(db.clone());
+    execute_effects_with_writer(uow, db, &writer, decision, sink, deps, budget).await
+}
+
+pub(in crate::ingress) async fn execute_effects_with_writer(
+    uow: &IngressUnitOfWork,
+    db: &Database,
+    writer: &StandaloneReceiptWriter,
+    decision: &IngressDecision,
+    sink: &ImmediateSink,
+    deps: &Deps<'_>,
+    budget: Duration,
+) -> ExecutionReport {
+    execute_effects_inner(
+        uow,
+        ExecutionStorage { db, writer },
+        decision,
+        sink,
+        deps,
+        budget,
+        None,
+    )
+    .await
 }
 
 /// Only an authority-admitted live execution can transfer receipt proofs to
@@ -423,19 +450,36 @@ pub async fn execute_effects(
 /// ordinary entry point and retain their existing ownership boundaries.
 pub(in crate::ingress) async fn execute_admitted_effects(
     uow: &IngressUnitOfWork,
-    db: &Database,
+    writer: &StandaloneReceiptWriter,
     decision: &IngressDecision,
     sink: &ImmediateSink,
     deps: &Deps<'_>,
     budget: Duration,
     custody: &ReceiptCustody,
 ) -> ExecutionReport {
-    execute_effects_inner(uow, db, decision, sink, deps, budget, Some(custody)).await
+    execute_effects_inner(
+        uow,
+        ExecutionStorage {
+            db: uow.database(),
+            writer,
+        },
+        decision,
+        sink,
+        deps,
+        budget,
+        Some(custody),
+    )
+    .await
+}
+
+struct ExecutionStorage<'a> {
+    db: &'a Database,
+    writer: &'a StandaloneReceiptWriter,
 }
 
 async fn execute_effects_inner(
     uow: &IngressUnitOfWork,
-    db: &Database,
+    storage: ExecutionStorage<'_>,
     decision: &IngressDecision,
     sink: &ImmediateSink,
     deps: &Deps<'_>,
@@ -538,7 +582,7 @@ async fn execute_effects_inner(
                     proven: &mut proven,
                     recorded: &mut recorded,
                 },
-                db,
+                storage.writer,
                 sink,
                 deps,
                 deadline,
@@ -649,7 +693,7 @@ async fn execute_effects_inner(
                         Effect::External(resolved @ (ExternalEffect::RouteToPeer(_) | ExternalEffect::QueueOfflineDelivery(_))) => resolved,
                         _ => effect,
                     };
-                    if let Some(result) = super::super::execute_uow::execute_with_uow(uow, db, decision, index, resolved_effect, deps, deadline).await {
+                    if let Some(result) = super::super::execute_uow::execute_with_uow(uow, storage.db, decision, index, resolved_effect, deps, deadline).await {
                         result
                     } else {
                         let mut execution = planned[index].clone();
@@ -909,16 +953,8 @@ async fn execute_effects_inner(
                     .push((key, IngressUowError::Timeout.into()));
                 continue;
             }
-            let result = tokio::time::timeout_at(
-                deadline,
-                EffectReceiptRepository::record_receipt_pooled(
-                    db,
-                    message_key,
-                    key.kind,
-                    &key.semantic_identity_hash,
-                ),
-            )
-            .await;
+            let result =
+                tokio::time::timeout_at(deadline, storage.writer.record(message_key, &key)).await;
             match result {
                 Ok(Ok(())) => recorded.push(key),
                 Ok(Err(error)) => {

@@ -25,7 +25,7 @@ use waddle_xmpp::Stanza;
 use crate::db::Database;
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-    IngressUowTransaction,
+    IngressUowTransaction, StandaloneReceiptWriter,
 };
 use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
 use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
@@ -302,7 +302,6 @@ mod custody_tests;
 mod implementation;
 use implementation::classify_outcome;
 use implementation::completed_receipts;
-pub(in crate::ingress) use implementation::execute_admitted_effects;
 pub use implementation::execute_effects;
 #[cfg(test)]
 use implementation::is_invite_delivery_dependent;
@@ -319,3 +318,6 @@ pub use implementation::FrameObligation;
 pub(super) use implementation::ProvenReceiptBatch;
 #[cfg(feature = "clustering")]
 pub use implementation::RelayFrameReceiptCompletion;
+pub(in crate::ingress) use implementation::{
+    execute_admitted_effects, execute_effects_with_writer,
+};

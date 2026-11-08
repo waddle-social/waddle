@@ -1,9 +1,9 @@
 //! Run ready plugin observers fairly and persist each completion immediately.
 use super::{
-    classify_outcome, completed_receipts, dependencies, meter_unresolved, proven_receipts,
-    Database, Deps, EffectOutcome, EffectReceiptKey, EffectReceiptRepository,
-    ExecutionPersistenceFailure, ExecutionReport, ExternalEffect, ExternalOutcome, FrameObligation,
-    ImmediateSink, IngressDecision, PlannedEffect,
+    classify_outcome, completed_receipts, dependencies, meter_unresolved, proven_receipts, Deps,
+    EffectOutcome, EffectReceiptKey, ExecutionPersistenceFailure, ExecutionReport, ExternalEffect,
+    ExternalOutcome, FrameObligation, ImmediateSink, IngressDecision, PlannedEffect,
+    StandaloneReceiptWriter,
 };
 use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
 
@@ -25,7 +25,7 @@ pub(super) struct Batch<'a> {
 
 pub(super) async fn execute_ready(
     batch: Batch<'_>,
-    db: &Database,
+    writer: &StandaloneReceiptWriter,
     sink: &ImmediateSink,
     deps: &Deps<'_>,
     deadline: tokio::time::Instant,
@@ -104,16 +104,8 @@ pub(super) async fn execute_ready(
                 return;
             };
             for key in receipts {
-                let result = tokio::time::timeout_at(
-                    deadline,
-                    EffectReceiptRepository::record_receipt_pooled(
-                        db,
-                        message_key,
-                        key.kind,
-                        &key.semantic_identity_hash,
-                    ),
-                )
-                .await;
+                let result =
+                    tokio::time::timeout_at(deadline, writer.record(message_key, &key)).await;
                 let mut batch = state.lock().await;
                 match result {
                     Ok(Ok(())) => batch.recorded.push(key),
