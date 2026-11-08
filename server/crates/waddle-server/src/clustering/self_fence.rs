@@ -1016,16 +1016,23 @@ where
         }
     }
 
-    async fn retire_if_drained(&self, identity: &NodeIdentity) {
-        let drained = self.shutdown_sm_drain.is_some_and(|sm| {
+    /// Q6's completion token records task exit, not successful settlement.
+    /// A connection owner retains a drain guard until its panic is fenced,
+    /// so observe the current guard count before the final fatal-fence check.
+    fn may_retire_after_connection_drain(&self) -> bool {
+        self.shutdown_sm_drain.is_some_and(|sm| {
             sm.process_stop.is_cancelled()
                 && sm.complete.is_cancelled()
                 && sm.connections_drained.load(Ordering::Acquire)
-        });
-        if !drained {
-            // A timed-out socket drain, or clustering-only self-fence, is
-            // not proof that no socket remains on this node. Let the normal
-            // stale-heartbeat expiry CAS commit its eventual departure.
+                && sm.connections.active_connections() == 0
+                && !self.fatal_fence.is_cancelled()
+        })
+    }
+
+    async fn retire_if_drained(&self, identity: &NodeIdentity) {
+        if !self.may_retire_after_connection_drain() {
+            // An incomplete drain or fatal fence leaves departure to the
+            // stale-heartbeat expiry CAS.
             return;
         }
         let budget = self.control_plane_budget_keeping(Duration::ZERO);
@@ -1120,13 +1127,12 @@ where
             outcome = drain => outcome,
             _ = self.drain_phase_bound() => {
                 // The room drain's inventory read or batch release overran
-                // its stage. Dropping it is safe: unreleased claims stay
-                // fenced under this identity, which retirement below hands
-                // to survivors once the barrier has closed.
+                // its stage. Unreleased claims remain fenced under this
+                // identity until retirement or lease expiry.
                 tracing::warn!(
                     node_id = %identity.node_id,
                     "clustering: shutdown drain overran its stage of the shutdown deadline; \
-                     retiring the identity with unreleased claims"
+                     retaining unreleased claims for retirement or lease expiry"
                 );
                 ShutdownDrainOutcome::Completed
             }
@@ -1178,20 +1184,23 @@ where
             // the barrier cut-off above.
             return;
         }
-        // #1295: disable() is the authority barrier — no guard, claim-store
-        // call or fenced write can run under this identity again — and the
-        // exact-owner demotion has retired every actor it owned. Commit that
-        // as expiry now, so survivors reclaim the claims it still holds
-        // (UserActor claims, and anything the bounded drain abandoned) on
-        // their next acquire instead of after a lease TTL plus an
-        // orphan-reaper sweep. The terminal sweep below is local cleanup
-        // only, and running it first could let process exit cut this off.
-        retire_after_shutdown_bounded(
-            self.lease,
-            identity,
-            self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
-        )
-        .await;
+        // A disabled identity alone does not establish that every socket
+        // owner completed. An unfinished owner may still panic with its
+        // cleanup state in memory, so defer early retirement until the
+        // process-stop drain has observed every connection guard released.
+        if self.may_retire_after_connection_drain() {
+            retire_after_shutdown_bounded(
+                self.lease,
+                identity,
+                self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
+            )
+            .await;
+        } else {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: connection drain unconfirmed or fatal fence active; leaving identity to lease expiry"
+            );
+        }
         self.terminal_sweep().await;
         self.retire_if_drained(identity).await;
     }
@@ -1256,27 +1265,26 @@ where
             }
         }
         // #1985 follow-up: an ordinary stop during re-registration or
-        // recovery retires the fenced identity, and the fresh one if its
-        // registration has committed, once the barrier has closed and their
-        // actors are demoted, before the local sweep, exactly like
-        // `shutdown`. A fresh row registered after this point is marked
+        // recovery can retire the fenced identity and any committed fresh
+        // identity after the barrier, actor demotion, and connection drain.
+        // A fresh row registered after this point is marked
         // draining by its registration task, holds no claims and ages out.
         // An observed fatal fence stops new graceful-retirement admissions.
         // Cancellation cannot retract an already-dispatched database write:
         // keep its existing bound and allow its potentially committed result,
         // then observe the fence before admitting the next identity. The
         // disable and exact-owner demotion barriers precede every admission.
-        // A later terminal departure is still possible if the process,
-        // Q6, and socket drains have completed.
+        // Without a fatal fence, a later terminal departure is still possible
+        // after the process, Q6 task, and socket drains have completed.
         let retire = cause == TerminalCause::Shutdown
             && disabled
             && demoted
-            && !self.fatal_fence.is_cancelled();
+            && self.may_retire_after_connection_drain();
         if retire {
             for identity in identities {
                 // Also observes fencing that arrived during the preceding
                 // identity's retirement, without cancelling that write.
-                if self.fatal_fence.is_cancelled() {
+                if !self.may_retire_after_connection_drain() {
                     break;
                 }
                 mark_draining_bounded(
@@ -1285,7 +1293,7 @@ where
                     self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
                 )
                 .await;
-                if self.fatal_fence.is_cancelled() {
+                if !self.may_retire_after_connection_drain() {
                     break;
                 }
                 retire_after_shutdown_bounded(
@@ -4015,6 +4023,15 @@ mod tests {
         });
         let readiness = NodeLifecycle::new();
         let stop_token = CancellationToken::new();
+        let complete = CancellationToken::new();
+        complete.cancel();
+        let coordination = ShutdownSmDrain {
+            process_stop: stop_token.clone(),
+            complete,
+            connections_drained: Arc::new(AtomicBool::new(true)),
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
+            deadline: test_shutdown_deadline(Duration::from_secs(1), Duration::from_millis(20)),
+        };
         let task = tokio::spawn(run_node_lease(
             lease,
             initial_identity.clone(),
@@ -4038,7 +4055,7 @@ mod tests {
                 peer_id: None,
                 claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
                 claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
-                shutdown_sm_drain: None,
+                shutdown_sm_drain: Some(coordination),
             },
         ));
 
@@ -4088,6 +4105,7 @@ mod tests {
             let complete = CancellationToken::new();
             complete.cancel();
             let coordination = ShutdownSmDrain {
+                connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
                 process_stop: stop.clone(),
                 complete,
                 deadline: test_shutdown_deadline(
@@ -4123,6 +4141,73 @@ mod tests {
                 lease.retired.lock().expect("retirements").len(),
                 usize::from(sockets_drained),
                 "Q6 completion alone must not revoke admission while sockets are still draining"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn early_retirement_requires_current_guard_and_fatal_checks() {
+        // A stale `connections_drained` flag cannot authorize retirement
+        // while an owner is still guarded or after its fatal fence wins.
+        for (held_guard, fatal, expected) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+        ] {
+            let owner = identity();
+            let live_identity = SharedNodeIdentity::new(owner.clone());
+            let lease = FakeLease::new(Box::new(|| Ok(true)));
+            let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+            let readiness = NodeLifecycle::new();
+            let stop = CancellationToken::new();
+            stop.cancel();
+            let complete = CancellationToken::new();
+            complete.cancel();
+            let connections =
+                waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle();
+            let _guard = held_guard.then(|| connections.connection_guard());
+            let coordination = ShutdownSmDrain {
+                process_stop: stop.clone(),
+                complete,
+                connections_drained: Arc::new(AtomicBool::new(true)),
+                connections,
+                deadline: test_shutdown_deadline(Duration::from_secs(1), Duration::from_millis(50)),
+            };
+            let fatal_fence = readiness.fatal_fence_token();
+            if fatal {
+                fatal_fence.cancel();
+            }
+            let context = TerminalFenceContext {
+                lease: &lease,
+                live_identity: &live_identity,
+                local_claims: &local_claims,
+                readiness: &readiness,
+                stop_token: &stop,
+                fatal_fence: &fatal_fence,
+                control_plane_budget: Duration::from_millis(50),
+                shutdown_sm_drain: Some(&coordination),
+            };
+            let claim_store: Arc<dyn ClaimStore> =
+                Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+            context
+                .shutdown(
+                    &claim_store,
+                    &owner,
+                    Duration::from_millis(50),
+                    Duration::from_secs(10),
+                    tokio::time::Instant::now(),
+                )
+                .await;
+            assert_eq!(
+                lease.retirements.lock().expect("retirements").len(),
+                usize::from(expected),
+                "early retirement, guard held={held_guard}, fatal={fatal}"
+            );
+            assert_eq!(
+                lease.retired.lock().expect("terminal retirements").len(),
+                usize::from(expected),
+                "terminal retirement, guard held={held_guard}, fatal={fatal}"
             );
         }
     }
@@ -4226,6 +4311,7 @@ mod tests {
         let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let coordination = ShutdownSmDrain {
+            connections: state.deps.shutdown.clone(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: q6_complete.clone(),
@@ -4333,6 +4419,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
@@ -4408,6 +4495,15 @@ mod tests {
         let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let process_stop = CancellationToken::new();
+        let complete = CancellationToken::new();
+        complete.cancel();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete,
+            connections_drained: Arc::new(AtomicBool::new(true)),
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
+            deadline: test_shutdown_deadline(Duration::from_secs(1), Duration::from_millis(20)),
+        };
         let context = TerminalFenceContext {
             lease: &lease,
             live_identity: &live_identity,
@@ -4416,7 +4512,7 @@ mod tests {
             stop_token: &process_stop,
             fatal_fence: &fatal_fence,
             control_plane_budget: Duration::from_millis(50),
-            shutdown_sm_drain: None,
+            shutdown_sm_drain: Some(&coordination),
         };
         process_stop.cancel();
 
@@ -4517,14 +4613,9 @@ mod tests {
         }
     }
 
-    /// #2046 W1.10: SIGTERM with every drain stage stalled — Q6 never
-    /// settles, the room drain's inventory read and the terminal sweep never
-    /// return — still retires the node's identity, which releases every
-    /// claim it holds to survivors, and the whole node-lease shutdown ends
-    /// inside the one enclosing deadline. Before W1.10 the stalled room
-    /// drain held shutdown forever and only the process exit cut it off.
+    /// Stalled stages remain bounded, but cannot authorize early retirement.
     #[tokio::test(start_paused = true)]
-    async fn sigterm_with_stalled_stages_releases_claims_inside_the_enclosing_deadline() {
+    async fn sigterm_with_stalled_stages_leaves_claims_to_expiry() {
         let owner = identity();
         let live_identity = SharedNodeIdentity::new(owner.clone());
         let deadline = test_shutdown_deadline(Duration::from_secs(2), Duration::from_secs(1));
@@ -4544,6 +4635,7 @@ mod tests {
         let readiness = NodeLifecycle::new();
         let process_stop = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             process_stop: process_stop.clone(),
             complete: CancellationToken::new(),
             connections_drained: Arc::new(AtomicBool::new(false)),
@@ -4591,10 +4683,9 @@ mod tests {
 
         assert!(tokio::time::Instant::now() <= enclosing);
         assert!(!live_identity.current().is_active());
-        assert_eq!(
-            retirements.lock().expect("lock").as_slice(),
-            &[(owner, Some(true))],
-            "retired once, after disable and demotion, inside the deadline"
+        assert!(
+            retirements.lock().expect("lock").is_empty(),
+            "an unconfirmed connection drain cannot retire early"
         );
     }
 
@@ -4615,10 +4706,13 @@ mod tests {
         let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let process_stop = CancellationToken::new();
+        let complete = CancellationToken::new();
+        complete.cancel();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             process_stop: process_stop.clone(),
-            complete: CancellationToken::new(),
-            connections_drained: Arc::new(AtomicBool::new(false)),
+            complete,
+            connections_drained: Arc::new(AtomicBool::new(true)),
             deadline: deadline.clone(),
         };
         let context = TerminalFenceContext {
@@ -4644,9 +4738,8 @@ mod tests {
             )
             .await;
 
-        // Drain phase ends at 2.1 s (Q6 never settles); the retirement write
-        // then gets what is left before the terminal-sweep reservation, not
-        // its full 10 s.
+        // The observed drain authorizes the write, which gets only the
+        // remaining budget before the terminal-sweep reservation.
         let elapsed = tokio::time::Instant::now() - sigterm;
         assert!(
             elapsed <= deadline.budget().total() - SHUTDOWN_TERMINAL_SWEEP_BUDGET,
@@ -4674,6 +4767,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
@@ -4765,6 +4859,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
@@ -4926,6 +5021,7 @@ mod tests {
         let fatal_fence = readiness.fatal_fence_token();
         let process_stop = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: CancellationToken::new(),
@@ -4985,6 +5081,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
@@ -5039,6 +5136,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let clustering_stop = process_stop.child_token();
         let coordination = ShutdownSmDrain {
+            connections: waddle_ecdysis::GracefulShutdown::new(Duration::from_secs(1)).handle(),
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop,
             complete: CancellationToken::new(),

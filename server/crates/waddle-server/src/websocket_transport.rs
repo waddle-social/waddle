@@ -890,6 +890,9 @@ pub struct AdmissionTestBarriers {
     pub in_inbound_handler: Option<Arc<AdmissionTestBarrier>>,
     pub before_cleanup: Option<Arc<AdmissionTestBarrier>>,
     pub after_cleanup: Option<Arc<AdmissionTestBarrier>>,
+    pub owner_panic_active: Option<Arc<AdmissionTestBarrier>>,
+    pub owner_panic_caught: Option<Arc<AdmissionTestBarrier>>,
+    pub owner_panic_fenced: Option<Arc<AdmissionTestBarrier>>,
     pub callback_waiter: Option<Arc<CallbackWaiterTestControl>>,
 }
 

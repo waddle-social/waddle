@@ -132,6 +132,22 @@ fn only_serving_nodes_issue_admission_permits() {
 }
 
 #[test]
+fn pending_websocket_owner_panic_refuses_admission_before_the_fatal_signal() {
+    let lifecycle = NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    lifecycle.note_websocket_owner_panic();
+    assert_eq!(
+        lifecycle.critical_failure(),
+        Some(CriticalNodeFailure::WebSocketOwnerPanicked)
+    );
+    assert!(!lifecycle.is_ready());
+    assert!(lifecycle.admit().is_err());
+    assert_eq!(permit.revalidate(), Err(NodeAdmissionError::Revoked));
+    lifecycle.serve();
+    assert!(!lifecycle.is_ready());
+}
+
+#[test]
 fn transition_first_rejects_the_synchronous_admission_enqueue() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
