@@ -1596,7 +1596,7 @@ mod tests {
     use waddle_xmpp_core::xep0359::StanzaId;
 
     use super::*;
-    use crate::notification_outbox::drain::record_candidate_suppressed_reason_tx;
+    use crate::notification_outbox::candidate_persistence::record_candidate_suppressed_reason_tx;
     use crate::notification_outbox::test_support::{bare, store};
 
     #[test]

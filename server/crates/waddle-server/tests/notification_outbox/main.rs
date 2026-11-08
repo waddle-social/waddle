@@ -7,7 +7,12 @@ mod activity;
 mod activity_store;
 mod activity_writers;
 mod blocking;
+#[cfg(feature = "test-support")]
+mod candidate_drain;
 mod candidates;
+#[cfg(feature = "test-support")]
+#[path = "../ingress_support.rs"]
+pub mod ingress_support;
 mod payload;
 mod publish;
 mod schema;
