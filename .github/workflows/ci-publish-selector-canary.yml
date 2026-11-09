@@ -1,0 +1,98 @@
+name: publication-selector-canary
+"on": 
+  workflow_dispatch: 
+    {}
+permissions: 
+  contents: read
+concurrency: 
+  group: "publication-selector-canary-${{ github.ref }}"
+  cancel-in-progress: true
+defaults: 
+  run: 
+    shell: bash
+jobs: 
+  ciHelperContracts: 
+    if: "github.ref == 'refs/heads/codex/2046-runner-canary'"
+    runs-on: "${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\",\"namespace-features:container.privileged=true;job.priority=1\"]' || '[\"namespace-profile-linux-x86\"]') }}"
+    timeout-minutes: 55
+    outputs: 
+      sha: "${{ steps.evidence.outputs.sha }}"
+    steps: 
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with: 
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with: 
+          extra-conf: accept-flake-config = true
+      - name: Exercise missing and wrong ambient CUE
+        run: "set -euo pipefail\nexport CANARY_MISSING_PATH=\"$RUNNER_TEMP/canary-missing-cue\"\npython3 - <<'PY'\nimport os\nfrom pathlib import Path\ndestination = Path(os.environ[\"CANARY_MISSING_PATH\"])\ndestination.mkdir()\nfor directory in os.get_exec_path():\n    source = Path(directory)\n    if not source.is_dir():\n        continue\n    for entry in source.iterdir():\n        target = destination / entry.name\n        if (entry.name != \"cue\" and entry.is_file()\n                and os.access(entry, os.X_OK) and not target.exists()):\n            target.symlink_to(entry.absolute())\nPY\nPATH=\"$CANARY_MISSING_PATH\" bash -c '\n  set -euo pipefail\n  if command -v cue; then\n    echo \"Missing-CUE precondition failed\" >&2\n    exit 1\n  fi\n  bash server/scripts/check-ci-helper-contracts.sh\n'\nwrong=\"$RUNNER_TEMP/canary-wrong-cue\"\nmkdir \"$wrong\"\ncat > \"$wrong/cue\" <<'SH'\n#!/bin/bash\nif [[ \"${1:-}\" == version ]]; then\n  printf 'cue version v0.17.1\\n\\nCUE language version v0.17.1\\n\\n'\n  exit 0\nfi\necho \"Wrong-version CUE must never evaluate files\" >&2\nexit 97\nSH\nchmod +x \"$wrong/cue\"\nPATH=\"$wrong:$PATH\" bash -c '\n  set -euo pipefail\n  cue version\n  bash server/scripts/check-ci-helper-contracts.sh\n'\n"
+      - id: evidence
+        run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"\nprintf 'sha=%s\\n' \"$(git rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"\nprintf 'normal helper runner: %s\\n' \"$RUNNER_NAME\"\n"
+  nixTestLocal: 
+    needs: 
+      - ciHelperContracts
+    runs-on: "${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\",\"namespace-features:container.privileged=true;job.priority=1\"]' || '[\"namespace-profile-linux-x86\"]') }}"
+    timeout-minutes: 50
+    outputs: 
+      sha: "${{ steps.evidence.outputs.sha }}"
+    steps: 
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with: 
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with: 
+          extra-conf: accept-flake-config = true
+      - name: "Verify CPU availability, shell and sandbox"
+        env: 
+          HELPER_SHA: "${{ needs.ciHelperContracts.outputs.sha }}"
+        run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$GITHUB_SHA\"\ntest \"$HELPER_SHA\" = \"$GITHUB_SHA\"\npython3 - <<'PY'\nimport os\ncpus = sorted(os.sched_getaffinity(0))\nprint(\"Available CPUs:\", cpus)\nassert len(cpus) >= 32, cpus\nPY\nnix develop --no-write-lock-file --command bash -c '\n  set -euo pipefail\n  python3 -c \"import subprocess; assert '\\''CUE language version v0.16.1'\\'' in subprocess.check_output(['\\''cue'\\'', '\\''version'\\''], text=True).splitlines()\"\n'\nprobe='let f = builtins.getFlake (toString ./.); pkgs = import f.inputs.nixpkgs { system = builtins.currentSystem; }; in pkgs.runCommand \"waddle-ci-sandbox-probe\" {} \"echo WADDLE_SANDBOX_PROBE >&2; touch $out\"'\nnix build -L --impure --no-link --no-write-lock-file \\\n  --option builders '' --option sandbox true --option sandbox-fallback false --expr \"$probe\"\nnix build -L --rebuild --impure --no-link --no-write-lock-file \\\n  --option builders '' --option sandbox true --option sandbox-fallback false --expr \"$probe\"\n"
+      - id: evidence
+        run: "printf 'sha=%s\\n' \"$(git rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"\nprintf 'privileged test runner: %s\\n' \"$RUNNER_NAME\"\n"
+  publishContainerImage: 
+    needs: 
+      - ciHelperContracts
+      - nixTestLocal
+    permissions: 
+      {}
+    runs-on: "${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\",\"namespace-features:container.privileged=true;job.priority=1\"]' || '[\"namespace-profile-linux-x86\"]') }}"
+    timeout-minutes: 5
+    steps: 
+      - name: Simulate publication without running publication code
+        env: 
+          HELPER_SHA: "${{ needs.ciHelperContracts.outputs.sha }}"
+          TEST_SHA: "${{ needs.nixTestLocal.outputs.sha }}"
+        run: "set -euo pipefail\ntest -n \"$HELPER_SHA\"\ntest \"$HELPER_SHA\" = \"$TEST_SHA\"\ntest \"$TEST_SHA\" = \"$GITHUB_SHA\"\ntest -z \"${GITHUB_TOKEN:-}\"\ntest -z \"${GH_TOKEN:-}\"\ntest -z \"${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}\"\nprintf 'SIMULATION ONLY: revision=%s runner=%s\\n' \"$GITHUB_SHA\" \"$RUNNER_NAME\"\n"
+  skippedPrerequisite: 
+    if: "github.event_name == 'pull_request'"
+    permissions: 
+      {}
+    runs-on: ubuntu-24.04
+    steps: 
+      - run: exit 1
+  blockedBySkip: 
+    needs: 
+      - skippedPrerequisite
+    permissions: 
+      {}
+    runs-on: ubuntu-24.04
+    steps: 
+      - run: "echo \"ERROR: a skipped prerequisite did not block this job\" >&2\nexit 1\n"
+  verdict: 
+    if: "always() && github.ref == 'refs/heads/codex/2046-runner-canary'"
+    needs: 
+      - ciHelperContracts
+      - nixTestLocal
+      - publishContainerImage
+      - skippedPrerequisite
+      - blockedBySkip
+    permissions: 
+      {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps: 
+      - name: Require positive and negative evidence
+        env: 
+          RESULTS: "${{ toJSON(needs) }}"
+        run: "python3 - <<'PY'\nimport json, os\nresults = json.loads(os.environ[\"RESULTS\"])\nexpected = {\n    \"ciHelperContracts\": \"success\",\n    \"nixTestLocal\": \"success\",\n    \"publishContainerImage\": \"success\",\n    \"skippedPrerequisite\": \"skipped\",\n    \"blockedBySkip\": \"skipped\",\n}\nactual = {name: results[name][\"result\"] for name in expected}\nprint(actual)\nassert actual == expected, (actual, expected)\nPY\n"
