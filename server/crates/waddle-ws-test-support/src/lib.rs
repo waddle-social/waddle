@@ -283,7 +283,6 @@ impl TestServer {
             .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
             // MAM, inbox, SM, and pending delivery share the global database (the server
             // falls back to WADDLE_DATABASE_URL when these are unset).
-            .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_UPLOAD_DIR", &upload_dir)
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)
             .env(
@@ -295,6 +294,14 @@ impl TestServer {
                 "integration-test-occupant-id-secret-32-bytes-long",
             )
             .env("WADDLE_HTTP_PORT_FILE", &port_file);
+        // Shared-owner PostgreSQL startup refuses every per-store URL, so
+        // PubSub stays in memory only for SQLite servers.
+        let postgres = extra_envs
+            .iter()
+            .any(|(key, value)| *key == "WADDLE_DB_DRIVER" && value.starts_with("postgres"));
+        if !postgres {
+            command.env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:");
+        }
         for (key, value) in extra_envs {
             command.env(*key, *value);
         }

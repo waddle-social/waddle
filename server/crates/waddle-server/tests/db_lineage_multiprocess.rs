@@ -228,8 +228,11 @@ async fn assert_liveness(server: &TestServer) {
 /// listener binds, and before any write) when the global database holds a
 /// lineage row that does not verify for this deployment. This mirrors
 /// TestServer's env-driven spawn but observes the clean non-success exit.
-async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
-    let status = tokio::task::spawn_blocking(move || {
+///
+/// `expected_reason` must appear in the refused server's stderr, so an
+/// unrelated startup failure cannot satisfy the refusal.
+async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>, expected_reason: &str) {
+    let output = tokio::task::spawn_blocking(move || {
         let binary = std::env::var_os("CARGO_BIN_EXE_waddle-server")
             .expect("test runner sets the server binary path");
         let port_file = std::env::temp_dir().join(format!(
@@ -259,13 +262,6 @@ async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
             .env("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY", "true")
-            .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
-            .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
-            .env(
-                "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
-                "sqlite::memory:",
-            )
-            .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_UPLOAD_DIR", &upload_dir)
             .env("WADDLE_GIT_SHA", waddle_ws_test_support::TEST_GIT_SHA)
             .env(
@@ -277,25 +273,25 @@ async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
                 "integration-test-occupant-id-secret-32-bytes-long",
             )
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(std::process::Stdio::null());
         for (key, value) in envs {
             command.env(key, value);
         }
-        let status = command
-            .spawn()
-            .expect("spawn refused server")
-            .wait()
-            .expect("wait for refused server exit");
+        let output = command.output().expect("run refused server to exit");
         let _ = std::fs::remove_file(port_file);
         let _ = std::fs::remove_dir_all(upload_dir);
-        status
+        output
     })
     .await
     .expect("refused process task completes");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !status.success(),
+        !output.status.success(),
         "a mis-deployed global database must refuse startup cleanly"
+    );
+    assert!(
+        stderr.contains(expected_reason),
+        "startup must be refused for {expected_reason:?}, got: {stderr}"
     );
 }
 
@@ -436,17 +432,20 @@ async fn split_deployment_rejected() {
     // enrolled database is refused by the pre-migration guard: the process
     // exits before writing anything (including the append-only migration
     // ledger), rather than coming up unready.
-    spawn_expecting_startup_refusal(lineage_envs(&database_a, &deployment_two, None, None)).await;
+    spawn_expecting_startup_refusal(
+        lineage_envs(&database_a, &deployment_two, None, None),
+        "does not match persisted deployment UUID",
+    )
+    .await;
 
     // A MAM archive on a different database boundary can no longer be
     // written inside the ingress transaction; the split deployment is a
-    // startup refusal, not an unready node.
-    spawn_expecting_startup_refusal(lineage_envs(
-        &database_a,
-        &deployment_one,
-        None,
-        Some(&database_b),
-    ))
+    // startup refusal, not an unready node. Shared-owner startup refuses
+    // every explicit per-store URL before it opens the database.
+    spawn_expecting_startup_refusal(
+        lineage_envs(&database_a, &deployment_one, None, Some(&database_b)),
+        "requires inherited global MAM storage",
+    )
     .await;
 
     drop(enrolled);

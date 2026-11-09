@@ -112,13 +112,16 @@ impl Sink<Message> for RevokeAfterFirstSink {
 
     fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
         self.sent.push(item);
-        if self.sent.len() == 1 {
-            self.lifecycle.begin_fenced_recovery();
-        }
         Ok(())
     }
 
+    // Revoke from the flush, not from `start_send`: the sender holds the
+    // lifecycle admission guard across `start_send`, and recovery needs that
+    // same lock exclusively, so revoking there deadlocks the test.
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.sent.len() == 1 {
+            self.lifecycle.begin_fenced_recovery();
+        }
         Poll::Ready(Ok(()))
     }
 

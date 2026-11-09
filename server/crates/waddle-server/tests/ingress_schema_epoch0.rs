@@ -101,7 +101,8 @@ async fn sqlite_v1014_ingress_schema_constraints() {
     assert_count(
         &db,
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name LIKE 'ingress_%'",
-        0,
+        // V1028's two source-binding and three owner-rejection guards.
+        5,
     )
     .await;
     assert_count(&db, "SELECT COUNT(*) FROM pragma_foreign_key_list('ingress_effect_receipts') WHERE \"table\" = 'ingress_effect_intents' AND on_delete = 'CASCADE'", 3).await;

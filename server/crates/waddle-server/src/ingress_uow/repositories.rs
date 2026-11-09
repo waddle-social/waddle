@@ -1912,6 +1912,9 @@ impl SmIngressStreamRepository {
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
+        // Any other prepared writer would schema-qualify this lookup alone;
+        // only the definer-API candidate qualifies the whole closure.
+        let prepared = prepared.filter(|prepared| prepared.uses_definer_api_candidate());
         Self::lookup_unclaimed_in_transaction(tx, prepared, stream_id).await
     }
 

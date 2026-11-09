@@ -1537,6 +1537,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                         "ingress_effect_receipts",
                         "ingress_messages",
                         "ingress_origin_aliases",
+                        "ingress_owner_rejections",
                         "ingress_sm_refs",
                         "ingress_sm_streams",
                     ],
