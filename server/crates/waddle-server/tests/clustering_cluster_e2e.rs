@@ -403,25 +403,11 @@ async fn spawn_cluster_server_with_envs(
 
         let mut envs: Vec<(&str, &str)> = vec![
             ("WADDLE_DB_DRIVER", "postgres"),
+            // ADR-0017: inherit the global PostgreSQL pool for every durable
+            // store. This keeps clustered SM alongside the claims tables for
+            // cross-node resume and avoids ephemeral stores rejected by
+            // readiness (#1652). Shared-owner startup rejects per-store URLs.
             ("WADDLE_DATABASE_URL", &postgres_url),
-            // ADR-0017 Phase 3 Slice 4/6 co-location invariant: clustered SM
-            // persistence MUST live in the same Postgres database as the
-            // clustering claims tables, or `open_for_cluster_mode` fails
-            // startup with `ClusterColocationMismatch`. `TestServer`'s own
-            // default (`sqlite::memory:`) is a non-Postgres URL, which
-            // `open_for_cluster_mode`'s `postgres://`/`postgresql://` filter
-            // silently treats as "not set" — falling back to the portable,
-            // per-process, NON-shared SM store, defeating cross-node resume
-            // entirely (Slice 6's `cross_node_resume_live_steal_handshake`
-            // needs both nodes reading/writing the SAME persisted rows).
-            ("WADDLE_XMPP_SM_DATABASE_URL", &postgres_url),
-            // #1652: clustering rejects ephemeral (in-memory) durable stores
-            // at readiness, so the harness runs every store on the shared
-            // Postgres — the same shape as a production clustered node.
-            ("WADDLE_XMPP_MAM_DATABASE_URL", &postgres_url),
-            ("WADDLE_XMPP_INBOX_DATABASE_URL", &postgres_url),
-            ("WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL", &postgres_url),
-            ("WADDLE_XMPP_PUBSUB_DATABASE_URL", &postgres_url),
             // NB: the fixed test account stays enabled (TestServer's default) —
             // disabling it flips the permission backend onto the SpiceDB path and
             // fails startup. Its seeding is delete-then-recreate, safe for the
