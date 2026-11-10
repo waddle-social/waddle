@@ -514,7 +514,44 @@ mod seams {
         let failed = recv(&mut replacement).await;
         assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
         assert_replaced_transport_closes(&mut owner).await;
-        replacement.close().await.expect("replacement closes");
+        send(
+            &mut replacement,
+            Iq::from_set(
+                "blocked-bind",
+                xmpp_parsers::bind::BindQuery::new(Some("phone".to_owned())),
+            )
+            .into(),
+        )
+        .await;
+        let response = replacement
+            .recv_matching(|frame| {
+                frame.parse::<Element>().is_ok_and(|element| {
+                    element.is("iq", xmpp_parsers::ns::JABBER_CLIENT)
+                        && element.attr("id") == Some("blocked-bind")
+                })
+            })
+            .await
+            .expect("correlated bind refusal");
+        let response: Element = response.parse().expect("bind response XML");
+        assert_eq!(response.attr("type"), Some("error"));
+        let error = response
+            .get_child("error", xmpp_parsers::ns::JABBER_CLIENT)
+            .expect("bind error");
+        assert_eq!(error.attr("type"), Some("wait"));
+        assert!(error
+            .get_child("resource-constraint", xmpp_parsers::ns::XMPP_STANZAS)
+            .is_some());
+
+        // This existing seam observes the registry after the refused bind.
+        seam.release_stale_cleanup();
+        wait_for(
+            &seam,
+            format!("cleanup-finished {stream_id} {ALICE_PHONE} removed=false replacement=false"),
+        )
+        .await;
+        // Releasing the old endpoint can close the outbound channel and end
+        // the loop; a graceful close handshake is outside this bind test.
+        drop(replacement);
     }
 
     #[tokio::test]

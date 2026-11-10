@@ -717,6 +717,7 @@ async fn handle_xmpp_frame_impl(
         pending_sm_enable_commit,
         state_machine,
         registry_owner,
+        resume_endpoint_handoff_blocked,
         ..
     } = conn;
     if let Some((permit, shutdown)) = admission {
@@ -1220,7 +1221,13 @@ async fn handle_xmpp_frame_impl(
                         if e.ns() == waddle_xmpp::ns::BIND
                 );
                 if is_bind {
-                    return handle_resource_binding(iq, domain, phase).into();
+                    return handle_resource_binding(
+                        iq,
+                        domain,
+                        phase,
+                        *resume_endpoint_handoff_blocked,
+                    )
+                    .into();
                 }
             }
 
