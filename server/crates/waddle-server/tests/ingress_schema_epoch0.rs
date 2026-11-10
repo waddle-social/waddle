@@ -101,7 +101,13 @@ async fn sqlite_v1014_ingress_schema_constraints() {
     assert_count(
         &db,
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name LIKE 'ingress_%'",
-        // V1028's two source-binding and three owner-rejection guards.
+        5,
+    )
+    .await;
+    // Exactly V1028's source-binding and owner-rejection integrity guards.
+    assert_count(
+        &db,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('ingress_messages_source_binding_insert_guard', 'ingress_messages_source_binding_update_guard', 'ingress_owner_rejections_insert_guard', 'ingress_owner_rejections_update_guard', 'ingress_owner_rejections_delete_guard')",
         5,
     )
     .await;
