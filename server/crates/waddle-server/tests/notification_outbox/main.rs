@@ -15,6 +15,8 @@ mod candidates;
 pub mod ingress_support;
 mod payload;
 mod publish;
+#[cfg(feature = "test-support")]
+mod publisher_persistence;
 mod schema;
 mod settings_projection;
 mod support;
