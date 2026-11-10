@@ -116,24 +116,9 @@ impl IngressWsFixture {
         }
         let envs: Vec<(String, String)> = vec![
             ("WADDLE_DB_DRIVER".to_string(), "postgres".to_string()),
-            ("WADDLE_DATABASE_URL".to_string(), schema_url.clone()),
-            (
-                "WADDLE_XMPP_SM_DATABASE_URL".to_string(),
-                schema_url.clone(),
-            ),
-            (
-                "WADDLE_XMPP_MAM_DATABASE_URL".to_string(),
-                schema_url.clone(),
-            ),
-            (
-                "WADDLE_XMPP_INBOX_DATABASE_URL".to_string(),
-                schema_url.clone(),
-            ),
-            (
-                "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL".to_string(),
-                schema_url.clone(),
-            ),
-            ("WADDLE_XMPP_PUBSUB_DATABASE_URL".to_string(), schema_url),
+            // Inherit the global PostgreSQL pool for every durable store:
+            // SM shares the claims tables and no store falls back to memory.
+            ("WADDLE_DATABASE_URL".to_string(), schema_url),
             ("WADDLE_CLUSTERING_ENABLED".to_string(), "true".to_string()),
             (
                 "WADDLE_DEPLOYMENT_UUID".to_string(),

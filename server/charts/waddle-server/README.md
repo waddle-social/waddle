@@ -77,8 +77,8 @@ Primary database wiring is DSN/driver based for sqlx:
 
 - `WADDLE_DB_DRIVER` (default: `postgres`)
 - `WADDLE_DATABASE_URL` (primary DB DSN)
-- `WADDLE_XMPP_MAM_DATABASE_URL` (optional MAM DSN override)
-- `WADDLE_XMPP_INBOX_DATABASE_URL` (optional inbox DSN override)
+- `WADDLE_XMPP_MAM_DATABASE_URL` (optional SQLite MAM DSN override)
+- `WADDLE_XMPP_INBOX_DATABASE_URL` (optional SQLite inbox DSN override)
 - `WADDLE_DB_POOL_SIZE` (`database.poolSize`, default: `10`) — main/shared pool
   connection cap (ADR-0017 element 12).
 - `WADDLE_DB_CONTROL_PLANE_POOL_SIZE` (`database.controlPlanePoolSize`, default: `4`)
@@ -88,16 +88,24 @@ Primary database wiring is DSN/driver based for sqlx:
 - `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` (no chart value; set through
   `containerExtraEnv`, default: `30`, accepted `1`–`300`) — how long a
   caller of the global database's main pool waits for a connection before
-  failing with a pool timeout. It applies to that pool only: inbox, pubsub
-  and MAM stores opened by URL, and the clustering control-plane pool, keep
-  a fixed 30 s. Lowering it turns a stalled acquisition into a
-  client-visible timeout (a stream error for sessions without stream
-  management); measure first.
+  failing with a pool timeout. PostgreSQL owner stores share that pool;
+  the clustering control-plane pool keeps a fixed 30 s. Lowering it turns a
+  stalled acquisition into a client-visible timeout (a stream error for
+  sessions without stream management); measure first.
 
 Set DSNs with either:
 
 - non-sensitive `database.*` values (ConfigMap), or
-- `secret.databaseUrl` / `secret.xmppMamDatabaseUrl` / `secret.xmppInboxDatabaseUrl` (recommended for credentials)
+- `secret.databaseUrl` (recommended for credentials); SQLite overrides may use
+  `secret.xmppMamDatabaseUrl` / `secret.xmppInboxDatabaseUrl` / `secret.xmppPubsubDatabaseUrl`.
+
+For PostgreSQL owner startup, set only the global database URL. Leave all
+per-store URLs unset (MAM, inbox, PubSub, spaces metadata, channel-space links,
+SM, and pending delivery) so they inherit `WADDLE_DATABASE_URL` and share its
+main pool. Explicit overrides are rejected even when they equal the global
+URL. Leave `database.xmppMamUrl`, `database.xmppInboxUrl`,
+`database.xmppPubsubUrl` and their `secret.xmpp*DatabaseUrl` counterparts empty,
+and omit per-store URL variables from `containerExtraEnv` and external Secrets.
 
 Scaling note:
 - The default `accessModes: [ReadWriteOnce]` is typically not compatible with `replicaCount > 1`.
@@ -135,7 +143,7 @@ from explicit `secret.*` values:
 - `WADDLE_AUTH_PROVIDERS_JSON`
 - `WADDLE_DATABASE_URL`
 - `WADDLE_XMPP_MAM_DATABASE_URL`, `WADDLE_XMPP_INBOX_DATABASE_URL`,
-  `WADDLE_XMPP_PUBSUB_DATABASE_URL`
+  `WADDLE_XMPP_PUBSUB_DATABASE_URL` (SQLite overrides only; leave unset for PostgreSQL)
 - `WADDLE_SPICEDB_PRESHARED_KEY`
 
 Provider JSON may also be set in `config.authProvidersJson`, but

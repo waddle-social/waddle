@@ -2957,12 +2957,14 @@ unseated the occupancy, the janitor's generation-scoped redrive answers
 `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` and `WADDLE_XMPP_SM_DATABASE_URL`
 must be colocated with the global
 ingress database on every backend, including deployments without clustering.
-SQLite requires the same URL as `WADDLE_DATABASE_URL`; PostgreSQL requires the
-same live database/schema identity. Startup rejects a separate store before
+SQLite requires the same URL as `WADDLE_DATABASE_URL`. PostgreSQL owner startup
+requires both overrides unset, like all other per-store URLs, so the stores
+inherit the global database pool; even an explicit URL equal to the global URL
+is rejected before schema mutation. Startup rejects a separate store before
 initializing its schema or hydrating retained SM sessions. Leaving either
-override unset shares the global database
-pool. In-memory pending and SM storage are available only when the global database itself
-is in memory; it does not survive restart.
+override unset also shares the global pool on SQLite. In-memory pending and SM
+storage are available only when the global database itself is in memory; it
+does not survive restart.
 
 SM session and replay tables must participate in the same V1014 reset as ingress
 and pending claims. A separate retained-session store would leave replay copies
