@@ -35,6 +35,7 @@ mod observability;
 mod payload;
 mod prune;
 mod publish;
+mod publisher_persistence;
 pub(crate) mod runtime_attach;
 #[cfg(all(test, feature = "test-support"))]
 #[path = "notification_outbox/runtime_attach_tests.rs"]
@@ -63,7 +64,7 @@ pub use payload::{
     build_xep0357_notification_payload, publish_options_form_type_is_xep0060,
     target_from_subscription, RichSummary, WADDLE_PUSH_CONTEXT_NS, XEP0357_SUMMARY_FORM_TYPE,
 };
-pub(crate) use publish::retire_registration_outbox_tx;
+pub(crate) use publisher_persistence::retire_registration_outbox_tx;
 pub use runtime_attach::NotificationOutboxRuntimeAttachError;
 pub(crate) use types::SuppressedReason;
 pub use types::{
@@ -81,7 +82,8 @@ use candidate::{
 use codec::{decode_candidate, decode_outbox_job, decode_sender_jids, encode_sender_jids};
 use gate::{xep0191_blocks_notification_candidate, xep0191_blocks_notification_job};
 use payload::build_waddle_context;
-use publish::{lock_outbox_ancestry_tx, policy_retry_delay_ms, settle_outbox_if_unowned_tx};
+use publish::policy_retry_delay_ms;
+use publisher_persistence::{lock_outbox_ancestry_tx, settle_outbox_if_unowned_tx};
 use types::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
 
 #[derive(Clone)]
