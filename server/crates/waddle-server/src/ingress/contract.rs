@@ -156,7 +156,13 @@ impl IngressAuthority {
     #[cfg(feature = "test-support")]
     pub(crate) fn receipt_custody_shares_ingress_lane(&self, database: &Database) -> bool {
         self.database.shares_ingress_lane(database)
-            && self.receipt_custody.shares_ingress_lane(database)
+            && self
+                .uow
+                .standalone_receipt_writer()
+                .shares_ingress_lane(database)
+            && self
+                .receipt_custody
+                .shares_writer(self.uow.standalone_receipt_writer())
     }
 
     pub(crate) fn bind_room_observers(
@@ -371,7 +377,7 @@ impl IngressAuthority {
         let force_stop = CancellationToken::new();
         let admission = Arc::new(RwLock::new(true));
         let receipt_custody = receipt_custody::ReceiptCustody::new(
-            database.clone(),
+            uow.standalone_receipt_writer().clone(),
             Arc::clone(&admission),
             force_stop.clone(),
         );
@@ -432,7 +438,7 @@ impl IngressAuthority {
         let admission = Arc::new(RwLock::new(true));
         let force_stop = CancellationToken::new();
         let receipt_custody = receipt_custody::ReceiptCustody::new(
-            database.clone(),
+            uow.standalone_receipt_writer().clone(),
             Arc::clone(&admission),
             force_stop.clone(),
         );
@@ -739,9 +745,10 @@ impl IngressAuthority {
             || !self.receipt_custody.has_fatal_fence()
             || !self.receipt_custody.can_retain()
         {
-            return execute::execute_effects(
+            return execute::execute_effects_with_writer(
                 &self.uow,
                 &self.database,
+                self.uow.standalone_receipt_writer(),
                 decision,
                 sink,
                 &execution_deps,
@@ -751,7 +758,7 @@ impl IngressAuthority {
         }
         execute::execute_admitted_effects(
             &self.uow,
-            &self.database,
+            self.uow.standalone_receipt_writer(),
             decision,
             sink,
             &execution_deps,
@@ -777,7 +784,11 @@ impl IngressAuthority {
                 return Err(IngressUowError::AuthorityStopped.into());
             }
             report
-                .complete_frame_obligations(&self.uow, &self.database, Duration::from_secs(5))
+                .complete_frame_obligations_with_writer(
+                    &self.uow,
+                    self.uow.standalone_receipt_writer(),
+                    Duration::from_secs(5),
+                )
                 .await
         })
         .await

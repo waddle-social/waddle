@@ -471,6 +471,7 @@ fn permit_binds_queue_and_admission_even_for_equal_ids() {
     let b = BindingOutboundEndpoint {
         queue: socket_b.queue,
         admission: Arc::clone(&a.admission),
+        sealed: a.sealed.clone(),
     };
     let a_permit = a.try_reserve_owned().expect("reserve queue A");
     let b_permit = b.try_reserve_owned().expect("reserve queue B");
@@ -537,6 +538,114 @@ async fn blocked_send_rechecks_seal_without_seal_waking_the_waiter() {
     assert_eq!(endpoint.queue.capacity(), 1);
     assert!(receiver.try_recv().is_err());
     acknowledge(outbound, &mut accepted);
+}
+
+#[tokio::test]
+async fn deferred_seal_signal_wakes_all_pending_flush_waiters_without_draining_queue() {
+    let (endpoint, mut receiver, owner, binding_ref) = binding(BindingAdmissionState::Active);
+    assert!(matches!(
+        endpoint.try_send(OutboundStanza::new(Stanza::Message(Message::new(None)))),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    let clone = endpoint.clone();
+    let mut first = Box::pin(endpoint.reserve_pending_flush());
+    let mut second = Box::pin(clone.reserve_pending_flush());
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    assert!(endpoint.seal(owner, &binding_ref));
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    endpoint.pending_flush_seal_signal().cancel();
+    assert!(matches!(first.await, Err(EndpointEnqueueRejection::Sealed)));
+    assert!(matches!(
+        second.await,
+        Err(EndpointEnqueueRejection::Sealed)
+    ));
+    assert_eq!(endpoint.queue.capacity(), 0);
+    assert!(receiver.try_recv().is_ok(), "accepted frame remains queued");
+    assert!(!endpoint.is_closed());
+}
+
+#[tokio::test]
+async fn deferred_seal_between_check_and_wait_registration_is_sticky() {
+    let (endpoint, _receiver, owner, binding_ref) = binding(BindingAdmissionState::Active);
+    let _held = endpoint.try_reserve_owned().expect("hold capacity");
+    assert!(endpoint.check_active().is_ok());
+    assert!(endpoint.seal(owner, &binding_ref));
+    endpoint.pending_flush_seal_signal().cancel();
+    assert!(matches!(
+        endpoint.reserve_pending_flush_after_check().await,
+        Err(EndpointEnqueueRejection::Sealed)
+    ));
+}
+
+#[tokio::test]
+async fn pending_reserve_rechecks_before_deferred_wakeup_and_returns_capacity() {
+    let (endpoint, _receiver, owner, binding_ref) = binding(BindingAdmissionState::Active);
+    let held = endpoint.try_reserve_owned().expect("hold capacity");
+    let mut reserve = Box::pin(endpoint.reserve_pending_flush());
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+    assert!(endpoint.seal(owner, &binding_ref));
+    drop(held);
+    assert!(matches!(
+        reserve.await,
+        Err(EndpointEnqueueRejection::Sealed)
+    ));
+    assert_eq!(endpoint.queue.capacity(), 1, "uncommitted permit returned");
+}
+
+#[tokio::test]
+async fn pending_reserve_reports_close_and_seal_in_observed_order() {
+    let (endpoint, receiver, owner, binding_ref) = binding(BindingAdmissionState::Active);
+    let _held = endpoint.try_reserve_owned().expect("hold capacity");
+    let mut reserve = Box::pin(endpoint.reserve_pending_flush());
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+    drop(receiver);
+    assert!(matches!(
+        reserve.await,
+        Err(EndpointEnqueueRejection::ChannelClosed)
+    ));
+    assert!(endpoint.seal(owner, &binding_ref));
+
+    let (endpoint, receiver, owner, binding_ref) = binding(BindingAdmissionState::Active);
+    let _held = endpoint.try_reserve_owned().expect("hold capacity");
+    let mut reserve = Box::pin(endpoint.reserve_pending_flush());
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+    assert!(endpoint.seal(owner, &binding_ref));
+    drop(receiver);
+    assert!(matches!(
+        reserve.await,
+        Err(EndpointEnqueueRejection::ChannelClosed)
+    ));
+}
+
+#[tokio::test]
+async fn same_socket_rebind_has_a_fresh_pending_flush_signal() {
+    let (old, mut receiver, owner, binding_ref) = binding(BindingAdmissionState::Active);
+    let stale = old.clone();
+    assert!(old.seal(owner, &binding_ref));
+    old.pending_flush_seal_signal().cancel();
+    let socket = old
+        .into_socket_endpoint_if_empty(owner, &binding_ref, None)
+        .expect("empty queue can be rebound");
+    let new_owner = LocalConnectionBindingId::fresh();
+    let new_binding = BindingRef::fresh(binding_ref.connection_ref().clone());
+    let new = socket.bind(
+        new_owner,
+        Some(new_binding.clone()),
+        BindingAdmissionState::Active,
+    );
+    assert!(matches!(
+        new.try_send(OutboundStanza::new(Stanza::Message(Message::new(None)))),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    let mut reserve = Box::pin(new.reserve_pending_flush());
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+    assert!(!stale.seal(new_owner, &new_binding));
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+    receiver.recv().await.expect("drain frame");
+    drop(reserve.await.expect("new binding remains active"));
+    assert_eq!(new.queue.capacity(), 1);
 }
 
 #[tokio::test]

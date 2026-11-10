@@ -1371,6 +1371,21 @@ struct OfferFault {
     blocked: std::sync::atomic::AtomicBool,
 }
 
+struct WakeWhenDispatchStarts(tokio::sync::Notify);
+
+#[async_trait]
+impl PendingDispatchGate for WakeWhenDispatchStarts {
+    async fn check_turn(
+        &self,
+        _row: &PendingRow,
+        _resource: &FullJid,
+        _stream: Option<&SmSessionId>,
+    ) -> Result<PendingDispatchReadiness, PendingStorageError> {
+        self.0.notify_one();
+        Ok(PendingDispatchReadiness::Ready)
+    }
+}
+
 #[async_trait]
 impl PendingDeliveryStorage for OrderingReleaseFails {
     async fn notification_recovery_high_water(
@@ -6782,6 +6797,246 @@ async fn postgres_ambiguous_release_preserves_same_stream_claim_across_storage_h
     )
     .await;
     drop_postgres_test_schema(&database_url, &schema).await;
+}
+
+#[tokio::test]
+async fn seal_wakes_claimed_flush_releases_head_and_suffix_and_retries_failed_releases() {
+    let fault = Arc::new(OrderingReleaseFails {
+        inner: ordered_pending_fixture(None).await,
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        failed: tokio::sync::Notify::new(),
+        ambiguous_release: None,
+        release_blocked: std::sync::atomic::AtomicBool::new(true),
+        offer_fault: None,
+        delete_fault: None,
+    });
+    let storage: Arc<dyn PendingDeliveryStorage> = fault.clone();
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/sealed-flush");
+    let recipient = resource.to_bare();
+    let session = SmSessionId::new("sealed-flush");
+    let resolver = ordered_pending_resolver().await;
+    let gate = WakeWhenDispatchStarts(tokio::sync::Notify::new());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.try_send(waddle_xmpp::registry::OutboundStanza::new(Stanza::Message(
+        Message::new(None),
+    )))
+    .expect("fill old queue");
+    let owner = registry.register(resource.clone(), tx.clone());
+    registry.update_presence(&resource, true, 0);
+    let context = || FlushContext {
+        server_domain: "example.com",
+        sm_session: Some(&session),
+        blocking_storage: None,
+        owner: Some(&owner),
+        archive_resolver: &resolver,
+        dispatch_gate: Some(&gate),
+    };
+    let mut flush = Box::pin(flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        context(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            _ = &mut flush => panic!("full queue must block the flush"),
+            _ = gate.0.notified() => {}
+        }
+    })
+    .await
+    .expect("flush reached the dispatch gate");
+
+    let before = storage
+        .list_unoffered_claims(&recipient, None, i64::MAX, 8)
+        .await
+        .expect("inspect unoffered batch");
+    assert_eq!(before.len(), 2, "both head and suffix remain unoffered");
+    assert_eq!(before[0].token, before[1].token);
+    assert!(before.iter().all(|claim| claim.session == session));
+    let entry = registry.entry(&resource).expect("old entry");
+    let mut wakeups = waddle_xmpp::registry::DeferredPendingFlushWakeups::default();
+    assert!(entry.seal_binding_for_failed_resume(
+        owner,
+        entry.binding_ref().expect("exact binding"),
+        &mut wakeups,
+    ));
+    drop(wakeups);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), &mut flush)
+        .await
+        .expect("seal wakes flush without draining the queue");
+    assert_eq!(outcome.pushed, 0);
+    assert_eq!(outcome.deferred_ordering, 2);
+    assert!(
+        outcome.has_retry_work(),
+        "failed exact releases retain custody"
+    );
+    assert_eq!(tx.capacity(), 0);
+    let retained = storage
+        .list_unoffered_claims(&recipient, None, i64::MAX, 8)
+        .await
+        .expect("failed releases remain unoffered");
+    assert_eq!(retained.len(), 2);
+    assert!(retained.iter().all(|claim| before.contains(claim)));
+
+    let (new_tx, mut new_rx) = tokio::sync::mpsc::channel(4);
+    let new_owner = registry.register(resource.clone(), new_tx);
+    registry.update_presence(&resource, true, 0);
+    fault
+        .release_blocked
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let settled = super::flush::flush_recovery_pass(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        context(),
+        outcome,
+    )
+    .await;
+    assert!(!settled.has_retry_work());
+    let rows = storage.list(&recipient).await.expect("released rows");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.flushed_in_session.is_none()));
+    assert!(
+        new_rx.try_recv().is_err(),
+        "old owner cannot send to replacement"
+    );
+    let retried = flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            owner: Some(&new_owner),
+            ..context()
+        },
+    )
+    .await;
+    assert_eq!(retried.pushed, 2);
+    for expected in ["z-later-pending-id", "a-earlier-pending-id"] {
+        let row_id = new_rx
+            .try_recv()
+            .expect("retried row")
+            .pending_row_id
+            .expect("row identity");
+        assert_eq!(row_id.as_str(), expected);
+    }
+    assert!(new_rx.try_recv().is_err());
+    assert!(
+        rx.try_recv().is_ok(),
+        "the earlier accepted frame is retained"
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn seal_after_ambiguous_offer_retains_reservation_until_exact_reconciliation() {
+    let fault = Arc::new(OfferFault {
+        first: std::sync::atomic::AtomicBool::new(true),
+        blocked: std::sync::atomic::AtomicBool::new(true),
+    });
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(OrderingReleaseFails {
+        inner: ordered_pending_fixture(None).await,
+        attempts: std::sync::atomic::AtomicUsize::new(2),
+        failed: tokio::sync::Notify::new(),
+        ambiguous_release: None,
+        release_blocked: std::sync::atomic::AtomicBool::new(false),
+        offer_fault: Some(fault.clone()),
+        delete_fault: None,
+    });
+    let registry = ConnectionRegistry::new();
+    let resource = full("alice@example.com/sealed-uncertain");
+    let recipient = resource.to_bare();
+    let session = SmSessionId::new("sealed-uncertain");
+    let resolver = ordered_pending_resolver().await;
+    let gate = FixedPendingDispatch(PendingDispatchReadiness::Ready);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let owner = registry.register(resource.clone(), tx.clone());
+    registry.update_presence(&resource, true, 0);
+    let context = || FlushContext {
+        server_domain: "example.com",
+        sm_session: Some(&session),
+        blocking_storage: None,
+        owner: Some(&owner),
+        archive_resolver: &resolver,
+        dispatch_gate: Some(&gate),
+    };
+    let outcome = flush_for_resource(&storage, &registry, &recipient, &resource, context()).await;
+    assert!(
+        outcome.has_retry_work(),
+        "ambiguous offer retains exact custody"
+    );
+    assert_eq!(
+        tx.capacity(),
+        0,
+        "reservation is retained while outcome is unknown"
+    );
+    assert!(rx.try_recv().is_err());
+    let entry = registry.entry(&resource).expect("old entry");
+    let mut wakeups = waddle_xmpp::registry::DeferredPendingFlushWakeups::default();
+    assert!(entry.seal_binding_for_failed_resume(
+        owner,
+        entry.binding_ref().expect("exact binding"),
+        &mut wakeups,
+    ));
+    drop(wakeups);
+    assert_eq!(
+        tx.capacity(),
+        0,
+        "seal does not abandon a post-offer reservation"
+    );
+    let (new_tx, mut new_rx) = tokio::sync::mpsc::channel(4);
+    let new_owner = registry.register(resource.clone(), new_tx);
+    registry.update_presence(&resource, true, 0);
+    fault
+        .blocked
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let settled = super::flush::flush_recovery_pass(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        context(),
+        outcome,
+    )
+    .await;
+    assert!(!settled.has_retry_work());
+    assert_eq!(
+        tx.capacity(),
+        1,
+        "reconciled refusal returns the old permit"
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(
+        new_rx.try_recv().is_err(),
+        "old reservation never retargets"
+    );
+    let rows = storage.list(&recipient).await.expect("released rows");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.flushed_in_session.is_none()));
+    let retried = flush_for_resource(
+        &storage,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            owner: Some(&new_owner),
+            ..context()
+        },
+    )
+    .await;
+    assert_eq!(retried.pushed, 2);
+    for expected in ["z-later-pending-id", "a-earlier-pending-id"] {
+        let row_id = new_rx
+            .try_recv()
+            .expect("retried row")
+            .pending_row_id
+            .expect("row identity");
+        assert_eq!(row_id.as_str(), expected);
+    }
+    assert!(new_rx.try_recv().is_err());
 }
 
 #[tokio::test]

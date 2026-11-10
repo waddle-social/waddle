@@ -156,7 +156,7 @@ impl ConnectionRegistry {
         let captured_owner = entry.binding_id();
         let binding_ref = entry.binding_ref().cloned();
         drop(entry);
-        match endpoint.reserve_owned().await {
+        match endpoint.reserve_pending_flush().await {
             Ok(permit) => Ok(PendingFlushReservation {
                 jid: jid.clone(),
                 owner: captured_owner,
@@ -190,7 +190,7 @@ impl ConnectionRegistry {
         let captured_owner = entry.binding_id();
         let binding_ref = entry.binding_ref().cloned();
         drop(entry);
-        match endpoint.try_reserve_owned() {
+        match endpoint.try_reserve_pending_flush() {
             Ok(permit) => Ok(PendingFlushReservation {
                 jid: jid.clone(),
                 owner: captured_owner,

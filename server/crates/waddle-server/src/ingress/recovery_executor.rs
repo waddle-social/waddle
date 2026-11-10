@@ -118,9 +118,10 @@ pub(super) async fn recover_row(
     if !rebuilt.decision.external.is_empty() {
         let mut recovery_deps = deps.clone();
         recovery_deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
-        let report = super::execute::execute_effects(
+        let report = super::execute::execute_effects_with_writer(
             uow,
             database,
+            uow.standalone_receipt_writer(),
             &rebuilt.decision,
             &ImmediateSink,
             &recovery_deps,

@@ -90,7 +90,7 @@ pub enum Action {
     BeginRetirement {
         custody_known: bool,
     },
-    CompleteRetirement(SyntheticRetirement),
+    CompleteRetirement(Box<SyntheticRetirement>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

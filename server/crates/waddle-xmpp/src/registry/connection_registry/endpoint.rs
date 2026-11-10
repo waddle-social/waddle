@@ -5,6 +5,7 @@ use super::outbound::LocalConnectionBindingId;
 use super::{mpsc, OutboundStanza};
 use crate::ownership::{BindingRef, ConnectionRef};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 struct OutboundQueue {
@@ -196,6 +197,7 @@ impl SocketOutboundEndpoint {
                 binding_ref,
                 state,
             })),
+            sealed: CancellationToken::new(),
         }
     }
 }
@@ -263,6 +265,7 @@ impl BindingAdmission {
 pub(super) struct BindingOutboundEndpoint {
     queue: Arc<OutboundQueue>,
     pub(super) admission: Arc<std::sync::Mutex<BindingAdmission>>,
+    sealed: CancellationToken,
 }
 
 impl BindingOutboundEndpoint {
@@ -297,6 +300,10 @@ impl BindingOutboundEndpoint {
             }
         }
         sealed
+    }
+
+    pub(super) fn pending_flush_seal_signal(&self) -> CancellationToken {
+        self.sealed.clone()
     }
 
     /// Recover a sealed socket queue only after proving it contains no frames.
@@ -375,6 +382,32 @@ impl BindingOutboundEndpoint {
         })
     }
 
+    /// Pending flushes may abandon capacity waits before a durable offer. The
+    /// sticky signal belongs to this binding, not the underlying socket.
+    pub(super) async fn reserve_pending_flush(
+        &self,
+    ) -> Result<EndpointPermit, EndpointEnqueueRejection> {
+        self.check_active()?;
+        self.reserve_pending_flush_after_check().await
+    }
+
+    async fn reserve_pending_flush_after_check(
+        &self,
+    ) -> Result<EndpointPermit, EndpointEnqueueRejection> {
+        tokio::select! {
+            biased;
+            _ = self.sealed.cancelled() => Err(EndpointEnqueueRejection::Sealed),
+            result = self.reserve_owned() => {
+                let permit = result?;
+                // A seal may have won after capacity became available but
+                // before its deferred notification ran. Drop any permit on
+                // refusal; commit makes the final admission decision later.
+                self.check_active()?;
+                Ok(permit)
+            }
+        }
+    }
+
     pub(super) fn try_reserve_owned(&self) -> Result<EndpointPermit, EndpointEnqueueRejection> {
         self.check_active()?;
         let permit = match &self.queue.sender {
@@ -395,6 +428,14 @@ impl BindingOutboundEndpoint {
             permit,
             endpoint: self.clone(),
         })
+    }
+
+    pub(super) fn try_reserve_pending_flush(
+        &self,
+    ) -> Result<EndpointPermit, EndpointEnqueueRejection> {
+        let permit = self.try_reserve_owned()?;
+        self.check_active()?;
+        Ok(permit)
     }
 
     pub(super) fn commit_reserved(

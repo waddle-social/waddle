@@ -1,6 +1,7 @@
 use jid::FullJid;
 use tracing::{error, warn};
 use waddle_xmpp::protocol::ConnectionPhase;
+use waddle_xmpp::registry::DeferredPendingFlushWakeups;
 use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
 
 use super::super::cleanup::cleanup_invalidated_detached_session;
@@ -60,6 +61,7 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
     jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
+    failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
 ) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         return complete_pending_resume_claim(
@@ -69,6 +71,7 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
             owner,
             stream_id,
             outbound_receiver,
+            failed_resume_wakeups,
         )
         .await;
     }
@@ -99,6 +102,7 @@ async fn complete_pending_resume_claim(
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: String,
     outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
+    failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
 ) -> SmFinalizationReport {
     if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
         .await
@@ -233,6 +237,7 @@ async fn complete_pending_resume_claim(
                 Some(owner),
                 Some(&stream_id),
                 outbound_receiver,
+                failed_resume_wakeups,
             )
             .await;
             resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
@@ -333,7 +338,16 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     }
     conn.pending_resume_stream_id = None;
     conn.pending_resume_h = None;
-    reset_resume_attempt(state, conn, jid, None, None, None).await;
+    reset_resume_attempt(
+        state,
+        conn,
+        jid,
+        None,
+        None,
+        None,
+        &mut DeferredPendingFlushWakeups::default(),
+    )
+    .await;
     conn.pending_finalized_resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
     SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
         "item-not-found",
@@ -348,6 +362,7 @@ async fn reset_resume_attempt(
     owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     _failed_stream_id: Option<&str>,
     outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
+    failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
 ) {
     // This rollback runs inline while the sole live WebSocket task handles the
     // client's inbound SM request. That task owns the only receiver for this
@@ -366,7 +381,7 @@ async fn reset_resume_attempt(
         let current = registry.entry_if_owner(jid, owner);
         if let Some(entry) = current {
             if let Some(binding) = entry.binding_ref().cloned() {
-                if entry.seal_binding(*owner, &binding) {
+                if entry.seal_binding_for_failed_resume(*owner, &binding, failed_resume_wakeups) {
                     if let Some(removed) = registry.unregister_if_owner(jid, owner) {
                         removed_owner = true;
                         exact_binding_match = failed_binding.as_ref() == Some(&binding);
@@ -623,8 +638,15 @@ mod tests {
         conn.registry_owner = Some(owner);
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
-        let report =
-            finalize_sm_after_registry_registration(&state, &mut conn, &jid, &owner, None).await;
+        let report = finalize_sm_after_registry_registration(
+            &state,
+            &mut conn,
+            &jid,
+            &owner,
+            None,
+            &mut DeferredPendingFlushWakeups::default(),
+        )
+        .await;
         let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
             panic!("expired resume must produce failed, never resumed or replay");
         };

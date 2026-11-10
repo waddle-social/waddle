@@ -5,6 +5,22 @@ use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
 use std::sync::atomic::AtomicBool;
+use tokio_util::sync::CancellationToken;
+
+/// Pending-flush wakeups collected during a failed resume. The owner must
+/// outlive the bind and publication guards: dropping it invokes task wakers.
+#[derive(Default)]
+pub struct DeferredPendingFlushWakeups {
+    signals: Vec<CancellationToken>,
+}
+
+impl Drop for DeferredPendingFlushWakeups {
+    fn drop(&mut self) {
+        for signal in self.signals.drain(..) {
+            signal.cancel();
+        }
+    }
+}
 
 /// How the destination connection should handle an inbound
 /// [`OutboundStanza`].
@@ -597,6 +613,24 @@ impl ConnectionEntry {
             self.binding_permit.notify_revoked();
         }
         sealed
+    }
+
+    /// Seal the failed resume's exact binding and retain its pending-flush
+    /// wakeup until the caller has released its outer registration guards.
+    /// The existing pre-write permit notification retains its normal timing.
+    pub fn seal_binding_for_failed_resume(
+        &self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+        wakeups: &mut DeferredPendingFlushWakeups,
+    ) -> bool {
+        if !self.seal_binding(owner, binding_ref) {
+            return false;
+        }
+        wakeups
+            .signals
+            .push(self.endpoint.pending_flush_seal_signal());
+        true
     }
 
     /// Legacy replacements are unchanged. Every path that removes an actor

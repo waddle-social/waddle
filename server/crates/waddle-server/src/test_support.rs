@@ -261,6 +261,26 @@ pub fn receipt_operation_from_intent(
     crate::ingress::receipt_operation_for_test(message, key)
 }
 
+/// Attach an existing notification candidate through the normal owner path.
+#[cfg(feature = "test-support")]
+pub async fn attach_notification_candidate_lineage_for_test(
+    uow: &IngressUnitOfWork,
+    message: waddle_xmpp::ingress::MessageKey,
+    effect: &waddle_xmpp::ingress::IngressEffectKey,
+    candidate: &crate::notification_outbox::NotificationCandidate,
+) -> Result<(), IngressUowError> {
+    let mut transaction = uow.begin().await?;
+    NotificationOutboxStore::attach_candidate_lineage_with_api(
+        transaction.transaction_mut(),
+        None,
+        message,
+        effect,
+        candidate,
+    )
+    .await?;
+    transaction.commit().await
+}
+
 /// Whether both the authority and its receipt worker carry this reserved lane.
 #[cfg(feature = "test-support")]
 pub fn receipt_custody_shares_ingress_lane(

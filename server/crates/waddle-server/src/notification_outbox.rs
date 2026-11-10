@@ -19,6 +19,7 @@ use crate::notification_activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
 mod candidate;
+mod candidate_persistence;
 mod direct_envelope;
 pub(crate) use direct_envelope::direct_candidate_from_envelope;
 mod envelope;
