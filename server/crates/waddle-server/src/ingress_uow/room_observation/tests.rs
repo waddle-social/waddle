@@ -155,6 +155,19 @@ async fn revert_v1025(fixture: &IngressFixture) {
         .begin()
         .await
         .expect("downgrade fixture transaction");
+    // Undo V1030's receipt journal and V1029's SM frame provenance first:
+    // the ledger rejects any applied version above a missing one.
+    if fixture.db.driver() == crate::db::DatabaseDriver::Postgres {
+        tx.execute("DROP FUNCTION waddle_p21_record_effect_receipt", ())
+            .await
+            .expect("remove receipt journal function");
+    }
+    tx.execute("DROP TABLE p21_receipt_operation_results", ())
+        .await
+        .expect("remove receipt journal");
+    tx.execute("ALTER TABLE sm_unacked DROP COLUMN provenance", ())
+        .await
+        .expect("remove SM frame provenance");
     // Undo V1028 source binding before the older retention migrations.
     match fixture.db.driver() {
         crate::db::DatabaseDriver::Sqlite => {
@@ -337,7 +350,7 @@ ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_ch
         tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
     }
     tx.execute(
-        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028)",
+        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028, 1029, 1030)",
         (),
     )
     .await

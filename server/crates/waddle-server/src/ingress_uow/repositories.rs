@@ -1912,6 +1912,10 @@ impl SmIngressStreamRepository {
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
         let (tx, prepared) = transaction.prepared_parts();
+        // Retirement's ref scan and stream delete are unqualified, so the
+        // lookup they act on stays unqualified too. Only the definer-API
+        // candidate routes it through its function.
+        let prepared = prepared.filter(|prepared| prepared.uses_definer_api_candidate());
         Self::lookup_unclaimed_in_transaction(tx, prepared, stream_id).await
     }
 

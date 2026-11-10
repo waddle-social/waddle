@@ -2127,7 +2127,9 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
             let drained = super::super::connection::drain_ready_force_detach_requests(
                 &mut force_detach_rx,
                 &bare_jid,
-                None,
+                // Retirement stamps its request with the retired entry's
+                // binding; the drain drops requests for any other binding.
+                old_entry.binding_ref(),
             );
             if !drained.is_empty() {
                 break drained;
