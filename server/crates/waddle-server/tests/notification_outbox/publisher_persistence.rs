@@ -458,3 +458,376 @@ async fn postgres_retry_and_terminal_outcomes_have_exact_durable_state() {
         retry_and_terminal_durable_state(fixture).await;
     }
 }
+
+#[derive(Clone, Copy)]
+enum RollbackOperation {
+    Published,
+    Suppression,
+    TerminalRetry,
+    GoneRegistration,
+    TerminalProof,
+}
+
+// Snapshot every column, including claim/deadline timestamps and frozen bytes,
+// rather than checking only the status changed by the transaction's first write.
+async fn job_snapshot(store: &TestStore) -> Vec<Vec<waddle_server::db::Value>> {
+    let mut rows = store
+        .query("SELECT * FROM notification_outbox ORDER BY job_id", ())
+        .await
+        .expect("durable job snapshot");
+    let width = rows.column_count();
+    let mut snapshot = Vec::new();
+    while let Some(row) = rows.next().await.expect("snapshot row") {
+        snapshot.push((0..width).map(|i| row.value(i).expect("column")).collect());
+    }
+    snapshot
+}
+
+async fn assert_custody(fixture: &IngressFixture, unsettled: i64) {
+    // The candidate descendant was settled by T1; the outbox descendant is
+    // the remaining obligation exercised by the publisher transaction.
+    assert_eq!(fixture.count("ingress_effect_descendants").await, 2);
+    assert_eq!(fixture.count("notification_outbox_lineage").await, 1);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        unsettled,
+    );
+    assert_eq!(
+        fixture
+            .count("notification_outbox_lineage WHERE settled_at_ms IS NULL")
+            .await,
+        unsettled,
+    );
+}
+
+async fn install_ack_failure(fixture: &IngressFixture) {
+    match fixture.db.driver() {
+        DatabaseDriver::Sqlite => fixture.execute(
+            "CREATE TRIGGER fail_publisher_ack BEFORE UPDATE OF upstream_completed ON push_publish_jobs BEGIN SELECT RAISE(FAIL, 'publisher acknowledgement failed'); END",
+            (),
+        ).await,
+        DatabaseDriver::Postgres => {
+            fixture.execute(
+                "CREATE FUNCTION fail_publisher_ack() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'publisher acknowledgement failed'; END $$",
+                (),
+            ).await;
+            fixture.execute(
+                "CREATE TRIGGER fail_publisher_ack BEFORE UPDATE OF upstream_completed ON push_publish_jobs FOR EACH ROW EXECUTE FUNCTION fail_publisher_ack()",
+                (),
+            ).await;
+        }
+    }
+}
+
+async fn remove_ack_failure(fixture: &IngressFixture) {
+    match fixture.db.driver() {
+        DatabaseDriver::Sqlite => fixture.execute("DROP TRIGGER fail_publisher_ack", ()).await,
+        DatabaseDriver::Postgres => {
+            fixture
+                .execute("DROP TRIGGER fail_publisher_ack ON push_publish_jobs", ())
+                .await;
+            fixture
+                .execute("DROP FUNCTION fail_publisher_ack()", ())
+                .await;
+        }
+    }
+}
+
+async fn run_rollback_operation(
+    operation: RollbackOperation,
+    store: &TestStore,
+    push: &DatabasePushServiceStore,
+    job: &NotificationOutboxJob,
+) -> Result<(), waddle_server::notification_outbox::NotificationOutboxError> {
+    match operation {
+        RollbackOperation::Published => assert!(store.mark_job_published(job).await?),
+        RollbackOperation::TerminalRetry => assert_eq!(
+            store
+                .schedule_retry_or_fail(job, "rollback retry".into())
+                .await?,
+            Some(4),
+        ),
+        _ => {
+            let registrations = InMemoryPushStore::new();
+            if !matches!(operation, RollbackOperation::GoneRegistration) {
+                register_push_target(
+                    &registrations,
+                    job.recipient_bare_jid(),
+                    &NotificationOutboxTarget::new(
+                        job.push_service_jid().clone(),
+                        job.node().clone(),
+                    ),
+                )
+                .await;
+            }
+            // An existing zero-unread entry is required: an absent entry does
+            // not suppress. The other paths retain one unread message.
+            let (inbox, _) = crate::support::seed_inbox_witness(
+                job.recipient_bare_jid(),
+                job.conversation_jid(),
+                "read-before-publish",
+                1,
+                u32::from(!matches!(operation, RollbackOperation::Suppression)),
+            )
+            .await;
+            let outcome = store
+                .publish_claimed_job(
+                    job,
+                    push,
+                    &registrations,
+                    &inbox,
+                    &InMemoryBlockingStorage::new(),
+                    &bare("push.example.com"),
+                )
+                .await?;
+            assert!(matches!(
+                (operation, outcome),
+                (
+                    RollbackOperation::Suppression,
+                    NotificationOutboxPublishOutcome::Suppressed { .. }
+                ) | (
+                    RollbackOperation::GoneRegistration,
+                    NotificationOutboxPublishOutcome::Failed { .. }
+                ) | (
+                    RollbackOperation::TerminalProof,
+                    NotificationOutboxPublishOutcome::Published { .. }
+                )
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn publisher_transaction_rolls_back(fixture: IngressFixture, operation: RollbackOperation) {
+    let store = TestStore {
+        db: fixture.db.clone(),
+        store: NotificationOutboxStore::try_new(fixture.db.clone())
+            .await
+            .expect("outbox"),
+    };
+    // Colocation makes the real provider acknowledgement a write in the SAME
+    // transaction, so its trigger also tests rollback of preceding settlement.
+    let push = DatabasePushServiceStore::new_with_secret_key(
+        fixture.db.clone(),
+        b"waddle-push-service-test-secret-key",
+    )
+    .await
+    .expect("colocated provider");
+    let owner = bare("alice@example.com");
+    let node = push
+        .ensure_node(&owner, "publisher-rollback")
+        .await
+        .expect("node");
+    let target = NotificationOutboxTarget::new(
+        bare("push.example.com"),
+        PushServiceNodeName::try_new(node.node()).expect("node name"),
+    );
+    let candidate = candidate("publisher-atomic-operation");
+    store.insert_candidate(&candidate).await.expect("candidate");
+    attach_parent(&fixture, &candidate).await;
+    enqueue_jobs_for_test(&store, &candidate, &[target]).await;
+    fixture.execute(
+        "UPDATE notification_outbox SET attempt_count = ?, policy_error_count = 1, last_error = 'before transition', next_attempt_at_ms = 1",
+        waddle_server::db_params![if matches!(operation, RollbackOperation::TerminalRetry) { 3_i64 } else { 2_i64 }],
+    ).await;
+    let mut job = claim(&store).await;
+    let with_ack = matches!(
+        operation,
+        RollbackOperation::Published | RollbackOperation::TerminalProof
+    );
+    if with_ack {
+        let item = job.to_xep0357_pubsub_item();
+        fixture.execute(
+            "UPDATE notification_outbox SET approved_payload_xml = ?, queue_acceptance_may_exist = 1",
+            waddle_server::db_params![String::from(item.payload.as_ref().expect("notification payload"))],
+        ).await;
+        // Seed the exact durable provider acceptance/proof that the public
+        // completion paths consume, without first settling the owner in setup.
+        fixture.execute(
+            "INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, status, created_at_ms, updated_at_ms) SELECT 'publisher-acceptance', recipient_bare_jid, push_service_jid, node, job_id, approved_payload_xml, approved_publish_options_xml, job_id, 'canonical', ?, 1, 1 FROM notification_outbox",
+            waddle_server::db_params![if matches!(operation, RollbackOperation::TerminalProof) { "published" } else { "queued" }],
+        ).await;
+        job = store
+            .pending_outbox_jobs()
+            .await
+            .expect("frozen claim")
+            .remove(0);
+        install_ack_failure(&fixture).await;
+    } else {
+        install_settlement_failure(&fixture).await;
+    }
+    let before = job_snapshot(&store).await;
+    assert_eq!(before.len(), 1);
+    assert_custody(&fixture, 1).await;
+    assert_eq!(
+        fixture
+            .count("push_publish_jobs WHERE upstream_completed = 1")
+            .await,
+        0
+    );
+    let error = run_rollback_operation(operation, &store, &push, &job)
+        .await
+        .expect_err("late write must abort the whole operation");
+    if with_ack {
+        // The ancestry boundary deliberately redacts the provider DB error.
+        assert!(matches!(
+            error,
+            waddle_server::notification_outbox::NotificationOutboxError::Ancestry(_)
+        ));
+    } else {
+        assert!(
+            error.to_string().contains("publisher settlement failed"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        job_snapshot(&store).await,
+        before,
+        "every job column must roll back"
+    );
+    assert_custody(&fixture, 1).await;
+    assert_eq!(
+        fixture
+            .count("push_publish_jobs WHERE upstream_completed = 1")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture.count("push_publish_jobs").await,
+        i64::from(with_ack)
+    );
+    if with_ack {
+        remove_ack_failure(&fixture).await;
+    } else {
+        remove_settlement_failure(&fixture).await;
+    }
+    run_rollback_operation(operation, &store, &push, &job)
+        .await
+        .expect("retry commits");
+    match operation {
+        RollbackOperation::Suppression => assert!(job_snapshot(&store).await.is_empty()),
+        RollbackOperation::Published | RollbackOperation::TerminalProof => {
+            assert_eq!(fixture.count("notification_outbox WHERE status = 'published' AND attempt_count = 2 AND policy_error_count = 0 AND last_error IS NULL AND claim_token IS NULL AND claimed_at_ms IS NULL AND next_attempt_at_ms IS NULL AND published_at_ms IS NOT NULL AND queue_acceptance_may_exist = 1 AND approved_payload_xml IS NOT NULL").await, 1);
+        }
+        RollbackOperation::TerminalRetry => {
+            assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND attempt_count = 4 AND policy_error_count = 1 AND last_error = 'unknown' AND claim_token IS NULL AND claimed_at_ms IS NULL AND next_attempt_at_ms IS NULL AND published_at_ms IS NULL AND queue_acceptance_may_exist = 0 AND approved_payload_xml IS NULL AND approved_publish_options_xml IS NULL").await, 1);
+        }
+        RollbackOperation::GoneRegistration => {
+            assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND attempt_count = 2 AND policy_error_count = 0 AND last_error = 'registration_gone' AND claim_token IS NULL AND claimed_at_ms IS NULL AND next_attempt_at_ms IS NULL AND published_at_ms IS NULL AND queue_acceptance_may_exist = 0 AND approved_payload_xml IS NULL AND approved_publish_options_xml IS NULL").await, 1);
+        }
+    }
+    // mark_job_published transfers upstream ownership; its still-queued provider
+    // retains ancestry. Terminal proof and unowned terminal paths settle it.
+    assert_custody(
+        &fixture,
+        i64::from(matches!(operation, RollbackOperation::Published)),
+    )
+    .await;
+    assert_eq!(
+        fixture
+            .count("push_publish_jobs WHERE upstream_completed = 1")
+            .await,
+        i64::from(with_ack)
+    );
+    assert_eq!(
+        fixture.count("push_publish_jobs").await,
+        i64::from(with_ack)
+    );
+    drop(push);
+    drop(store);
+    fixture.close().await;
+}
+
+// mark_job_published: ancestry locks, job UPDATE, matching provider SELECT,
+// provider acknowledgement UPDATE (failed). No ancestry settlement in this path.
+#[tokio::test]
+async fn sqlite_mark_job_published_rolls_back_all_statements() {
+    publisher_transaction_rolls_back(IngressFixture::sqlite().await, RollbackOperation::Published)
+        .await;
+}
+
+// Same statement order and acknowledgement failure as the SQLite guard.
+#[tokio::test]
+async fn postgres_mark_job_published_rolls_back_all_statements() {
+    if let Some(fixture) = IngressFixture::postgres("publisher_published_rollback").await {
+        publisher_transaction_rolls_back(fixture, RollbackOperation::Published).await;
+    }
+}
+
+// persist_claimed_job_suppression: ancestry locks, job DELETE, unowned-provider
+// check, canonical descendant UPDATE, lineage UPDATE (failed).
+#[tokio::test]
+async fn sqlite_suppression_rolls_back_all_statements() {
+    publisher_transaction_rolls_back(
+        IngressFixture::sqlite().await,
+        RollbackOperation::Suppression,
+    )
+    .await;
+}
+
+// Same DELETE, descendant UPDATE, then failed lineage UPDATE as SQLite.
+#[tokio::test]
+async fn postgres_suppression_rolls_back_all_statements() {
+    if let Some(fixture) = IngressFixture::postgres("publisher_suppression_rollback").await {
+        publisher_transaction_rolls_back(fixture, RollbackOperation::Suppression).await;
+    }
+}
+
+// persist_claimed_job_retry (terminal): ancestry locks, acceptance SELECT, job
+// UPDATE, unowned-provider check, descendant UPDATE, lineage UPDATE (failed).
+#[tokio::test]
+async fn sqlite_terminal_retry_rolls_back_all_statements() {
+    publisher_transaction_rolls_back(
+        IngressFixture::sqlite().await,
+        RollbackOperation::TerminalRetry,
+    )
+    .await;
+}
+
+// Same acceptance SELECT, job/descendant UPDATEs, failed lineage UPDATE as SQLite.
+#[tokio::test]
+async fn postgres_terminal_retry_rolls_back_all_statements() {
+    if let Some(fixture) = IngressFixture::postgres("publisher_terminal_retry_rollback").await {
+        publisher_transaction_rolls_back(fixture, RollbackOperation::TerminalRetry).await;
+    }
+}
+
+// persist_gone_registration_failure: ancestry locks, acceptance SELECT, job
+// UPDATE, unowned-provider check, descendant UPDATE, lineage UPDATE (failed).
+#[tokio::test]
+async fn sqlite_gone_registration_rolls_back_all_statements() {
+    publisher_transaction_rolls_back(
+        IngressFixture::sqlite().await,
+        RollbackOperation::GoneRegistration,
+    )
+    .await;
+}
+
+// Same acceptance SELECT, job/descendant UPDATEs, failed lineage UPDATE as SQLite.
+#[tokio::test]
+async fn postgres_gone_registration_rolls_back_all_statements() {
+    if let Some(fixture) = IngressFixture::postgres("publisher_gone_rollback").await {
+        publisher_transaction_rolls_back(fixture, RollbackOperation::GoneRegistration).await;
+    }
+}
+
+// persist_terminal_notification_proof: ancestry locks, job UPDATE, descendant
+// UPDATE, lineage UPDATE, provider SELECT, acknowledgement UPDATE (failed).
+#[tokio::test]
+async fn sqlite_terminal_proof_rolls_back_all_statements() {
+    publisher_transaction_rolls_back(
+        IngressFixture::sqlite().await,
+        RollbackOperation::TerminalProof,
+    )
+    .await;
+}
+
+// Same job/descendant/lineage UPDATEs, then failed acknowledgement as SQLite.
+#[tokio::test]
+async fn postgres_terminal_proof_rolls_back_all_statements() {
+    if let Some(fixture) = IngressFixture::postgres("publisher_proof_rollback").await {
+        publisher_transaction_rolls_back(fixture, RollbackOperation::TerminalProof).await;
+    }
+}
