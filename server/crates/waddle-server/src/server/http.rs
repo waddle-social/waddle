@@ -299,7 +299,7 @@ enum IngressColocationError {
     #[error("attested MAM storage requires an independent operator owner/claim-schema handoff")]
     AttestedMamOwnerHandoffRequired,
     #[cfg(feature = "clustering")]
-    #[error("attested MAM storage requires live clustering claim handles in clustering builds")]
+    #[error("clustered attested MAM storage requires live claim handles")]
     AttestedMamClaimsUnavailable,
     #[cfg(feature = "clustering")]
     #[error("clustered pending delivery requires live claim handles")]
@@ -542,16 +542,28 @@ pub(crate) async fn select_websocket_mam_storage(
         }
         let owner_handoff =
             owner_handoff.ok_or(IngressColocationError::AttestedMamOwnerHandoffRequired)?;
+        // A clustered node fences archive writes with claims, so its claim
+        // pair must be live. A node serving without clustering holds no
+        // claims and attaches the archive alone.
         #[cfg(feature = "clustering")]
-        if !clustering_enabled || !clustering_claim_pair_live {
+        if clustering_enabled && !clustering_claim_pair_live {
             return Err(IngressColocationError::AttestedMamClaimsUnavailable.into());
         }
-        let storage = DatabaseMamStorage::attach(
-            global_db,
-            owner_handoff.mam_owner.clone(),
-            owner_handoff.claim_schema.clone(),
-        )
-        .await?;
+        let storage = if clustering_enabled {
+            DatabaseMamStorage::attach(
+                global_db,
+                owner_handoff.mam_owner.clone(),
+                owner_handoff.claim_schema.clone(),
+            )
+            .await?
+        } else {
+            DatabaseMamStorage::attach_single_node(
+                global_db,
+                owner_handoff.mam_owner.clone(),
+                owner_handoff.claim_schema.clone(),
+            )
+            .await?
+        };
         return Ok(MamStartupStorage::Attested(Arc::new(storage)));
     }
 
@@ -745,7 +757,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 
     let extension_webhooks_router =
         routes::extension_webhooks::router(Arc::clone(&websocket_state));
-    let livekit_webhook_router = routes::livekit_webhook::router(Arc::clone(&websocket_state));
+    let livekit_webhook_router = routes::livekit_webhook::router(Arc::clone(&websocket_state))
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(error).context("failed to attach webhook delivery ledger")
+        })?;
     let websocket_router = routes::websocket::router(websocket_state.clone());
     let calendar_feed_router =
         routes::calendar_feed::router(Arc::new(routes::calendar_feed::CalendarFeedState::new(
@@ -1075,11 +1091,18 @@ async fn create_websocket_state(
         Arc::clone(&call_teardown_outbox),
         tokio::runtime::Handle::current(),
     );
-    let room_effect_outbox = Arc::new(
+    // The restricted runtime role cannot run DDL: every store below attaches
+    // to relations the migration owner prepared instead of creating them.
+    let runtime_role = state.db_pool.global().uses_attested_postgres_pool();
+    let room_effect_outbox = Arc::new(if runtime_role {
+        RoomEffectOutboxStore::attach_serving(state.db_pool.global().clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to attach room effect outbox: {error}"))?
+    } else {
         RoomEffectOutboxStore::try_new(state.db_pool.global().clone())
             .await
-            .map_err(|error| anyhow::anyhow!("failed to initialize room effect outbox: {error}"))?,
-    );
+            .map_err(|error| anyhow::anyhow!("failed to initialize room effect outbox: {error}"))?
+    });
     let room_effect_arm_supervisor = RoomEffectArmSupervisor::new(
         Arc::clone(&room_effect_outbox),
         tokio::runtime::Handle::current(),
@@ -1315,17 +1338,31 @@ async fn create_websocket_state(
         );
     }
     ensure_push_service_global_database_is_durable()?;
-    let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
+    // Under the restricted runtime role the owner phase has already prepared
+    // every Push and notification store. Attach to them read-only; the owner
+    // constructors below run DDL and provisioning the runtime role may not.
+    let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(if runtime_role {
+        DatabasePushRegistrationStore::attach_existing(state.db_pool.global().clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to attach XEP-0357 storage: {error}"))?
+    } else {
         DatabasePushRegistrationStore::try_new(state.db_pool.global().clone())
             .await
-            .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
-    );
+            .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?
+    });
     // Provision (or load) the VAPID signing key once at boot. The
     // signer is `Arc<dyn VapidSigner>` so the publish-job worker can
     // sign once per (kid, aud, sub) and share the JWT across the device
     // fan-out. If provisioning, integrity checks, or commit acknowledgement
     // fail, no signer is returned and this startup fails.
-    let vapid_signer = if lineage_attested {
+    let vapid_signer = if runtime_role {
+        VapidStorage::load_attested(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load the prepared VAPID signer: {error}"))?
+    } else if lineage_attested {
         VapidStorage::load_or_provision(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
@@ -1354,14 +1391,25 @@ async fn create_websocket_state(
     // contact when our deliveries misbehave.
     let vapid_sub = waddle_xmpp::push::types::VapidSub::default_for_domain(&xmpp_domain)
         .map_err(|error| anyhow::anyhow!("failed to derive VAPID sub claim: {error}"))?;
-    let push_service = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
-        state.db_pool.global().clone(),
-        server_config.session_key.as_bytes(),
-        service_domains.push.parse()?,
-        Arc::clone(&pubsub_storage),
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
+    let push_service = if runtime_role {
+        DatabasePushServiceStore::attach_existing(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+            service_domains.push.parse()?,
+            Arc::clone(&pubsub_storage),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to attach XMPP Push Service: {error}"))?
+    } else {
+        DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+            state.db_pool.global().clone(),
+            server_config.session_key.as_bytes(),
+            service_domains.push.parse()?,
+            Arc::clone(&pubsub_storage),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
+    }
     .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub)
     .with_inbox_storage(Arc::clone(&state.inbox_storage));
     // APNs (#529): the `.p8` provider key is read once here. A
@@ -1436,6 +1484,13 @@ async fn create_websocket_state(
     .await;
     let notification_outbox = Arc::new(match owner_outbox {
         Some(outbox) => outbox,
+        None if runtime_role => {
+            NotificationOutboxStore::attach_existing(state.db_pool.global().clone())
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to attach notification candidate outbox: {error}")
+                })?
+        }
         None => NotificationOutboxStore::try_new(state.db_pool.global().clone())
             .await
             .map_err(|error| {
@@ -1443,23 +1498,33 @@ async fn create_websocket_state(
             })?,
     });
     // Push initialization precedes outbox schema/adoption. Rebind only exact
-    // accepted target tuples once canonical ancestry is available.
-    push_service
-        .adopt_notification_ancestry()
-        .await
-        .context("failed to adopt canonical notification ancestry")?;
+    // accepted target tuples once canonical ancestry is available. Adoption
+    // rewrites rows as part of schema preparation, so it belongs to the owner
+    // phase and the runtime role only attaches to its result.
+    if !runtime_role {
+        push_service
+            .adopt_notification_ancestry()
+            .await
+            .context("failed to adopt canonical notification ancestry")?;
+    }
     let notification_settings_projection = Arc::new(NotificationSettingsProjectionStore::new(
         pubsub_database_storage.database(),
     ));
     let dnd_projection = Arc::new(DndProjectionStore::new(pubsub_database_storage.database()));
     let dnd_reader = Arc::new(PepDndReader::with_system_clock(Arc::clone(&dnd_projection)));
-    let notification_activity = Arc::new(
+    let notification_activity = Arc::new(if runtime_role {
+        NotificationActivityStore::attach_existing(state.db_pool.global().clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to attach notification activity projection: {error}")
+            })?
+    } else {
         NotificationActivityStore::try_new(state.db_pool.global().clone())
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to initialize notification activity projection: {error}")
-            })?,
-    );
+            })?
+    });
 
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
         Arc::new(DatabaseBlockingStorage::new(state.db_pool.global().clone()));
@@ -1612,7 +1677,8 @@ async fn create_websocket_state(
         }
     }
     if lineage_attested {
-        RoomObservationActors::start(&websocket_state).await?;
+        RoomObservationActors::start(&websocket_state, xmpp_config.designated_migrator.as_ref())
+            .await?;
     } else {
         // Observer configuration and recovery write through lineage-guarded
         // transactions. Keep an unattested node alive for diagnostics without

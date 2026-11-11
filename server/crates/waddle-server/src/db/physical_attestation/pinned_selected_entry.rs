@@ -8,6 +8,7 @@
 //! epoch relation, then guard-manifest relation. Cooperative mutators must take
 //! the exclusive catalog fence before any of those subordinate locks.
 
+use crate::db::DarkEpochAclStage;
 use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
@@ -464,7 +465,12 @@ async fn prepare_selected_transaction(
         )
         .await?;
     }
-    verify_pinned_epoch_manifest_catalog_sqlx(tx, authority).await?;
+    verify_pinned_epoch_manifest_catalog_sqlx(
+        tx,
+        authority,
+        DarkEpochAclStage::RelationGuardEpochZero,
+    )
+    .await?;
     if let Some(profile) = partial_profile {
         sqlx::query("SET LOCAL search_path = pg_catalog, pg_temp")
             .execute(&mut **tx)

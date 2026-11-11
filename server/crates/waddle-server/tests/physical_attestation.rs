@@ -3455,7 +3455,7 @@ async fn assert_operator_runtime_handoff(fixture: &Fixture, limits: RuntimePoolL
         .expect("start server binary");
     assert!(
         !output.status.success(),
-        "unconverted stores must refuse before serving"
+        "a mismatched primary endpoint must refuse before serving"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

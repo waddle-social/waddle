@@ -5,6 +5,7 @@
 //! before the first await. A dropped future produces no outcome, and closing a
 //! timed-out connection does not prove that its server backend has terminated.
 
+use crate::db::DarkEpochAclStage;
 use std::time::Duration;
 
 use sqlx::{Connection, PgConnection, Row};
@@ -560,7 +561,12 @@ async fn prepare(
     attest_dark_catalog_pinned(tx, &authority.config, authority.attestor, &path).await?;
     verify_dark_shared_migration_ledger_v1030_write_sqlx(tx, schema, authority.ledger, &path)
         .await?;
-    verify_pinned_epoch_manifest_catalog_sqlx(tx, authority).await?;
+    verify_pinned_epoch_manifest_catalog_sqlx(
+        tx,
+        authority,
+        DarkEpochAclStage::RelationGuardEpochZero,
+    )
+    .await?;
     read_epoch_after_prelock(tx, schema, authority.config.postgres().schema.oid).await?;
     Ok(())
 }

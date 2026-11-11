@@ -24,9 +24,12 @@ use super::{select_websocket_mam_storage, start_http_server, HttpServerDeps, Mam
 #[derive(Debug, thiserror::Error)]
 pub enum RestrictedStartupError {
     #[error(
-        "restricted runtime cannot serve until all startup stores have read-only attachment paths"
+        "the restricted runtime role cannot serve with clustering enabled: the clustering \
+         stores have no owner-prepared attachment"
     )]
-    UnconvertedStores,
+    ClusteringUnsupported,
+    #[error("the restricted runtime attaches its own notification outbox; an owner-prepared handle was supplied")]
+    OwnerOutboxSupplied,
 }
 
 /// Start HTTP and XMPP services with inherited listeners and graceful shutdown.
@@ -88,19 +91,30 @@ pub async fn start_with_config_and_owner_outbox(
     owner_outbox: Option<crate::notification_outbox::NotificationOutboxStore>,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
-    // Several constructors below still initialize owner schemas or open
-    // separate raw pools (including PubSub, MAM, clustered SM, push and
-    // outboxes). Refuse before binding or starting actors until each has a
-    // verified same-pool attachment. Do not try them with the runtime role.
     if db_pool.global().uses_attested_postgres_pool() {
-        return Err(RestrictedStartupError::UnconvertedStores.into());
-    }
-    let shared_owner = db_pool.global().ingress_pool_size().is_some();
-    let matching_outbox = owner_outbox
-        .as_ref()
-        .is_some_and(|outbox| outbox.belongs_to_shared_owner_main(db_pool.global()));
-    if (shared_owner && !matching_outbox) || (!shared_owner && owner_outbox.is_some()) {
-        anyhow::bail!("shared owner startup requires its prepared outbox on the exact main pool");
+        // The restricted runtime role holds no DDL privilege. Every store
+        // below attaches to relations the owner phase prepared. The
+        // clustering stores (keypair lease, claims, durable MUC, fenced SM)
+        // only have owner constructors, so refuse before binding a listener
+        // rather than run them under this role.
+        if server_config.clustering.enabled {
+            return Err(RestrictedStartupError::ClusteringUnsupported.into());
+        }
+        // An owner-prepared outbox handle belongs to an owner pool. This
+        // role attaches the outbox itself on its attested main lane.
+        if owner_outbox.is_some() {
+            return Err(RestrictedStartupError::OwnerOutboxSupplied.into());
+        }
+    } else {
+        let shared_owner = db_pool.global().ingress_pool_size().is_some();
+        let matching_outbox = owner_outbox
+            .as_ref()
+            .is_some_and(|outbox| outbox.belongs_to_shared_owner_main(db_pool.global()));
+        if (shared_owner && !matching_outbox) || (!shared_owner && owner_outbox.is_some()) {
+            anyhow::bail!(
+                "shared owner startup requires its prepared outbox on the exact main pool"
+            );
+        }
     }
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();

@@ -94,6 +94,7 @@ package(waddle-server) & (
     | binary(pubsub_runtime_attach)
     | binary(room_effect_runtime_attach)
     | binary(claim_occupancy_runtime_attach)
+    | binary(restricted_runtime_startup)
     | test(clustering::)
     | test(db::)
     | test(inbox::)

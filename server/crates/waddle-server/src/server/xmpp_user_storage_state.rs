@@ -4,7 +4,7 @@ use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::XmppError;
 
-use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
+use crate::db::actor::{DbActor, DbQueryOne};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::{row_value, Database, Value, ValueExt};
 
@@ -122,14 +122,7 @@ pub(crate) async fn set_private_xml(
     debug!(jid = %jid, namespace = %namespace, "Setting private XML");
 
     global_db_actor
-        .ask(DbExecute {
-            sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
-            params: vec![
-                Value::from(jid.to_string()),
-                Value::from(namespace.to_string()),
-                Value::from(xml_content.to_string()),
-            ],
-        })
+        .ask(crate::db::private_xml::upsert(jid, namespace, xml_content))
         .await
         .map_err(|e| {
             warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");

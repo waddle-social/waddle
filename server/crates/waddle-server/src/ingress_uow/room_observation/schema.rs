@@ -1895,19 +1895,35 @@ async fn verify_no_runtime_callable_owner_definers(
     // The designated owner may create functions outside the target schema,
     // and a view can invoke them without namespace USAGE. Check every
     // owner-owned callable SECURITY DEFINER routine in this database.
+    //
+    // One routine is exempt: the PubSub attach-lock function in the target
+    // schema, which PubSub attachment requires the runtime to execute. The
+    // exemption is PubSub's own pin of that function (name, schema,
+    // signature, language, configuration, exact body and ACL), so any
+    // deviation leaves the routine refused here.
+    let (attach_lock_pin, attach_lock_body) =
+        crate::pubsub::runtime_attach::runtime_attach_lock_pin(
+            &identity.schema.name.0,
+            "routine",
+            "owner_namespace",
+            "runtime",
+        );
     let mut rows = tx
         .query(
-            "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc routine \
-               JOIN pg_catalog.pg_namespace owner_namespace \
-                 ON owner_namespace.nspname = ? \
-                AND routine.proowner = owner_namespace.nspowner \
-               JOIN pg_catalog.pg_roles runtime ON runtime.rolname = ? \
-               WHERE routine.prosecdef \
-                 AND routine.prorettype NOT IN ( \
-                   'pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype) \
-                 AND pg_catalog.has_function_privilege( \
-                   runtime.oid, routine.oid, 'EXECUTE'))",
-            crate::db_params![&identity.schema.name.0, runtime],
+            &format!(
+                "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc routine \
+                   JOIN pg_catalog.pg_namespace owner_namespace \
+                     ON owner_namespace.nspname = ? \
+                    AND routine.proowner = owner_namespace.nspowner \
+                   JOIN pg_catalog.pg_roles runtime ON runtime.rolname = ? \
+                   WHERE routine.prosecdef \
+                     AND routine.prorettype NOT IN ( \
+                       'pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype) \
+                     AND pg_catalog.has_function_privilege( \
+                       runtime.oid, routine.oid, 'EXECUTE') \
+                     AND NOT COALESCE(({attach_lock_pin}), false))"
+            ),
+            crate::db_params![&identity.schema.name.0, runtime, attach_lock_body],
         )
         .await?;
     let Some(row) = rows.next().await? else {

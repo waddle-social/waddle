@@ -19,6 +19,7 @@ pub mod push_notification_custody;
 pub mod push_notification_owner;
 pub mod push_notification_runtime;
 mod room_registry_gauge;
+pub mod runtime_owner;
 pub(crate) mod session_janitors;
 mod state;
 pub(crate) mod state_inventory;
@@ -56,6 +57,7 @@ pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
 pub mod xmpp_state;
 
 pub use config::{MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};
+pub use routes::webhook_delivery::WebhookDeliveryAttachError;
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
 use crate::config::ServerConfig;

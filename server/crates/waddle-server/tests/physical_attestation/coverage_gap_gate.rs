@@ -337,12 +337,28 @@ pub(super) async fn exercise_combined_fixture(
         matches!(inspect_coverage_gap_gate_v1(&candidate), CoverageRefusal::Incomplete(gaps) if gaps == COVERAGE_GAPS_V1)
     );
 
-    // Exercise the real attested selector with the requested disabled-cluster
-    // target. The refusal happens before MAM attachment or any claim reads.
+    // A clustered attested selection without a live claim pair refuses
+    // before MAM attachment or any claim read.
     let handoff = waddle_server::server::MamOwnerClaimHandoff::new(
         waddle_server::db::physical_attestation::PgRoleName::new(schema_owner)?,
         waddle_server::db::lineage::PgSchemaName("guarded".to_owned()),
     )?;
+    let error = waddle_server::test_support::select_mam_storage_for_test(
+        &xmpp.mam_database_url,
+        Some(&handoff),
+        true,
+        false,
+        main,
+    )
+    .await
+    .expect_err("clustered attested MAM must refuse without a claim pair");
+    ensure!(
+        error.to_string() == "clustered attested MAM storage requires live claim handles",
+        "clustered MAM failed for an unexpected reason: {error}"
+    );
+    // With clustering disabled the selector attaches without claims. That
+    // attachment refuses this fixture, whose schema ACL carries grantees
+    // MAM does not admit.
     let error = waddle_server::test_support::select_mam_storage_for_test(
         &xmpp.mam_database_url,
         Some(&handoff),
@@ -351,11 +367,10 @@ pub(super) async fn exercise_combined_fixture(
         main,
     )
     .await
-    .expect_err("clustering-disabled attested MAM must refuse without a claim pair");
+    .expect_err("single-node attested MAM must refuse the fixture schema ACL");
     ensure!(
-        error.to_string()
-            == "attested MAM storage requires live clustering claim handles in clustering builds",
-        "MAM failed for an unexpected reason: {error}"
+        error.to_string() == "the MAM runtime role or column privileges are unsafe",
+        "single-node MAM failed for an unexpected reason: {error}"
     );
     ensure!(matches!(
         waddle_server::room_effect_outbox::RoomEffectOutboxStore::try_new(main.clone()).await,

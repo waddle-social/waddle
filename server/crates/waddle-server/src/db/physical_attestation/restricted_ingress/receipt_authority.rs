@@ -429,9 +429,13 @@ impl ReceiptOperationAuthority {
             )
             .await
             .map_err(|_| ReceiptAuthorityError::Binding)?;
-            verify_pinned_epoch_manifest_catalog(ledger.transaction(), authority)
-                .await
-                .map_err(|_| ReceiptAuthorityError::Binding)?;
+            verify_pinned_epoch_manifest_catalog(
+                ledger.transaction(),
+                authority,
+                crate::db::DarkEpochAclStage::RelationGuardEpochZero,
+            )
+            .await
+            .map_err(|_| ReceiptAuthorityError::Binding)?;
             let connection = ledger
                 .transaction()
                 .postgres_connection()

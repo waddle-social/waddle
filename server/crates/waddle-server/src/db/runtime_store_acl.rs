@@ -88,6 +88,13 @@ const PENDING_RELATIONS: &[Relation] = &[
     },
 ];
 
+const WEBHOOK_RELATIONS: &[Relation] = &[Relation {
+    name: "webhook_deliveries",
+    insert: true,
+    update: true,
+    delete: true,
+}];
+
 /// Returns the first unsafe component. Privileged role, owner and ACL changes
 /// must remain quiescent after this point-in-time check.
 pub(crate) async fn verify_inbox(
@@ -116,6 +123,20 @@ pub(crate) async fn verify_pending(
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
     verify(tx, schema, PENDING_RELATIONS, true).await
+}
+
+pub(crate) async fn verify_webhook_deliveries(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    verify(tx, schema, WEBHOOK_RELATIONS, false).await
+}
+
+pub(crate) async fn unexpected_webhook_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, WEBHOOK_RELATIONS).await
 }
 
 /// Check executable relation objects while the caller holds each table lock.

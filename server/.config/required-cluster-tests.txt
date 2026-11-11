@@ -480,3 +480,17 @@ waddle-server::notification_outbox publisher_persistence::sqlite_suppression_rol
 waddle-server::notification_outbox publisher_persistence::sqlite_terminal_proof_rolls_back_all_statements
 waddle-server::notification_outbox publisher_persistence::sqlite_terminal_retry_rolls_back_all_statements
 waddle-server::notification_outbox publisher_persistence::sqlite_terminal_transaction_rolls_back_all_statements
+
+# #2116 restricted database runtime: the owner phase must prepare every store
+# and grant exactly the classified privileges, and the server must start and
+# serve under the runtime role, which holds no DDL privilege, failing closed
+# on a missing relation, a widened grant or clustering. An image whose
+# restricted startup creates schema or refuses to serve must not ship.
+waddle-server::restricted_runtime_startup owner_phase_prepares_the_stores_the_runtime_role_attaches
+waddle-server::restricted_runtime_startup restricted_runtime_refuses_instead_of_creating_or_clustering
+waddle-server::restricted_runtime_startup restricted_runtime_role_serves_without_ddl
+waddle-server::restricted_runtime_startup runtime_locks_the_epoch_row_but_cannot_change_it
+waddle-server::restricted_runtime_startup mam_admits_only_the_exact_monitor_schema_grant
+waddle-server::restricted_runtime_startup room_observation_exempts_only_the_exact_pubsub_lock_function
+waddle-server::restricted_runtime_startup owner_phase_is_idempotent_and_fails_closed_on_unclassified_state
+waddle-server::restricted_runtime_startup owner_phase_refuses_a_schema_public_can_use

@@ -5,6 +5,7 @@
 //! guard behavior, or owner/ACL transition protocol. The catalog proof pins
 //! the epoch index and the epoch and manifest relation shapes.
 
+use crate::db::DarkEpochAclStage;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -53,9 +54,26 @@ impl AttestedPgPool {
     /// This requires a direct session-preserving PG17 primary and independent
     /// quiescence of privileged catalog, role, ACL, and uncooperative writes.
     pub async fn inspect_dark_pinned_read_only_entry(&self) -> Result<(), DarkPinnedEntryError> {
-        tokio::time::timeout(ENTRY_DEADLINE, self.inspect_entry(None))
-            .await
-            .map_err(|_| DarkPinnedEntryError::Timeout)?
+        tokio::time::timeout(
+            ENTRY_DEADLINE,
+            self.inspect_entry(DarkEpochAclStage::RelationGuardEpochZero, None),
+        )
+        .await
+        .map_err(|_| DarkPinnedEntryError::Timeout)?
+    }
+
+    /// The same observation for restricted startup, which then serves on the
+    /// registered V1009 guard. That guard and the ingress substrate read the
+    /// epoch row `FOR SHARE`, so this entry requires the runtime's exact
+    /// serving grant on the epoch relation, `SELECT` plus a column-level
+    /// `UPDATE (id)`, and refuses a database that grants `SELECT` alone.
+    pub async fn inspect_dark_pinned_startup_entry(&self) -> Result<(), DarkPinnedEntryError> {
+        tokio::time::timeout(
+            ENTRY_DEADLINE,
+            self.inspect_entry(DarkEpochAclStage::V1009EpochZero, None),
+        )
+        .await
+        .map_err(|_| DarkPinnedEntryError::Timeout)?
     }
 
     /// Pause a fixed test observation after all three relation barriers are
@@ -66,13 +84,20 @@ impl AttestedPgPool {
         ready: tokio::sync::oneshot::Sender<i32>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), DarkPinnedEntryError> {
-        tokio::time::timeout(ENTRY_DEADLINE, self.inspect_entry(Some((ready, release))))
-            .await
-            .map_err(|_| DarkPinnedEntryError::Timeout)?
+        tokio::time::timeout(
+            ENTRY_DEADLINE,
+            self.inspect_entry(
+                DarkEpochAclStage::RelationGuardEpochZero,
+                Some((ready, release)),
+            ),
+        )
+        .await
+        .map_err(|_| DarkPinnedEntryError::Timeout)?
     }
 
     async fn inspect_entry(
         &self,
+        stage: DarkEpochAclStage,
         pause: Option<(
             tokio::sync::oneshot::Sender<i32>,
             tokio::sync::oneshot::Receiver<()>,
@@ -88,7 +113,7 @@ impl AttestedPgPool {
         let database =
             Database::from_postgres_pool("dark pinned read-only entry", self.pool.clone());
         let mut tx = database.begin().await?;
-        let observed = prepare_entry(&mut tx, authority, pause).await;
+        let observed = prepare_entry(&mut tx, authority, stage, pause).await;
         tx.rollback()
             .await
             .map_err(|_| DarkPinnedEntryError::RollbackUnconfirmed)?;
@@ -99,6 +124,7 @@ impl AttestedPgPool {
 pub(super) async fn prepare_entry(
     tx: &mut Transaction<'_>,
     authority: &super::PinnedRuntimeAuthority,
+    stage: DarkEpochAclStage,
     pause: Option<(
         tokio::sync::oneshot::Sender<i32>,
         tokio::sync::oneshot::Receiver<()>,
@@ -109,7 +135,7 @@ pub(super) async fn prepare_entry(
         (),
     )
     .await?;
-    prepare_read_only_entry(tx, authority, pause).await
+    prepare_read_only_entry(tx, authority, stage, pause).await
 }
 
 /// Finish the entry after the caller has set the transaction mode and, when
@@ -117,6 +143,7 @@ pub(super) async fn prepare_entry(
 pub(super) async fn prepare_read_only_entry(
     tx: &mut Transaction<'_>,
     authority: &super::PinnedRuntimeAuthority,
+    stage: DarkEpochAclStage,
     pause: Option<(
         tokio::sync::oneshot::Sender<i32>,
         tokio::sync::oneshot::Receiver<()>,
@@ -143,7 +170,7 @@ pub(super) async fn prepare_read_only_entry(
             &restore_path,
         )
         .await?;
-        verify_pinned_epoch_manifest_catalog(ledger.transaction(), authority).await?;
+        verify_pinned_epoch_manifest_catalog(ledger.transaction(), authority, stage).await?;
     }
     if let Some((ready, release)) = pause {
         let connection = tx

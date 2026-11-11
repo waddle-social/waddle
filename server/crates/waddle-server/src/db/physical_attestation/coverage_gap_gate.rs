@@ -158,7 +158,7 @@ pub const COVERAGE_GAPS_V1: &[CoverageGap] = &[
         "server/crates/waddle-server/src/db/physical_attestation/pinned_partial_profile.rs",
         "server/crates/waddle-server/src/pubsub/runtime_attach.rs",
     ]),
-    gap!(MamAndClaimPair, "The clustering-compiled attested MAM selector requires a live claim pair even when clustering is disabled.", ["mam_messages", "mam_archive_sequences"], [
+    gap!(MamAndClaimPair, "Attested MAM attaches without claims when clustering is disabled; a clustered attachment needs a live claim pair, which no restricted startup builds.", ["mam_messages", "mam_archive_sequences"], [
         "server/crates/waddle-server/src/server/http.rs",
         "server/crates/waddle-server/src/server/lifecycle.rs",
         "server/crates/waddle-xmpp/src/mam/storage/sqlx_store/schema.rs",

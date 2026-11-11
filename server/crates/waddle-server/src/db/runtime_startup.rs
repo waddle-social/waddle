@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::config::LineageConfig;
 
-use super::bootstrap::RuntimePoolLimits;
+use super::bootstrap::{attach_verified_global_runtime, RuntimeAttachmentError, RuntimePoolLimits};
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName, PgSystemIdentifier,
@@ -59,8 +59,8 @@ pub enum RuntimeStartupError {
     PinnedPreflightIndeterminate(#[source] DarkPinnedEntryError),
     #[error("the pinned startup preflight pool close timed out; reconcile the original backend before retrying")]
     PreflightPoolCloseIndeterminate,
-    #[error("restricted startup preflight passed, but enabled stores and transaction entry remain unconverted")]
-    UnconvertedStores,
+    #[error("the restricted runtime could not attach its serving pool")]
+    ServingAttachment(#[source] RuntimeAttachmentError),
     #[error(transparent)]
     PhysicalAttestation(#[from] PhysicalAttestationError),
 }
@@ -156,7 +156,8 @@ struct OperatorCutoverRecord {
     _mutator_policy_record_id: Uuid,
 }
 
-/// Validated operator input used only for a pinned, read-only startup preflight.
+/// Validated operator input for restricted startup: the pinned, read-only
+/// preflight and the attested serving pool both bind to this identity.
 pub struct RuntimeStartupIdentity {
     expected: AttestedLineage,
     runtime_login: PgRoleName,
@@ -166,11 +167,13 @@ pub struct RuntimeStartupIdentity {
 }
 
 /// A sealed result showing that one pinned, same-backend read-only preflight
-/// completed. This is deliberately not a database pool or serving capability.
-#[must_use = "restricted startup preparation does not authorize serving"]
+/// completed. It is not a database pool: [`RuntimeStartupIdentity::attach_serving`]
+/// consumes it to build the serving pool, so a pool cannot exist without a
+/// completed preflight.
+#[must_use = "a completed preflight only serves once it is attached"]
 pub struct RestrictedStartupPreparation {
     transition_id: Uuid,
-    _expected: AttestedLineage,
+    expected: AttestedLineage,
 }
 
 impl RestrictedStartupPreparation {
@@ -306,7 +309,7 @@ impl RuntimeStartupIdentity {
     /// on one checked-out pool connection, then await the throwaway pool's
     /// local close. SQLx close completion does not prove that PostgreSQL has
     /// exited the backend; cancellation or transport loss is indeterminate.
-    /// No pool escapes or serving authority is returned.
+    /// The pinned pool never escapes; serving uses [`Self::attach_serving`].
     pub async fn preflight(
         &self,
         database_url: &str,
@@ -349,7 +352,8 @@ impl RuntimeStartupIdentity {
         // This single-use pool never becomes a DatabasePool. Its hook checks
         // physical identity before lending; the entry proof then rechecks
         // physical identity, the complete pinned ledger, and epoch manifest
-        // in one read-only transaction on that checked-out backend.
+        // in one read-only transaction on that checked-out backend. The
+        // epoch relation must carry the runtime's exact serving grant.
         let pool = pinned_attested_pool(
             options,
             self.physical.clone(),
@@ -357,7 +361,7 @@ impl RuntimeStartupIdentity {
             1,
             limits.acquire_timeout,
         )?;
-        let preflight = pool.inspect_dark_pinned_read_only_entry().await;
+        let preflight = pool.inspect_dark_pinned_startup_entry().await;
         let close = tokio::time::timeout(limits.acquire_timeout, pool.close()).await;
         if close.is_err() {
             return Err(RuntimeStartupError::PreflightPoolCloseIndeterminate);
@@ -368,8 +372,37 @@ impl RuntimeStartupIdentity {
 
         Ok(RestrictedStartupPreparation {
             transition_id: self.cutover.transition_id,
-            _expected: self.expected.clone(),
+            expected: self.expected.clone(),
         })
+    }
+
+    /// Build the serving pool for the restricted runtime role after its
+    /// preflight completed.
+    ///
+    /// The pool is the attested, non-pinned one: every checkout attests the
+    /// login, schema and lineage, and the attachment verifies lineage, the
+    /// complete migration ledger and the global runtime ACL before a handle
+    /// is returned. The pinned pool cannot serve, because store transactions
+    /// attest after `BEGIN` and that conflicts with the pinned lock order.
+    /// No DDL, enrollment or store initialization runs here; each store
+    /// attaches to its owner-prepared relations afterwards.
+    pub async fn attach_serving(
+        &self,
+        preparation: RestrictedStartupPreparation,
+        database_url: &str,
+        limits: RuntimePoolLimits,
+    ) -> Result<super::DatabasePool, RuntimeStartupError> {
+        let options = PgConnectOptions::from_str(database_url)
+            .map_err(|_| RuntimeStartupError::InvalidDatabaseUrl)?;
+        let attachment = attach_verified_global_runtime(
+            options,
+            self.physical.clone(),
+            &preparation.expected,
+            limits,
+        )
+        .await
+        .map_err(RuntimeStartupError::ServingAttachment)?;
+        Ok(attachment.into_pool())
     }
 }
 

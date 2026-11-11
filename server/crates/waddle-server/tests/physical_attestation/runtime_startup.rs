@@ -1,4 +1,5 @@
-//! PG17 and real-binary checks for restricted startup preparation.
+//! PG17 and real-binary checks for the restricted startup preflight and its
+//! refusal to serve from stores no owner phase prepared.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use super::{dark_attestor_fixture, test_url, url_with_schema, Fixture, CATALOG_G
 const RELEASE_GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
 #[tokio::test]
-async fn restricted_startup_runs_pinned_preflight_then_refuses_store_activation() {
+async fn restricted_startup_runs_pinned_preflight_then_refuses_unprepared_stores() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(base_url) = test_url() else { return };
     let fixture = Fixture::new(base_url).await;
@@ -108,16 +109,20 @@ async fn restricted_startup_runs_pinned_preflight_then_refuses_store_activation(
         .await
         .expect("restricted startup finishes")
         .expect("start server binary");
+    // This fixture ran the registered migrations only. No owner phase
+    // prepared the startup stores, so the runtime attaches its serving pool
+    // and then fails closed on the first store instead of creating it.
     assert!(
         !output.status.success(),
-        "restricted startup remains closed after preparation"
+        "restricted startup must refuse stores no owner phase prepared"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let output_text = format!("{stdout}{stderr}");
     assert!(
-        output_text.contains("enabled stores and transaction entry remain unconverted"),
-        "startup must retain the all-store refusal: {output_text}"
+        output_text.contains("Restricted runtime attached its attested serving pool")
+            && output_text.contains("failed to attach MUC destroy completion outbox"),
+        "startup must fail on the unprepared store attachment: {output_text}"
     );
     assert!(
         !port_file.exists(),
@@ -125,7 +130,7 @@ async fn restricted_startup_runs_pinned_preflight_then_refuses_store_activation(
     );
 
     // A syntactically valid handoff with a wrong independent ledger pin must
-    // fail on the connected pinned path, before the all-store refusal or any
+    // fail on the connected pinned path, before the serving pool or any
     // listener publication. This is distinct from a URL preflight rejection.
     let mut wrong_pin: serde_json::Value =
         serde_json::from_str(&document).expect("structured handoff JSON");
@@ -156,8 +161,8 @@ async fn restricted_startup_runs_pinned_preflight_then_refuses_store_activation(
         "drifted pin must fail in the connected preflight: {failed_text}"
     );
     assert!(
-        !failed_text.contains("enabled stores and transaction entry remain unconverted"),
-        "a failed preflight must not reach the all-store refusal: {failed_text}"
+        !failed_text.contains("Restricted runtime attached its attested serving pool"),
+        "a failed preflight must not reach the serving pool: {failed_text}"
     );
     assert!(!port_file.exists(), "drifted pin cannot publish a listener");
 
@@ -192,6 +197,15 @@ async fn runtime_handoff(fixture: &Fixture) -> (String, String) {
         .await
         .expect("grant runtime read-only pinned entry access");
     }
+    // Restricted startup serves on the registered guard, whose `FOR SHARE`
+    // read of the epoch row needs this column grant; the preflight requires it.
+    sqlx::query(&format!(
+        "GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant the runtime its serving epoch lock privilege");
     let (_config, attestor) = dark_attestor_fixture(fixture).await;
     let pins_row = sqlx::query(
         "SELECT ledger.oid::bigint, ledger_idx.indexrelid::bigint, \
