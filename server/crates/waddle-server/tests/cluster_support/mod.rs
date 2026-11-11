@@ -1,0 +1,414 @@
+//! Multi-process cluster fixtures shared by the clustering test binaries.
+//!
+//! Each binary that needs real `waddle-server` processes meshed over libp2p
+//! against one PostgreSQL control plane declares this module with
+//! `pub mod cluster_support;`. The fixtures reset the shared control-plane
+//! tables, so every binary using them belongs in nextest's `postgres` group
+//! and serializes its own tests through [`cluster_e2e_serial_lock`].
+
+use base64::Engine;
+use libp2p::identity::ed25519;
+use std::time::{Duration, Instant};
+use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStore};
+use waddle_server::clustering::claims::PostgresClaimStore;
+use waddle_server::clustering::lease::{KeypairSlotLease, PostgresKeypairSlotLease};
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+use waddle_ws_test_support::{TestServer, WsXmppClient};
+
+pub const POOL_SIZE: usize = 4;
+
+pub const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
+
+pub const CLUSTER_PEER_PASSWORD: &str = "cluster-peer-password";
+
+pub struct EnrolledPool {
+    /// base64-encoded 32-byte ed25519 seeds (the WADDLE_CLUSTERING_KEYPAIR_POOL value).
+    pub pool_env: String,
+    /// PeerIds derived from every pool slot (all enrolled).
+    pub peer_ids: Vec<libp2p::PeerId>,
+    pub seeds: Vec<Vec<u8>>,
+}
+
+pub fn generate_pool() -> EnrolledPool {
+    let mut encoded_seeds = Vec::new();
+    let mut seeds = Vec::new();
+    let mut peer_ids = Vec::new();
+    for _ in 0..POOL_SIZE {
+        let keypair = ed25519::Keypair::generate();
+        let seed = keypair.secret().as_ref().to_vec();
+        seeds.push(seed.clone());
+        peer_ids.push(
+            libp2p::identity::Keypair::from(keypair)
+                .public()
+                .to_peer_id(),
+        );
+        encoded_seeds.push(base64::engine::general_purpose::STANDARD.encode(seed));
+    }
+    EnrolledPool {
+        pool_env: encoded_seeds.join(","),
+        peer_ids,
+        seeds,
+    }
+}
+
+pub async fn open_control_db(url: &str) -> Database {
+    // The test-process node (C) leases a keypair-pool slot and heartbeats it
+    // exactly like a production pod, so it needs the same dedicated
+    // control-plane pool `swarm::spawn`'s `run_heartbeat` renews through
+    // (ADR-0017 element 4/12, Phase 3 Slice 0) — otherwise every renewal
+    // would error and self-fence this node almost immediately.
+    Database::from_config(
+        "clustering-e2e-harness",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string())
+            .with_control_plane_pool(waddle_server::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open harness postgres")
+}
+
+/// Reset the clustering control-plane tables and enroll every pool PeerId.
+pub async fn reset_and_enroll(db: &Database, pool: &EnrolledPool) {
+    use waddle_xmpp::ownership::ClaimStore as _;
+
+    // Provision the schema through the production `ensure_schema` path — an
+    // inline DDL copy here could silently diverge as the schema evolves.
+    PostgresClaimStore::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("claims schema");
+    PostgresKeypairSlotLease::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("lease schema");
+    PostgresAllowlistStore::new(db.clone())
+        .ensure_schema()
+        .await
+        .expect("allowlist schema");
+    let conn = db.guard().await.expect("guard");
+    conn.execute("DELETE FROM clustering_claims", ())
+        .await
+        .expect("clean claims");
+    conn.execute("DELETE FROM clustering_nodes", ())
+        .await
+        .expect("clean nodes");
+    conn.execute("DELETE FROM clustering_keypair_slots", ())
+        .await
+        .expect("clean slots");
+    conn.execute("DELETE FROM clustering_peer_allowlist", ())
+        .await
+        .expect("clean allowlist");
+    for peer in &pool.peer_ids {
+        conn.execute(
+            "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+            waddle_server::db_params![peer.to_string()],
+        )
+        .await
+        .expect("enroll peer");
+    }
+}
+
+/// Reserve an ephemeral TCP port by binding and immediately releasing it.
+///
+/// Inherently best-effort (bind/release TOCTOU): another process could grab
+/// the port before the spawned server binds it. The window is unavoidable
+/// here — the mesh needs pre-agreed ports (A's seed list names B's port and
+/// vice versa), so neither server can pick its own port at bind time. The
+/// kernel avoids immediately reissuing a just-released ephemeral port, and a
+/// lost race fails loudly (the server's swarm listen bind errors and the
+/// node-id file never appears) rather than corrupting the test.
+pub fn free_tcp_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
+}
+
+/// Spawn a clustering-enabled waddle-server on a fixed swarm port, wired to
+/// the shared Postgres and seeded with one loopback bootstrap entry per
+/// `bootstrap_ports` element (the harness expression of the headless
+/// Service resolving to every pod). Returns the server handle plus its
+/// published (node_id, peer_id).
+///
+/// `TestServer::start_with_extra_envs` and the node-id-file poll both block
+/// (process spawn + sleep polling), so the whole bring-up runs on the tokio
+/// blocking pool instead of stalling a worker thread.
+pub async fn spawn_cluster_server(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+) -> (TestServer, String, String) {
+    spawn_cluster_server_with_envs(postgres_url, pool_env, swarm_port, bootstrap_ports, &[]).await
+}
+
+/// [`spawn_cluster_server`] plus caller-supplied extra envs (e.g. the
+/// `LIVEKIT_*` set for the Muji route-to-owner test — the JWT mint is
+/// pure, so no real LiveKit is needed).
+pub async fn spawn_cluster_server_with_envs(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+    extra_envs: &[(&str, &str)],
+) -> (TestServer, String, String) {
+    let postgres_url = postgres_url.to_string();
+    let pool_env = pool_env.to_string();
+    let bootstrap_ports = bootstrap_ports.to_vec();
+    let extra_envs: Vec<(String, String)> = extra_envs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        let node_id_file = std::env::temp_dir().join(format!(
+            "waddle-clustering-e2e-node-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let listen = format!("/ip4/127.0.0.1/tcp/{swarm_port}");
+        let node_id_file_str = node_id_file.display().to_string();
+        let bootstrap_peers = bootstrap_ports
+            .iter()
+            .map(|port| format!("localhost:{port}"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut envs: Vec<(&str, &str)> = vec![
+            ("WADDLE_DB_DRIVER", "postgres"),
+            // ADR-0017: inherit the global PostgreSQL pool for every durable
+            // store. This keeps clustered SM alongside the claims tables for
+            // cross-node resume and avoids ephemeral stores rejected by
+            // readiness (#1652). Shared-owner startup rejects per-store URLs.
+            ("WADDLE_DATABASE_URL", &postgres_url),
+            // NB: the fixed test account stays enabled (TestServer's default) —
+            // disabling it flips the permission backend onto the SpiceDB path and
+            // fails startup. Its seeding is delete-then-recreate, safe for the
+            // sequential startups this harness performs.
+            // The secondary fixed account is also owner-capable so foreign-owned
+            // MUC join tests reach the RoomRegistry ownership check instead of
+            // being denied by the local instant-room creation guard first.
+            ("WADDLE_SERVER_OWNER_LOCALPARTS", "admin,cluster-peer"),
+            ("WADDLE_CLUSTERING_ENABLED", "true"),
+            // #1652: clustered nodes refuse a row-less database unless the
+            // rollout carries the enroll action; enroll is idempotent, so
+            // every node of the harness may carry it. One fixed deployment
+            // UUID = one deployment sharing the Postgres, matching prod.
+            (
+                "WADDLE_DEPLOYMENT_UUID",
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1e2",
+            ),
+            ("WADDLE_DB_LINEAGE_ACTION", "enroll"),
+            ("WADDLE_CLUSTERING_LISTEN_ADDRS", &listen),
+            ("WADDLE_CLUSTERING_KEYPAIR_POOL", &pool_env),
+            ("WADDLE_CLUSTERING_NODE_ID_FILE", &node_id_file_str),
+            ("WADDLE_CLUSTERING_FAULT_INJECTION", "true"),
+            // Tight intervals so revocation/re-dial assertions run fast.
+            ("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "1000"),
+            ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "1000"),
+            ("WADDLE_CLUSTERING_LEASE_TTL_MS", "10000"),
+            // ADR-0017 Phase 3 Slice 2 (FIX 4): equally tight node-lease/
+            // self-fence timing, exercised by `lone_survivor_and_isolation_fencing`
+            // below — every server this harness spawns is a real production
+            // subprocess that runs `clustering::start_if_enabled`'s node-lease/
+            // self-fence loop unconditionally, so these envs simply make that
+            // already-running production loop observable on a modest wall
+            // clock instead of introducing a second harness-only code path.
+            ("WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS", "300"),
+            ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "1200"),
+            ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "2"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_BASE_MS", "200"),
+            ("WADDLE_CLUSTERING_REREGISTER_BACKOFF_MAX_MS", "1000"),
+            // ADR-0017 Phase 3 Slice 6: must be <= WADDLE_CLUSTERING_NODE_LEASE_TTL_MS
+            // (config validation enforces this — the held-response window is
+            // an upper bound on, never longer than, a fresh node-lease TTL).
+            ("WADDLE_CLUSTERING_RESUME_HANDSHAKE_TIMEOUT_MS", "1000"),
+            // ADR-0017 Phase 3 Slice 10: node_lease_ttl (1200) must be >= 3x
+            // the claim-release budget. The default budget is 5s, which would
+            // reject this harness's fast-timer config at startup — size it
+            // down to match (1200 >= 3 * 300).
+            ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "300"),
+            // ADR-0017 Phase 3 Slice 11 corrigenda (deviation 111, FIX C):
+            // the orphan reaper's cadence has no other reason to run at its
+            // 120s production default in this harness — every real
+            // subprocess spawned here already runs the unmodified
+            // `spawn_orphan_reaper_janitor` loop, so tightening only its
+            // interval (not its logic) lets
+            // `orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`
+            // observe a sweep in seconds instead of waiting out ~120s of
+            // real wall-clock time per attempt.
+            ("WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS", "500"),
+        ];
+        if !bootstrap_peers.is_empty() {
+            envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
+        }
+        envs.extend(
+            extra_envs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+
+        let server = TestServer::start_with_extra_envs(
+            &[(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD)],
+            &envs,
+        );
+
+        // The node-id file is written during clustering bring-up, which
+        // precedes HTTP readiness — but poll defensively anyway.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let contents = loop {
+            if let Ok(contents) = std::fs::read_to_string(&node_id_file) {
+                if contents.trim().split(' ').count() == 2 {
+                    break contents;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not publish its node-id file"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let mut parts = contents.trim().split(' ');
+        let node_id = parts.next().expect("node id").to_string();
+        let peer_id = parts.next().expect("peer id").to_string();
+        let _ = std::fs::remove_file(&node_id_file);
+        (server, node_id, peer_id)
+    })
+    .await
+    .unwrap_or_else(|join_error| match join_error.try_into_panic() {
+        // Re-raise the inner panic so assertion messages surface verbatim.
+        Ok(payload) => std::panic::resume_unwind(payload),
+        Err(join_error) => panic!("cluster server bring-up task failed: {join_error}"),
+    })
+}
+
+/// Serializes the heavy subprocess tests in this binary. They share the
+/// mutable control-plane tables (`clustering_nodes`/`clustering_claims`/
+/// `clustering_peer_allowlist`/`clustering_keypair_slots`) in one Postgres
+/// and each starts by DELETE-resetting them — running concurrently (the
+/// cargo test default) would wipe rows the other test's live subprocess
+/// servers depend on mid-run.
+pub fn cluster_e2e_serial_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Wipe the `clustering_nodes`/`clustering_claims` tables (provisioning the
+/// schema first via the production `ensure_schema` path, in case this is
+/// the first test in the binary to touch it — mirrors `reset_and_enroll`'s
+/// own "provision through the production path" convention). Residual rows
+/// from an earlier scenario in the same shared Postgres instance are
+/// otherwise invisible garbage that can pollute `count_other_live_nodes`:
+/// `lone_survivor_and_isolation_fencing` needs a truthful "other live node"
+/// count before any survivor janitor has had time to run the stale-node
+/// watchdog.
+pub async fn reset_node_lease_tables(db: &Database) {
+    use waddle_xmpp::ownership::ClaimStore as _;
+    let store = PostgresClaimStore::new(db.clone());
+    store
+        .ensure_schema()
+        .await
+        .expect("ensure node-lease schema");
+    let conn = db.guard().await.expect("guard");
+    conn.execute("DELETE FROM clustering_claims", ())
+        .await
+        .expect("clean claims");
+    conn.execute("DELETE FROM clustering_nodes", ())
+        .await
+        .expect("clean nodes");
+}
+
+/// Poll a spawned cluster server's `/ready` endpoint once; `None` if the
+/// request itself fails (e.g. the process hasn't bound its HTTP listener
+/// yet), `Some(true)`/`Some(false)` for a 2xx/non-2xx response.
+pub async fn readiness_status(server: &TestServer) -> Option<bool> {
+    let url = format!("{}/ready", server.http_base_url());
+    reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .ok()
+        .map(|response| response.status().is_success())
+}
+
+/// Poll until a spawned cluster server's `/ready` endpoint reports
+/// `want_ready`, or panic once `deadline` elapses.
+pub async fn wait_for_readiness(server: &TestServer, want_ready: bool, deadline: Duration) {
+    let until = Instant::now() + deadline;
+    loop {
+        if readiness_status(server).await == Some(want_ready) {
+            return;
+        }
+        assert!(
+            Instant::now() < until,
+            "server did not report {} within {deadline:?}",
+            if want_ready { "ready" } else { "not-ready" }
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
+    client
+        .send(&String::from(&muc_join_presence(&room.to_string(), nick)))
+        .await
+        .expect("send MUC join");
+    let replies = tokio::time::timeout(
+        Duration::from_secs(15),
+        client.recv_until(|frame| frame.contains("<subject")),
+    )
+    .await
+    .expect("bounded MUC join")
+    .expect("MUC join replies");
+    let occupant = room
+        .with_resource_str(nick)
+        .expect("occupant JID")
+        .to_string();
+    assert!(
+        replies.iter().any(|frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("from") == Some(occupant.as_str())
+                    && element.attr("type").is_none()
+                    && element
+                        .get_child("x", "http://jabber.org/protocol/muc#user")
+                        .is_some_and(|x| {
+                            x.children().any(|child| {
+                                child.is("status", "http://jabber.org/protocol/muc#user")
+                                    && child.attr("code") == Some("110")
+                            })
+                        })
+            })
+        }),
+        "{occupant} must receive self-presence 110: {replies:?}"
+    );
+}
+
+pub fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom::Element {
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
+    let payload = match body {
+        Some(body) => Element::builder("body", waddle_xmpp::ns::JABBER_CLIENT)
+            .append(body)
+            .build(),
+        None => Element::builder("composing", waddle_xmpp::xep::xep0085::NS_CHATSTATES).build(),
+    };
+    Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(xml_ncname!("to").to_owned(), room.to_string())
+        .attr(xml_ncname!("type").to_owned(), "groupchat")
+        .attr(xml_ncname!("id").to_owned(), id)
+        .append(payload)
+        .build()
+}
+
+/// MUC join `<presence/>` built with the typed XML builder (repo
+/// XML-generation rule: never construct XML with `format!`).
+pub fn muc_join_presence(room: &str, nick: &str) -> xmpp_parsers::minidom::Element {
+    use xmpp_parsers::minidom::Element;
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/{nick}"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .build()
+}

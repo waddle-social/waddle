@@ -500,6 +500,9 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         );
         let receiver = Arc::clone(&self.ordered_receiver);
         let delivery_bridge = Arc::clone(&self.ordered_delivery_bridge);
+        #[cfg(feature = "test-support")]
+        let relayed_groupchat =
+            crate::clustering::acceptance_seams::relayed_groupchat(&msg.envelope);
         // The reservation must stay inline (mailbox-ordered); only the
         // delegated delivery moves onto the instrumented reply task.
         let reservation = receiver.lock().await.reserve(msg.envelope);
@@ -508,6 +511,14 @@ impl Message<RelayDeliverOrdered> for RelayActor {
             let reply =
                 finish_ordered_reservation(receiver, delivery_bridge, reservation, receipts).await;
             record_ordered_relay_reply(&reply);
+            // Acceptance seam: the receiver has recorded this delivery as
+            // complete, so withholding the reply here models its loss.
+            #[cfg(feature = "test-support")]
+            crate::clustering::acceptance_seams::drop_owner_reply(
+                relayed_groupchat.as_ref(),
+                &reply,
+            )
+            .await;
             reply
         })
     }
