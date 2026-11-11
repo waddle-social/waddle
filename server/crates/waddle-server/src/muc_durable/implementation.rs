@@ -289,6 +289,8 @@ pub enum MucOwnerPreparationError {
     UnsafeOwnerBoundary,
     #[error("MUC owner preparation requires a fresh room schema")]
     ExistingRoomSchema,
+    #[error("the MUC owner step could not take its lock within the lock timeout")]
+    LockTimeout,
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -411,16 +413,26 @@ impl PostgresMucRoomStore {
         if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
             return Err(MucOwnerPreparationError::OwnerHandleRequired);
         }
-        let mut tx = db
-            .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
-            .await?;
-        Self::bound_owner_bootstrap_waits(&mut tx).await?;
-        crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
-            .await
-            .map_err(|_| MucOwnerPreparationError::UnsafeOwnerBoundary)?;
-        Self::ensure_schema_in_tx(&mut tx).await?;
-        tx.commit().await?;
-        Ok(())
+        let prepare = async {
+            let mut tx = db
+                .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
+                .await?;
+            Self::bound_owner_bootstrap_waits(&mut tx).await?;
+            crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+                .await
+                .map_err(|_| MucOwnerPreparationError::UnsafeOwnerBoundary)?;
+            Self::ensure_schema_in_tx(&mut tx).await?;
+            tx.commit().await?;
+            Ok(())
+        };
+        prepare.await.map_err(|error| match error {
+            MucOwnerPreparationError::Database(error)
+                if crate::clustering::lease::is_lock_timeout(&error) =>
+            {
+                MucOwnerPreparationError::LockTimeout
+            }
+            other => other,
+        })
     }
 
     /// Attach the serving store to an owner-prepared schema through the

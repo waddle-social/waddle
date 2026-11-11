@@ -90,6 +90,8 @@ pub enum ClaimOwnerPreparationError {
     UnsafeOwnerBoundary,
     #[error("claim owner preparation requires a fresh claim table and epoch sequence")]
     ExistingClaimAuthority,
+    #[error("the claim owner step could not take its lock within the lock timeout")]
+    LockTimeout,
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -192,191 +194,322 @@ pub async fn initialize_fresh_claims_owner(
 /// Serializes claim schema preparation across owner sessions and nodes.
 const CLAIM_SCHEMA_LOCK_SQL: &str = "SELECT pg_catalog.pg_advisory_xact_lock(6841445497037937991)";
 
+/// Node leases. `draining` stops a node acquiring new claims, `peer_id` binds
+/// the registration to its libp2p PeerId for ordered relay validation, and
+/// `first_seen` is stamped once and kept across re-registrations so the
+/// newest non-expired row names the current deployment generation.
+const NODES_TABLE_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS clustering_nodes (
+        node_id           TEXT PRIMARY KEY,
+        node_epoch        TEXT NOT NULL,
+        heartbeat         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expired           BOOLEAN NOT NULL DEFAULT FALSE,
+        pod_template_hash TEXT,
+        -- ADR-0017 Phase 3 Slice 2: set by `NodeLeaseStore::mark_draining`
+        -- (Slice 10 consumes it — stop acquiring new claims, keep
+        -- serving owned ones). No production deployments predate this
+        -- column (pre-launch project), so it is added directly to the
+        -- `CREATE TABLE IF NOT EXISTS` rather than a separate `ALTER
+        -- TABLE` migration.
+        draining          BOOLEAN NOT NULL DEFAULT FALSE,
+        -- ADR-0017 Phase 4: libp2p PeerId bound to this exact
+        -- node_id/node_epoch registration. Ordered relay validates
+        -- signed origin envelopes against this value before applying
+        -- delivery effects.
+        peer_id           TEXT,
+        -- ADR-0017 Phase 3 Slice 10 (Q5's operational definition of
+        -- "the current deployment generation" — realized here):
+        -- stamped once, at this row's FIRST registration, and never
+        -- refreshed by a later re-registration under the SAME
+        -- `node_id` (`register`'s upsert explicitly preserves it —
+        -- see that method). "The current generation" for the
+        -- rollout-aware acquire-backoff heuristic is the
+        -- `pod_template_hash` of the row with the greatest
+        -- `first_seen` among non-expired rows
+        -- (`current_generation`, below): a re-registration after a
+        -- self-fence must NOT make an old-generation pod look newer
+        -- than a genuinely newer-generation pod that registered
+        -- later, or the backoff heuristic would misclassify who
+        -- "tries first" during a rollout (never who wins — the CAS
+        -- remains authoritative either way, per Q5).
+        first_seen        TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"#;
+
+/// Claim generations come from this sequence and must never repeat after a
+/// row is deleted and recreated.
+const EPOCH_SEQUENCE_SQL: &str = r#"
+    CREATE SEQUENCE IF NOT EXISTS clustering_claim_epoch_seq
+        AS BIGINT MINVALUE 0 START WITH 1
+"#;
+
+const CLAIMS_TABLE_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS clustering_claims (
+        entity      TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        node_id     TEXT NOT NULL,
+        node_epoch  TEXT NOT NULL,
+        claim_epoch BIGINT NOT NULL
+            DEFAULT nextval('clustering_claim_epoch_seq'::regclass)
+    )
+"#;
+
+const CLAIMS_EPOCH_DEFAULT_SQL: &str = r#"
+    ALTER TABLE clustering_claims
+    ALTER COLUMN claim_epoch
+    SET DEFAULT nextval('clustering_claim_epoch_seq'::regclass)
+"#;
+
+/// Advance the sequence past every generation already present. It never
+/// moves backwards.
+const EPOCH_FLOOR_SQL: &str = r#"
+    SELECT setval(
+        'clustering_claim_epoch_seq',
+        GREATEST(
+            (SELECT COALESCE(MAX(claim_epoch), 0) FROM clustering_claims),
+            (SELECT last_value FROM clustering_claim_epoch_seq)
+        ),
+        true
+    )
+"#;
+
+const CLAIMS_NODE_INDEX_SQL: &str = r#"
+    CREATE INDEX IF NOT EXISTS clustering_claims_node_id_node_epoch
+        ON clustering_claims (node_id, node_epoch)
+"#;
+
+const CLAIMS_OWNER_INDEX_SQL: &str = r#"
+    CREATE INDEX IF NOT EXISTS clustering_claims_owner_type_entity
+        ON clustering_claims (node_id, node_epoch, entity_type, entity)
+"#;
+
+/// Supports bounded per-entity-type orphan scans without walking the much
+/// larger mixed claim table; `entity` also gives the room scan its stable
+/// order before its LIMIT.
+const CLAIMS_TYPE_INDEX_SQL: &str = r#"
+    CREATE INDEX IF NOT EXISTS clustering_claims_entity_type_entity
+        ON clustering_claims (entity_type, entity)
+"#;
+
+const REAPER_CURSORS_TABLE_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS clustering_orphan_reaper_cursors (
+        lane          TEXT PRIMARY KEY,
+        cursor_entity TEXT
+    )
+"#;
+
+/// Steal intents for the unwedge and owner-veto path. The unique key and
+/// the upsert in `report_steal_intent` collapse repeated failures from one
+/// reporter against one entity into a single refreshed row.
+const STEAL_INTENTS_TABLE_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS clustering_steal_intents (
+        entity        TEXT NOT NULL,
+        reporter_node TEXT NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (entity, reporter_node)
+    )
+"#;
+
+/// Backs the steal CAS's per-entity probe and the per-owner intent read.
+const STEAL_INTENTS_INDEX_SQL: &str = r#"
+    CREATE INDEX IF NOT EXISTS clustering_steal_intents_entity_created_at
+        ON clustering_steal_intents (entity, created_at)
+"#;
+
+const NODES_PEER_ID_SQL: &str =
+    "ALTER TABLE clustering_nodes ADD COLUMN IF NOT EXISTS peer_id TEXT";
+const CLAIMS_LOCK_SQL: &str = "LOCK TABLE clustering_claims IN ACCESS EXCLUSIVE MODE";
+const REAPER_CURSOR_ROW_SQL: &str =
+    "INSERT INTO clustering_orphan_reaper_cursors (lane) VALUES (?) \
+     ON CONFLICT (lane) DO NOTHING";
+
+/// The sequence, the claim table, its default and the sequence floor. The
+/// table lock excludes concurrent claim writes until the default and the
+/// floor commit together.
+const EPOCH_AUTHORITY_SQL: [&str; 5] = [
+    EPOCH_SEQUENCE_SQL,
+    CLAIMS_TABLE_SQL,
+    CLAIMS_LOCK_SQL,
+    CLAIMS_EPOCH_DEFAULT_SQL,
+    EPOCH_FLOOR_SQL,
+];
+
 /// Create or complete the claim authority relations in the caller's
 /// transaction, which holds the claim schema advisory lock: nodes, the claim
 /// epoch sequence, claims and their indexes, the orphan-reaper cursors and
 /// steal intents. Every statement is idempotent, existing rows are kept, and
 /// the epoch sequence only ever moves forward.
+///
+/// The transaction takes ACCESS EXCLUSIVE locks on several tables and holds
+/// them to its end, so it is for an owner phase that runs with every server
+/// stopped. A node that bootstraps while others serve uses
+/// [`bootstrap_claim_schema_while_serving`].
 async fn apply_claim_schema(tx: &mut crate::db::Transaction<'_>) -> Result<(), DatabaseError> {
-    tx.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS clustering_nodes (
-            node_id           TEXT PRIMARY KEY,
-            node_epoch        TEXT NOT NULL,
-            heartbeat         TIMESTAMPTZ NOT NULL DEFAULT now(),
-            expired           BOOLEAN NOT NULL DEFAULT FALSE,
-            pod_template_hash TEXT,
-            -- ADR-0017 Phase 3 Slice 2: set by `NodeLeaseStore::mark_draining`
-            -- (Slice 10 consumes it — stop acquiring new claims, keep
-            -- serving owned ones). No production deployments predate this
-            -- column (pre-launch project), so it is added directly to the
-            -- `CREATE TABLE IF NOT EXISTS` rather than a separate `ALTER
-            -- TABLE` migration.
-            draining          BOOLEAN NOT NULL DEFAULT FALSE,
-            -- ADR-0017 Phase 4: libp2p PeerId bound to this exact
-            -- node_id/node_epoch registration. Ordered relay validates
-            -- signed origin envelopes against this value before applying
-            -- delivery effects.
-            peer_id           TEXT,
-            -- ADR-0017 Phase 3 Slice 10 (Q5's operational definition of
-            -- "the current deployment generation" — realized here):
-            -- stamped once, at this row's FIRST registration, and never
-            -- refreshed by a later re-registration under the SAME
-            -- `node_id` (`register`'s upsert explicitly preserves it —
-            -- see that method). "The current generation" for the
-            -- rollout-aware acquire-backoff heuristic is the
-            -- `pod_template_hash` of the row with the greatest
-            -- `first_seen` among non-expired rows
-            -- (`current_generation`, below): a re-registration after a
-            -- self-fence must NOT make an old-generation pod look newer
-            -- than a genuinely newer-generation pod that registered
-            -- later, or the backoff heuristic would misclassify who
-            -- "tries first" during a rollout (never who wins — the CAS
-            -- remains authoritative either way, per Q5).
-            first_seen        TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-        "#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        "ALTER TABLE clustering_nodes ADD COLUMN IF NOT EXISTS peer_id TEXT",
-        (),
-    )
-    .await?;
-    // Claim generations must never repeat after a row is deleted and
-    // recreated. Bootstrap the sequence under a transaction-scoped
-    // advisory lock so concurrent startup migrations cannot race their
-    // `setval`, then lock the claims table while advancing the sequence
-    // past every generation already present in a pre-sequence schema.
-    // The table lock also excludes concurrent INSERT/UPDATE statements
-    // until the new default and sequence floor commit together.
-    tx.execute(
-        r#"
-        CREATE SEQUENCE IF NOT EXISTS clustering_claim_epoch_seq
-            AS BIGINT MINVALUE 0 START WITH 1
-        "#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS clustering_claims (
-            entity      TEXT PRIMARY KEY,
-            entity_type TEXT NOT NULL,
-            node_id     TEXT NOT NULL,
-            node_epoch  TEXT NOT NULL,
-            claim_epoch BIGINT NOT NULL
-                DEFAULT nextval('clustering_claim_epoch_seq'::regclass)
-        )
-        "#,
-        (),
-    )
-    .await?;
-    tx.execute("LOCK TABLE clustering_claims IN ACCESS EXCLUSIVE MODE", ())
-        .await?;
-    tx.execute(
-        r#"
-        ALTER TABLE clustering_claims
-        ALTER COLUMN claim_epoch
-        SET DEFAULT nextval('clustering_claim_epoch_seq'::regclass)
-        "#,
-        (),
-    )
-    .await?;
-    tx.query(
-        r#"
-        SELECT setval(
-            'clustering_claim_epoch_seq',
-            GREATEST(
-                (SELECT COALESCE(MAX(claim_epoch), 0) FROM clustering_claims),
-                (SELECT last_value FROM clustering_claim_epoch_seq)
-            ),
-            true
-        )
-        "#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        r#"
-        CREATE INDEX IF NOT EXISTS clustering_claims_node_id_node_epoch
-            ON clustering_claims (node_id, node_epoch)
-        "#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        r#"
-        CREATE INDEX IF NOT EXISTS clustering_claims_owner_type_entity
-            ON clustering_claims (node_id, node_epoch, entity_type, entity)
-        "#,
-        (),
-    )
-    .await?;
-    // Supports bounded per-entity-type orphan scans without walking the
-    // much larger mixed claim table (SM sessions dominate in modeled
-    // deployments). `entity` also satisfies the room scan's stable
-    // ordering before its LIMIT.
-    tx.execute(
-        r#"
-        CREATE INDEX IF NOT EXISTS clustering_claims_entity_type_entity
-            ON clustering_claims (entity_type, entity)
-        "#,
-        (),
-    )
-    .await?;
-    tx.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS clustering_orphan_reaper_cursors (
-            lane          TEXT PRIMARY KEY,
-            cursor_entity TEXT
-        )
-        "#,
-        (),
-    )
-    .await?;
+    for statement in [NODES_TABLE_SQL, NODES_PEER_ID_SQL]
+        .into_iter()
+        .chain(EPOCH_AUTHORITY_SQL)
+        .chain([
+            CLAIMS_NODE_INDEX_SQL,
+            CLAIMS_OWNER_INDEX_SQL,
+            CLAIMS_TYPE_INDEX_SQL,
+            REAPER_CURSORS_TABLE_SQL,
+        ])
+    {
+        run_schema_statement(tx, statement).await?;
+    }
     for lane in [EntityType::SmSession, EntityType::RoomActor] {
         tx.execute(
-            "INSERT INTO clustering_orphan_reaper_cursors (lane) VALUES (?) \
-             ON CONFLICT (lane) DO NOTHING",
+            REAPER_CURSOR_ROW_SQL,
             crate::db_params![lane.as_db_str().to_string()],
         )
         .await?;
     }
-    // ADR-0017 Phase 3 Slice 3: steal-intents unwedge/owner-veto path
-    // (element 4's "Unwedge" text, quoted verbatim in the phase plan).
-    // `UNIQUE (entity, reporter_node)` + the upsert in
-    // `report_steal_intent` collapses repeated failures from one
-    // reporter against one entity into a single refreshed row rather
-    // than growing unbounded during a sustained relay fault.
-    tx.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS clustering_steal_intents (
-            entity        TEXT NOT NULL,
-            reporter_node TEXT NOT NULL,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (entity, reporter_node)
-        )
-        "#,
-        (),
-    )
-    .await?;
-    // Backs both the steal CAS's per-entity `EXISTS` probe (hot path)
-    // and `owner_steal_intents`'s per-owner read. The abandoned-intent
-    // sweep (a future orphan-reaper concern, Slice 5) is deliberately
-    // NOT served by this index — it is keyed by bare `created_at` with
-    // no entity filter, a full-table scan on a table that stays small
-    // by construction (minor fix 20 in the phase plan).
-    tx.execute(
-        r#"
-        CREATE INDEX IF NOT EXISTS clustering_steal_intents_entity_created_at
-            ON clustering_steal_intents (entity, created_at)
-        "#,
-        (),
-    )
-    .await?;
+    for statement in [STEAL_INTENTS_TABLE_SQL, STEAL_INTENTS_INDEX_SQL] {
+        run_schema_statement(tx, statement).await?;
+    }
     Ok(())
+}
+
+async fn run_schema_statement(
+    tx: &mut crate::db::Transaction<'_>,
+    statement: &str,
+) -> Result<(), DatabaseError> {
+    if statement.trim_start().starts_with("SELECT") {
+        tx.query(statement, ()).await.map(drop)
+    } else {
+        tx.execute(statement, ()).await.map(drop)
+    }
+}
+
+/// How long one bootstrap step waits for a table lock before it fails the
+/// bootstrap instead of queueing serving statements behind it.
+const CLAIM_SCHEMA_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '10s'";
+
+/// Which parts of the claim schema the current schema lacks. One catalog
+/// read, which takes no table lock.
+const CLAIM_SCHEMA_GAPS_SQL: &str = r#"
+WITH relations AS (
+    SELECT c.oid, c.relname
+    FROM pg_catalog.pg_class c
+    WHERE c.relnamespace = pg_catalog.current_schema()::pg_catalog.regnamespace
+)
+SELECT
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_nodes'),
+    NOT EXISTS (SELECT 1 FROM relations r
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = r.oid
+        WHERE r.relname = 'clustering_nodes' AND a.attname = 'peer_id'
+          AND NOT a.attisdropped),
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_claim_epoch_seq')
+      OR NOT EXISTS (SELECT 1 FROM relations r
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = r.oid
+        JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+        WHERE r.relname = 'clustering_claims' AND a.attname = 'claim_epoch'
+          AND pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+            = 'nextval(''clustering_claim_epoch_seq''::regclass)'),
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_claims_node_id_node_epoch'),
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_claims_owner_type_entity'),
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_claims_entity_type_entity'),
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_orphan_reaper_cursors'),
+    NOT EXISTS (SELECT 1 FROM relations WHERE relname = 'clustering_steal_intents'),
+    NOT EXISTS (SELECT 1 FROM relations
+        WHERE relname = 'clustering_steal_intents_entity_created_at')
+"#;
+
+/// Whether the epoch sequence is behind a retained claim or has never been
+/// positioned. Read without a table lock: once the claim table's default is
+/// the sequence every epoch comes from it, so this only finds a schema that
+/// was changed outside the bootstrap.
+const EPOCH_FLOOR_BEHIND_SQL: &str = r#"
+SELECT NOT seq.is_called
+    OR COALESCE((SELECT max(claim_epoch) FROM clustering_claims), 0) > seq.last_value
+FROM clustering_claim_epoch_seq seq
+"#;
+
+/// Bring the claim schema up to date from a node that starts while other
+/// nodes serve on the same database.
+///
+/// Serving statements lock `clustering_claims` and then read
+/// `clustering_nodes`, and node heartbeats update `clustering_nodes`. A
+/// bootstrap that held an ACCESS EXCLUSIVE lock on one of those tables while
+/// it waited for the other would deadlock with a claim acquire and stall
+/// every heartbeat. So a schema that is already current takes no table lock
+/// at all: the gaps are read from the catalog first. Each missing part is
+/// then created in its own short transaction, under the claim schema
+/// advisory lock and a lock timeout, so locks on different tables are never
+/// held together and a step that cannot get its lock fails the bootstrap.
+async fn bootstrap_claim_schema_while_serving(db: &Database) -> Result<(), DatabaseError> {
+    let gaps = {
+        let conn = db.guard().await?;
+        let mut rows = conn.query(CLAIM_SCHEMA_GAPS_SQL, ()).await?;
+        let row = rows.next().await?.ok_or_else(|| {
+            DatabaseError::QueryFailed("claim schema catalog read returned no row".to_owned())
+        })?;
+        let mut gaps = [false; 9];
+        for (index, gap) in gaps.iter_mut().enumerate() {
+            *gap = row.get::<bool>(index)?;
+        }
+        gaps
+    };
+    let [nodes, peer_id, epoch_authority, node_index, owner_index, type_index, cursors, intents, intent_index] =
+        gaps;
+    if nodes {
+        run_claim_schema_step(db, &[NODES_TABLE_SQL]).await?;
+    } else if peer_id {
+        run_claim_schema_step(db, &[NODES_PEER_ID_SQL]).await?;
+    }
+    let epoch_authority = epoch_authority || {
+        let conn = db.guard().await?;
+        let mut rows = conn.query(EPOCH_FLOOR_BEHIND_SQL, ()).await?;
+        match rows.next().await? {
+            Some(row) => row.get::<bool>(0)?,
+            None => true,
+        }
+    };
+    if epoch_authority {
+        run_claim_schema_step(db, &EPOCH_AUTHORITY_SQL).await?;
+    }
+    for (missing, statement) in [
+        (node_index, CLAIMS_NODE_INDEX_SQL),
+        (owner_index, CLAIMS_OWNER_INDEX_SQL),
+        (type_index, CLAIMS_TYPE_INDEX_SQL),
+        (cursors, REAPER_CURSORS_TABLE_SQL),
+    ] {
+        if missing {
+            run_claim_schema_step(db, &[statement]).await?;
+        }
+    }
+    {
+        let conn = db.guard().await?;
+        for lane in [EntityType::SmSession, EntityType::RoomActor] {
+            conn.execute(
+                REAPER_CURSOR_ROW_SQL,
+                crate::db_params![lane.as_db_str().to_string()],
+            )
+            .await?;
+        }
+    }
+    for (missing, statement) in [
+        (intents, STEAL_INTENTS_TABLE_SQL),
+        (intent_index, STEAL_INTENTS_INDEX_SQL),
+    ] {
+        if missing {
+            run_claim_schema_step(db, &[statement]).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Run one bootstrap step in its own transaction, serialized against other
+/// bootstraps by the claim schema advisory lock and bounded by a lock
+/// timeout.
+async fn run_claim_schema_step(db: &Database, statements: &[&str]) -> Result<(), DatabaseError> {
+    let mut tx = db.begin().await?;
+    tx.query(CLAIM_SCHEMA_LOCK_SQL, ()).await?;
+    tx.execute(CLAIM_SCHEMA_LOCK_TIMEOUT_SQL, ()).await?;
+    for statement in statements {
+        run_schema_statement(&mut tx, statement).await?;
+    }
+    tx.commit().await
 }
 
 /// Prepare the claim authority relations through the schema owner, adopting
@@ -392,21 +525,30 @@ pub async fn prepare_claims_owner(
     if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
         return Err(ClaimOwnerPreparationError::OwnerHandleRequired);
     }
-    let mut tx = db.begin().await?;
-    tx.execute(
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
-        (),
-    )
-    .await?;
-    tx.query(CLAIM_SCHEMA_LOCK_SQL, ()).await?;
-    crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
-        .await
-        .map_err(|_| ClaimOwnerPreparationError::UnsafeOwnerBoundary)?;
-    tx.execute("SET LOCAL default_table_access_method = heap", ())
+    let prepare = async {
+        let mut tx = db.begin().await?;
+        tx.execute(
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+            (),
+        )
         .await?;
-    apply_claim_schema(&mut tx).await?;
-    tx.commit().await?;
-    Ok(())
+        tx.query(CLAIM_SCHEMA_LOCK_SQL, ()).await?;
+        crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+            .await
+            .map_err(|_| ClaimOwnerPreparationError::UnsafeOwnerBoundary)?;
+        tx.execute(super::lease::OWNER_LOCK_TIMEOUT_SQL, ()).await?;
+        tx.execute("SET LOCAL default_table_access_method = heap", ())
+            .await?;
+        apply_claim_schema(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    };
+    prepare.await.map_err(|error| match error {
+        ClaimOwnerPreparationError::Database(error) if super::lease::is_lock_timeout(&error) => {
+            ClaimOwnerPreparationError::LockTimeout
+        }
+        other => other,
+    })
 }
 
 /// Convert a backend database failure into the upstream `ClaimError`. The
@@ -811,16 +953,11 @@ impl PostgresClaimStore {
 impl ClaimStore for PostgresClaimStore {
     async fn ensure_schema(&self) -> Result<(), ClaimError> {
         if self.db.uses_attested_postgres_pool() {
-            return Err(ClaimError::Backend(
-                "claim schema must be prepared by the owner before restricted attachment"
-                    .to_owned(),
-            ));
+            return Err(ClaimError::OwnerPreparationRequired);
         }
-        let mut tx = self.db.begin().await.map_err(db_err)?;
-        tx.query(CLAIM_SCHEMA_LOCK_SQL, ()).await.map_err(db_err)?;
-        apply_claim_schema(&mut tx).await.map_err(db_err)?;
-        tx.commit().await.map_err(db_err)?;
-        Ok(())
+        bootstrap_claim_schema_while_serving(&self.db)
+            .await
+            .map_err(db_err)
     }
 
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
@@ -5560,6 +5697,97 @@ mod tests {
             .await
             .expect_err("SM-session claims are excluded from the steal-intent path");
         assert!(matches!(err, ClaimError::SmSessionExcludedFromStealIntent));
+    }
+
+    /// A node that bootstraps the claim schema while other nodes serve must
+    /// not take a table lock on a schema that is already current: a claim
+    /// acquire locks `clustering_claims` and then reads `clustering_nodes`,
+    /// so a bootstrap holding a lock on one table while it waits for the
+    /// other would deadlock with it.
+    #[tokio::test]
+    async fn schema_bootstrap_on_a_current_schema_neither_waits_for_nor_deadlocks_a_claim_acquire()
+    {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        store.register(&owner, None).await.expect("register owner");
+
+        // A claim-acquire-shaped transaction, stopped between its claim
+        // write and its node read.
+        let mut acquire = store.db.begin().await.expect("begin acquire");
+        acquire
+            .execute(
+                "INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch) \
+                 VALUES ('user_actor:held-open', 'user_actor', ?, ?)",
+                crate::db_params![owner.node_id.clone(), owner.node_epoch.clone()],
+            )
+            .await
+            .expect("claim write");
+
+        let bootstrapping = PostgresClaimStore::new(store.db.clone());
+        let bootstrap = tokio::spawn(async move { bootstrapping.ensure_schema().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut live = acquire
+            .query(
+                "SELECT 1 FROM clustering_nodes WHERE node_id = ? AND NOT expired",
+                crate::db_params![owner.node_id.clone()],
+            )
+            .await
+            .expect("the acquire reads its node row without waiting or deadlocking");
+        assert!(live.next().await.expect("node row").is_some());
+        drop(live);
+
+        tokio::time::timeout(Duration::from_secs(2), bootstrap)
+            .await
+            .expect("the bootstrap completes while the acquire transaction is open")
+            .expect("bootstrap task")
+            .expect("bootstrap on a current schema");
+        acquire.commit().await.expect("commit acquire");
+    }
+
+    /// A bootstrap on a current schema takes no lock on `clustering_nodes`,
+    /// so node heartbeats proceed while a transaction holds a claim row.
+    #[tokio::test]
+    async fn schema_bootstrap_on_a_current_schema_does_not_block_a_node_heartbeat() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        store.register(&owner, None).await.expect("register owner");
+
+        let mut writer = store.db.begin().await.expect("begin claim writer");
+        writer
+            .execute(
+                "INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch) \
+                 VALUES ('user_actor:held-open', 'user_actor', ?, ?)",
+                crate::db_params![owner.node_id.clone(), owner.node_epoch.clone()],
+            )
+            .await
+            .expect("claim write");
+
+        let bootstrapping = PostgresClaimStore::new(store.db.clone());
+        let bootstrap = tokio::spawn(async move { bootstrapping.ensure_schema().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let renewed = tokio::time::timeout(
+            Duration::from_secs(1),
+            store.heartbeat(&owner, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the heartbeat is not blocked by the bootstrap")
+        .expect("heartbeat");
+        assert!(renewed);
+
+        tokio::time::timeout(Duration::from_secs(2), bootstrap)
+            .await
+            .expect("the bootstrap completes while the claim writer is open")
+            .expect("bootstrap task")
+            .expect("bootstrap on a current schema");
+        writer.commit().await.expect("commit claim writer");
     }
 
     #[tokio::test]

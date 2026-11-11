@@ -113,16 +113,51 @@ pub fn c_string(bytes: &[u8]) -> (String, &[u8]) {
 }
 
 /// Whether any statement in `sql` creates, alters, drops or re-grants.
+/// Whether a query string holds a statement that changes the catalog.
+///
+/// Each `;`-separated statement is classified by its first keyword after
+/// leading whitespace and comments. A `DO` block counts, because its body
+/// can run any DDL. Splitting on `;` also splits inside string literals,
+/// which can only add a false report. What this cannot see is DDL performed
+/// inside a function the statement calls; the catalog comparison the tests
+/// make around the serving interval covers any lasting effect of that.
 pub fn changes_catalog(sql: &str) -> bool {
     sql.split(';').any(|statement| {
-        let keyword = statement
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
+        let mut rest = statement.trim_start();
+        loop {
+            if let Some(comment) = rest.strip_prefix("--") {
+                rest = comment
+                    .split_once('\n')
+                    .map_or("", |(_, after)| after)
+                    .trim_start();
+            } else if let Some(comment) = rest.strip_prefix("/*") {
+                rest = comment
+                    .split_once("*/")
+                    .map_or("", |(_, after)| after)
+                    .trim_start();
+            } else {
+                break;
+            }
+        }
+        let keyword: String = rest
+            .chars()
+            .take_while(|character| character.is_ascii_alphabetic())
+            .collect::<String>()
             .to_ascii_uppercase();
         matches!(
             keyword.as_str(),
-            "CREATE" | "ALTER" | "DROP" | "GRANT" | "REVOKE" | "TRUNCATE" | "COMMENT" | "REINDEX"
+            "CREATE"
+                | "ALTER"
+                | "DROP"
+                | "GRANT"
+                | "REVOKE"
+                | "TRUNCATE"
+                | "COMMENT"
+                | "REINDEX"
+                | "DO"
+                | "SECURITY"
+                | "REASSIGN"
+                | "IMPORT"
         )
     })
 }
@@ -1066,7 +1101,7 @@ pub async fn provision_clustered(url: &str, pool: &KeypairPool) -> Provisioned {
     let mut provisioned = Provisioned::new(url).await;
     provisioned.plan.clustering = Some(ClusteringOwnerPlan {
         exclusive_database: ExclusiveDatabase::NotChecked,
-        ..ClusteringOwnerPlan::new(pool.peer_ids.clone(), Uuid::new_v4())
+        ..ClusteringOwnerPlan::new(pool.peer_ids.clone(), Uuid::new_v4(), String::new())
     });
     provisioned
 }

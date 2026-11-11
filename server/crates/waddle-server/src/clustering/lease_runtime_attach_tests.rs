@@ -480,6 +480,8 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
             runtime_role: &fixture.runtime,
             activation_delay: Duration::ZERO,
             legacy: LegacyKeypairSlots::Refuse,
+            lease_ttl: Duration::from_secs(30),
+            exclusive_owner_tag: None,
         };
         let revision_before: i64 = sqlx::query_scalar(&format!(
             "SELECT lease_revision FROM {}.clustering_keypair_slots WHERE slot_index = $1",
@@ -647,6 +649,38 @@ async fn postgres_attached_keypair_lease_validates_both_pools_and_contract() {
         if definer_guards != 0 {
             bail!("owner preparation left {definer_guards} definer guard function(s)");
         }
+        // Conversion only changes whose privileges a guard runs with. A
+        // guard whose body was replaced is still refused by the pin, and the
+        // refused preparation leaves it as it found it.
+        let guard_definition = |security: &str, body: &str| {
+            format!(
+                "CREATE OR REPLACE FUNCTION {0}.clustering_keypair_slot_guard() RETURNS trigger \
+                 LANGUAGE plpgsql SECURITY {security} \
+                 SET search_path = pg_catalog, {0}, pg_temp AS $guard${body}$guard$",
+                fixture.target
+            )
+        };
+        sqlx::query(&guard_definition("DEFINER", "BEGIN RETURN NEW; END;"))
+            .execute(&fixture.admin)
+            .await?;
+        match PostgresKeypairSlotLease::prepare_keypool_owner(
+            &owner_database,
+            &owner_identity,
+            &enrollment,
+        )
+        .await
+        {
+            Err(KeypoolOwnerError::EnrolledShape(LeaseAttachError::InvalidSchemaShape)) => {}
+            other => bail!("a replaced guard body passed the owner preparation: {other:?}"),
+        }
+        match PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await {
+            Err(LeaseAttachError::InvalidSchemaShape) => {}
+            Err(error) => bail!("a replaced guard body had wrong error: {error}"),
+            Ok(_) => bail!("a replaced guard body was accepted"),
+        }
+        sqlx::query(&guard_definition("INVOKER", super::KEYPAIR_GUARD_BODY))
+            .execute(&fixture.admin)
+            .await?;
         let reattached =
             PostgresKeypairSlotLease::attach_existing(database.clone(), &configured_pool).await?;
         let reacquired = reattached
@@ -812,6 +846,9 @@ async fn postgres_keypool_owner_retires_an_unenrolled_lease_table_only_when_idle
             runtime_role,
             activation_delay: ttl,
             legacy: LegacyKeypairSlots::Retire { legacy_ttl: ttl },
+            // The lease lifetime this test's deployment is configured with.
+            lease_ttl: ttl,
+            exclusive_owner_tag: None,
         };
         let prepare = |enrollment: KeypoolEnrollment<'static>| {
             let owner_database = owner_database.clone();
@@ -843,6 +880,17 @@ async fn postgres_keypool_owner_retires_an_unenrolled_lease_table_only_when_idle
         {
             Err(KeypoolOwnerError::ActivationDelayBelowLegacyTtl) => {}
             other => bail!("short activation delay was not refused: {other:?}"),
+        }
+        // A lifetime below the deployment's configured one would call a
+        // lease expired early, so it is refused before anything is read.
+        match prepare(KeypoolEnrollment {
+            lease_ttl: Duration::from_secs(30),
+            ..enrollment
+        })
+        .await
+        {
+            Err(KeypoolOwnerError::LegacyTtlBelowLeaseTtl) => {}
+            other => bail!("an understated lease lifetime was not refused: {other:?}"),
         }
         // The leased-row checks assume a lifetime far longer than this test
         // runs, so they do not depend on how fast it runs.
@@ -911,6 +959,42 @@ async fn postgres_keypool_owner_retires_an_unenrolled_lease_table_only_when_idle
         sqlx::query(&format!("DROP VIEW {}.slot_view", fixture.target))
             .execute(&fixture.admin)
             .await?;
+        let retained: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {}.clustering_keypair_slots",
+            fixture.target
+        ))
+        .fetch_one(&fixture.admin)
+        .await?;
+        if retained != 1 {
+            bail!("a refused retirement changed the lease table");
+        }
+
+        // The retirement waits a bounded time for its table lock and then
+        // refuses, leaving the table to whoever holds it.
+        let mut holder_session = fixture.admin.begin().await?;
+        sqlx::query(&format!(
+            "LOCK TABLE {}.clustering_keypair_slots IN ACCESS SHARE MODE",
+            fixture.target
+        ))
+        .execute(&mut *holder_session)
+        .await?;
+        match prepare(enrollment).await {
+            Err(KeypoolOwnerError::LockTimeout) => {}
+            other => bail!("a held table lock did not time the retirement out: {other:?}"),
+        }
+        holder_session.rollback().await?;
+
+        // With the table locked the retirement looks again for sessions that
+        // are not the owner's own; the fixture's administrator is one.
+        match prepare(KeypoolEnrollment {
+            exclusive_owner_tag: Some("owner-sessions-of-this-run"),
+            ..enrollment
+        })
+        .await
+        {
+            Err(KeypoolOwnerError::DatabaseNotExclusive { sessions, .. }) if sessions >= 1 => {}
+            other => bail!("a foreign session did not stop the retirement: {other:?}"),
+        }
         let retained: i64 = sqlx::query_scalar(&format!(
             "SELECT count(*) FROM {}.clustering_keypair_slots",
             fixture.target

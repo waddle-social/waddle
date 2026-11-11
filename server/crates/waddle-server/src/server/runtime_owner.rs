@@ -31,6 +31,8 @@ use waddle_xmpp::XmppError;
 
 use crate::call_teardown_outbox::{CallTeardownOutboxError, CallTeardownOutboxStore};
 #[cfg(feature = "clustering")]
+pub use crate::clustering::allowlist::AllowlistRemoval;
+#[cfg(feature = "clustering")]
 pub use crate::clustering::lease::LegacyKeypairSlots;
 #[cfg(feature = "clustering")]
 use crate::clustering::lease::{KeypoolEnrollment, KeypoolPreparation, PostgresKeypairSlotLease};
@@ -100,6 +102,13 @@ pub struct ClusteringOwnerPlan {
     pub activation_delay: std::time::Duration,
     /// What to do with a keypair-slot table an unattested runtime created.
     pub legacy_keypair_slots: LegacyKeypairSlots,
+    /// The keypair-slot lease lifetime the servers are configured with
+    /// (`WADDLE_CLUSTERING_LEASE_TTL_MS`). A retirement refuses a
+    /// `legacy_ttl` below it. If the retired deployment ran with a longer
+    /// lifetime, `legacy_ttl` must be that longer value.
+    pub lease_ttl: std::time::Duration,
+    /// What to do with enrolled PeerIds the plan does not name.
+    pub allowlist: AllowlistRemoval,
     /// Whether the phase requires the database to itself.
     pub exclusive_database: ExclusiveDatabase,
 }
@@ -107,30 +116,40 @@ pub struct ClusteringOwnerPlan {
 #[cfg(feature = "clustering")]
 impl ClusteringOwnerPlan {
     /// A plan that activates immediately, refuses an unenrolled keypair-slot
-    /// table and requires an exclusive database.
-    pub fn new(peer_ids: Vec<libp2p::PeerId>, keypool_generation: uuid::Uuid) -> Self {
+    /// table and PeerIds it does not name, assumes the default lease
+    /// lifetime, and requires an exclusive database.
+    /// `owner_application_name` is the `application_name` the owner handle's
+    /// sessions were opened with; it is unique to this run.
+    pub fn new(
+        peer_ids: Vec<libp2p::PeerId>,
+        keypool_generation: uuid::Uuid,
+        owner_application_name: String,
+    ) -> Self {
         Self {
             peer_ids,
             keypool_generation,
             activation_delay: std::time::Duration::ZERO,
             legacy_keypair_slots: LegacyKeypairSlots::Refuse,
-            exclusive_database: ExclusiveDatabase::Required,
+            lease_ttl: crate::config::ClusteringLeaseConfig::default().lease_ttl,
+            allowlist: AllowlistRemoval::Refuse,
+            exclusive_database: ExclusiveDatabase::Required {
+                owner_application_name,
+            },
         }
     }
 }
 
-/// Whether the clustered owner phase checks, before it changes anything,
-/// that no other login has a session on the database and that no prepared
-/// transaction is pending in it.
-///
-/// Sessions of the migrator login are not counted: the owner handle's own
-/// pooled sessions cannot be told apart from them. A server that runs under
-/// the schema owner must therefore not connect as the migrator login.
+/// Whether the clustered owner phase checks that it has the database to
+/// itself: no other client session and no prepared transaction. The check
+/// runs before the phase changes anything and again, with the lease table
+/// locked, before an unenrolled lease table is retired.
 #[cfg(feature = "clustering")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExclusiveDatabase {
-    #[default]
-    Required,
+    /// Every session of the owner handle was opened with this
+    /// `application_name`, generated for this run. Any other client session
+    /// on the database is refused, including one of the migrator login.
+    Required { owner_application_name: String },
     /// The caller vouches that concurrent sessions are harmless.
     NotChecked,
 }
@@ -202,8 +221,13 @@ pub enum RestrictedRuntimeOwnerError {
     #[error("could not inspect database sessions and prepared transactions")]
     ExclusiveDatabaseInspection(#[source] DatabaseError),
     #[error(
-        "the clustered owner phase needs the database to itself: {sessions} session(s) of \
-         other logins and {prepared_transactions} prepared transaction(s) are present"
+        "the owner handle's session does not carry the application_name the plan names, so \
+         its sessions cannot be told apart from another client's"
+    )]
+    OwnerSessionUntagged,
+    #[error(
+        "the clustered owner phase needs the database to itself: {sessions} other client \
+         session(s) and {prepared_transactions} prepared transaction(s) are present"
     )]
     DatabaseNotExclusive {
         sessions: i64,
@@ -409,9 +433,9 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
 /// and reaper-cursor rows and keypair leases are upserted and never deleted
 /// (the lease guard forbids it). Affiliations are upserted and deleted. The
 /// allowlist and the enrollment are owner-controlled and read-only. Admin
-/// receipts are inserted and deleted, never updated. Lifecycles are inserted
-/// and updated; the room attachment additionally requires DELETE, which no
-/// runtime statement uses.
+/// receipts are inserted and deleted, never updated. Lifecycles are
+/// inserted, updated and row-locked; a destroyed room's lifecycle is
+/// tombstoned, not deleted.
 const CLUSTERED_TABLE_GRANTS: &[(&str, &str)] = &[
     ("clustering_claims", READ_WRITE),
     ("clustering_nodes", READ_INSERT_UPDATE),
@@ -423,7 +447,7 @@ const CLUSTERED_TABLE_GRANTS: &[(&str, &str)] = &[
     ("clustering_keypair_slots", READ_INSERT_UPDATE),
     ("clustering_muc_rooms", READ_WRITE),
     ("clustering_muc_room_affiliations", READ_WRITE),
-    ("clustering_muc_room_lifecycles", READ_WRITE),
+    ("clustering_muc_room_lifecycles", READ_INSERT_UPDATE),
     ("clustering_muc_admin_receipts", READ_INSERT_DELETE),
 ];
 
@@ -566,10 +590,15 @@ pub async fn prepare_restricted_runtime_owner(
 
     refuse_public_schema_privileges(owner).await?;
     #[cfg(feature = "clustering")]
-    if let Some(clustering) = &plan.clustering {
-        if clustering.exclusive_database == ExclusiveDatabase::Required {
-            require_exclusive_database(owner).await?;
-        }
+    if let Some(ClusteringOwnerPlan {
+        exclusive_database:
+            ExclusiveDatabase::Required {
+                owner_application_name,
+            },
+        ..
+    }) = &plan.clustering
+    {
+        require_exclusive_database(owner, owner_application_name).await?;
     }
 
     bootstrap_global_owner(owner, &plan.lineage, false)
@@ -720,6 +749,13 @@ async fn prepare_clustering(
             runtime_role: plan.runtime.as_str(),
             activation_delay: clustering.activation_delay,
             legacy: clustering.legacy_keypair_slots,
+            lease_ttl: clustering.lease_ttl,
+            exclusive_owner_tag: match &clustering.exclusive_database {
+                ExclusiveDatabase::Required {
+                    owner_application_name,
+                } => Some(owner_application_name),
+                ExclusiveDatabase::NotChecked => None,
+            },
         },
     )
     .await
@@ -728,6 +764,7 @@ async fn prepare_clustering(
         owner,
         identity,
         &clustering.peer_ids,
+        clustering.allowlist,
     )
     .await
     .map_err(RestrictedRuntimeOwnerError::PeerAllowlist)?;
@@ -737,38 +774,39 @@ async fn prepare_clustering(
     Ok(keypool)
 }
 
-/// Refuse while another login is connected to the database or a prepared
-/// transaction is pending in it: either could hold or later commit state the
-/// phase is about to adopt or retire.
+/// Refuse while any other client session is connected to the database or a
+/// prepared transaction is pending in it: either could hold or later commit
+/// state the phase is about to adopt or retire. The owner handle's own
+/// sessions are recognised by the `application_name` generated for this run.
 #[cfg(feature = "clustering")]
-async fn require_exclusive_database(owner: &Database) -> Result<(), RestrictedRuntimeOwnerError> {
+async fn require_exclusive_database(
+    owner: &Database,
+    owner_application_name: &str,
+) -> Result<(), RestrictedRuntimeOwnerError> {
     let inspect = async {
-        let connection = owner.guard().await?;
-        let mut rows = connection
+        let mut tx = owner.begin().await?;
+        let mut tagged = tx
             .query(
-                "SELECT (SELECT count(*) FROM pg_catalog.pg_stat_activity activity \
-                   WHERE activity.datname = pg_catalog.current_database() \
-                     AND activity.pid <> pg_catalog.pg_backend_pid() \
-                     AND activity.usename IS NOT NULL \
-                     AND activity.usename <> session_user \
-                     AND (activity.backend_type IS NULL \
-                       OR activity.backend_type = 'client backend'))::bigint, \
-                   (SELECT count(*) FROM pg_catalog.pg_prepared_xacts prepared \
-                     WHERE prepared.database = pg_catalog.current_database())::bigint",
-                (),
+                "SELECT pg_catalog.current_setting('application_name') = ?",
+                crate::db_params![owner_application_name],
             )
             .await?;
-        match rows.next().await? {
-            Some(row) => Ok::<_, DatabaseError>((row.get::<i64>(0)?, row.get::<i64>(1)?)),
-            None => Ok((i64::MAX, i64::MAX)),
-        }
+        let tagged = match tagged.next().await? {
+            Some(row) => row.get::<bool>(0)?,
+            None => false,
+        };
+        let counts =
+            crate::clustering::lease::foreign_sessions(&mut tx, owner_application_name).await?;
+        tx.rollback().await?;
+        Ok::<_, DatabaseError>((tagged, counts))
     };
     match inspect
         .await
         .map_err(RestrictedRuntimeOwnerError::ExclusiveDatabaseInspection)?
     {
-        (0, 0) => Ok(()),
-        (sessions, prepared_transactions) => {
+        (false, _) => Err(RestrictedRuntimeOwnerError::OwnerSessionUntagged),
+        (true, (0, 0)) => Ok(()),
+        (true, (sessions, prepared_transactions)) => {
             Err(RestrictedRuntimeOwnerError::DatabaseNotExclusive {
                 sessions,
                 prepared_transactions,

@@ -247,9 +247,11 @@ const MUC_LIFECYCLES: Table = Table {
     checks: MUC_LIFECYCLE_CHECKS,
     foreign_key: None,
     indexes: MUC_LIFECYCLE_INDEXES,
+    // Lifecycles are inserted, updated and row-locked; a destroyed room's
+    // lifecycle is tombstoned, never deleted.
     insert: true,
     update: true,
-    delete: true,
+    delete: false,
 };
 
 const MUC_ADMIN_RECEIPT_COLUMNS: &[Column] = &[

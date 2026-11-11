@@ -150,6 +150,9 @@ where
 fn classify_error(error: &ClaimError) -> (ClaimResult, Option<ClaimRejection>) {
     match error {
         ClaimError::Backend(_) => (ClaimResult::Backend, None),
+        // A store asked to create schema it may not create is a
+        // deployment fault, reported with the backend failures.
+        ClaimError::OwnerPreparationRequired => (ClaimResult::Backend, None),
         ClaimError::AlreadyClaimed => (ClaimResult::Rejected, Some(ClaimRejection::AlreadyClaimed)),
         ClaimError::Conflict => (ClaimResult::Rejected, Some(ClaimRejection::Conflict)),
         // A poisoned store mutex is a persistently broken store, not

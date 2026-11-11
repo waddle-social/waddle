@@ -56,9 +56,9 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::MessageType;
 
 use support::{
-    assert_catalog_unchanged, catalog_entries, chat_message, collect_until, contains_text,
-    drop_fixture, execute, exercise_stream_management, has_descendant, iq_request, mam_query,
-    muc_presence, probe, role, run_owner_phase, send_element, Prepared, Provisioned,
+    assert_catalog_unchanged, catalog_entries, changes_catalog, chat_message, collect_until,
+    contains_text, drop_fixture, execute, exercise_stream_management, has_descendant, iq_request,
+    mam_query, muc_presence, probe, role, run_owner_phase, send_element, Prepared, Provisioned,
     SocketEndpoint, Wire, DOMAIN, RELEASE_GIT_SHA, SCHEMA, SESSION_KEY,
 };
 
@@ -873,6 +873,34 @@ async fn iq_result(client: &mut WsXmppClient, request: Iq) -> Option<Element> {
     match round_trip(client, request).await {
         Iq::Result { payload, .. } => payload,
         other => panic!("expected an IQ result, received {other:?}"),
+    }
+}
+
+/// The relay's statement classifier sees through leading whitespace and
+/// comments, treats an anonymous code block as a catalog change, and leaves
+/// data statements alone.
+#[test]
+fn relay_classifies_catalog_changing_statements() {
+    for statement in [
+        "CREATE TABLE probe (id integer)",
+        "  \n\talter table probe add column other integer",
+        "-- a comment\nDROP TABLE probe",
+        "/* a comment */ /* another */ GRANT SELECT ON probe TO PUBLIC",
+        "SELECT 1; TRUNCATE probe",
+        "DO $$ BEGIN EXECUTE 'CREATE TABLE probe (id integer)'; END $$",
+        "REASSIGN OWNED BY old_role TO new_role",
+    ] {
+        assert!(changes_catalog(statement), "{statement}");
+    }
+    for statement in [
+        "SELECT 1",
+        "WITH moved AS (DELETE FROM probe RETURNING id) INSERT INTO other SELECT id FROM moved",
+        "INSERT INTO probe (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET id = 2",
+        "-- CREATE TABLE in a comment\nSELECT 1",
+        "UPDATE probe SET note = 'created'",
+        "",
+    ] {
+        assert!(!changes_catalog(statement), "{statement}");
     }
 }
 

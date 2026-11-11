@@ -5,7 +5,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
 use waddle_server::clustering::allowlist::{
-    prepare_peer_allowlist_owner, AllowlistOwnerPreparationError,
+    prepare_peer_allowlist_owner, AllowlistOwnerPreparationError, AllowlistRemoval,
 };
 use waddle_server::clustering::claims::{
     attach_main_claim_occupancy, initialize_fresh_claims_owner, prepare_claims_owner,
@@ -420,12 +420,53 @@ async fn claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs() {
         .expect("adopt the fresh claim authority");
     let enrolled = [libp2p::PeerId::random(), libp2p::PeerId::random()];
     assert!(matches!(
-        prepare_peer_allowlist_owner(&runtime, &identity, &enrolled).await,
+        prepare_peer_allowlist_owner(&runtime, &identity, &enrolled, AllowlistRemoval::Refuse)
+            .await,
         Err(AllowlistOwnerPreparationError::OwnerHandleRequired)
     ));
-    prepare_peer_allowlist_owner(&owner_db, &identity, &enrolled)
+    prepare_peer_allowlist_owner(&owner_db, &identity, &enrolled, AllowlistRemoval::Refuse)
         .await
         .expect("enroll the peer allowlist");
+    // A different set is refused while PeerIds outside it are enrolled, and
+    // replaces them only when the caller asks for reconciliation.
+    let other = [libp2p::PeerId::random()];
+    let enrolled_rows = |admin: PgPool, target: String| async move {
+        let mut rows: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT peer_id FROM {target}.clustering_peer_allowlist"
+        ))
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+        rows.sort_unstable();
+        rows
+    };
+    let mut expected: Vec<String> = enrolled.iter().map(ToString::to_string).collect();
+    expected.sort_unstable();
+    match prepare_peer_allowlist_owner(&owner_db, &identity, &other, AllowlistRemoval::Refuse).await
+    {
+        Err(AllowlistOwnerPreparationError::UnexpectedPeers { peers }) => {
+            assert_eq!(peers, expected);
+        }
+        other => panic!("enrolled PeerIds outside the set were not refused: {other:?}"),
+    }
+    assert_eq!(
+        enrolled_rows(f.admin.clone(), f.target.clone()).await,
+        expected
+    );
+    prepare_peer_allowlist_owner(&owner_db, &identity, &other, AllowlistRemoval::Reconcile)
+        .await
+        .expect("reconcile the peer allowlist");
+    assert_eq!(
+        enrolled_rows(f.admin.clone(), f.target.clone()).await,
+        vec![other[0].to_string()]
+    );
+    prepare_peer_allowlist_owner(&owner_db, &identity, &enrolled, AllowlistRemoval::Reconcile)
+        .await
+        .expect("reconcile the peer allowlist back");
+    assert_eq!(
+        enrolled_rows(f.admin.clone(), f.target.clone()).await,
+        expected
+    );
     run_sql(
         &f,
         &format!(

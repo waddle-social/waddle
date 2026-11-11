@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libp2p::PeerId;
+use minidom::Element;
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -27,6 +28,7 @@ use waddle_server::clustering::lease::{
 };
 use waddle_server::clustering::NodeId;
 use waddle_server::db::bootstrap::ControlPlanePoolLimits;
+use waddle_server::db::lineage::AttestedLineage;
 use waddle_server::db::lineage::PgSchemaName;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool};
 use waddle_server::ingress_uow::{
@@ -38,7 +40,8 @@ use waddle_server::muc_durable::{
 };
 use waddle_server::room_effect_outbox::RoomEffectRuntimeAttachError;
 use waddle_server::server::runtime_owner::{
-    ClusteringOwnerPlan, ExclusiveDatabase, LegacyKeypairSlots, RestrictedRuntimeOwnerError,
+    AllowlistRemoval, ClusteringOwnerPlan, ExclusiveDatabase, LegacyKeypairSlots,
+    RestrictedRuntimeOwnerError, RestrictedRuntimeOwnerPlan,
 };
 use waddle_server::server::ResolvedXmppDatabaseUrl;
 use waddle_server::sm_persistence_fenced::{
@@ -46,8 +49,9 @@ use waddle_server::sm_persistence_fenced::{
 };
 use waddle_ws_test_support::{require_test_postgres_url, TestServer, WsXmppClient};
 use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::stream_management::SM_NS;
 
-use super::support::{keypair_pool, provision_clustered, KeypairPool};
+use super::support::{collect_until, keypair_pool, provision_clustered, send_element, KeypairPool};
 use super::{
     assert_catalog_unchanged, assert_runtime_owns_nothing, attach_serving_pool,
     attach_single_node_stores, catalog_entries, execute, exercise_muc, owner_phase_stable_entries,
@@ -83,6 +87,40 @@ async fn owner_database(owner_url: &str) -> Database {
     Database::from_config("clustered owner", &config)
         .await
         .expect("owner database")
+}
+
+/// `owner_url` with the `application_name` an exclusive owner phase names.
+fn tagged_owner_url(owner_url: &str, tag: &str) -> String {
+    let mut url = url::Url::parse(owner_url).expect("owner URL");
+    url.query_pairs_mut().append_pair("application_name", tag);
+    url.to_string()
+}
+
+fn exclusive_plan(plan: &RestrictedRuntimeOwnerPlan, tag: &str) -> RestrictedRuntimeOwnerPlan {
+    let mut plan = plan.clone();
+    if let Some(clustering) = plan.clustering.as_mut() {
+        clustering.exclusive_database = ExclusiveDatabase::Required {
+            owner_application_name: tag.to_owned(),
+        };
+    }
+    plan
+}
+
+/// Run the owner phase the way a cutover does: its sessions carry a name
+/// generated for the run, it requires the database to itself, and the
+/// fixture's administrator is disconnected for its duration.
+async fn run_exclusive_owner_phase(
+    provisioned: &mut Provisioned,
+) -> Result<AttestedLineage, RestrictedRuntimeOwnerError> {
+    let tag = format!("waddle-owner-{}", Uuid::new_v4().simple());
+    let plan = exclusive_plan(&provisioned.plan, &tag);
+    provisioned.admin.close().await;
+    let result = run_owner_phase(&tagged_owner_url(&provisioned.owner_url, &tag), &plan).await;
+    provisioned.admin =
+        PgPool::connect_with(provisioned.base.clone().database(&provisioned.database))
+            .await
+            .expect("reconnect the database administrator");
+    result
 }
 
 async fn allowlist_rows(admin: &PgPool) -> HashSet<String> {
@@ -316,6 +354,29 @@ const ADOPTED_TABLES: [&str; 9] = [
     "clustering_muc_admin_receipts",
 ];
 
+/// Every relation whose rows an adoption must leave exactly as the previous
+/// server wrote them: the clustering and room state, occupancy authority,
+/// stream management, pending delivery and the archive.
+const RETAINED_TABLES: [&str; 17] = [
+    "clustering_claims",
+    "clustering_nodes",
+    "clustering_steal_intents",
+    "clustering_orphan_reaper_cursors",
+    "clustering_peer_allowlist",
+    "clustering_muc_rooms",
+    "clustering_muc_room_affiliations",
+    "clustering_muc_room_lifecycles",
+    "clustering_muc_admin_receipts",
+    "xmpp_occupancy_authority",
+    "sm_sessions",
+    "sm_unacked",
+    "sm_acknowledged_windows",
+    "sm_ingress_appends",
+    "pending_delivery",
+    "mam_messages",
+    "mam_archive_sequences",
+];
+
 /// The keypair-pool enrollment and its leases.
 const KEYPAIR_TABLES: [&str; 3] = [
     "clustering_keypool",
@@ -422,19 +483,84 @@ async fn clustered_owner_phase_fails_closed_on_a_mismatched_plan_or_database() {
         other => panic!("a plan without clustering was not refused: {other:?}"),
     }
 
-    // The fixture's administrator session is another login on the database.
-    let mut exclusive = prepared.plan.clone();
-    exclusive.clustering = Some(ClusteringOwnerPlan {
-        exclusive_database: ExclusiveDatabase::Required,
-        ..clustering.clone()
-    });
-    match run_owner_phase(&prepared.owner_url, &exclusive).await {
+    // An exclusive phase recognises its own sessions by the name the plan
+    // carries. A handle opened without it is refused, and so is any other
+    // client session: here the fixture's administrator.
+    let tag = format!("waddle-owner-{}", Uuid::new_v4().simple());
+    let exclusive = exclusive_plan(&prepared.plan, &tag);
+    assert!(matches!(
+        run_owner_phase(&prepared.owner_url, &exclusive).await,
+        Err(RestrictedRuntimeOwnerError::OwnerSessionUntagged)
+    ));
+    let tagged_url = tagged_owner_url(&prepared.owner_url, &tag);
+    match run_owner_phase(&tagged_url, &exclusive).await {
         Err(RestrictedRuntimeOwnerError::DatabaseNotExclusive {
             sessions,
             prepared_transactions: 0,
         }) => assert!(sessions >= 1, "the administrator session is counted"),
         other => panic!("a shared database was not refused: {other:?}"),
     }
+    // A prepared transaction can commit after the phase, so it is refused
+    // too. PostgreSQL only accepts one when `max_prepared_transactions` is
+    // set, which a test cluster may leave at zero.
+    let prepared_capacity: String = sqlx::query_scalar("SHOW max_prepared_transactions")
+        .fetch_one(&prepared.admin)
+        .await
+        .expect("read max_prepared_transactions");
+    if prepared_capacity != "0" {
+        let mut session = prepared
+            .admin
+            .acquire()
+            .await
+            .expect("administrator session");
+        for statement in [
+            "BEGIN".to_owned(),
+            format!("LOCK TABLE {SCHEMA}.clustering_nodes IN ACCESS SHARE MODE"),
+            "PREPARE TRANSACTION 'restricted-owner-phase'".to_owned(),
+        ] {
+            sqlx::query(&statement)
+                .execute(&mut *session)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        drop(session);
+        match run_owner_phase(&tagged_url, &exclusive).await {
+            Err(RestrictedRuntimeOwnerError::DatabaseNotExclusive {
+                prepared_transactions: 1,
+                ..
+            }) => {}
+            other => panic!("a prepared transaction was not refused: {other:?}"),
+        }
+        execute(
+            &prepared.admin,
+            "ROLLBACK PREPARED 'restricted-owner-phase'",
+        )
+        .await;
+    }
+
+    // An enrolled PeerId the plan does not name is refused, not revoked,
+    // unless the plan says to reconcile the allowlist.
+    let stray = PeerId::random().to_string();
+    execute(
+        &prepared.admin,
+        &format!("INSERT INTO {SCHEMA}.clustering_peer_allowlist (peer_id) VALUES ('{stray}')"),
+    )
+    .await;
+    match prepared.rerun_owner_phase().await {
+        Err(RestrictedRuntimeOwnerError::PeerAllowlist(
+            AllowlistOwnerPreparationError::UnexpectedPeers { peers },
+        )) => assert_eq!(peers, vec![stray.clone()]),
+        other => panic!("an enrolled PeerId outside the plan was not refused: {other:?}"),
+    }
+    assert!(allowlist_rows(&prepared.admin).await.contains(&stray));
+    let mut reconciling = prepared.plan.clone();
+    if let Some(clustering) = reconciling.clustering.as_mut() {
+        clustering.allowlist = AllowlistRemoval::Reconcile;
+    }
+    run_owner_phase(&prepared.owner_url, &reconciling)
+        .await
+        .expect("a reconciling plan revokes the PeerId it does not name");
+    assert_eq!(allowlist_rows(&prepared.admin).await, enrolled);
 
     // A privilege outside the clustered matrix is reported, not revoked.
     execute(
@@ -513,7 +639,13 @@ async fn clustered_owner_phase_fails_closed_on_a_mismatched_plan_or_database() {
         Err(ClaimOwnerPreparationError::UnsafeOwnerBoundary)
     ));
     assert!(matches!(
-        prepare_peer_allowlist_owner(&owner, &wrong, &clustering.peer_ids).await,
+        prepare_peer_allowlist_owner(
+            &owner,
+            &wrong,
+            &clustering.peer_ids,
+            AllowlistRemoval::Refuse
+        )
+        .await,
         Err(AllowlistOwnerPreparationError::UnsafeOwnerBoundary)
     ));
     assert!(matches!(
@@ -532,7 +664,13 @@ async fn clustered_owner_phase_fails_closed_on_a_mismatched_plan_or_database() {
         Err(ClaimOwnerPreparationError::OwnerHandleRequired)
     ));
     assert!(matches!(
-        prepare_peer_allowlist_owner(runtime_pool.global(), &identity, &clustering.peer_ids).await,
+        prepare_peer_allowlist_owner(
+            runtime_pool.global(),
+            &identity,
+            &clustering.peer_ids,
+            AllowlistRemoval::Refuse
+        )
+        .await,
         Err(AllowlistOwnerPreparationError::OwnerHandleRequired)
     ));
     assert!(matches!(
@@ -605,6 +743,58 @@ async fn clustered_owner_phase_fails_closed_on_a_mismatched_plan_or_database() {
     attach_rooms()
         .await
         .expect("the restored room schema attaches");
+    // The monitoring role's USAGE is admitted only as the schema owner's
+    // grant. A role can grant it only while it holds the grant option
+    // itself, so this case always comes with a grantable entry as well.
+    let mut session = prepared
+        .admin
+        .acquire()
+        .await
+        .expect("administrator session");
+    for statement in [
+        format!(
+            "GRANT USAGE ON SCHEMA {SCHEMA} TO {} WITH GRANT OPTION",
+            prepared.roles.old_runtime
+        ),
+        format!("SET ROLE {}", prepared.roles.old_runtime),
+        format!("GRANT USAGE ON SCHEMA {SCHEMA} TO pg_monitor"),
+        "RESET ROLE".to_owned(),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut *session)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    let foreign_grantor: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n \
+           CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) acl \
+           WHERE n.nspname = $1 AND acl.grantee = 'pg_monitor'::regrole \
+             AND acl.grantor <> n.nspowner)",
+    )
+    .bind(SCHEMA)
+    .fetch_one(&mut *session)
+    .await
+    .expect("inspect the schema ACL");
+    assert!(foreign_grantor, "the schema must hold a non-owner grant");
+    assert!(matches!(
+        attach_rooms().await,
+        Err(MucRuntimeAttachError::Schema(
+            RoomEffectRuntimeAttachError::UnsafeRuntimePrivileges {
+                component: "runtime role"
+            }
+        ))
+    ));
+    sqlx::query(&format!(
+        "REVOKE USAGE ON SCHEMA {SCHEMA} FROM {} CASCADE",
+        prepared.roles.old_runtime
+    ))
+    .execute(&mut *session)
+    .await
+    .expect("revoke the non-owner grant");
+    drop(session);
+    attach_rooms()
+        .await
+        .expect("the room schema attaches without the non-owner grant");
     drop(evidence);
     drop(serving);
 
@@ -664,14 +854,9 @@ async fn clustered_owner_phase_fences_activation_and_legacy_leases() {
     let delay = Duration::from_secs(2);
     provisioned.plan.clustering = Some(ClusteringOwnerPlan {
         activation_delay: delay,
-        ..ClusteringOwnerPlan::new(keypairs.peer_ids.clone(), Uuid::new_v4())
+        ..ClusteringOwnerPlan::new(keypairs.peer_ids.clone(), Uuid::new_v4(), String::new())
     });
-    provisioned.admin.close().await;
-    let first = run_owner_phase(&provisioned.owner_url, &provisioned.plan).await;
-    provisioned.admin =
-        PgPool::connect_with(provisioned.base.clone().database(&provisioned.database))
-            .await
-            .expect("reconnect the database administrator");
+    let first = run_exclusive_owner_phase(&mut provisioned).await;
     assert!(
         matches!(
             first,
@@ -748,11 +933,23 @@ async fn clustered_owner_phase_fences_activation_and_legacy_leases() {
         ))
     ));
     let lease_lifetime = Duration::from_secs(30);
+    // A lifetime below the deployment's configured one is refused outright.
+    if let Some(clustering) = provisioned.plan.clustering.as_mut() {
+        clustering.legacy_keypair_slots = LegacyKeypairSlots::Retire {
+            legacy_ttl: Duration::from_secs(5),
+        };
+        clustering.activation_delay = lease_lifetime;
+    }
+    assert!(matches!(
+        run_owner_phase(&provisioned.owner_url, &provisioned.plan).await,
+        Err(RestrictedRuntimeOwnerError::Keypool(
+            KeypoolOwnerError::LegacyTtlBelowLeaseTtl
+        ))
+    ));
     if let Some(clustering) = provisioned.plan.clustering.as_mut() {
         clustering.legacy_keypair_slots = LegacyKeypairSlots::Retire {
             legacy_ttl: lease_lifetime,
         };
-        clustering.activation_delay = lease_lifetime;
     }
     match run_owner_phase(&provisioned.owner_url, &provisioned.plan).await {
         Err(RestrictedRuntimeOwnerError::Keypool(KeypoolOwnerError::LegacyLeaseLive {
@@ -907,6 +1104,11 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
     let keypairs = keypair_pool(2);
     let mut provisioned = provision_clustered(&url, &keypairs).await;
     let lease_lifetime = Duration::from_millis(1500);
+    // The lease lifetime both the old and the new servers are configured
+    // with in this test.
+    if let Some(clustering) = provisioned.plan.clustering.as_mut() {
+        clustering.lease_ttl = lease_lifetime;
+    }
 
     // The deployment pipeline enrolls the allowlist before the first node.
     let owner = owner_database(&provisioned.owner_url).await;
@@ -948,16 +1150,79 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
     .await
     .expect("admin authenticates on the owner-capable server");
     exercise_muc(&mut admin, &mut alice).await;
+    // A resumable stream that loses its transport leaves a detached
+    // session behind.
+    send_element(
+        &mut alice,
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    )
+    .await;
+    collect_until(&mut alice, "stream management enabled", |stanzas| {
+        stanzas.iter().any(|stanza| stanza.is("enabled", SM_NS))
+    })
+    .await;
     drop(alice);
     drop(admin);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let sessions: i64 =
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {SCHEMA}.sm_sessions"))
+                .fetch_one(&provisioned.admin)
+                .await
+                .expect("count detached sessions");
+        if sessions > 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owner-capable runtime persisted no detached session"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // An owner phase that requires the database to itself refuses while the
+    // old server is connected, even though that server uses the migrator
+    // login, and changes nothing.
+    match run_exclusive_owner_phase(&mut provisioned).await {
+        Err(RestrictedRuntimeOwnerError::DatabaseNotExclusive { sessions, .. }) => {
+            assert!(sessions >= 1, "the old server's sessions are counted");
+        }
+        other => panic!("a connected old server did not stop the owner phase: {other:?}"),
+    }
+    assert!(!relation_exists(&provisioned.admin, "clustering_keypool").await);
+
     // The process is killed, as a node that crashes mid-rollout is: its
-    // keypair lease stays held until the lease lifetime runs out.
+    // keypair lease stays held until the lease lifetime runs out. Its
+    // database sessions end with it.
     drop(server);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let sessions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_stat_activity \
+             WHERE datname = pg_catalog.current_database() AND usename = $1",
+        )
+        .bind(&provisioned.roles.migrator)
+        .fetch_one(&provisioned.admin)
+        .await
+        .expect("count the old server's sessions");
+        if sessions == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the old server's sessions did not end"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     for table in [
         "clustering_muc_rooms",
         "clustering_claims",
         "clustering_nodes",
+        "xmpp_occupancy_authority",
+        "mam_messages",
     ] {
         let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {SCHEMA}.{table}"))
             .fetch_one(&provisioned.admin)
@@ -968,12 +1233,7 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
             "the owner-capable runtime must leave rows in {table}"
         );
     }
-    let retained = row_digest(&provisioned.admin, &ADOPTED_TABLES).await;
-    let archived: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {SCHEMA}.mam_messages"))
-        .fetch_one(&provisioned.admin)
-        .await
-        .expect("count archived messages");
-    assert!(archived > 0);
+    let retained = row_digest(&provisioned.admin, &RETAINED_TABLES).await;
 
     // The unenrolled lease table is retired only once the killed node's
     // lease has run out on the database clock. A plan that assumes a longer
@@ -985,7 +1245,7 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
         };
         clustering.activation_delay = assumed_lifetime;
     }
-    let first = run_owner_phase(&provisioned.owner_url, &provisioned.plan).await;
+    let first = run_exclusive_owner_phase(&mut provisioned).await;
     assert!(
         matches!(
             first,
@@ -1004,7 +1264,7 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
         clustering.activation_delay = lease_lifetime;
     }
     tokio::time::sleep(lease_lifetime + Duration::from_millis(300)).await;
-    let second = run_owner_phase(&provisioned.owner_url, &provisioned.plan).await;
+    let second = run_exclusive_owner_phase(&mut provisioned).await;
     assert!(
         matches!(
             second,
@@ -1013,22 +1273,15 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
         "the new generation must stay pending for its delay: {second:?}"
     );
     tokio::time::sleep(lease_lifetime + Duration::from_millis(300)).await;
-    let lineage = run_owner_phase(&provisioned.owner_url, &provisioned.plan)
+    let lineage = run_exclusive_owner_phase(&mut provisioned)
         .await
         .expect("owner phase adopts the owner-capable runtime's database");
 
     assert_eq!(
-        row_digest(&provisioned.admin, &ADOPTED_TABLES).await,
+        row_digest(&provisioned.admin, &RETAINED_TABLES).await,
         retained,
-        "adoption must keep every retained clustering and room row"
+        "adoption must keep every retained row"
     );
-    let archived_after: i64 =
-        sqlx::query_scalar(&format!("SELECT count(*) FROM {SCHEMA}.mam_messages"))
-            .fetch_one(&provisioned.admin)
-            .await
-            .expect("count archived messages");
-    assert_eq!(archived_after, archived);
-
     let prepared = Prepared::attest(provisioned, lineage, &url).await;
     let before = catalog_entries(&prepared.admin).await;
     let pool = attach_clustered_pool(&prepared).await;

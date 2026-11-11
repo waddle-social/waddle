@@ -158,6 +158,14 @@ pub enum SmPersistenceError {
     /// store and rotating node identity needed by fenced persistence.
     #[error("clustered SM persistence started without live claim-store handles")]
     ClusterClaimHandlesUnavailable,
+
+    /// The store was asked to create its schema through a database handle
+    /// that holds no DDL privilege. The schema owner prepares it and the
+    /// store attaches to it.
+    #[error(
+        "the SM persistence schema is prepared by the schema owner, not by this database handle"
+    )]
+    OwnerPreparationRequired,
 }
 
 /// A durable record of an XEP-0198 detached session.

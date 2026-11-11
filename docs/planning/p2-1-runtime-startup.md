@@ -167,14 +167,26 @@ clients on different nodes; a room created on one node and joined and
 written to from the other, with the reflection and the owner's archive
 read; XEP-0198 enabled on one node and resumed on the other; and a graceful
 shutdown of the room's owning node, after which the surviving node delivers
-a direct message, takes the room over, accepts a join and a message, and
-serves the archive. Neither relay may record an `insufficient_privilege`
-error or a catalog-changing statement, the catalog must be unchanged, and
-the owner phase must run again on the database afterwards. It does not
-cover a node crash, a keypair-slot steal, an administrative room owner
-transfer, or the archive of an instant room read from a node that does not
-own the room, which the archive access gate refuses with or without the
-restricted role.
+a direct message, takes the room over, accepts a join and a message, serves
+the archive, and bans an occupant, which commits an admin receipt. A
+replacement node then creates a second room and is killed. The survivor
+expires it, steals the room claim and serves the room; once the keypair
+lease has run out a further node steals the dead node's slot and joins; and
+the owner destroys the room. No relay may record an
+`insufficient_privilege` error or a catalog-changing statement, the catalog
+must be unchanged, and the owner phase must run again on the database
+afterwards.
+
+It does not cover an administrative room owner transfer, or the archive of
+an instant room read from a node that does not own the room, which the
+archive access gate refuses with or without the restricted role. The reply
+to the destroy request is not asserted: when another node's janitor leases
+the destroy completion before the requesting node drains it inline, the
+request is answered with an error although the room is destroyed, with or
+without the restricted role. The relay classifies each statement by its
+first keyword after whitespace and comments and counts a `DO` block as a
+catalog change; DDL run inside a function a statement calls is visible only
+through the catalog comparison.
 
 Old-writer drain and physical primary fencing remain gates, as do the parts
 of typed transaction authority listed under
@@ -227,7 +239,11 @@ destroy outbox and before the grants:
   triggers). An existing enrollment must name the plan's generation and
   PeerId order, or the phase fails with `EnrollmentMismatch` before anything
   else changes;
-- makes `clustering_peer_allowlist` exactly the plan's PeerIds;
+- enrolls the plan's PeerIds in `clustering_peer_allowlist`. An enrolled
+  PeerId the plan does not name fails the phase with `UnexpectedPeers`
+  before anything is written, so a plan built from the wrong keypair pool
+  neither revokes serving peers nor leaves PeerIds outside the pool
+  admitted. A plan with `allowlist: Reconcile` revokes them instead;
 - creates or completes the durable room tables without rewriting a row.
 
 Fenced stream management uses the four relations the portable preparation
@@ -283,10 +299,14 @@ generation. The plan decides what happens:
   that it has exactly the unattested shape (five columns, primary key, schema
   owner, no trigger, constraint or dependent object) and that no row is
   leased. A row is leased when it has a holder, is not marked expired and its
-  heartbeat is newer than `legacy_ttl` on the database clock; a heartbeat
-  ahead of the clock counts as leased. A leased row fails the phase with
-  `LegacyLeaseLive`. The plan's activation delay must be at least
-  `legacy_ttl`.
+  heartbeat is no older than `legacy_ttl` on the database clock, the
+  predicate the old server renews under; a heartbeat ahead of the clock
+  counts as leased. A leased row fails the phase with `LegacyLeaseLive`.
+  `legacy_ttl` below the plan's `lease_ttl` (the lease lifetime the servers
+  are configured with, 30 s by default) is refused with
+  `LegacyTtlBelowLeaseTtl`, and the plan's activation delay must be at least
+  `legacy_ttl`. Every lock the owner steps wait for is bounded by a lock
+  timeout that fails the step with a typed error.
 
 A holder identity is generated per process start, so a restarted process
 cannot renew a surviving row; only a process that is still running can.
@@ -297,24 +317,45 @@ the grants and then fails with `KeypoolActivationPending`; the runtime
 refuses to attach a pending generation. Running the phase again after the
 delay activates it.
 
-By default the clustered phase first requires that no other login has a
-session on the database and that `pg_prepared_xacts` holds no row for it
-(`DatabaseNotExclusive`). Sessions of the migrator login are not counted,
-because the phase's own pooled sessions cannot be told apart from them.
+By default the clustered phase requires the database to itself: no other
+client session and no row in `pg_prepared_xacts` for it
+(`DatabaseNotExclusive`). The caller opens the owner handle with an
+`application_name` generated for the run and names it in the plan; every
+session without that name counts, including one of the migrator login, and
+a handle that does not carry the name is refused (`OwnerSessionUntagged`).
+The check runs before the phase changes anything and again inside the
+retirement transaction, once the lease table is locked.
+
+A server that starts under the schema owner while other nodes serve reads
+the claim schema's gaps from the catalog first and takes no table lock when
+the schema is current. Each missing part is created in its own short
+transaction under a lock timeout, so a bootstrap never holds a lock on
+`clustering_nodes` while it waits for `clustering_claims`.
 
 The cutover runbook must therefore state:
 
 1. Steps 1–4 of the coordinated cutover (stop the pods, rotate the old
    login's credential, terminate its backends, verify none remain and no
    prepared transaction is pending) are complete before the owner phase.
-2. The old server did not connect as the migrator login.
-3. `legacy_ttl` is at least the `WADDLE_CLUSTERING_LEASE_TTL_MS` the old
-   server ran with (30 s unless configured), and the activation delay is at
-   least `legacy_ttl`.
+2. The owner handle is opened with an `application_name` unique to the run,
+   and the plan names it.
+3. `legacy_ttl` is the `WADDLE_CLUSTERING_LEASE_TTL_MS` the old server ran
+   with. The phase only enforces the lifetime the plan says the servers are
+   configured with; if the old deployment had raised it, the operator
+   supplies that larger value. The activation delay is at least
+   `legacy_ttl`.
 4. Retirement discards the old lease rows, including which node held which
    slot.
 5. The owner phase is run again after the activation delay, and the new
    version starts only after that run succeeds.
+6. Retirement is the rollback boundary. The enrolled lease table rejects
+   the old server's five-column insert, so an old image cannot lease a
+   keypair slot on an enrolled database and cannot start clustered. Rolling
+   back to it means restoring the unenrolled table shape first.
+7. The retirement shape check is written against PostgreSQL 17. PostgreSQL
+   18 records NOT NULL constraints in `pg_constraint`, so the check finds
+   constraints besides the primary key there and fails closed with
+   `LegacyShapeMismatch`.
 
 ### Runtime grant matrix
 
@@ -359,18 +400,17 @@ A plan with a clustering section replaces the clustering rows:
 | Privileges | Relations |
 |---|---|
 | `SELECT` | `clustering_peer_allowlist`, `clustering_keypool`, `clustering_keypool_slots` |
-| `SELECT`, `INSERT`, `UPDATE` | `clustering_nodes`, `clustering_orphan_reaper_cursors`, `clustering_keypair_slots` |
+| `SELECT`, `INSERT`, `UPDATE` | `clustering_nodes`, `clustering_orphan_reaper_cursors`, `clustering_keypair_slots`, `clustering_muc_room_lifecycles` |
 | `SELECT`, `INSERT`, `DELETE` | `clustering_muc_admin_receipts` |
-| `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `clustering_claims`, `clustering_steal_intents`, `clustering_muc_rooms`, `clustering_muc_room_affiliations`, `clustering_muc_room_lifecycles` |
+| `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `clustering_claims`, `clustering_steal_intents`, `clustering_muc_rooms`, `clustering_muc_room_affiliations` |
 | sequence `SELECT`, `USAGE` | `clustering_claim_epoch_seq` |
 
 These rows follow the same enumeration run over the clustering, durable room
 and fenced stream management modules. Node and reaper-cursor rows and
 keypair leases are upserted and never deleted. Affiliations are upserted and
 deleted. Admin receipts are inserted and deleted, never updated. Lifecycle
-rows are inserted, updated and locked; no runtime statement deletes one, and
-the row carries `DELETE` only because the room schema verifier requires that
-exact set. The revisioned stream management tables and the inter-server
+rows are inserted, updated and locked; a destroyed room's lifecycle is
+tombstoned, not deleted. The revisioned stream management tables and the inter-server
 resume tables stay without privileges: no serving path selects the first,
 and the registered migrations drop the second. The stream management,
 occupancy and outbox rows are the same with and without clustering.

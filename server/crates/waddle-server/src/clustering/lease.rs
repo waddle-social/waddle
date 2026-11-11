@@ -161,6 +161,21 @@ pub enum KeypoolOwnerError {
     },
     #[error("the activation delay is shorter than the lease lifetime being retired")]
     ActivationDelayBelowLegacyTtl,
+    #[error(
+        "the lease lifetime given for the retired table is shorter than this deployment's \
+         configured lease lifetime"
+    )]
+    LegacyTtlBelowLeaseTtl,
+    #[error(
+        "the database is not exclusive to the owner phase: {sessions} other client session(s) \
+         and {prepared_transactions} prepared transaction(s) are present"
+    )]
+    DatabaseNotExclusive {
+        sessions: i64,
+        prepared_transactions: i64,
+    },
+    #[error("a keypair-pool owner step could not take its lock within the lock timeout")]
+    LockTimeout,
     #[error("the enrolled keypair pool has a different generation or PeerId order")]
     EnrollmentMismatch,
     #[error("the enrolled keypair-pool relations or guards do not have the expected shape")]
@@ -179,9 +194,10 @@ pub enum LegacyKeypairSlots {
     Refuse,
     /// Drop the table and create the enrolled one, but only while no row is
     /// leased. A row is leased when it has a holder, is not marked expired
-    /// and its heartbeat is newer than `legacy_ttl` on the database clock;
-    /// `legacy_ttl` must be at least the lease lifetime the unattested
-    /// runtime was configured with. Holder history in the table is lost.
+    /// and its heartbeat is no older than `legacy_ttl` on the database clock.
+    /// `legacy_ttl` is the lease lifetime the unattested runtime was
+    /// configured with; a value below this deployment's own configured
+    /// lifetime is refused. Holder history in the table is lost.
     Retire { legacy_ttl: Duration },
 }
 
@@ -197,6 +213,15 @@ pub struct KeypoolEnrollment<'a> {
     /// How long a newly enrolled generation stays pending.
     pub activation_delay: Duration,
     pub legacy: LegacyKeypairSlots,
+    /// The lease lifetime this deployment is configured with. A
+    /// [`LegacyKeypairSlots::Retire`] lifetime below it is refused: a lease
+    /// taken under a longer lifetime must not be judged against a shorter
+    /// one.
+    pub lease_ttl: Duration,
+    /// When set, a retirement checks, after it has locked the lease table,
+    /// that the database has no client session without this
+    /// `application_name` and no prepared transaction.
+    pub exclusive_owner_tag: Option<&'a str>,
 }
 
 /// State of the enrolled generation after an owner preparation.
@@ -315,7 +340,9 @@ impl PostgresKeypairSlotLease {
         if db.attested_pg_writer_capability().is_some() {
             return Err(KeypoolOwnerError::OwnerHandleRequired);
         }
-        activate_keypool_owner(db, identity, generation).await
+        activate_keypool_owner(db, identity, generation)
+            .await
+            .map_err(keypool_lock_timeout)
     }
 
     /// Bring the keypair authority to the active enrollment `enrollment`
@@ -351,7 +378,9 @@ impl PostgresKeypairSlotLease {
             "keypool runtime role",
         )
         .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
-        prepare_keypool_owner(db, identity, enrollment).await
+        prepare_keypool_owner(db, identity, enrollment)
+            .await
+            .map_err(keypool_lock_timeout)
     }
 
     /// Switch keypair guard functions that carry `SECURITY DEFINER` to run
@@ -373,10 +402,13 @@ impl PostgresKeypairSlotLease {
         }
         crate::db::physical_attestation::validate_identifier(runtime_role, "keypool runtime role")
             .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
-        let mut tx = begin_keypool_owner(db, identity, runtime_role).await?;
-        let converted = convert_definer_guards(&mut tx, &identity.schema.name.0).await?;
-        tx.commit().await?;
-        Ok(converted)
+        let convert = async {
+            let mut tx = begin_keypool_owner(db, identity, runtime_role).await?;
+            let converted = convert_definer_guards(&mut tx, &identity.schema.name.0).await?;
+            tx.commit().await?;
+            Ok(converted)
+        };
+        convert.await.map_err(keypool_lock_timeout)
     }
 
     /// Attach the exact attested main and independent control-plane pools to
@@ -791,6 +823,57 @@ enum KeypairInventory {
     Enrolled,
 }
 
+/// Bound on every table lock an owner step waits for. A step that cannot get
+/// its lock fails with a typed error and changes nothing.
+pub(crate) const OWNER_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '10s'";
+
+/// Whether `error` is PostgreSQL's `lock_not_available`, which a statement
+/// raises when `lock_timeout` expires.
+pub(crate) fn is_lock_timeout(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Internal(sqlx::Error::Database(inner))
+            if inner.code().as_deref() == Some("55P03")
+    )
+}
+
+fn keypool_lock_timeout(error: KeypoolOwnerError) -> KeypoolOwnerError {
+    match error {
+        KeypoolOwnerError::Database(error) if is_lock_timeout(&error) => {
+            KeypoolOwnerError::LockTimeout
+        }
+        other => other,
+    }
+}
+
+/// Client sessions on the current database that do not carry `tag` as
+/// their `application_name` under the session's own login, and prepared
+/// transactions in it. The caller's own backend is not counted.
+pub(crate) async fn foreign_sessions(
+    tx: &mut Transaction<'_>,
+    tag: &str,
+) -> Result<(i64, i64), DatabaseError> {
+    let mut rows = tx
+        .query(
+            "SELECT (SELECT count(*) FROM pg_catalog.pg_stat_activity activity \
+               WHERE activity.datname = pg_catalog.current_database() \
+                 AND activity.pid <> pg_catalog.pg_backend_pid() \
+                 AND activity.usename IS NOT NULL \
+                 AND (activity.backend_type IS NULL \
+                   OR activity.backend_type = 'client backend') \
+                 AND NOT (activity.usename = session_user \
+                   AND activity.application_name = ?))::bigint, \
+               (SELECT count(*) FROM pg_catalog.pg_prepared_xacts prepared \
+                 WHERE prepared.database = pg_catalog.current_database())::bigint",
+            crate::db_params![tag],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok((row.get::<i64>(0)?, row.get::<i64>(1)?)),
+        None => Ok((i64::MAX, i64::MAX)),
+    }
+}
+
 /// Open the owner transaction every keypool preparation runs in: the
 /// keypool advisory lock, the pinned owner schema, schema USAGE for the
 /// runtime and the runtime role checks.
@@ -813,6 +896,7 @@ async fn begin_keypool_owner<'a>(
     crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
         .await
         .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+    tx.execute(OWNER_LOCK_TIMEOUT_SQL, ()).await?;
     let schema_name = &identity.schema.name.0;
     let schema = crate::db::physical_attestation::quote_identifier(schema_name);
     tx.execute(
@@ -926,13 +1010,26 @@ async fn prepare_keypool_owner(
             let LegacyKeypairSlots::Retire { legacy_ttl } = enrollment.legacy else {
                 return Err(KeypoolOwnerError::LegacyKeypairSlots);
             };
+            // A lease taken under this deployment's lifetime is live for
+            // that long, so a shorter claimed lifetime would call it expired
+            // early. An operator whose retired deployment ran with a longer
+            // lifetime supplies that longer one.
+            if legacy_ttl < enrollment.lease_ttl {
+                return Err(KeypoolOwnerError::LegacyTtlBelowLeaseTtl);
+            }
             // A holder that outlives the liveness check below could still
             // believe in its lease for one more lifetime; the pending
             // generation must not activate inside that window.
             if enrollment.activation_delay < legacy_ttl {
                 return Err(KeypoolOwnerError::ActivationDelayBelowLegacyTtl);
             }
-            retire_legacy_keypair_slots(&mut tx, schema_name, legacy_ttl).await?;
+            retire_legacy_keypair_slots(
+                &mut tx,
+                schema_name,
+                legacy_ttl,
+                enrollment.exclusive_owner_tag,
+            )
+            .await?;
             create_keypool_generation(
                 &mut tx,
                 schema_name,
@@ -967,6 +1064,7 @@ async fn retire_legacy_keypair_slots(
     tx: &mut Transaction<'_>,
     schema_name: &str,
     legacy_ttl: Duration,
+    exclusive_owner_tag: Option<&str>,
 ) -> Result<(), KeypoolOwnerError> {
     let schema = crate::db::physical_attestation::quote_identifier(schema_name);
     tx.execute(
@@ -974,6 +1072,20 @@ async fn retire_legacy_keypair_slots(
         (),
     )
     .await?;
+    // Checked again here, with the table locked: a session that connected
+    // after the owner phase's first check cannot write a lease any more, but
+    // it shows that a server is running against the database.
+    if let Some(tag) = exclusive_owner_tag {
+        match foreign_sessions(tx, tag).await? {
+            (0, 0) => {}
+            (sessions, prepared_transactions) => {
+                return Err(KeypoolOwnerError::DatabaseNotExclusive {
+                    sessions,
+                    prepared_transactions,
+                });
+            }
+        }
+    }
     let mut shape = tx
         .query(
             "SELECT c.relkind = 'r' AND c.relpersistence = 'p' \
@@ -1031,9 +1143,11 @@ async fn retire_legacy_keypair_slots(
     }
     let ttl_ms = i64::try_from(legacy_ttl.as_millis())
         .map_err(|_| KeypoolOwnerError::ActivationDelayBelowLegacyTtl)?;
-    // Liveness is judged on the database clock. The `expired` flag alone is
-    // not enough to call a row leased, and a heartbeat ahead of the clock is
-    // newer than any cutoff, so it counts as leased.
+    // Liveness is judged on the database clock with the predicate the
+    // unattested runtime renews under: a heartbeat exactly one lifetime old
+    // is still renewable. The `expired` flag alone is not enough to call a
+    // row leased, and a heartbeat ahead of the clock is newer than any
+    // cutoff, so it counts as leased.
     let mut live = tx
         .query(
             &format!(
@@ -1041,7 +1155,7 @@ async fn retire_legacy_keypair_slots(
                     (EXTRACT(EPOCH FROM (now() - heartbeat)) * 1000)::bigint \
                  FROM {schema}.{KEYPAIR_SLOT_TABLE} \
                  WHERE holder_node IS NOT NULL AND NOT expired \
-                   AND heartbeat > now() - (? || ' milliseconds')::interval \
+                   AND heartbeat >= now() - (? || ' milliseconds')::interval \
                  ORDER BY slot_index LIMIT 1"
             ),
             crate::db_params![ttl_ms.to_string()],
@@ -1055,8 +1169,11 @@ async fn retire_legacy_keypair_slots(
         });
     }
     drop(live);
-    tx.execute(&format!("DROP TABLE {schema}.{KEYPAIR_SLOT_TABLE}"), ())
-        .await?;
+    tx.execute(
+        &format!("DROP TABLE {schema}.{KEYPAIR_SLOT_TABLE} RESTRICT"),
+        (),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1398,6 +1515,7 @@ async fn activate_keypool_owner(
     crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
         .await
         .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+    tx.execute(OWNER_LOCK_TIMEOUT_SQL, ()).await?;
     let schema = crate::db::physical_attestation::quote_identifier(&identity.schema.name.0);
     tx.execute(
         &format!(

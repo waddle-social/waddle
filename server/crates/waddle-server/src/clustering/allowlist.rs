@@ -66,6 +66,15 @@ pub enum AllowlistOwnerPreparationError {
     UnsafeOwnerBoundary,
     #[error("peer-allowlist enrollment requires a non-empty set of distinct PeerIds")]
     InvalidPeerSet,
+    #[error(
+        "the peer allowlist holds {} PeerId(s) the plan does not name ({}); removing them \
+         needs an explicit reconciling plan",
+        peers.len(),
+        peers.join(",")
+    )]
+    UnexpectedPeers { peers: Vec<String> },
+    #[error("the peer-allowlist owner step could not take its lock within the lock timeout")]
+    LockTimeout,
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -80,19 +89,53 @@ const ALLOWLIST_TABLE_SQL: &str = r#"
 /// Serializes peer-allowlist owner preparation across owner sessions.
 const ALLOWLIST_OWNER_ADVISORY_LOCK: i64 = 6_841_445_497_037_938_002;
 
-/// Create the peer allowlist if it is missing and make its rows exactly
-/// `peer_ids`, in one owner transaction: PeerIds outside the set are revoked
-/// and missing ones enrolled, while rows already enrolled keep their
-/// enrollment time. The runtime only ever reads this table, so the owner
-/// phase is the enrollment authority for a restricted deployment.
+/// What the owner does with enrolled PeerIds the plan does not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AllowlistRemoval {
+    /// Refuse the preparation and change nothing. A plan built from the
+    /// wrong keypair pool therefore neither revokes the peers that are
+    /// serving nor leaves an allowlist that admits PeerIds outside the
+    /// enrolled pool.
+    #[default]
+    Refuse,
+    /// Revoke them, making the allowlist exactly the plan's PeerIds.
+    Reconcile,
+}
+
+/// Create the peer allowlist if it is missing and enroll `peer_ids`, in one
+/// owner transaction. Rows already enrolled keep their enrollment time.
+/// Enrolled PeerIds outside `peer_ids` are refused with
+/// [`AllowlistOwnerPreparationError::UnexpectedPeers`] before anything is
+/// written, or revoked under [`AllowlistRemoval::Reconcile`]. The runtime
+/// only ever reads this table, so the owner phase is the enrollment
+/// authority for a restricted deployment.
 pub async fn prepare_peer_allowlist_owner(
     db: &Database,
     identity: &crate::db::lineage::PgIdentity,
     peer_ids: &[PeerId],
+    removal: AllowlistRemoval,
 ) -> Result<(), AllowlistOwnerPreparationError> {
     if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
         return Err(AllowlistOwnerPreparationError::OwnerHandleRequired);
     }
+    reconcile_peer_allowlist(db, identity, peer_ids, removal)
+        .await
+        .map_err(|error| match error {
+            AllowlistOwnerPreparationError::Database(error)
+                if crate::clustering::lease::is_lock_timeout(&error) =>
+            {
+                AllowlistOwnerPreparationError::LockTimeout
+            }
+            other => other,
+        })
+}
+
+async fn reconcile_peer_allowlist(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+    peer_ids: &[PeerId],
+    removal: AllowlistRemoval,
+) -> Result<(), AllowlistOwnerPreparationError> {
     let enrolled = peer_ids
         .iter()
         .map(PeerId::to_string)
@@ -114,6 +157,8 @@ pub async fn prepare_peer_allowlist_owner(
     crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
         .await
         .map_err(|_| AllowlistOwnerPreparationError::UnsafeOwnerBoundary)?;
+    tx.execute(crate::clustering::lease::OWNER_LOCK_TIMEOUT_SQL, ())
+        .await?;
     tx.execute("SET LOCAL default_table_access_method = heap", ())
         .await?;
     tx.execute(ALLOWLIST_TABLE_SQL, ()).await?;
@@ -125,7 +170,12 @@ pub async fn prepare_peer_allowlist_owner(
         existing.insert(row.get::<String>(0)?);
     }
     drop(rows);
-    for revoked in existing.difference(&enrolled) {
+    let mut unexpected: Vec<String> = existing.difference(&enrolled).cloned().collect();
+    unexpected.sort_unstable();
+    if removal == AllowlistRemoval::Refuse && !unexpected.is_empty() {
+        return Err(AllowlistOwnerPreparationError::UnexpectedPeers { peers: unexpected });
+    }
+    for revoked in &unexpected {
         tx.execute(
             "DELETE FROM clustering_peer_allowlist WHERE peer_id = ?",
             crate::db_params![revoked.clone()],

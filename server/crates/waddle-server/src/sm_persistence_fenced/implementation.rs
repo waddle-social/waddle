@@ -74,7 +74,7 @@ pub(in crate::sm_persistence_fenced) fn claim_error_to_sm_persistence_error(
         | ClaimError::Conflict
         | ClaimError::Draining
         | ClaimError::AuthorityDisabled => SmPersistenceError::NotOwner { entity },
-        ClaimError::Backend(_) | ClaimError::Poisoned => {
+        ClaimError::Backend(_) | ClaimError::Poisoned | ClaimError::OwnerPreparationRequired => {
             SmPersistenceError::Other(error.to_string())
         }
         // Defensive only: `ensure_claimed`/`acquire` never actually return
@@ -182,10 +182,7 @@ impl PostgresFencedSmPersistence {
         // The restricted runtime holds no DDL privilege; its schema is
         // prepared by the owner and attached through `attach_runtime`.
         if db.uses_attested_postgres_pool() {
-            return Err(SmPersistenceError::Other(
-                "fenced SM persistence on an attested pool attaches to an owner-prepared schema"
-                    .to_owned(),
-            ));
+            return Err(SmPersistenceError::OwnerPreparationRequired);
         }
         let storage = Self {
             db,
