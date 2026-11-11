@@ -41,6 +41,12 @@ impl SplitIoRelinquishment {
         }
     }
 
+    /// The raw completion signal: `true` once both half destructors returned,
+    /// closed without `true` if that was never observed.
+    pub(crate) fn completion(&self) -> watch::Receiver<bool> {
+        self.completion.clone()
+    }
+
     /// The connection reference associated with these factory-supplied halves.
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.connection_ref

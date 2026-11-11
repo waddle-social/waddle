@@ -32,10 +32,12 @@ use super::{
 use crate::clustering::NodeAdmissionPermit;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
-use crate::websocket_transport::LegacySocketAdmission;
+use crate::websocket_transport::{
+    IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits, LiveSocketTransport,
+    TransportLimits, WebSocketInput, WebSocketMessageSink,
+};
 use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
-use futures::stream::{SplitSink, SplitStream};
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -314,8 +316,25 @@ enum LiveSocketPhase {
     Transitioning,
 }
 
-type LiveSocketIo =
-    LocalSocketIo<InterruptibleSink<SplitSink<WebSocket, Message>>, SplitStream<WebSocket>>;
+type LiveSocketIo = LocalSocketIo<
+    InterruptibleSink<WebSocketMessageSink<axum::Error>>,
+    WebSocketInput<axum::Error>,
+>;
+
+/// Outbound pump queue for one connection. The loop writes one frame and
+/// waits for its flush, so the count only has to cover a frame in flight plus
+/// the short terminal sequence. Outbound frames have no byte cap of their own.
+const TRANSPORT_OUTBOUND_FRAMES: usize = 4;
+/// Inbound pump queue for one connection. The reader pump reads on demand, so
+/// at most one frame waits here. The byte bound stays above anything the
+/// WebSocket layer can deliver, so oversized stanzas still reach the protocol
+/// handler's own limit and stream error.
+const TRANSPORT_INBOUND_FRAMES: usize = 1;
+const TRANSPORT_QUEUE_BYTES: usize = u32::MAX as usize;
+/// How long the owner task waits, once the owner has finished, for the pump
+/// custodian to report both pumps joined before leaving the inventory slot in
+/// place.
+const TRANSPORT_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct LiveSocketState {
     // Keep the pre-extraction drop order on cancellation: channels and timers
@@ -356,6 +375,8 @@ impl LiveWebSocketConnection {
         let drain_guard = self._connection_guard.clone();
         let node_lifecycle = self.state.deps.app_state.node_lifecycle.clone();
         let stop = self.state.deps.shutdown.stop_token();
+        let inventory = self.state.deps.app_state.websocket_inventory.clone();
+        let transport = Arc::new(std::sync::OnceLock::new());
         #[cfg(feature = "test-support")]
         let panic_caught = self
             .state
@@ -373,11 +394,19 @@ impl LiveWebSocketConnection {
             .owner_panic_fenced
             .clone();
         let owner = tokio::spawn(async move {
-            if AssertUnwindSafe(self.run(caller_gone))
+            let panicked = AssertUnwindSafe(self.run(caller_gone, Arc::clone(&transport)))
                 .catch_unwind()
                 .await
-                .is_err()
-            {
+                .is_err();
+            // The owner has returned or unwound, so every transport handle is
+            // dropped and the pumps are stopping. Release the inventory slot
+            // once the custodian has seen both pumps and the owner's marker
+            // task finish. A pump that does not join keeps its slot, so
+            // capacity never exceeds the sockets still held.
+            if let Some(observer) = transport.get() {
+                release_transport_slot(&inventory, observer).await;
+            }
+            if panicked {
                 #[cfg(feature = "test-support")]
                 if let Some(barrier) = panic_caught {
                     barrier.arrive().await;
@@ -403,7 +432,11 @@ impl LiveWebSocketConnection {
     }
 
     /// Run the connection through its live I/O loop and shutdown settlement.
-    async fn run(mut self, caller_gone: CancellationToken) {
+    async fn run(
+        mut self,
+        caller_gone: CancellationToken,
+        transport: Arc<std::sync::OnceLock<IoCustodianObserver>>,
+    ) {
         #[cfg(feature = "test-support")]
         if let Some(barrier) = &self
             .state
@@ -444,14 +477,61 @@ impl LiveWebSocketConnection {
         else {
             unreachable!("run starts with the upgraded socket");
         };
+        let limits = match (
+            Limits::new(TRANSPORT_INBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
+            Limits::new(TRANSPORT_OUTBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
+        ) {
+            (Ok(inbound), Ok(outbound)) => TransportLimits::new(inbound, outbound),
+            _ => unreachable!("the transport queue bounds are positive and within range"),
+        };
+        let LiveSocketTransport {
+            observer: transport_observer,
+            cleanup: _transport_cleanup,
+            input: ws_receiver,
+            output: ws_sender,
+        } = match self
+            .admission
+            .start_socket(*socket, limits, SHUTDOWN_CLOSE_TIMEOUT)
+            .await
+        {
+            Ok(transport) => transport,
+            Err(error) => {
+                info!(
+                    %error,
+                    connection_ref = ?self.admission.connection_ref(),
+                    "Closing upgraded WebSocket: transport start was refused"
+                );
+                return;
+            }
+        };
+        // The custodian joins this task before it reports the connection
+        // joined. It ends when the owner returns or unwinds.
+        let _ = transport.set(transport_observer.clone());
+        let (_owner_finished, owner_running) = tokio::sync::oneshot::channel::<()>();
+        if let Err(error) = self
+            .state
+            .deps
+            .app_state
+            .websocket_inventory
+            .register_auxiliary_task(
+                self.admission.connection_ref(),
+                tokio::spawn(async move {
+                    let _ = owner_running.await;
+                }),
+            )
+        {
+            error!(
+                %error,
+                connection_ref = ?self.admission.connection_ref(),
+                "WebSocket owner could not register with its transport custodian"
+            );
+        }
         let state = &self.state;
         let admission = &self.admission;
         let admission_permit = admission.permit();
         let domain = state.deps.auth_state.xmpp_domain.clone();
         let shutdown_token = state.deps.shutdown.stop_token();
         info!(domain = %domain, "XMPP WebSocket connection established");
-
-        let (ws_sender, ws_receiver) = (*socket).split();
 
         // Create outbound channel for receiving messages from other connections.
         // After the session is registered, `pending_tx` is handed to the
@@ -486,9 +566,15 @@ impl LiveWebSocketConnection {
         let ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
             .with_resume_control(live_resume_control.clone());
         // This owner spans live I/O and shutdown settlement, including
-        // cancellation/unwind. It publishes only after both halves are dropped.
-        let (socket_io, witness) = LocalSocketIo::new(ws_sender, ws_receiver);
-        conn.local_io_relinquishment = Some(witness);
+        // cancellation/unwind. The physical halves belong to the pump tasks,
+        // so the witness is theirs: dropping `socket_io` stops the pumps, and
+        // they publish once both halves are gone.
+        let (socket_io, _handles_dropped) = LocalSocketIo::new(ws_sender, ws_receiver);
+        conn.local_io_relinquishment = Some(
+            waddle_xmpp::registry::LocalIoRelinquishment::from_completion(
+                transport_observer.local_io_relinquishment().completion(),
+            ),
+        );
         let (handoff_tx, handoff_rx) = mpsc::unbounded_channel::<OrderedRelayHandoffCompletion>();
         conn.ordered_relay_handoff_tx = Some(handoff_tx);
         // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
@@ -620,6 +706,12 @@ impl LiveWebSocketConnection {
             // pre-select loop), and yields between chunks, so a client
             // streaming frames mid-flood cannot monopolize the executor.
             let deferred_pending = !conn.deferred_inbound.is_empty();
+            // The select below prefers client input to its timers. A frame the
+            // socket already holds must therefore be ready before the select
+            // is polled, as it would be for a task reading its own socket.
+            if !deferred_pending {
+                ws_receiver.settle().await;
+            }
             tokio::select! {
                 biased;
 
@@ -1034,6 +1126,18 @@ impl LiveWebSocketConnection {
             },
         )
         .await;
+    }
+}
+
+async fn release_transport_slot(inventory: &IoCustodianInventory, observer: &IoCustodianObserver) {
+    match tokio::time::timeout(TRANSPORT_JOIN_TIMEOUT, observer.wait_until_joined()).await {
+        Ok(_) => {
+            inventory.prune_joined();
+        }
+        Err(_) => error!(
+            connection_ref = ?observer.connection_ref(),
+            "WebSocket transport pumps did not join; the inventory slot stays held"
+        ),
     }
 }
 

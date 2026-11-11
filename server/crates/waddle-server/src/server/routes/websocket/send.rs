@@ -62,6 +62,8 @@ impl WebSocketWriteError for axum::Error {}
 
 impl WebSocketWriteError for std::io::Error {}
 
+impl WebSocketWriteError for crate::websocket_transport::OutputError<axum::Error> {}
+
 #[cfg(test)]
 impl WebSocketWriteError for &'static str {}
 
