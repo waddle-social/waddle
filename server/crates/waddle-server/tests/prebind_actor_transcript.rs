@@ -145,6 +145,8 @@ impl Fixture {
             capacity: MaxWebSocketConnections::from_raw(Some("1")).expect("capacity"),
             clustered_identity: None,
             barriers: AdmissionTestBarriers::default(),
+            live_connection_host: None,
+            ws_keepalive: None,
         })
         .await;
         let (started_tx, mut started_rx) = mpsc::channel(1);

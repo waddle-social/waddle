@@ -90,6 +90,8 @@ pub struct AppState {
     pub node_lifecycle: NodeLifecycle,
     /// Per-process capacity reserved for live and pending WebSocket connections.
     pub(crate) websocket_inventory: IoCustodianInventory,
+    /// Which owner runs the live loop of each started connection.
+    pub(crate) live_connection_host: LiveConnectionHost,
     #[cfg(feature = "test-support")]
     pub websocket_admission_test_barriers: crate::websocket_transport::AdmissionTestBarriers,
     /// Live `ClaimStore`/node-identity handles from the clustering
@@ -218,6 +220,10 @@ impl AppState {
             node_lifecycle,
             websocket_inventory: IoCustodianInventory::new(max_websocket_connections.get())
                 .expect("validated WebSocket capacity is positive"),
+            #[cfg(not(feature = "test-support"))]
+            live_connection_host: LiveConnectionHost::default(),
+            #[cfg(feature = "test-support")]
+            live_connection_host: crate::test_support::live_connection_host_for_tests(),
             #[cfg(feature = "test-support")]
             websocket_admission_test_barriers: Default::default(),
             clustering_claims,
@@ -231,6 +237,18 @@ impl AppState {
             runtime_progress: Arc::new(RuntimeProgress::new()),
         }
     }
+}
+
+/// The owner that runs a started connection's live loop. The pre-start close
+/// paths run on the connection's own task under either host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveConnectionHost {
+    /// The connection task drives the loop itself.
+    #[default]
+    PlainTask,
+    /// A Kameo actor, run on the connection task, drives the loop from its
+    /// `next` hook and settles in `on_stop`.
+    Actor,
 }
 
 /// The lifecycle generation and identity revision tied to their AppState.

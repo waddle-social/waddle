@@ -172,15 +172,16 @@ async fn drain_recovered_stream(
 ///
 /// Characterizes current behaviour; changes with D2d (#2046), which removes
 /// this IQ capacity wait. D2p records the class-wide exit criterion.
-async fn observe_cycle(entry: EntryOrder) {
+async fn observe_cycle(entry: EntryOrder, host: &[(&str, &str)]) {
     let observer = UdpSocket::bind("127.0.0.1:0").await.expect("bind observer");
     let config = serde_json::to_string(&IqForwardObserverConfig {
         destination: observer.local_addr().expect("observer address"),
         request_ids: [ALICE_WAIT.to_owned(), BOB_WAIT.to_owned()],
     })
     .expect("serialize observer configuration");
-    let server =
-        TestServer::start_with_extra_envs(&ACCOUNTS, &[(IQ_FORWARD_OBSERVER_ENV, config.as_str())]);
+    let mut envs = vec![(IQ_FORWARD_OBSERVER_ENV, config.as_str())];
+    envs.extend_from_slice(host);
+    let server = TestServer::start_with_extra_envs(&ACCOUNTS, &envs);
     let (mut alice, alice_jid) = connect(&server, ALICE, "desk").await;
     let (mut bob, bob_jid) = connect(&server, BOB, "web").await;
     enable_resumable_sm(&mut alice, "alice").await;
@@ -369,7 +370,7 @@ async fn observe_cycle(entry: EntryOrder) {
 /// Two independently observed active sends with near-simultaneous entry.
 #[tokio::test]
 async fn mutual_full_outbound_channels_hold_iq_forwarders_despite_recovery_acks_until_a_backstop() {
-    observe_cycle(EntryOrder::Simultaneous).await;
+    observe_cycle(EntryOrder::Simultaneous, &[]).await;
 }
 
 /// The entry offset exposes the peer-completion path after the first backstop
@@ -377,5 +378,15 @@ async fn mutual_full_outbound_channels_hold_iq_forwarders_despite_recovery_acks_
 /// assuming that a particular timer must win a scheduler race on every host.
 #[tokio::test]
 async fn staggered_full_outbound_channels_hold_both_iq_forwarders_despite_recovery_acks() {
-    observe_cycle(EntryOrder::Staggered).await;
+    observe_cycle(EntryOrder::Staggered, &[]).await;
+}
+
+/// The staggered cycle with the live loop hosted by the connection actor.
+#[tokio::test]
+async fn staggered_full_outbound_channels_hold_both_iq_forwarders_under_the_actor_host() {
+    observe_cycle(
+        EntryOrder::Staggered,
+        &[(waddle_ws_test_support::LIVE_CONNECTION_HOST_ENV, "actor")],
+    )
+    .await;
 }

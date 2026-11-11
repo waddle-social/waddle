@@ -311,7 +311,10 @@ batch writer and converge on the actor hosting the legacy handlers anyway.
 The live loop therefore moves into the actor as a unit. Control does not need a
 mailbox turn while a handler awaits a write: writes race the binding permit and
 shutdown tokens, and the sink polls write interruption and live-resume control
-on every poll.
+on every poll. The reverse does not hold for the mailbox: Kameo handles a
+message between two turns of the loop, with no control source, socket or timer
+polled meanwhile, so a message handler on the connection actor must not await
+unbounded work; such work runs as a turn of the loop instead.
 
 | # | Slice | Deletes | Proof | Size | Gate |
 | --- | --- | --- | --- | --- | --- |

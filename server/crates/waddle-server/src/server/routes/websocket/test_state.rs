@@ -161,6 +161,17 @@ where
         .expect("MUC destroy completion outbox");
 
     let server_config = ServerConfig::test_homeserver();
+    #[cfg(feature = "test-support")]
+    let server_config = {
+        let mut server_config = server_config;
+        if let Some(keepalive) = websocket_admission
+            .as_ref()
+            .and_then(|config| config.ws_keepalive)
+        {
+            server_config.ws_keepalive = keepalive;
+        }
+        server_config
+    };
     let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
     let shared_pubsub = app_state_override
         .as_ref()
@@ -185,6 +196,9 @@ where
                     state.clustering_claims.node_identity = identity;
                 }
                 state.websocket_admission_test_barriers = config.barriers;
+                if let Some(host) = config.live_connection_host {
+                    state.live_connection_host = host;
+                }
             }
             if let Some(clustering) = clustering_override {
                 state.clustering_claims = clustering;

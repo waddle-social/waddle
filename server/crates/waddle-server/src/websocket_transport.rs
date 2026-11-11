@@ -981,10 +981,12 @@ pub(crate) struct LiveSocketTransport {
 }
 
 /// The owner's half of the inventory slot. Dropping it reports that the owner
-/// holds nothing more for this connection, whether it returned or unwound; a
-/// panicking owner has dropped its transport handles by the time this runs,
-/// and the node is fenced separately. The custodian releases the slot only
-/// after the pumps have joined as well.
+/// holds nothing more for this connection, whether it settled, unwound or was
+/// stopped without settling. The owner therefore drops its transport handles
+/// first on every path: the live state declares this guard after its socket
+/// halves, and settlement consumes the halves before the state is dropped. A
+/// failed owner fences the node separately. The custodian releases the slot
+/// only after the pumps have joined as well.
 pub(crate) struct LiveSocketCleanup {
     guard: Option<crate::server::routes::websocket::supervised_io::AuxiliaryCleanupGuard>,
     /// Ends the marker task the custodian joins before it reports the
@@ -1135,7 +1137,141 @@ pub struct AdmissionTestBarriers {
     pub owner_panic_active: Option<Arc<AdmissionTestBarrier>>,
     pub owner_panic_caught: Option<Arc<AdmissionTestBarrier>>,
     pub owner_panic_fenced: Option<Arc<AdmissionTestBarrier>>,
+    /// Panics the owner at the start of settlement, once released.
+    pub owner_panic_settling: Option<Arc<AdmissionTestBarrier>>,
     pub callback_waiter: Option<Arc<CallbackWaiterTestControl>>,
+    pub live_actor: Option<Arc<LiveActorTestTap>>,
+}
+
+/// Test-only reach into the actor hosting a live connection. The owner task
+/// installs the operations when it starts the actor; the actor reference
+/// itself stays inside them.
+///
+/// A state serves one tap to the first connection an actor hosts; later
+/// connections of the same state are not observed.
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+pub struct LiveActorTestTap {
+    ops: std::sync::OnceLock<LiveActorTestOps>,
+    hosted: CancellationToken,
+    pings_handled: std::sync::atomic::AtomicUsize,
+    loop_events_handled: std::sync::atomic::AtomicUsize,
+    /// Loop events handled before each ping, in the order pings were handled.
+    loop_events_before_ping: Mutex<Vec<usize>>,
+    /// Pings handled before each loop event, in the order events were handled.
+    pings_before_loop_event: Mutex<Vec<usize>>,
+    park_requested: std::sync::atomic::AtomicBool,
+    park: AdmissionTestBarrier,
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) struct LiveActorTestOps {
+    /// Offer this many no-op messages without waiting; returns how many the
+    /// mailbox accepted.
+    pub(crate) flood: Box<dyn Fn(usize) -> usize + Send + Sync>,
+    /// Send one no-op message and wait for the actor to handle it.
+    pub(crate) ping: Box<dyn Fn() -> BoxFuture<'static, bool> + Send + Sync>,
+    pub(crate) kill: Box<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(feature = "test-support")]
+impl LiveActorTestTap {
+    /// Returns whether this connection is the one the tap observes.
+    pub(crate) fn install(&self, ops: LiveActorTestOps) -> bool {
+        let installed = self.ops.set(ops).is_ok();
+        if installed {
+            self.hosted.cancel();
+        }
+        installed
+    }
+
+    pub(crate) fn note_ping_handled(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.loop_events_before_ping
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .push(self.loop_events_handled.load(SeqCst));
+        self.pings_handled.fetch_add(1, SeqCst);
+    }
+
+    pub(crate) fn note_loop_event_handled(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.pings_before_loop_event
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .push(self.pings_handled.load(SeqCst));
+        self.loop_events_handled.fetch_add(1, SeqCst);
+    }
+
+    /// Called by the hosted loop at the top of every turn. Returns whether
+    /// the loop was parked here.
+    pub(crate) async fn before_turn(&self) -> bool {
+        let parked = self
+            .park_requested
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        if parked {
+            self.park.arrive().await;
+        }
+        parked
+    }
+
+    /// Stop the hosted loop at the top of its next turn and wait until it is
+    /// there. One no-op message wakes the loop, so `pings_handled` grows by
+    /// one. Sources that become ready while the loop is parked are all ready
+    /// together when [`Self::resume`] lets it wait again, and that wait
+    /// offers the mailbox.
+    pub async fn park(&self) {
+        self.park_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(self.flood(1), 1, "the wake-up message was refused");
+        self.park.wait_until_entered().await;
+    }
+
+    pub fn resume(&self) {
+        self.park.release();
+    }
+
+    pub fn loop_events_before_each_ping(&self) -> Vec<usize> {
+        self.loop_events_before_ping
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone()
+    }
+
+    pub fn pings_before_each_loop_event(&self) -> Vec<usize> {
+        self.pings_before_loop_event
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone()
+    }
+
+    pub async fn wait_until_hosted(&self) {
+        self.hosted.cancelled().await;
+    }
+
+    /// Offer `count` no-op messages without waiting. Returns how many the
+    /// mailbox accepted; zero before an actor is hosted.
+    pub fn flood(&self, count: usize) -> usize {
+        self.ops.get().map_or(0, |ops| (ops.flood)(count))
+    }
+
+    /// Whether the actor handled one no-op message.
+    pub async fn ping(&self) -> bool {
+        match self.ops.get() {
+            Some(ops) => (ops.ping)().await,
+            None => false,
+        }
+    }
+
+    pub fn kill(&self) {
+        if let Some(ops) = self.ops.get() {
+            (ops.kill)();
+        }
+    }
+
+    pub fn pings_handled(&self) -> usize {
+        self.pings_handled.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// Test-only control of the actual upgrade callback's observational waiter.

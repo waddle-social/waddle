@@ -56,6 +56,12 @@ const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// and cargo places package binaries one directory up. Running the
 /// tests through cargo (`cargo test -p waddle-server`, `cargo test
 /// --workspace`) always builds the binary before the tests execute.
+/// Selects the live connection host of a server built with `test-support`:
+/// `actor` or `plain-task`. Must equal
+/// `waddle_server::test_support::LIVE_CONNECTION_HOST_ENV`; a server built
+/// without the feature ignores it.
+pub const LIVE_CONNECTION_HOST_ENV: &str = "WADDLE_TEST_LIVE_CONNECTION_HOST";
+
 fn waddle_server_bin() -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("current test executable path");
     let profile_dir = exe
@@ -260,6 +266,12 @@ impl TestServer {
             if key.starts_with("WADDLE_") || key.starts_with("OTEL_") {
                 command.env_remove(key);
             }
+        }
+        // The one variable of the test process the server inherits: a
+        // whole-suite run under one live connection host has to reach the
+        // servers the suites spawn. `extra_envs` still overrides it.
+        if let Ok(host) = std::env::var(LIVE_CONNECTION_HOST_ENV) {
+            command.env(LIVE_CONNECTION_HOST_ENV, host);
         }
         command
             .env("WADDLE_CERTS_EPHEMERAL", "true")

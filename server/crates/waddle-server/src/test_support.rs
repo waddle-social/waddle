@@ -873,6 +873,76 @@ pub struct WebSocketAdmissionTestConfig {
     /// `None` is standalone; `Some(None)` represents missing clustered identity.
     pub clustered_identity: Option<Option<waddle_xmpp::ownership::SharedNodeIdentity>>,
     pub barriers: crate::websocket_transport::AdmissionTestBarriers,
+    /// `None` keeps the host selected for the test.
+    pub live_connection_host: Option<crate::server::LiveConnectionHost>,
+    /// `None` keeps the test server's default keepalive policy.
+    pub ws_keepalive: Option<waddle_xmpp::protocol::KeepaliveConfig>,
+}
+
+/// Names the environment variable that selects the live connection host for
+/// every in-process test server of a test process.
+#[cfg(feature = "test-support")]
+pub const LIVE_CONNECTION_HOST_ENV: &str = "WADDLE_TEST_LIVE_CONNECTION_HOST";
+
+#[cfg(feature = "test-support")]
+struct LiveConnectionHostScope {
+    host: crate::server::LiveConnectionHost,
+    states_built: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static LIVE_CONNECTION_HOST_SCOPE: LiveConnectionHostScope;
+}
+
+/// Run `body` with every `AppState` it builds on this task hosted by `host`,
+/// whatever the environment selects. Panics if `body` built none, so a test
+/// that constructs its state on another task cannot pass as a run under
+/// `host`.
+#[cfg(feature = "test-support")]
+pub async fn with_live_connection_host<F: std::future::Future>(
+    host: crate::server::LiveConnectionHost,
+    body: F,
+) -> F::Output {
+    LIVE_CONNECTION_HOST_SCOPE
+        .scope(
+            LiveConnectionHostScope {
+                host,
+                states_built: std::sync::atomic::AtomicUsize::new(0),
+            },
+            async {
+                let output = body.await;
+                let built = LIVE_CONNECTION_HOST_SCOPE
+                    .with(|scope| scope.states_built.load(std::sync::atomic::Ordering::SeqCst));
+                assert!(built > 0, "no server state was built under {host:?}");
+                output
+            },
+        )
+        .await
+}
+
+/// The live connection host for a test server state. A surrounding
+/// [`with_live_connection_host`] decides; otherwise `actor` or `plain-task`
+/// from [`LIVE_CONNECTION_HOST_ENV`], and the plain task when that is unset.
+/// Any other value is a mistake in the test invocation and panics, so a
+/// mistyped mode cannot pass as a run of the default.
+#[cfg(feature = "test-support")]
+pub(crate) fn live_connection_host_for_tests() -> crate::server::LiveConnectionHost {
+    use crate::server::LiveConnectionHost;
+    if let Ok(host) = LIVE_CONNECTION_HOST_SCOPE.try_with(|scope| {
+        scope
+            .states_built
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        scope.host
+    }) {
+        return host;
+    }
+    match std::env::var(LIVE_CONNECTION_HOST_ENV) {
+        Err(std::env::VarError::NotPresent) => LiveConnectionHost::PlainTask,
+        Ok(value) if value == "plain-task" => LiveConnectionHost::PlainTask,
+        Ok(value) if value == "actor" => LiveConnectionHost::Actor,
+        other => panic!("{LIVE_CONNECTION_HOST_ENV} must be `actor` or `plain-task`: {other:?}"),
+    }
 }
 
 #[cfg(feature = "test-support")]
