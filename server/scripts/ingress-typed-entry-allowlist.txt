@@ -1,20 +1,76 @@
-# Ingress source files, other than the typed entry, that may call
-# `attest_transaction(`. Format: `<path relative to server/> <call count>`.
+# Code in the ingress modules, outside the typed entry
+# (crates/waddle-server/src/ingress_substrate/typed_entry.rs), that may
+# attest a transaction, open one directly on a database handle, or take the
+# epoch row lock without the entry's witness.
 #
-# Every entry is an attach- or verify-time check: it attests a read-only
-# transaction, inspects catalog or archive state, and writes no ingress rows.
-# A transaction that writes ingress rows begins in
-# crates/waddle-server/src/ingress_substrate/typed_entry.rs instead.
+# Format: `<path relative to server/> <attest|begin|epoch-lock> <count>`.
+# scripts/check-ingress-typed-entry.py defines the three kinds and requires
+# each listed file to hold exactly that many occurrences.
 
-# RelationGuardCapability::verify_inner: REPEATABLE READ READ ONLY snapshot
-# that verifies the candidate guard, its ACLs and the owner marker once,
-# before any relation-guard transaction is opened.
-crates/waddle-server/src/ingress_uow/relation_guard.rs 1
+# --- Read-only attach- and verify-time checks ------------------------------
+# These attest or open a read-only transaction, inspect catalog or archive
+# state, and write no ingress rows.
 
-# Room-observation schema verification at attach time: a catalog-fenced
-# read-only transaction that checks lineage, schema and the owner marker.
-crates/waddle-server/src/ingress_uow/room_observation/schema.rs 1
+# RelationGuardCapability::verify_inner: a READ ONLY lock transaction on the
+# main lane and a REPEATABLE READ READ ONLY snapshot on the reserved ingress
+# lane verify the candidate guard, its ACLs and the owner marker once, before
+# any relation-guard transaction is opened.
+crates/waddle-server/src/ingress_uow/relation_guard.rs attest 1
+crates/waddle-server/src/ingress_uow/relation_guard.rs begin 2
+
+# Room-observation schema. `initialize_room_observations` (SQLite immediate,
+# PostgreSQL catalog-fenced) and the owner preparation are owner-phase DDL
+# and never run under the runtime role; the attach-time verifier opens one
+# catalog-fenced read-only transaction, attests it, and checks lineage,
+# schema and the owner marker.
+crates/waddle-server/src/ingress_uow/room_observation/schema.rs attest 1
+crates/waddle-server/src/ingress_uow/room_observation/schema.rs begin 4
 
 # DarkSharedCorrectness::lookup_archive_or_stanza_id: READ COMMITTED READ ONLY
 # archive lookup on the main lane, always rolled back.
-crates/waddle-server/src/ingress/shared_correctness.rs 1
+crates/waddle-server/src/ingress/shared_correctness.rs attest 1
+crates/waddle-server/src/ingress/shared_correctness.rs begin 1
+
+# --- Readers ----------------------------------------------------------------
+# Plain pooled reads that take no epoch lock and write nothing.
+
+# CarbonReceiptRepository::attempted_resources and the envelope/intent load.
+crates/waddle-server/src/ingress_uow/carbon_receipts.rs begin 2
+
+# --- Writers that are unattested by construction ----------------------------
+# Each is reached only when the database handle carries no attested writer
+# capability; the same function sends an attested pool through the entry.
+
+# record_receipt_pooled: the branch after `db.attested_pg_writer_capability()`
+# returned None (one begin, one epoch lock). `record_receipt` re-reads the
+# epoch row on a caller-owned transaction and has no serving caller.
+crates/waddle-server/src/ingress_substrate/authority.rs begin 1
+crates/waddle-server/src/ingress_substrate/authority.rs epoch-lock 2
+
+# begin_raw_ingress_writer_inner: the foundation-probing raw writer for
+# handles without attestation (one begin). `install_epoch_proof` and the
+# `*_raw` descendant repositories re-read the epoch row on the caller's raw
+# transaction; on an attested pool that transaction came from the entry.
+crates/waddle-server/src/ingress_uow/effect_descendants.rs begin 1
+crates/waddle-server/src/ingress_uow/effect_descendants.rs epoch-lock 5
+
+# --- Maintenance writers that do not attest ---------------------------------
+# These run on whatever pool the server serves on, including the attested
+# pool, take the epoch row lock themselves and do not attest their
+# transaction. They are listed so the gap stays visible, not because
+# bypassing the entry is the intended end state.
+
+# Alias GC: `gc_orphan_proof_batch` deletes `sm_ingress_appends`,
+# `gc_candidate_batch` deletes epoch-guarded `ingress_messages` rows and their
+# children, `expired_candidates` scans (three begins); the GC reads the epoch
+# row `FOR SHARE` first in `acquire_gc_epoch_lock_first` (one epoch lock).
+# The remaining begin and epoch lock are `PostgresIngressSubstrate::begin_inner`,
+# which is unattested by construction: `begin` sends an attested pool
+# through the entry.
+crates/waddle-server/src/ingress_substrate/substrate.rs begin 4
+crates/waddle-server/src/ingress_substrate/substrate.rs epoch-lock 2
+
+# Ingress maintenance: `observer_retention_batch` collects expired room
+# observation rows under its own timeouts; `candidate_page` and
+# `recovery_page` are bounded scans that write nothing.
+crates/waddle-server/src/ingress/maintenance/implementation.rs begin 3

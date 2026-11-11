@@ -11,7 +11,6 @@ use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 #[cfg(feature = "test-support")]
 use super::RelationGuardCapability;
 use super::{IngressUowError, IngressUowTransaction};
-#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
 use crate::ingress_substrate::DefinerApiCandidateContext;
@@ -19,8 +18,6 @@ use crate::ingress_substrate::{
     acquire_epoch_lock_first, prepared_ingress_relation, prepared_ingress_sql,
     supported_protocol_epoch, PreparedAttestedReceiptWriter, PreparedIngressRelation,
 };
-#[cfg(feature = "test-support")]
-#[cfg(feature = "test-support")]
 use crate::ingress_substrate::{
     begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
     IngressEntryRequest,
@@ -39,26 +36,31 @@ pub enum EffectDeliveryBinding {
 ///
 /// This must happen at the actual transaction boundary: PostgreSQL cannot
 /// change isolation after a snapshot has been taken, and an epoch request
-/// made after scheduler locks can deadlock with epoch activation. Standalone
-/// stores without the descendant foundation remain usable.
+/// made after scheduler locks can deadlock with epoch activation.
+///
+/// The database handle decides the path. A physically attested pool begins
+/// through the typed ingress entry, so the transaction's connection is
+/// attested and its epoch proven before any scheduler lock; such a pool
+/// always carries the ingress foundation. Every other handle probes for the
+/// descendant foundation first, so standalone stores without it remain
+/// usable.
 pub(crate) async fn begin_raw_ingress_writer(
     db: &Database,
 ) -> Result<Transaction<'_>, IngressUowError> {
-    begin_raw_ingress_writer_inner(db).await
+    match db.attested_pg_writer_capability() {
+        Some(capability) => begin_attested_raw_ingress_writer(db, &capability).await,
+        None => begin_raw_ingress_writer_inner(db).await,
+    }
 }
 
-/// Begin a dark raw writer using the full identity capability retained by an
-/// independently attested PostgreSQL pool. This path is not wired into normal
-/// startup and verifies the same physical transaction connection before any
-/// application lock or DML.
-#[cfg(feature = "test-support")]
-pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
+/// Begin a raw writer on a physically attested pool through the typed
+/// ingress entry. The caller's statements are not schema-qualified: the
+/// entry pins the transaction's `search_path` to the attested schema, so
+/// they resolve there and the prepared-writer witness is not needed.
+async fn begin_attested_raw_ingress_writer<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
 ) -> Result<Transaction<'a>, IngressUowError> {
-    if db.driver() != DatabaseDriver::Postgres {
-        return Err(IngressUowError::PostgresRequired);
-    }
     let entry = begin_ingress_entry(
         db,
         IngressEntryRequest {
@@ -71,6 +73,20 @@ pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
     )
     .await?;
     Ok(entry.into_parts().0)
+}
+
+/// Begin an attested raw writer with a capability the caller supplies
+/// rather than the one the database handle retains, so fixtures can present
+/// a capability from another pool and observe the refusal.
+#[cfg(feature = "test-support")]
+pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
+    db: &'a Database,
+    capability: &AttestedPostgresWriterCapability,
+) -> Result<Transaction<'a>, IngressUowError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(IngressUowError::PostgresRequired);
+    }
+    begin_attested_raw_ingress_writer(db, capability).await
 }
 
 /// Begin a raw writer prepared for the dark SECURITY DEFINER API experiment.

@@ -228,8 +228,13 @@ prunes the version of an owner whose roster holds a dangling contact.
 On the serving pool every ingress transaction that attests its connection
 begins in `ingress_substrate::typed_entry::begin_ingress_entry`. The ingress
 unit of work, the pooled effect-receipt writer and its post-commit readback
-all call it; so do the test-support raw writers. A request names, as typed
-values, what those callers differ in:
+all call it. So do the raw ingress writers when their database handle is an
+attested pool: `ingress_uow::begin_raw_ingress_writer`, which the notification
+and push outboxes use, and `PostgresIngressSubstrate::begin`. On a handle
+without attestation those two keep their own sequence, which for the raw
+writer first probes for the descendant foundation so a standalone store
+without it stays usable. A request names, as typed values, what the callers
+differ in:
 
 - the authority: unattested (SQLite, or PostgreSQL without attestation), the
   registered V1009 guard on an attested pool, or the candidate relation guard;
@@ -258,10 +263,13 @@ transaction cannot be assembled around a transaction that skipped the entry.
 A commit error is returned as it is; each caller keeps its own policy for a
 commit whose outcome is unknown.
 
-`server/scripts/check-ingress-typed-entry.py` runs in the clippy lanes and
-fails when `attest_transaction(` appears in `ingress/`, `ingress_uow/` or
-`ingress_substrate/` outside the entry. Read-only attach-time checks are
-listed, with their exact call count, in
+`server/scripts/check-ingress-typed-entry.py` runs in the clippy lanes. In
+`ingress/`, `ingress_uow/` and `ingress_substrate/`, outside the entry, it
+fails on three kinds of code: a call of `attest_transaction(`; a transaction
+opened directly on a database handle; and a call that takes the epoch row
+lock without the entry's witness. Test code may open transactions and take
+the epoch lock directly. Every exception is listed by file, kind and exact
+count, with its reason, in
 `server/scripts/ingress-typed-entry-allowlist.txt`.
 
 What the entry does not do:
@@ -269,11 +277,15 @@ What the entry does not do:
 - It attests the physical connection identity and lineage, not the migration
   ledger or the epoch guard manifest; those are checked once by the startup
   preflight.
-- The pool type still exposes raw `begin`, `execute` and `query`. Raw ingress
-  writers that take the epoch row lock without attesting
-  (`ingress_uow::begin_raw_ingress_writer`, used by the notification and push
-  outboxes, `IngressSubstrate::begin`, and the unattested receipt writer) do
-  not go through it.
+- The pool type still exposes raw `begin`, `execute` and `query`. A raw
+  writer that began through the entry gets back a plain transaction, and its
+  later statements are not schema-qualified; they resolve through the
+  `search_path` the entry pinned.
+- The alias GC (`ingress_substrate::gc_expired_aliases`) deletes
+  epoch-guarded `ingress_messages` rows on the serving pool under an epoch
+  row lock it takes itself, without attesting its transaction. The ingress
+  maintenance scans and the room-observation retention batch also open
+  their transactions directly. The allowlist names each.
 - Attach-time checks in other stores call the attestor directly on their own
   read-only transactions.
 - The clustered stores are refused under the attested pool and have no entry.

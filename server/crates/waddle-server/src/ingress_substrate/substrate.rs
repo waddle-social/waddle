@@ -24,7 +24,6 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
-#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
@@ -272,14 +271,29 @@ impl PostgresIngressSubstrate {
     /// The returned value and the write methods still accept raw transactions:
     /// callers supplying another transaction must establish these preconditions
     /// before acquiring application locks. This API does not prove that order.
+    ///
+    /// On a physically attested pool the transaction begins through the typed
+    /// ingress entry instead, which attests its connection before the epoch
+    /// is proven.
     pub async fn begin(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
-        self.begin_inner().await
+        match self.db.attested_pg_writer_capability() {
+            Some(capability) => self.begin_attested(&capability).await,
+            None => self.begin_inner().await,
+        }
     }
 
-    /// Start a writer using the full-identity capability retained by its
-    /// physically attested pool.
+    /// Start a writer with a capability the caller supplies rather than the
+    /// one the database handle retains, so fixtures can present a capability
+    /// from another pool and observe the refusal.
     #[cfg(feature = "test-support")]
     pub(crate) async fn begin_with_attested_pg_writer(
+        &self,
+        capability: &AttestedPostgresWriterCapability,
+    ) -> Result<Transaction<'_>, IngressSubstrateError> {
+        self.begin_attested(capability).await
+    }
+
+    async fn begin_attested(
         &self,
         capability: &AttestedPostgresWriterCapability,
     ) -> Result<Transaction<'_>, IngressSubstrateError> {
