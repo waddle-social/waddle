@@ -117,6 +117,18 @@ function installNavigationTiming(type: string | null): () => void {
   };
 }
 
+/** Stored SM resume envelopes: the entries that carry a `previd`. */
+function storedSmEnvelopes(): Array<{ key: string; value: string }> {
+  const envelopes: Array<{ key: string; value: string }> = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (!key?.startsWith("waddle.chat.sm-resume.")) continue;
+    const value = window.localStorage.getItem(key);
+    if (value?.includes("\"previd\"")) envelopes.push({ key, value });
+  }
+  return envelopes;
+}
+
 function seedCopiedOwnerHandoff(
   ownerId: string,
   state: PersistedSmResumeState,
@@ -501,6 +513,80 @@ describe("applyResumeStateToWasmConfig", () => {
         method: "with_resume_state_entries",
         args: ["prev-3", 1, 2, [{ xml: "<presence/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }]],
       },
+    ]);
+  });
+
+  test("attaches the bound JID after the counters of a session that will be resumed", () => {
+    const { config, calls } = configWith([
+      "with_resume_state_entries_with_max",
+      "with_resume_state_with_max",
+      "with_resume_state",
+      "with_resume_bound_jid",
+    ]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-bound",
+      inboundH: 3,
+      outboundH: 5,
+      maxResumeSeconds: 120,
+      resource: "web-abc",
+      boundJid: "alice@example.com/assigned-by-server",
+    });
+
+    expect(calls).toEqual([
+      { method: "with_resume_state_with_max", args: ["prev-bound", 3, 5, 120] },
+      { method: "with_resume_bound_jid", args: ["alice@example.com/assigned-by-server"] },
+    ]);
+  });
+
+  test("restores a state stored without a bound JID exactly as before", () => {
+    const { config, calls } = configWith(["with_resume_state", "with_resume_bound_jid"]);
+
+    applyResumeStateToWasmConfig(config, { previd: "prev-old", inboundH: 1, outboundH: 2, resource: "web-abc" });
+
+    expect(calls).toEqual([{ method: "with_resume_state", args: ["prev-old", 1, 2] }]);
+  });
+
+  test("resumes without the bound JID on a WASM build that cannot carry it", () => {
+    const { config, calls } = configWith(["with_resume_state"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-older-wasm",
+      inboundH: 1,
+      outboundH: 2,
+      boundJid: "alice@example.com/assigned-by-server",
+    });
+
+    expect(calls).toEqual([{ method: "with_resume_state", args: ["prev-older-wasm", 1, 2] }]);
+  });
+
+  test("never attaches a bound JID to a tail that will not be resumed", () => {
+    const { config, calls } = configWith([
+      "with_fresh_stream_retry_state_entries",
+      "with_resume_state",
+      "with_resume_bound_jid",
+    ]);
+    const entries = [{ xml: "<message id='m1'/>", sentAt: "2026-07-26T12:34:56.789Z", rejected: false }];
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "declined",
+      resumable: false,
+      inboundH: 0,
+      outboundH: 0,
+      unhandledOutboundEntries: entries,
+      boundJid: "alice@example.com/assigned-by-server",
+    });
+    // Entries that no available constructor can restore leave the config untouched.
+    applyResumeStateToWasmConfig(configWith(["with_resume_state", "with_resume_bound_jid"]).config, {
+      previd: "legacy-only",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: entries,
+      boundJid: "alice@example.com/assigned-by-server",
+    });
+
+    expect(calls).toEqual([
+      { method: "with_fresh_stream_retry_state_entries", args: ["declined", 0, 0, entries] },
     ]);
   });
 
@@ -1246,6 +1332,85 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     // Round-trip strips the internal `savedAt` so the caller gets
     // the same shape it passed in.
     expect(persistence.loadSm()).toEqual(state);
+  });
+
+  test("a session bound to a server-assigned resource resumes after reload under that JID", () => {
+    const owner = "bound-jid-owner";
+    const writer = createLocalStorageResumePersistence("alice@example.com", owner);
+    const state: PersistedSmResumeState = {
+      previd: "bound-stream",
+      inboundH: 4,
+      outboundH: 9,
+      maxResumeSeconds: 300,
+      resource: "web-abc",
+      boundJid: "alice@example.com/assigned-by-server",
+    };
+    writer.saveSm(state);
+    // A reload constructs a new adapter over the same storage.
+    const reader = createLocalStorageResumePersistence("alice@example.com", owner);
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const config = {
+      with_resume_state_with_max: (...args: unknown[]) => { calls.push({ method: "resume", args }); },
+      with_resume_bound_jid: (...args: unknown[]) => { calls.push({ method: "bound-jid", args }); },
+    };
+
+    try {
+      expect(reader.loadSm()).toEqual(state);
+      const consumed = reader.consumeSm();
+      expect(consumed).toEqual(state);
+      applyResumeStateToWasmConfig(config, consumed!);
+      expect(calls).toEqual([
+        { method: "resume", args: ["bound-stream", 4, 9, 300] },
+        { method: "bound-jid", args: ["alice@example.com/assigned-by-server"] },
+      ]);
+    } finally {
+      reader.dispose();
+      writer.dispose();
+    }
+  });
+
+  test("an SM resume state stored without a bound JID still loads and resumes", () => {
+    const owner = "pre-bound-jid-owner";
+    const writer = createLocalStorageResumePersistence("alice@example.com", owner);
+    const state: PersistedSmResumeState = { previd: "older-stream", inboundH: 2, outboundH: 3, resource: "web-abc" };
+    writer.saveSm(state);
+    const stored = storedSmEnvelopes();
+    expect(stored).toHaveLength(1);
+    // The stored shape is the one written before the bound JID existed.
+    expect(Object.keys(JSON.parse(stored[0]!.value) as object)).not.toContain("boundJid");
+    const reader = createLocalStorageResumePersistence("alice@example.com", owner);
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const config = {
+      with_resume_state: (...args: unknown[]) => { calls.push({ method: "resume", args }); },
+      with_resume_bound_jid: (...args: unknown[]) => { calls.push({ method: "bound-jid", args }); },
+    };
+
+    try {
+      const consumed = reader.consumeSm();
+      expect(consumed).toEqual(state);
+      applyResumeStateToWasmConfig(config, consumed!);
+      expect(calls).toEqual([{ method: "resume", args: ["older-stream", 2, 3] }]);
+    } finally {
+      reader.dispose();
+      writer.dispose();
+    }
+  });
+
+  test("an SM resume state whose bound JID is not a string is rejected whole", () => {
+    const owner = "corrupt-bound-jid-owner";
+    const persistence = createLocalStorageResumePersistence("alice@example.com", owner);
+    persistence.saveSm({ previd: "corrupt-stream", inboundH: 2, outboundH: 3 });
+    const [stored] = storedSmEnvelopes();
+    window.localStorage.setItem(
+      stored!.key,
+      JSON.stringify({ ...(JSON.parse(stored!.value) as object), boundJid: 42 }),
+    );
+
+    try {
+      expect(persistence.loadSm()).toBeNull();
+    } finally {
+      persistence.dispose();
+    }
   });
 
   test("localStorage consume preserves a nonresumable fresh-stream tail for config application", () => {

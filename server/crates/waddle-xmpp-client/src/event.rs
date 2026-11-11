@@ -14,7 +14,7 @@ use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
 use crate::state::{SessionBinding, SessionSnapshot, StreamId};
-use crate::stream_management::SmResumeState;
+use crate::stream_management::{SmFailureCondition, SmResumeState};
 use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
 
 /// Public event surface emitted by the client runtime.
@@ -187,7 +187,10 @@ pub enum StreamManagementEvent {
         h: u32,
     },
     /// Stream-management negotiation or resumption failed.
-    Failed,
+    Failed {
+        #[doc = "Stanza error condition the server gave in `<failed/>`; absent when it gave none or the client ended the session itself."]
+        condition: Option<SmFailureCondition>,
+    },
 }
 
 /// Why this endpoint emitted a typed XEP-0198 acknowledgement request.

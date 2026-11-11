@@ -200,13 +200,13 @@ fn dispatch_stream_management_callback(
     event: &ClientEvent,
     emit: impl FnOnce(JsStreamManagementTelemetry),
 ) -> bool {
-    if matches!(
-        event,
-        ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
-        ))
-    ) {
-        emit(JsStreamManagementTelemetry::Failed);
+    if let ClientEvent::Connection(ConnectionEvent::StreamManagement(
+        StreamManagementEvent::Failed { condition },
+    )) = event
+    {
+        emit(JsStreamManagementTelemetry::Failed {
+            condition: condition.map(waddle_xmpp_client::SmFailureCondition::as_str),
+        });
         return true;
     }
     false
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn failed_stream_management_event_invokes_one_closed_callback_payload() {
         let event = ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed,
+            StreamManagementEvent::Failed { condition: None },
         ));
         let mut payloads = Vec::new();
 
@@ -238,6 +238,25 @@ mod tests {
         }));
 
         assert_eq!(payloads, vec![serde_json::json!({ "kind": "failed" })]);
+    }
+
+    #[test]
+    fn failed_stream_management_callback_payload_names_the_server_condition() {
+        let event = ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed {
+                condition: Some(waddle_xmpp_client::SmFailureCondition::ItemNotFound),
+            },
+        ));
+        let mut payloads = Vec::new();
+
+        assert!(dispatch_stream_management_callback(&event, |payload| {
+            payloads.push(serde_json::to_value(payload).expect("serializable telemetry"));
+        }));
+
+        assert_eq!(
+            payloads,
+            vec![serde_json::json!({ "kind": "failed", "condition": "item-not-found" })]
+        );
     }
 
     #[test]

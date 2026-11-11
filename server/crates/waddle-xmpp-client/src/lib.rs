@@ -126,7 +126,7 @@ pub use stickers::{
     parse_sticker_packs_result, HashAlgo, PackId, PackRef, PackSticker, StickerHash, StickerMarker,
     StickerPackDoc, StickerText, NS_STICKERS, STICKERS_NODE,
 };
-pub use stream_management::{SmResumeState, UnhandledOutboundEntry};
+pub use stream_management::{SmFailureCondition, SmResumeState, UnhandledOutboundEntry};
 pub use transport::{
     decode_message, encode_message, StreamClose, StreamOpen, TransportCapabilities, TransportEvent,
     TransportKind, TransportMessage, TransportState,

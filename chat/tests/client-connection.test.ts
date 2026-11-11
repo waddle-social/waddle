@@ -640,6 +640,38 @@ describe("ResumeStateStore", () => {
     expect(calls).toEqual([]);
   });
 
+  test("the bound JID reported by the runtime is kept through capture and pagehide persistence", () => {
+    const saved: XmppResumeState[] = [];
+    const persistence: ResumePersistence = {
+      ...nullResumePersistence,
+      saveSm: (state) => { saved.push(state); },
+    };
+    const store = new ResumeStateStore(persistence);
+
+    const captured = store.captureFromDisconnect(
+      {
+        resume_state: () => ({
+          previd: "p-bound",
+          inboundH: 1,
+          outboundH: 2,
+          boundJid: "alice@example.com/assigned-by-server",
+        }),
+      },
+      "web-xyz",
+    );
+    store.persistForPageHide(null, "web-xyz", () => undefined);
+
+    const expected = {
+      previd: "p-bound",
+      inboundH: 1,
+      outboundH: 2,
+      boundJid: "alice@example.com/assigned-by-server",
+      resource: "web-xyz",
+    };
+    expect(captured).toEqual(expected);
+    expect(saved).toEqual([expected]);
+  });
+
   test("discardState clears the persisted slot; clearAll also drops joined rooms + handle", () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);

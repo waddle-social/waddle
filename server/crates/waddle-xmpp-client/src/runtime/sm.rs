@@ -3,6 +3,7 @@
 use crate::bootstrap::NS_STREAMS;
 use crate::event::SmAckRequestReason;
 use crate::state::SessionPhase;
+use crate::stream_management::SmFailureCondition;
 use crate::stream_management::SmInboundControl;
 use crate::stream_management::SmState;
 use crate::stream_management::NS_SM;
@@ -78,7 +79,7 @@ impl XmppRuntime {
             ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
         }));
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed,
+            StreamManagementEvent::Failed { condition: None },
         )));
     }
 
@@ -179,7 +180,7 @@ impl XmppRuntime {
                 }
                 self.apply_resumed(h, previd, None, events)?;
             }
-            crate::stream_management::SmInboundControl::Failed { h } => {
+            crate::stream_management::SmInboundControl::Failed { h, condition } => {
                 let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
                 let enable_failed = matches!(
                     self.sm_negotiation,
@@ -196,14 +197,14 @@ impl XmppRuntime {
                     }
                 }
                 if resume_failed {
-                    self.apply_resume_failed(h, events);
+                    self.apply_resume_failed(h, condition, events);
                     self.request_resource_binding(events)?;
                 } else {
                     self.settle_failed_handled_count(h, events);
                     self.sm_state.stop();
                     self.sm_negotiation = SmNegotiationState::Inactive;
                     events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                        StreamManagementEvent::Failed,
+                        StreamManagementEvent::Failed { condition },
                     )));
                     self.sm_advertised = false;
                     self.flush_pending_fallback_retries(events);
@@ -276,14 +277,19 @@ impl XmppRuntime {
     /// the rest of the tail is queued for retry on the fresh session. The
     /// caller has already checked that `h` does not exceed the stanzas sent,
     /// and decides how the fresh session is bound.
-    pub(super) fn apply_resume_failed(&mut self, h: Option<u32>, events: &mut Vec<ClientEvent>) {
+    pub(super) fn apply_resume_failed(
+        &mut self,
+        h: Option<u32>,
+        condition: Option<SmFailureCondition>,
+        events: &mut Vec<ClientEvent>,
+    ) {
         self.settle_failed_handled_count(h, events);
         // Keep the queue resumable until fallback retries are written to the new stream.
         self.prepare_fresh_stream_fallback(events, true);
         self.sm_state.stop();
         self.sm_negotiation = SmNegotiationState::Inactive;
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed,
+            StreamManagementEvent::Failed { condition },
         )));
     }
 
@@ -316,7 +322,7 @@ impl XmppRuntime {
             TransportMessage::Element(error),
         )));
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed,
+            StreamManagementEvent::Failed { condition: None },
         )));
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Close(StreamClose),
@@ -333,7 +339,7 @@ impl XmppRuntime {
             TransportMessage::Element(error),
         )));
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed,
+            StreamManagementEvent::Failed { condition: None },
         )));
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Close(StreamClose),

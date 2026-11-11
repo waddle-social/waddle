@@ -604,12 +604,12 @@ impl DriverTask {
                 None
             }
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                StreamManagementEvent::Failed,
+                StreamManagementEvent::Failed { condition },
             )) => {
                 let _ =
                     self.events
                         .send(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                            StreamManagementEvent::Failed,
+                            StreamManagementEvent::Failed { condition },
                         )));
                 None
             }

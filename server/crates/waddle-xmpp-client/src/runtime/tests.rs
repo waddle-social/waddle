@@ -1199,7 +1199,7 @@ fn runtime_rejects_resumed_without_required_h() {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(events.iter().any(|event| matches!(
@@ -1242,7 +1242,7 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(events.iter().any(|event| matches!(
@@ -1285,7 +1285,7 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(events.iter().any(|event| matches!(
@@ -1768,7 +1768,7 @@ fn runtime_accepts_enable_response_only_after_bound_enable_was_sent() {
     assert!(failed_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(!failed_runtime.sm_state.enabled);
@@ -2011,7 +2011,7 @@ fn runtime_releases_send_barrier_when_fresh_sm_enable_fails() {
     assert!(failed_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
 }
@@ -2568,7 +2568,7 @@ fn runtime_discards_resume_state_after_prebind_stream_error_close() {
     assert!(error_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(runtime.resume_state().is_none());
@@ -2635,7 +2635,7 @@ fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
     assert!(error_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(runtime.resume_state().is_none());
@@ -2915,7 +2915,7 @@ fn runtime_keeps_resume_state_when_transport_fails_during_resume_without_stream_
     assert!(!events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert_eq!(runtime.resume_state(), Some(expected_resume_state));
@@ -3073,7 +3073,7 @@ fn runtime_rejects_sm_ack_above_sent_count() {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(events.iter().any(|event| matches!(
@@ -3776,7 +3776,7 @@ fn assert_sm_protocol_violation(events: &[ClientEvent]) {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { .. }
         ))
     )));
     assert!(events.iter().any(|event| matches!(

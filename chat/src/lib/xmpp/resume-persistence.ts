@@ -74,6 +74,12 @@ export type PersistedSmResumeState = {
   maxResumeSeconds?: number;
   unhandledOutboundEntries?: Array<{ xml: string; sentAt: string; rejected: boolean }>;
   resource?: string;
+  /**
+   * Full JID the server bound for the session. Optional like every field
+   * added to this shape: a stored state without it still loads, and the
+   * resumed session is then reported under `resource`.
+   */
+  boundJid?: string;
 };
 
 type PersistedAutoJoinBlock = RoomAutoJoinBlock;
@@ -304,7 +310,7 @@ export function createLocalStorageResumePersistence(
       }
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
-      const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = envelope;
+      const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, boundJid, unhandledOutboundEntries } = envelope;
       return {
         previd,
         ...(resumable !== undefined ? { resumable } : {}),
@@ -313,6 +319,7 @@ export function createLocalStorageResumePersistence(
         ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
         ...(unhandledOutboundEntries?.length ? { unhandledOutboundEntries: unhandledOutboundEntries.map((entry) => ({ ...entry })) } : {}),
         ...(resource ? { resource } : {}),
+        ...(boundJid ? { boundJid } : {}),
       };
     },
     consumeSm() {
@@ -504,7 +511,7 @@ function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeSt
       ownerInstanceId: owner.instanceId,
     }));
     s.removeItem(key);
-    const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = claimed;
+    const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, boundJid, unhandledOutboundEntries } = claimed;
     return {
       previd,
       ...(resumable !== undefined ? { resumable } : {}),
@@ -513,6 +520,7 @@ function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeSt
       ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
       ...(unhandledOutboundEntries?.length ? { unhandledOutboundEntries: unhandledOutboundEntries.map((entry) => ({ ...entry })) } : {}),
       ...(resource ? { resource } : {}),
+      ...(boundJid ? { boundJid } : {}),
     };
   } catch (err) {
     void err;
@@ -1423,6 +1431,7 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
     && (candidate.maxResumeSeconds === undefined || isPositiveU32(candidate.maxResumeSeconds))
     && (candidate.unhandledOutboundEntries === undefined || isPersistedUnhandledOutboundEntries(candidate.unhandledOutboundEntries))
     && (candidate.resource === undefined || typeof candidate.resource === "string")
+    && (candidate.boundJid === undefined || typeof candidate.boundJid === "string")
     && (candidate.ownerId === undefined || typeof candidate.ownerId === "string")
     && (candidate.ownerInstanceId === undefined || typeof candidate.ownerInstanceId === "string")
     && (candidate.claimId === undefined || typeof candidate.claimId === "string")

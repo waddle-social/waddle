@@ -91,7 +91,122 @@ pub enum SmInboundControl {
     Failed {
         /// Peer stanza-handled counter modulo 2^32.
         h: Option<u32>,
+        /// Stanza error condition the peer gave for the failure.
+        condition: Option<SmFailureCondition>,
     },
+}
+
+/// RFC 6120 stanza error condition carried by an XEP-0198 `<failed/>`.
+///
+/// The alternate address that `gone` and `redirect` may carry as text is not
+/// retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SmFailureCondition {
+    /// `<bad-request/>`.
+    BadRequest,
+    /// `<conflict/>`.
+    Conflict,
+    /// `<feature-not-implemented/>`.
+    FeatureNotImplemented,
+    /// `<forbidden/>`.
+    Forbidden,
+    /// `<gone/>`.
+    Gone,
+    /// `<internal-server-error/>`.
+    InternalServerError,
+    /// `<item-not-found/>`: the server no longer knows the session.
+    ItemNotFound,
+    /// `<jid-malformed/>`.
+    JidMalformed,
+    /// `<not-acceptable/>`.
+    NotAcceptable,
+    /// `<not-allowed/>`.
+    NotAllowed,
+    /// `<not-authorized/>`.
+    NotAuthorized,
+    /// `<policy-violation/>`.
+    PolicyViolation,
+    /// `<recipient-unavailable/>`.
+    RecipientUnavailable,
+    /// `<redirect/>`.
+    Redirect,
+    /// `<registration-required/>`.
+    RegistrationRequired,
+    /// `<remote-server-not-found/>`.
+    RemoteServerNotFound,
+    /// `<remote-server-timeout/>`.
+    RemoteServerTimeout,
+    /// `<resource-constraint/>`.
+    ResourceConstraint,
+    /// `<service-unavailable/>`.
+    ServiceUnavailable,
+    /// `<subscription-required/>`.
+    SubscriptionRequired,
+    /// `<undefined-condition/>`.
+    UndefinedCondition,
+    /// `<unexpected-request/>`.
+    UnexpectedRequest,
+}
+
+impl SmFailureCondition {
+    /// Parse the element name of an RFC 6120 stanza error condition.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "bad-request" => Self::BadRequest,
+            "conflict" => Self::Conflict,
+            "feature-not-implemented" => Self::FeatureNotImplemented,
+            "forbidden" => Self::Forbidden,
+            "gone" => Self::Gone,
+            "internal-server-error" => Self::InternalServerError,
+            "item-not-found" => Self::ItemNotFound,
+            "jid-malformed" => Self::JidMalformed,
+            "not-acceptable" => Self::NotAcceptable,
+            "not-allowed" => Self::NotAllowed,
+            "not-authorized" => Self::NotAuthorized,
+            "policy-violation" => Self::PolicyViolation,
+            "recipient-unavailable" => Self::RecipientUnavailable,
+            "redirect" => Self::Redirect,
+            "registration-required" => Self::RegistrationRequired,
+            "remote-server-not-found" => Self::RemoteServerNotFound,
+            "remote-server-timeout" => Self::RemoteServerTimeout,
+            "resource-constraint" => Self::ResourceConstraint,
+            "service-unavailable" => Self::ServiceUnavailable,
+            "subscription-required" => Self::SubscriptionRequired,
+            "undefined-condition" => Self::UndefinedCondition,
+            "unexpected-request" => Self::UnexpectedRequest,
+            _ => return None,
+        })
+    }
+
+    /// Borrow the element name of the condition.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BadRequest => "bad-request",
+            Self::Conflict => "conflict",
+            Self::FeatureNotImplemented => "feature-not-implemented",
+            Self::Forbidden => "forbidden",
+            Self::Gone => "gone",
+            Self::InternalServerError => "internal-server-error",
+            Self::ItemNotFound => "item-not-found",
+            Self::JidMalformed => "jid-malformed",
+            Self::NotAcceptable => "not-acceptable",
+            Self::NotAllowed => "not-allowed",
+            Self::NotAuthorized => "not-authorized",
+            Self::PolicyViolation => "policy-violation",
+            Self::RecipientUnavailable => "recipient-unavailable",
+            Self::Redirect => "redirect",
+            Self::RegistrationRequired => "registration-required",
+            Self::RemoteServerNotFound => "remote-server-not-found",
+            Self::RemoteServerTimeout => "remote-server-timeout",
+            Self::ResourceConstraint => "resource-constraint",
+            Self::ServiceUnavailable => "service-unavailable",
+            Self::SubscriptionRequired => "subscription-required",
+            Self::UndefinedCondition => "undefined-condition",
+            Self::UnexpectedRequest => "unexpected-request",
+        }
+    }
 }
 
 /// The received control element is not a valid XEP-0198 wire shape.
@@ -938,7 +1053,11 @@ impl SmState {
                     Some(value) => Some(parse_exact_u32(value).ok_or(InvalidSmInboundControl)?),
                     None => None,
                 };
-                Ok(SmInboundControl::Failed { h })
+                let condition = element
+                    .children()
+                    .next()
+                    .and_then(|condition| SmFailureCondition::from_name(condition.name()));
+                Ok(SmInboundControl::Failed { h, condition })
             }
             _ => Err(InvalidSmInboundControl),
         }
@@ -1028,31 +1147,7 @@ fn is_text_stanza_error_condition(name: &str) -> bool {
 }
 
 fn is_standard_stanza_error_condition(name: &str) -> bool {
-    matches!(
-        name,
-        "bad-request"
-            | "conflict"
-            | "feature-not-implemented"
-            | "forbidden"
-            | "gone"
-            | "internal-server-error"
-            | "item-not-found"
-            | "jid-malformed"
-            | "not-acceptable"
-            | "not-allowed"
-            | "not-authorized"
-            | "policy-violation"
-            | "recipient-unavailable"
-            | "redirect"
-            | "registration-required"
-            | "remote-server-not-found"
-            | "remote-server-timeout"
-            | "resource-constraint"
-            | "service-unavailable"
-            | "subscription-required"
-            | "undefined-condition"
-            | "unexpected-request"
-    )
+    SmFailureCondition::from_name(name).is_some()
 }
 
 impl UnhandledOutboundEntry {
@@ -1103,6 +1198,40 @@ mod tests {
         let mut buf = Vec::new();
         element.write_to(&mut buf).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn failure_condition_names_round_trip_for_every_rfc6120_condition() {
+        let names = [
+            "bad-request",
+            "conflict",
+            "feature-not-implemented",
+            "forbidden",
+            "gone",
+            "internal-server-error",
+            "item-not-found",
+            "jid-malformed",
+            "not-acceptable",
+            "not-allowed",
+            "not-authorized",
+            "policy-violation",
+            "recipient-unavailable",
+            "redirect",
+            "registration-required",
+            "remote-server-not-found",
+            "remote-server-timeout",
+            "resource-constraint",
+            "service-unavailable",
+            "subscription-required",
+            "undefined-condition",
+            "unexpected-request",
+        ];
+        for name in names {
+            let condition = SmFailureCondition::from_name(name).expect("known condition");
+            assert_eq!(condition.as_str(), name);
+        }
+        assert_eq!(SmFailureCondition::from_name("text"), None);
+        assert_eq!(SmFailureCondition::from_name("not-a-condition"), None);
     }
 
     #[test]
@@ -1258,7 +1387,10 @@ mod tests {
         valid.append_text_node("\n");
         assert_eq!(
             SmState::parse_inbound_control(&valid),
-            Ok(SmInboundControl::Failed { h: None })
+            Ok(SmInboundControl::Failed {
+                h: None,
+                condition: Some(SmFailureCondition::ItemNotFound)
+            })
         );
 
         let mut redirect = Element::builder("redirect", NS_STANZA_ERRORS).build();
@@ -1267,7 +1399,10 @@ mod tests {
             SmState::parse_inbound_control(
                 &Element::builder("failed", NS_SM).append(redirect).build()
             ),
-            Ok(SmInboundControl::Failed { h: None })
+            Ok(SmInboundControl::Failed {
+                h: None,
+                condition: Some(SmFailureCondition::Redirect)
+            })
         );
         assert_eq!(
             SmState::parse_inbound_control(
@@ -1275,7 +1410,10 @@ mod tests {
                     .attr(minidom::rxml::xml_ncname!("h").to_owned(), " +1 ")
                     .build()
             ),
-            Ok(SmInboundControl::Failed { h: Some(1) })
+            Ok(SmInboundControl::Failed {
+                h: Some(1),
+                condition: None
+            })
         );
 
         for invalid in [

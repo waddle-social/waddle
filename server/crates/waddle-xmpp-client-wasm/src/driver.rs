@@ -15,12 +15,23 @@ use super::{
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub(crate) enum JsStreamManagementTelemetry {
-    AckRequested { reason: JsSmAckRequestReason },
-    AckValidated { progress: bool },
-    AckRetry { attempt: u8 },
+    AckRequested {
+        reason: JsSmAckRequestReason,
+    },
+    AckValidated {
+        progress: bool,
+    },
+    AckRetry {
+        attempt: u8,
+    },
     AckRequestTimedOut,
     ProgressTimedOut,
-    Failed,
+    Failed {
+        /// Element name of the RFC 6120 stanza error condition the server
+        /// gave in `<failed/>`; omitted when there is none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        condition: Option<&'static str>,
+    },
 }
 
 #[derive(Serialize)]
@@ -131,7 +142,8 @@ mod telemetry_tests {
             serde_json::to_value(JsStreamManagementTelemetry::AckValidated { progress: false })
                 .unwrap();
         let timeout = serde_json::to_value(JsStreamManagementTelemetry::ProgressTimedOut).unwrap();
-        let failed = serde_json::to_value(JsStreamManagementTelemetry::Failed).unwrap();
+        let failed =
+            serde_json::to_value(JsStreamManagementTelemetry::Failed { condition: None }).unwrap();
 
         assert_eq!(
             pagehide,
@@ -1083,13 +1095,15 @@ impl WasmDriverTask {
                 None
             }
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                StreamManagementEvent::Failed,
+                StreamManagementEvent::Failed { condition },
             )) => {
                 let _ = self
                     .event_tx
                     .clone()
                     .send(client_driver_event(ClientEvent::Connection(
-                        ConnectionEvent::StreamManagement(StreamManagementEvent::Failed),
+                        ConnectionEvent::StreamManagement(StreamManagementEvent::Failed {
+                            condition,
+                        }),
                     )))
                     .await;
                 None
@@ -1298,7 +1312,7 @@ fn may_carry_fresh_stream_retries(events: &[ClientEvent]) -> bool {
         matches!(
             event,
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                StreamManagementEvent::Enabled { .. } | StreamManagementEvent::Failed
+                StreamManagementEvent::Enabled { .. } | StreamManagementEvent::Failed { .. }
             ))
         )
     })
@@ -1941,7 +1955,7 @@ mod tests {
             StreamManagementEvent::Enabled { previd: None }
         )));
         assert!(may_carry_fresh_stream_retries(&sm(
-            StreamManagementEvent::Failed
+            StreamManagementEvent::Failed { condition: None }
         )));
         // A successful resume replays the tail on the same occupancy, and its
         // SM ordinals must stay in wire order.

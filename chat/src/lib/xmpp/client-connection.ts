@@ -38,6 +38,11 @@ export type XmppResumeState = {
   hasUnackedOutbound?: boolean;
   unhandledOutboundEntries?: Array<{ xml: string; sentAt: string; rejected: boolean }>;
   resource?: string;
+  /**
+   * Full JID the server bound for the session. A resumed session keeps it,
+   * and its resource may be one the server chose rather than `resource`.
+   */
+  boundJid?: string;
 };
 
 export type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleResumeState;
@@ -124,6 +129,20 @@ function validResumeMaxSeconds(value: number | undefined): number | undefined {
 }
 
 export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppResumeState): void {
+  if (!restoreResumeCounters(config, resumeState)) return;
+  // The bound JID only means something to a session that can be resumed, and
+  // only a WASM build that knows the method can carry it; without either the
+  // resumed session is reported under the configured resource.
+  if (!resumeState.boundJid) return;
+  (config as { with_resume_bound_jid?: (boundJid: string) => void })
+    .with_resume_bound_jid?.(resumeState.boundJid);
+}
+
+/**
+ * Configure the counters and sender-owned tail. Returns whether the config
+ * now holds a session that will be resumed.
+ */
+function restoreResumeCounters(config: unknown, resumeState: XmppResumeState): boolean {
   const wasmConfig = config as {
     with_fresh_stream_retry_state_entries?: (
       previd: string,
@@ -154,7 +173,7 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
   };
   const maxResumeSeconds = validResumeMaxSeconds(resumeState.maxResumeSeconds);
   if (resumeState.resumable === false) {
-    if (!resumeState.unhandledOutboundEntries?.length) return;
+    if (!resumeState.unhandledOutboundEntries?.length) return false;
     if (typeof wasmConfig.with_fresh_stream_retry_state_entries !== "function") {
       throw new Error("WASM client cannot restore a fresh-stream retry tail");
     }
@@ -164,7 +183,7 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
       resumeState.outboundH,
       resumeState.unhandledOutboundEntries,
     );
-    return;
+    return false;
   }
   if (
     resumeState.unhandledOutboundEntries?.length
@@ -178,7 +197,7 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
       resumeState.unhandledOutboundEntries,
       maxResumeSeconds,
     );
-    return;
+    return true;
   }
   if (
     resumeState.unhandledOutboundEntries?.length
@@ -190,13 +209,13 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
       resumeState.outboundH,
       resumeState.unhandledOutboundEntries,
     );
-    return;
+    return true;
   }
   // An entry-bearing snapshot must never be passed to a legacy constructor:
   // it would restore the counters but discard the sender-owned tail, making
   // `<resumed h>` validation and replay ownership unsound. Falling through to
   // a fresh stream leaves the durable browser queue as the sole retry owner.
-  if (resumeState.unhandledOutboundEntries?.length) return;
+  if (resumeState.unhandledOutboundEntries?.length) return false;
   if (maxResumeSeconds !== undefined && typeof wasmConfig.with_resume_state_with_max === "function") {
     wasmConfig.with_resume_state_with_max(
       resumeState.previd,
@@ -204,9 +223,11 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
       resumeState.outboundH,
       maxResumeSeconds,
     );
-    return;
+    return true;
   }
-  wasmConfig.with_resume_state?.(resumeState.previd, resumeState.inboundH, resumeState.outboundH);
+  if (typeof wasmConfig.with_resume_state !== "function") return false;
+  wasmConfig.with_resume_state(resumeState.previd, resumeState.inboundH, resumeState.outboundH);
+  return true;
 }
 
 type ReconnectSchedulerDeps = {

@@ -62,6 +62,7 @@ import type {
   CallKind,
   CallLifecyclePayload,
 } from "./calls/call-lifecycle-telemetry";
+import { isSmFailureCondition, type SmFailureCondition } from "./xmpp/sm-failure-condition";
 import type { XmppStatusSnapshot } from "./xmpp/types";
 
 type MessageKind = "room" | "dm";
@@ -72,7 +73,7 @@ type StreamManagementTelemetryPayload =
   | { kind: "ack-retry"; attempt: number }
   | { kind: "ack-request-timed-out" }
   | { kind: "progress-timed-out" }
-  | { kind: "failed" }
+  | { kind: "failed"; condition?: SmFailureCondition }
   | { kind: "lifecycle-failed"; operation: "prepare-xmpp" | "resume-xmpp" | "suspend-call" };
 
 /** Errors we classify coarsely so Tempo filters stay useful. */
@@ -1564,9 +1565,10 @@ export function reportResumeDrain(payload: { buffered: number; durationMs: numbe
 
 /**
  * Closed XEP-0198 health signal. Its attributes are deliberately limited to
- * the event discriminant, closed request reason, boolean progress, and a
- * bounded retry attempt: no XML, JIDs, stanza IDs, or server-provided text
- * can reach the Faro collector through this path.
+ * the event discriminant, closed request reason, boolean progress, a bounded
+ * retry attempt, and the name of a known stanza error condition: no XML,
+ * JIDs, stanza IDs, or server-provided text can reach the Faro collector
+ * through this path.
  */
 export function reportStreamManagement(event: StreamManagementTelemetryPayload): void {
   const attributes: Record<string, string> = { kind: event.kind };
@@ -1583,9 +1585,11 @@ export function reportStreamManagement(event: StreamManagementTelemetryPayload):
     case "lifecycle-failed":
       attributes.operation = event.operation;
       break;
+    case "failed":
+      if (isSmFailureCondition(event.condition)) attributes.condition = event.condition;
+      break;
     case "ack-request-timed-out":
     case "progress-timed-out":
-    case "failed":
       break;
   }
   safePushEvent("chat.xmpp.stream_management", attributes);

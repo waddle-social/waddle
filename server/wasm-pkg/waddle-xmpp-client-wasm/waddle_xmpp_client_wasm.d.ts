@@ -672,6 +672,12 @@ export class WaddleConfig {
      * explicitly declined XEP-0198. It must never issue `<resume/>`.
      */
     with_fresh_stream_retry_state_entries(previd: string, inbound_h: number, outbound_h: number, entries: any): void;
+    /**
+     * Attach the full JID the server bound for the session to the resume
+     * state already configured through one of the `with_resume_state*`
+     * methods.
+     */
+    with_resume_bound_jid(bound_jid: string): void;
     with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
     with_resume_state_entries(previd: string, inbound_h: number, outbound_h: number, entries: any): void;
     with_resume_state_entries_with_max(previd: string, inbound_h: number, outbound_h: number, entries: any, max_resume_seconds: number): void;

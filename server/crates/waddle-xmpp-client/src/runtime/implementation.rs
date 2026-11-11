@@ -30,6 +30,7 @@ use crate::bootstrap::{
     Sasl2InlineRequests, Sasl2Success, SaslChallenge, SmInlineResume, SmStreamId,
 };
 use crate::state::StreamId;
+use crate::stream_management::SmFailureCondition;
 use jid::FullJid;
 use waddle_xmpp_core::xep0388_inline::{
     Sasl2InlineResults, SmInlineFailed, SmInlineResumeResult, SmInlineResumed,
@@ -838,7 +839,12 @@ impl XmppRuntime {
                 self.apply_resumed(resumed.h, previd, reported_jid, events)?;
             }
             InlineOutcome::ResumeFailed { failed } => {
-                self.apply_resume_failed(failed.h, events);
+                // The parsed condition is one of the RFC 6120 stanza error
+                // conditions, each of which has a name the event type knows.
+                let condition = failed.condition.and_then(|condition| {
+                    SmFailureCondition::from_name(Element::from(condition).name())
+                });
+                self.apply_resume_failed(failed.h, condition, events);
                 // The stream features that follow lead to RFC 6120 resource
                 // binding, as after a SASL2 success without inline requests,
                 // and say whether stream management can be enabled on the

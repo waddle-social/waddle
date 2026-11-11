@@ -18,6 +18,7 @@
  *   must not break the others or the client.
  */
 
+import type { SmFailureCondition } from "./sm-failure-condition";
 import type {
   ChatStateEvent,
   DmChatStateEvent,
@@ -76,7 +77,7 @@ export type StreamManagementTelemetry =
   | { kind: "ack-retry"; attempt: number }
   | { kind: "ack-request-timed-out" }
   | { kind: "progress-timed-out" }
-  | { kind: "failed" };
+  | { kind: "failed"; condition?: SmFailureCondition };
 
 type CatchupOutcome = "completed" | "aborted" | "failed";
 

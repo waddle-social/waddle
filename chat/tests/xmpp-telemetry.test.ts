@@ -347,6 +347,22 @@ describe("telemetry module no-op behaviour", () => {
     ]);
   });
 
+  test("stream-management failures name only a known stanza error condition", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportStreamManagement({ kind: "failed", condition: "item-not-found" });
+    reportStreamManagement({ kind: "failed", condition: "alice@example.com left" as never });
+
+    expect(stub.events).toEqual([
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "failed", condition: "item-not-found" },
+      },
+      { name: "chat.xmpp.stream_management", attributes: { kind: "failed" } },
+    ]);
+  });
+
   test("queue-depth measurements are deduped per kind until the reading changes (#1443)", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
