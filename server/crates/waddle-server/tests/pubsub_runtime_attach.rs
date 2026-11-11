@@ -1,5 +1,5 @@
 //! Restricted PostgreSQL PubSub attachment and owner bootstrap.
-#![cfg(feature = "test-support")]
+#![cfg(all(feature = "test-support", feature = "clustering"))]
 
 #[path = "push_notification_custody/catalog_fence.rs"]
 mod push_notification_custody_catalog_fence;
