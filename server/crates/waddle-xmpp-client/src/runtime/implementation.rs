@@ -26,7 +26,14 @@ use super::{DateTime, Utc};
 use super::{SessionBinding, SessionPhase, SessionSnapshot};
 use super::{SmAcknowledgementClockAction, SmResume, SmResumeState, SmState};
 use super::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
-use crate::bootstrap::{Sasl2Success, SaslChallenge};
+use crate::bootstrap::{
+    Sasl2InlineRequests, Sasl2Success, SaslChallenge, SmInlineResume, SmStreamId,
+};
+use crate::state::StreamId;
+use jid::FullJid;
+use waddle_xmpp_core::xep0388_inline::{
+    Sasl2InlineResults, SmInlineFailed, SmInlineResumeResult, SmInlineResumed,
+};
 
 /// High-level lifecycle of the scaffolded runtime wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +99,33 @@ pub(in crate::runtime) enum BootstrapState {
     AwaitingAuthenticationOutcome {
         sasl2: bool,
         oauthbearer_error_challenge_seen: bool,
+        /// Whether the `<authenticate/>` carried an inline XEP-0198
+        /// `<resume/>`, which decides the inline results the matching
+        /// `<success/>` may carry.
+        inline_resume: bool,
     },
     AwaitingBindResult {
         stanza_id: StanzaId,
     },
     AwaitingResume,
     Ready,
+}
+
+/// What a SASL2 success means for the session, derived from its inline
+/// results before any runtime state changes.
+enum InlineOutcome {
+    /// Nothing was requested inline, or the server left the resumption
+    /// request unprocessed: negotiation continues with the stream features.
+    ContinueWithFeatures,
+    /// The previous session continues on this stream.
+    Resumed {
+        resumed: SmInlineResumed,
+        /// Full JID the server reported for a session whose bound JID is
+        /// not retained locally.
+        reported_jid: Option<FullJid>,
+    },
+    /// The previous session is gone and no resource is bound yet.
+    ResumeFailed { failed: SmInlineFailed },
 }
 
 /// Hosts pulse the XEP-0198 clock every 250ms; a pulse arriving this long
@@ -586,14 +614,26 @@ impl XmppRuntime {
                     });
                 }
 
-                let request = if sasl2 {
-                    AuthenticationRequest::sasl2_oauthbearer_from_config(self.oauth_config())
+                let inline_requests = if sasl2 {
+                    self.inline_resume_requests(&features)
                 } else {
-                    AuthenticationRequest::from_config(self.oauth_config())
+                    None
+                };
+                let inline_resume = inline_requests.is_some();
+                let request = match inline_requests {
+                    Some(requests) => AuthenticationRequest::sasl2_oauthbearer_with_inline(
+                        self.oauth_config(),
+                        requests,
+                    ),
+                    None if sasl2 => {
+                        AuthenticationRequest::sasl2_oauthbearer_from_config(self.oauth_config())
+                    }
+                    None => AuthenticationRequest::from_config(self.oauth_config()),
                 };
                 self.bootstrap = BootstrapState::AwaitingAuthenticationOutcome {
                     sasl2,
                     oauthbearer_error_challenge_seen: false,
+                    inline_resume,
                 };
                 self.set_phase(SessionPhase::Authenticating)?;
                 events.push(ClientEvent::Connection(
@@ -656,6 +696,37 @@ impl XmppRuntime {
         Ok(())
     }
 
+    /// Inline requests for the SASL2 `<authenticate/>`: resumption of the
+    /// retained XEP-0198 session when the server offers it inline.
+    ///
+    /// Without a resumable session or a well-formed `<sm/>` inline feature
+    /// this is `None` and the `<authenticate/>` carries no inline request; a
+    /// malformed advertisement counts as no offer, so it cannot prevent
+    /// authentication.
+    ///
+    /// The server's Bind 2 offer is not taken up: XEP-0386 has the server
+    /// discard offline messages on a Bind 2 bind in favour of archive
+    /// catch-up, which this runtime does not perform itself. A failed inline
+    /// resumption is followed by RFC 6120 resource binding instead.
+    fn inline_resume_requests(&self, features: &StreamFeatures) -> Option<Sasl2InlineRequests> {
+        let sm_cfg = &self.config.session.stream_management;
+        if !sm_cfg.enable_stream_management || !sm_cfg.allow_resume {
+            return None;
+        }
+        let previd = SmStreamId::new(self.sm_state.previd.as_ref()?.as_str())?;
+        let offer = features.sasl2_inline_offer().ok()??;
+        if !offer.stream_resumption {
+            return None;
+        }
+        Some(Sasl2InlineRequests {
+            resume: Some(SmInlineResume {
+                previd,
+                h: self.sm_state.inbound_count,
+            }),
+            bind: None,
+        })
+    }
+
     pub(in crate::runtime) fn request_resource_binding(
         &mut self,
         events: &mut Vec<ClientEvent>,
@@ -691,6 +762,7 @@ impl XmppRuntime {
             BootstrapState::AwaitingAuthenticationOutcome {
                 sasl2: false,
                 oauthbearer_error_challenge_seen: true,
+                ..
             } => {
                 return self
                     .terminate_authentication(ClientError::UnexpectedSaslSuccessAfterOAuthError);
@@ -715,47 +787,150 @@ impl XmppRuntime {
         success: Sasl2Success,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
-        match self.bootstrap {
+        let inline_resume = match self.bootstrap {
             BootstrapState::AwaitingAuthenticationOutcome {
                 sasl2: true,
                 oauthbearer_error_challenge_seen: true,
+                ..
             } => {
                 return self
                     .terminate_authentication(ClientError::UnexpectedSaslSuccessAfterOAuthError);
             }
-            BootstrapState::AwaitingAuthenticationOutcome { sasl2: true, .. } => {}
+            BootstrapState::AwaitingAuthenticationOutcome {
+                sasl2: true,
+                inline_resume,
+                ..
+            } => inline_resume,
             BootstrapState::AwaitingAuthenticationOutcome { sasl2: false, .. } => {
                 return self
                     .terminate_authentication(ClientError::UnexpectedSaslAuthenticationProfile);
             }
             _ => return Ok(()),
-        }
+        };
 
-        if !success.inline_results.is_empty() {
-            return self.terminate_authentication(ClientError::UnexpectedSasl2InlineResult);
-        }
-
-        if success.additional_data.is_some() {
-            return self.terminate_authentication(ClientError::UnexpectedOAuthBearerSuccessData);
-        }
-
-        let expected = &self.oauth_config().account;
-        if success.authorization_identifier.resource().is_some()
-            || success.authorization_identifier.to_bare() != *expected
-        {
-            return self.terminate_authentication(ClientError::Sasl2AuthorizationIdentityMismatch);
-        }
+        // The whole success, including the counters of an inline result, is
+        // validated before any of it is applied: a rejected success emits no
+        // event and leaves the retained XEP-0198 session untouched.
+        let outcome = match self.inline_outcome(inline_resume, &success) {
+            Ok(outcome) => outcome,
+            Err(error) => return self.terminate_authentication(error),
+        };
 
         events.push(ClientEvent::Connection(
             ConnectionEvent::AuthenticationSucceeded,
         ));
-        // XEP-0388 continues on the existing stream. The next stanza is
-        // stream features; emitting a second stream `<open/>` would violate
-        // the SASL2 success sequence.
-        self.bootstrap = BootstrapState::AwaitingFeatures {
-            authenticated: true,
-        };
+        match outcome {
+            InlineOutcome::ContinueWithFeatures => {
+                // XEP-0388 continues on the existing stream. The next stanza
+                // is stream features; emitting a second stream `<open/>`
+                // would violate the SASL2 success sequence.
+                self.bootstrap = BootstrapState::AwaitingFeatures {
+                    authenticated: true,
+                };
+            }
+            InlineOutcome::Resumed {
+                resumed,
+                reported_jid,
+            } => {
+                // XEP-0198 re-establishes the stream with this success: no
+                // stream features follow a successful inline resumption.
+                let previd = StreamId::new(resumed.previd.as_str());
+                self.apply_resumed(resumed.h, previd, reported_jid, events)?;
+            }
+            InlineOutcome::ResumeFailed { failed } => {
+                self.apply_resume_failed(failed.h, events);
+                // The stream features that follow lead to RFC 6120 resource
+                // binding, as after a SASL2 success without inline requests,
+                // and say whether stream management can be enabled on the
+                // fresh session.
+                self.sm_advertised = false;
+                self.bootstrap = BootstrapState::AwaitingFeatures {
+                    authenticated: true,
+                };
+            }
+        }
         Ok(())
+    }
+
+    /// Validate a SASL2 success against the inline resumption request that
+    /// was sent with the `<authenticate/>` and decide how the session
+    /// continues. Nothing is mutated here.
+    fn inline_outcome(
+        &self,
+        inline_resume: bool,
+        success: &Sasl2Success,
+    ) -> ClientResult<InlineOutcome> {
+        let results = if inline_resume {
+            Sasl2InlineResults::from_success(success)
+                .map_err(|_| ClientError::InvalidSasl2InlineResult)?
+        } else {
+            if !success.inline_results.is_empty() {
+                return Err(ClientError::UnexpectedSasl2InlineResult);
+            }
+            Sasl2InlineResults::default()
+        };
+        // No Bind 2 request is ever sent, so `<bound/>` answers nothing.
+        if results.bound.is_some() || !results.other_results.is_empty() {
+            return Err(ClientError::UnexpectedSasl2InlineResult);
+        }
+
+        if success.additional_data.is_some() {
+            return Err(ClientError::UnexpectedOAuthBearerSuccessData);
+        }
+
+        let identity = &success.authorization_identifier;
+        if identity.to_bare() != self.oauth_config().account {
+            return Err(ClientError::Sasl2AuthorizationIdentityMismatch);
+        }
+        let full_jid = identity.clone().try_into_full().ok();
+
+        match results.resume {
+            Some(SmInlineResumeResult::Resumed(resumed)) => {
+                // The same conditions end the stream with a stream error
+                // when `<resumed/>` arrives as a stream element. Inline, the
+                // success that carries it is rejected as a whole instead.
+                if self.sm_state.previd.as_ref().map(StreamId::as_str)
+                    != Some(resumed.previd.as_str())
+                    || self.sm_state.handled_count_too_high(resumed.h)
+                {
+                    return Err(ClientError::InvalidSasl2InlineResult);
+                }
+                // A resumed session keeps the resource it was bound with.
+                // XEP-0388 leaves the identifier a bare JID unless it names
+                // that resource, so a full JID must name the retained one;
+                // it is taken on trust only when none is retained.
+                let reported_jid = match (&self.sm_state.bound_jid, full_jid) {
+                    (Some(retained), Some(reported)) if *retained != reported => {
+                        return Err(ClientError::Sasl2AuthorizationIdentityMismatch);
+                    }
+                    (Some(_), _) => None,
+                    (None, reported) => reported,
+                };
+                Ok(InlineOutcome::Resumed {
+                    resumed,
+                    reported_jid,
+                })
+            }
+            Some(SmInlineResumeResult::Failed(failed)) => {
+                // No resource is bound, so the identifier stays a bare JID.
+                if full_jid.is_some() {
+                    return Err(ClientError::Sasl2AuthorizationIdentityMismatch);
+                }
+                if failed
+                    .h
+                    .is_some_and(|h| self.sm_state.handled_count_too_high(h))
+                {
+                    return Err(ClientError::InvalidSasl2InlineResult);
+                }
+                Ok(InlineOutcome::ResumeFailed { failed })
+            }
+            None => {
+                if full_jid.is_some() {
+                    return Err(ClientError::Sasl2AuthorizationIdentityMismatch);
+                }
+                Ok(InlineOutcome::ContinueWithFeatures)
+            }
+        }
     }
 
     pub(in crate::runtime) fn handle_sasl2_continue(&mut self) -> ClientResult<()> {
@@ -778,6 +953,7 @@ impl XmppRuntime {
         let BootstrapState::AwaitingAuthenticationOutcome {
             sasl2,
             oauthbearer_error_challenge_seen,
+            inline_resume,
         } = self.bootstrap
         else {
             return Ok(());
@@ -790,6 +966,7 @@ impl XmppRuntime {
         self.bootstrap = BootstrapState::AwaitingAuthenticationOutcome {
             sasl2,
             oauthbearer_error_challenge_seen: true,
+            inline_resume,
         };
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(challenge.oauthbearer_error_response_element()),
@@ -932,6 +1109,7 @@ impl XmppRuntime {
         self.pending_fallback_retries
             .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
         self.sm_state.previd = None;
+        self.sm_state.bound_jid = None;
         self.sm_state.stop();
         self.sm_negotiation = SmNegotiationState::Inactive;
         self.sm_advertised = stream_management_remains_available;
@@ -1001,6 +1179,13 @@ impl XmppRuntime {
                 | (SessionPhase::OpeningStream, SessionPhase::Binding)
                 | (SessionPhase::OpeningStream, SessionPhase::Resuming)
                 | (SessionPhase::Authenticating, SessionPhase::Binding)
+                // SASL2 does not restart the stream, so a `<resume/>` sent
+                // on the authenticated stream follows authentication
+                // directly.
+                | (SessionPhase::Authenticating, SessionPhase::Resuming)
+                // An inline XEP-0198 resumption completes inside the SASL2
+                // success, with no separate resuming or binding step.
+                | (SessionPhase::Authenticating, SessionPhase::Established)
                 | (SessionPhase::Resuming, SessionPhase::Binding)
                 | (SessionPhase::Binding, SessionPhase::Established)
                 | (SessionPhase::Established, SessionPhase::Resuming)

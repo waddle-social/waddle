@@ -4,6 +4,7 @@ use crate::messaging::MessageRejection;
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use jid::FullJid;
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
@@ -219,6 +220,7 @@ pub struct SmResumeState {
     inbound_h: u32,
     outbound_h: u32,
     max_resume_seconds: Option<u32>,
+    bound_jid: Option<FullJid>,
     outbound_queue: VecDeque<UnhandledOutboundEntry>,
 }
 
@@ -239,8 +241,26 @@ impl SmResumeState {
             inbound_h,
             outbound_h,
             max_resume_seconds: None,
+            bound_jid: None,
             outbound_queue: VecDeque::new(),
         })
+    }
+
+    /// Set the full JID the server bound for this session and return the
+    /// updated value.
+    ///
+    /// A resumed session keeps that resource, which the server may have
+    /// chosen itself, so it cannot be derived from the client configuration.
+    #[must_use]
+    pub fn with_bound_jid(mut self, bound_jid: Option<FullJid>) -> Self {
+        self.bound_jid = bound_jid;
+        self
+    }
+
+    /// Return the full JID the server bound for this session, when known.
+    #[must_use]
+    pub fn bound_jid(&self) -> Option<&FullJid> {
+        self.bound_jid.as_ref()
     }
 
     /// Set the max resume seconds and return the updated value.
@@ -296,6 +316,7 @@ impl SmResumeState {
     #[must_use]
     pub fn into_fresh_stream_retry_state(mut self) -> Self {
         self.resumable = false;
+        self.bound_jid = None;
         self
     }
 
@@ -360,6 +381,9 @@ pub struct SmState {
     pub previd: Option<StreamId>,
     /// Advertised server resumption window in seconds, when the server supplied one.
     pub max_resume_seconds: Option<u32>,
+    /// Full JID the server bound for the session named by `previd`, when
+    /// known. A resumed session keeps this resource.
+    pub bound_jid: Option<FullJid>,
     /// Whether the outbound stanza counter has started for this session.
     ///
     /// XEP-0198 starts the sender's own counter immediately after sending
@@ -410,6 +434,10 @@ impl SmState {
                 .is_resumable()
                 .then(|| resume_state.max_resume_seconds())
                 .flatten(),
+            bound_jid: resume_state
+                .is_resumable()
+                .then(|| resume_state.bound_jid().cloned())
+                .flatten(),
             outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
         }
@@ -425,7 +453,11 @@ impl SmState {
                 self.outbound_count,
                 self.outbound_queue.clone(),
             )
-            .map(|state| state.with_max_resume_seconds(self.max_resume_seconds))
+            .map(|state| {
+                state
+                    .with_max_resume_seconds(self.max_resume_seconds)
+                    .with_bound_jid(self.bound_jid.clone())
+            })
             .ok()
         })
     }
