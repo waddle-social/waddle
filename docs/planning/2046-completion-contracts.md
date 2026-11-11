@@ -281,62 +281,51 @@ owner-as-runtime path is deleted.
 
 ## M3 gaps: the connection actor owns a single-node `/ws` session
 
-### Step 0: the live loop runs on the supervised pumps
+### The live loop runs on the supervised pumps
 
-Package D's first item is observed pump termination before handlers move. It
-can be delivered on the live path instead of the dark one, which gives M3 an
-activation before step 1 and exercises the pumps under every existing `*_ws`
-suite.
+`LiveWebSocketConnection::run` starts the socket through
+`LegacySocketAdmission::start_socket` (`S/websocket_transport.rs`). The owner
+task reads through a demand-gated `WebSocketInput`, one frame per grant, and
+writes through `WebSocketMessageSink`, whose flush completes when the write
+receipt is terminal. The custodian observes pump termination and releases the
+connection slot. `InterruptibleSink` wraps the message sink, so write
+interruption and live-resume control end a pending write as before.
 
-- The live owner task already owns `WsConnState` exclusively
-  (`W/connection.rs:349-406`). What it lacks is the transport boundary: it
-  splits the socket itself (`W/connection.rs:454`) and writes inline.
-- Only one alias names the concrete socket types (`W/connection.rs:317-318`).
-  The handlers are generic over `Sink<Message>` (29 bounds across
-  `batch_write.rs`, `send.rs`, `connection.rs` and `outbound.rs`).
-- The supervised start exists and is unused outside tests
-  (`SocketAdmission::start_socket`, `S/websocket_transport.rs:672`). Its output
-  is a `Sink<WebSocketOutboundFrame>` that restricts close and terminal frames
-  to typed constructors (`S/websocket_transport.rs:1546-1652,1799`), and its
-  input is a `Stream` (`:150`).
+### The actor hosts the live loop
 
-The change is an adapter that presents the supervised output as
-`Sink<Message>` (data frames while open, `Message::Close` through
-`transport_close_frame`), completes a flush only when the write receipt is
-terminal so the handlers' "written" assumption holds, and replaces
-`into_legacy` with `start_socket` plus custodian retirement in teardown.
+The dark connection actor already owns a whole `WsConnState` and calls the
+legacy handlers (`W/connection_actor_core.rs`), but its driver admits only
+`<r/>` and receives frames pushed into its mailbox by a forwarder. The handlers
+need to pull: the mid-batch acknowledgement drain settles the reader and takes
+a ready frame while a batch is being written (`W/batch_write.rs`,
+`drain_ready_inbound`). Growing the dark driver to parity would rewrite the
+batch writer and converge on the actor hosting the legacy handlers anyway.
 
-Not yet established: that receipt-terminal flush preserves SM accounting on a
-failed write, how `LocalSocketIo`'s relinquishment witness maps onto the
-supervised `SplitIoRelinquishment`
-([`2046-local-io-relinquishment.md`](2046-local-io-relinquishment.md)), and
-the interaction between `InterruptibleSink` and the supervised live-detach
-phase. These need their own design review before implementation.
+The live loop therefore moves into the actor as a unit. Control does not need a
+mailbox turn while a handler awaits a write: writes race the binding permit and
+shutdown tokens, and the sink polls write interruption and live-resume control
+on every poll.
 
-### Steps 1–11: the actor replaces the loop
+| # | Slice | Deletes | Proof | Size | Gate |
+| --- | --- | --- | --- | --- | --- |
+| S1 | The loop is expressed as prepare turn, wait for one event, handle the event, settle (`LiveSocketState`, `LoopEvent`) | Inline arm bodies | Every `*_ws`, characterization and WebSocket unit suite | M | Behaviour-neutral |
+| S2 | A Kameo actor hosts S1 by overriding `Actor::next`, with an explicit 256-entry mailbox that carries commands and lifecycle only; inbound stays pulled and outbound stays in the endpoint queue so the send-window pause can gate it; a kill is treated as a panic | Nothing | Every `*_ws` suite under the selector, `websocket_admission_live`, a saturation test for control progress | M | Selector |
+| S3 | The actor is the default; the loop driver and the dark driver are removed | Legacy driver, `connection_actor_core.rs`, `connection_actor_driver_task.rs`, the fixture forwarder | All suites | M | Flip |
+| S4 | One `retire(cause)`: typed cause, idempotent, fenced on `ConnectionRef`; a same-node transfer is acknowledged only after observed pump termination within a deadline, else the terminal path (D4) | Scattered close paths | `websocket_admission_live`, `clustering_shutdown_deadline`, `supervised_io`, `xep0198_cross_node_resume` | M | Selector |
+| S5 | Actor-owned endpoint: the actor mints `BindingRef`; prepare, install, confirm and retire are mailbox messages; sink receipts map to typed attempt evidence; pump queues get real byte bounds | `pending_tx`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ingress_generation` | `characterization_bind`, `characterization_routing`, `xep0198_attached_resume_ws`, `xep0198_replay_bytes`, `physical_continuation` | L | Selector, then flip |
+| S6 | The D5 rows owned by the connection actor move out of `WsConnState` | `LiveSocketState` scaffolding | All suites | M | Behaviour-neutral |
 
-In dependency order. Each step keeps the legacy path selected in production
-and is proven by the named suite under a test-selected actor.
+Open before S4: the join deadline and its effect on force-detach
+acknowledgement latency (`TRANSPORT_JOIN_TIMEOUT` is 10 s). Open before S5:
+`TRANSPORT_QUEUE_BYTES` is `u32::MAX`, which is no byte bound; the
+ordered-relay handoff receiver is unbounded; and how a terminal write receipt
+maps to an uncertain attempt without stream management.
 
-| # | Gap | Where | Size | Proof |
-| --- | --- | --- | --- | --- |
-| 1 | Production composition root: reader, prebind initialisation, `TransportReady`, timers, cleanup index in application state | `S/websocket_transport.rs:109-111`, `W/connection.rs:479-558` | M | `canonical_actor_bridge` |
-| 2 | Generic inbound dispatch on the driver with a bounded response continuation | `W/connection_actor_driver_task.rs:597-619,1734` | L | driver tests |
-| 3 | Production output writer: SM record, send-window pause, mid-batch acknowledgement | `W/batch_write.rs:196` | L | `physical_continuation`, `batch_write` |
-| 4 | Prebind through the shared handler, covering stream open and every SASL mechanism | `W/connection_actor/prebind.rs` | M | `sasl1_identity_ws`, `sasl2_dark_ws` |
-| 5 | Bind and binding publication against the actor endpoint | `W/actor_local_endpoint.rs:1020`, `W/registration.rs:448` | L | `characterization_bind` |
-| 6 | Peer stanza admission, interpretation and write | `W/connection_actor_driver_task.rs:621` | L | `characterization_routing`, `rfc6121_presence_ws` |
-| 7 | SM enable, same-node resume, replay and completion settlement | `W/connection.rs:1920-2034` | L | `xep0198_attached_resume_ws` |
-| 8 | Force-detach, live-resume control, deferred inbound, relay handoff, keepalive | `W/connection.rs:677-1000` | M | `rfc7395_keepalive_ws` |
-| 9 | Terminal cleanup after join: detach, MUC sweep, terminal drain | `W/cleanup.rs:783-834` | L | `graceful_shutdown_ws` |
-| 10 | Drain-guard and panic-fence parity | `W/connection.rs:349-403` | S | owner panic test |
-| 11 | Selector in the upgrade handler and admission gate | `W/connection.rs:130,157`, `S/server/state.rs:259` | S | every `*_ws` suite under the selector |
+The regression for publication order
+(`server/crates/waddle-server/tests/xep0198_attached_resume_ws.rs`) is ignored
+until the remote enqueue paths are gated; that gating is part of S5.
 
-Step 7's regression for publication order is ignored until the remote enqueue
-paths are gated (`server/crates/waddle-server/tests/xep0198_attached_resume_ws.rs:680`);
-that gating is part of step 5.
-
-After step 11 the actor hosts the legacy handlers and `WsConnState`. What
+After S6 the actor hosts the legacy handlers and `WsConnState`. What
 follows, before the production activation:
 
 - the field moves in D5, durable SM and exact account bindings;
