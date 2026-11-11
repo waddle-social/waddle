@@ -12,8 +12,9 @@ use crate::event::{
     ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamErrorCondition, StreamErrorDetail,
     StreamManagementEvent,
 };
-use crate::state::SessionBinding;
+use crate::state::{SessionBinding, StreamId};
 use crate::transport::{StreamClose, TransportMessage};
+use jid::FullJid;
 use minidom::Element;
 
 use super::{BootstrapState, SmNegotiationState, XmppRuntime};
@@ -35,17 +36,32 @@ impl XmppRuntime {
         }));
 
         // RFC 6120 defines stream errors as terminal for the current XML
-        // stream. During XEP-0198 resume bootstrap, recoverable resume-specific
-        // failures are represented by `<failed/>`; if the server instead ends
-        // the stream, keeping `previd` would replay the same failed pre-bind
-        // resume on the next WebSocket connection.
-        if matches!(self.bootstrap, BootstrapState::AwaitingResume) {
-            self.discard_failed_prebind_resume(events);
+        // stream. A resumption the server cannot honour is answered with
+        // `<failed/>`; if the server instead ends the stream while a
+        // `<resume/>` is outstanding, keeping `previd` would send the same
+        // doomed request on every later connection. That holds whether the
+        // `<resume/>` was a stream element or travelled inline in the SASL2
+        // `<authenticate/>`.
+        if self.resume_outstanding() {
+            self.discard_outstanding_resume(events);
         }
     }
 
-    pub(super) fn discard_failed_prebind_resume(&mut self, events: &mut Vec<ClientEvent>) {
-        if !matches!(self.bootstrap, BootstrapState::AwaitingResume) {
+    /// Whether a `<resume/>` has been sent on this stream and not yet
+    /// answered.
+    fn resume_outstanding(&self) -> bool {
+        matches!(
+            self.bootstrap,
+            BootstrapState::AwaitingResume
+                | BootstrapState::AwaitingAuthenticationOutcome {
+                    inline_resume: true,
+                    ..
+                }
+        )
+    }
+
+    pub(super) fn discard_outstanding_resume(&mut self, events: &mut Vec<ClientEvent>) {
+        if !self.resume_outstanding() {
             return;
         }
         if self.sm_state.previd.is_none() {
@@ -54,6 +70,7 @@ impl XmppRuntime {
 
         let failed = self.sm_state.unhandled_message_stanza_ids();
         self.sm_state.previd = None;
+        self.sm_state.bound_jid = None;
         self.fallback_resume_state = None;
         self.pending_fallback_retries.clear();
         self.fallback_retry_writes_in_flight.clear();
@@ -130,6 +147,12 @@ impl XmppRuntime {
                     return Ok(());
                 }
                 self.sm_state.previd = previd.clone();
+                // A resumable session is later re-established without a
+                // bind, so the JID bound now is kept with its identifier.
+                self.sm_state.bound_jid = previd
+                    .as_ref()
+                    .and(self.snapshot.binding.as_ref())
+                    .map(|binding| binding.jid.clone());
                 self.sm_state.max_resume_seconds = max_resume_seconds;
                 self.sm_state.enabled = true;
                 self.sm_negotiation = SmNegotiationState::Enabled;
@@ -154,38 +177,7 @@ impl XmppRuntime {
                     self.handle_sm_handled_count_too_high(h, events);
                     return Ok(());
                 }
-                let acked = self.sm_state.process_ack(h);
-                self.sm_state.previd = Some(previd);
-                self.sm_state.enabled = true;
-                self.sm_state.outbound_enabled = true;
-                self.sm_negotiation = SmNegotiationState::Enabled;
-                self.snapshot.binding = Some(self.resumed_session_binding()?);
-                self.bootstrap = BootstrapState::Ready;
-                self.set_phase(SessionPhase::Established)?;
-                events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                    StreamManagementEvent::Resumed { h },
-                )));
-                events.extend(acked.into_iter().map(|stanza_id| {
-                    ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
-                }));
-                // XEP-0198 §5 retains the unacknowledged tail across a successful
-                // resume. Queue those writes before requesting their acknowledgement
-                // so the serial driver preserves replay order on the wire.
-                for replay in self.sm_state.mark_unhandled_for_replay() {
-                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                        TransportMessage::Element(replay),
-                    )));
-                }
-                if self.sm_state.acknowledgement_clock_pending() {
-                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                        TransportMessage::Element(SmState::build_request_ack()),
-                    )));
-                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                        StreamManagementEvent::AckRequested {
-                            reason: SmAckRequestReason::ResumedUnackedTail,
-                        },
-                    )));
-                }
+                self.apply_resumed(h, previd, None, events)?;
             }
             crate::stream_management::SmInboundControl::Failed { h } => {
                 let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
@@ -202,23 +194,17 @@ impl XmppRuntime {
                         self.handle_sm_handled_count_too_high(h, events);
                         return Ok(());
                     }
-                    let acked = self.sm_state.process_ack(h);
-                    events.extend(acked.into_iter().map(|stanza_id| {
-                        ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
-                    }));
                 }
                 if resume_failed {
-                    // Keep the queue resumable until fallback retries are written to the new stream.
-                    self.prepare_fresh_stream_fallback(events, true);
-                }
-                self.sm_state.stop();
-                self.sm_negotiation = SmNegotiationState::Inactive;
-                events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                    StreamManagementEvent::Failed,
-                )));
-                if resume_failed {
+                    self.apply_resume_failed(h, events);
                     self.request_resource_binding(events)?;
                 } else {
+                    self.settle_failed_handled_count(h, events);
+                    self.sm_state.stop();
+                    self.sm_negotiation = SmNegotiationState::Inactive;
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::Failed,
+                    )));
                     self.sm_advertised = false;
                     self.flush_pending_fallback_retries(events);
                 }
@@ -226,6 +212,89 @@ impl XmppRuntime {
         }
 
         Ok(())
+    }
+
+    /// Continue the retained XEP-0198 session on this stream after the server
+    /// answered a `<resume/>`, sent either as a stream element or inline with
+    /// SASL2, with `<resumed/>`.
+    ///
+    /// The caller has already checked that `previd` names the retained
+    /// session and that `h` does not exceed the stanzas sent on it.
+    ///
+    /// `reported_jid` is the full JID the server reported for the resumed
+    /// session, used when the JID it was bound with is not retained.
+    pub(super) fn apply_resumed(
+        &mut self,
+        h: u32,
+        previd: StreamId,
+        reported_jid: Option<FullJid>,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        let acked = self.sm_state.process_ack(h);
+        self.sm_state.previd = Some(previd);
+        if self.sm_state.bound_jid.is_none() {
+            self.sm_state.bound_jid = reported_jid;
+        }
+        self.sm_state.enabled = true;
+        self.sm_state.outbound_enabled = true;
+        self.sm_negotiation = SmNegotiationState::Enabled;
+        self.snapshot.binding = Some(self.resumed_session_binding()?);
+        self.bootstrap = BootstrapState::Ready;
+        self.set_phase(SessionPhase::Established)?;
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Resumed { h },
+        )));
+        events.extend(acked.into_iter().map(|stanza_id| {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+        }));
+        // XEP-0198 §5 retains the unacknowledged tail across a successful
+        // resume. Queue those writes before requesting their acknowledgement
+        // so the serial driver preserves replay order on the wire.
+        for replay in self.sm_state.mark_unhandled_for_replay() {
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(replay),
+            )));
+        }
+        if self.sm_state.acknowledgement_clock_pending() {
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(SmState::build_request_ack()),
+            )));
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested {
+                    reason: SmAckRequestReason::ResumedUnackedTail,
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    /// Give up the retained XEP-0198 session after the server answered a
+    /// `<resume/>`, sent either as a stream element or inline with SASL2,
+    /// with `<failed/>`.
+    ///
+    /// The server's `h`, when present, settles the stanzas it did handle;
+    /// the rest of the tail is queued for retry on the fresh session. The
+    /// caller has already checked that `h` does not exceed the stanzas sent,
+    /// and decides how the fresh session is bound.
+    pub(super) fn apply_resume_failed(&mut self, h: Option<u32>, events: &mut Vec<ClientEvent>) {
+        self.settle_failed_handled_count(h, events);
+        // Keep the queue resumable until fallback retries are written to the new stream.
+        self.prepare_fresh_stream_fallback(events, true);
+        self.sm_state.stop();
+        self.sm_negotiation = SmNegotiationState::Inactive;
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        )));
+    }
+
+    /// Apply the optional `h` of a `<failed/>` as an acknowledgement.
+    fn settle_failed_handled_count(&mut self, h: Option<u32>, events: &mut Vec<ClientEvent>) {
+        if let Some(h) = h {
+            let acked = self.sm_state.process_ack(h);
+            events.extend(acked.into_iter().map(|stanza_id| {
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+            }));
+        }
     }
 
     fn handle_sm_handled_count_too_high(&mut self, h: u32, events: &mut Vec<ClientEvent>) {
@@ -271,12 +340,19 @@ impl XmppRuntime {
         )));
     }
 
+    /// Binding of the session named by the retained `previd`: the JID the
+    /// server bound for it when that is known, otherwise the configured
+    /// account and resource.
     fn resumed_session_binding(&self) -> ClientResult<SessionBinding> {
-        let auth = self.oauth_config();
-        let jid = auth
-            .account
-            .with_resource_str(auth.resource.as_str())
-            .map_err(|_| ClientError::InvalidBindResponse)?;
+        let jid = match &self.sm_state.bound_jid {
+            Some(jid) => jid.clone(),
+            None => {
+                let auth = self.oauth_config();
+                auth.account
+                    .with_resource_str(auth.resource.as_str())
+                    .map_err(|_| ClientError::InvalidBindResponse)?
+            }
+        };
         Ok(SessionBinding {
             jid,
             stream_id: self.sm_state.previd.clone(),

@@ -46,7 +46,8 @@ pub use avatar::{Avatar, AvatarChanged, AvatarId, AvatarInfo, AvatarItemId};
 pub use bootstrap::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, OAuthBearerRequest,
     RequiredStreamFeature, ResourceBindingRequest, ResourceBindingResult, Sasl2Authentication,
-    Sasl2Success, SaslChallenge, SaslFailure, SaslFailureCondition, SaslPayload, StreamFeatures,
+    Sasl2InlineOAuthBearerRequest, Sasl2InlineRequests, Sasl2Success, SaslChallenge, SaslFailure,
+    SaslFailureCondition, SaslPayload, SmInlineResume, SmStreamId, StreamFeatures,
     StreamResumption, NS_BIND, NS_CLIENT, NS_SASL, NS_SASL2, NS_SESSION, NS_SM, NS_STREAMS,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

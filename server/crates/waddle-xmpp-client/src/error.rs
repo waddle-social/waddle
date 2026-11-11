@@ -111,8 +111,11 @@ pub enum ClientError {
     /// SASL2 authorization identifier did not match the configured bare account.
     Sasl2AuthorizationIdentityMismatch,
     #[error("SASL2 success included a result for an unrequested inline feature")]
-    /// SASL2 success carried an inline result even though the client sent no inline requests.
+    /// SASL2 success carried an inline result for a feature the client did not request.
     UnexpectedSasl2InlineResult,
+    #[error("SASL2 success included a malformed or contradictory inline result")]
+    /// SASL2 success answered an inline resumption or bind request with a result that violates XEP-0198 or XEP-0386.
+    InvalidSasl2InlineResult,
     #[error("server requested an unsupported SASL2 authentication task")]
     /// The client does not implement the task offered by SASL2 continuation.
     UnsupportedSasl2AuthenticationTask,

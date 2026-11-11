@@ -21,6 +21,8 @@ use waddle_xmpp_core::xep0388::{
 pub use waddle_xmpp_core::xep0388::{
     Sasl2Data as SaslPayload, Sasl2Feature as Sasl2Authentication, Sasl2Success,
 };
+use waddle_xmpp_core::xep0388_inline::Sasl2InlineOffer;
+pub use waddle_xmpp_core::xep0388_inline::{Sasl2InlineRequests, SmInlineResume, SmStreamId};
 
 /// Protocol token `urn:ietf:params:xml:ns:xmpp-bind`.
 pub const NS_BIND: &str = "urn:ietf:params:xml:ns:xmpp-bind";
@@ -264,6 +266,24 @@ impl StreamFeatures {
         self.mechanisms.contains(&mechanism)
     }
 
+    /// XEP-0198 inline resumption and XEP-0386 Bind 2 support advertised in
+    /// the SASL2 `<inline/>` element, or `None` when SASL2 or `<inline/>` is
+    /// absent.
+    ///
+    /// The advertisement is interpreted only here, not while parsing the
+    /// stream features: authentication does not depend on it, so a server
+    /// with a malformed advertisement can still be logged in to.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::InvalidSasl2Feature` when the advertisement of
+    /// either extension is repeated or malformed.
+    pub fn sasl2_inline_offer(&self) -> ClientResult<Option<Sasl2InlineOffer>> {
+        self.sasl2_authentication
+            .as_ref()
+            .map_or(Ok(None), inline_offer)
+    }
+
     /// Whether the peer advertised the requested mechanism through SASL2.
     #[must_use]
     pub fn supports_sasl2(&self, mechanism: AuthMechanism) -> bool {
@@ -274,6 +294,15 @@ impl StreamFeatures {
     }
 }
 
+fn inline_offer(authentication: &Sasl2Authentication) -> ClientResult<Option<Sasl2InlineOffer>> {
+    authentication
+        .inline
+        .as_ref()
+        .map(Sasl2InlineOffer::from_inline_features)
+        .transpose()
+        .map_err(|_| ClientError::InvalidSasl2Feature)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Typed authentication exchange to be written to the stream.
 #[non_exhaustive]
@@ -282,6 +311,9 @@ pub enum AuthenticationRequest {
     OAuthBearer(OAuthBearerRequest),
     /// A SASL2 OAUTHBEARER request containing no inline requests.
     Sasl2OAuthBearer(OAuthBearerRequest),
+    /// A SASL2 OAUTHBEARER request that also asks the server to resume a
+    /// XEP-0198 session.
+    Sasl2OAuthBearerInline(Sasl2InlineOAuthBearerRequest),
 }
 
 impl AuthenticationRequest {
@@ -303,12 +335,28 @@ impl AuthenticationRequest {
         })
     }
 
+    /// Construct a SASL2 OAUTHBEARER request carrying inline extension requests.
+    #[must_use]
+    pub fn sasl2_oauthbearer_with_inline(
+        config: &OAuthBearerConfig,
+        inline: Sasl2InlineRequests,
+    ) -> Self {
+        Self::Sasl2OAuthBearerInline(Sasl2InlineOAuthBearerRequest {
+            request: OAuthBearerRequest {
+                account: config.account.clone(),
+                access_token: config.access_token.clone(),
+            },
+            inline,
+        })
+    }
+
     /// Serialize this value as a typed XML element.
     #[must_use]
     pub fn to_element(&self) -> Element {
         match self {
             Self::OAuthBearer(request) => request.to_element(),
             Self::Sasl2OAuthBearer(request) => request.to_sasl2_element(),
+            Self::Sasl2OAuthBearerInline(request) => request.to_element(),
         }
     }
 
@@ -365,6 +413,30 @@ impl OAuthBearerRequest {
         payload.push(0x01);
         payload.push(0x01);
         payload
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// SASL2 OAUTHBEARER initial response together with the inline extension
+/// requests sent in the same `<authenticate/>` element.
+pub struct Sasl2InlineOAuthBearerRequest {
+    /// Account and bearer credential being authenticated.
+    pub request: OAuthBearerRequest,
+    /// Inline extension requests the server processes once authentication
+    /// succeeds.
+    pub inline: Sasl2InlineRequests,
+}
+
+impl Sasl2InlineOAuthBearerRequest {
+    /// Serialize this value as a SASL2 `<authenticate/>` element whose inline
+    /// requests follow the initial response.
+    #[must_use]
+    pub fn to_element(&self) -> Element {
+        let mut element = self.request.to_sasl2_element();
+        for child in self.inline.to_elements() {
+            element.append_child(child);
+        }
+        element
     }
 }
 
