@@ -256,7 +256,8 @@ fn parse_sasl2_abort(frame: &str) -> Result<ParsedFrame, ParseError> {
         return Err(ParseError::UnknownRoot("abort".to_owned()));
     }
     if !element.is("abort", NS_SASL2) {
-        return Err(ParseError::MalformedSasl("invalid SASL2 abort"));
+        // An `abort` in any other namespace is not SASL at all.
+        return Err(ParseError::UnknownRoot("abort".to_owned()));
     }
     Ok(ParsedFrame {
         frame: InboundFrame::Sasl2Abort,
