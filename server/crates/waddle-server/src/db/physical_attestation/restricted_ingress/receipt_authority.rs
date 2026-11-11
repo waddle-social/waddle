@@ -33,10 +33,12 @@ use crate::ingress_substrate::{supported_protocol_epoch, EffectReceiptKind};
 #[cfg(feature = "test-support")]
 use crate::db::migrations::acquire_dark_shared_migration_ledger_v1030_write;
 #[cfg(feature = "test-support")]
+use crate::db::physical_attestation::pinned_catalog::verify_pinned_epoch_manifest_catalog;
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::preflight::attest_dark_catalog_pinned_db_transaction;
+#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::{
-    pinned_catalog::verify_pinned_epoch_manifest_catalog,
-    preflight::attest_dark_catalog_pinned_db_transaction, read_epoch_after_prelock,
-    AttestationMode, AttestedPgPool, PinnedRuntimeAuthority,
+    read_epoch_after_prelock, AttestationMode, AttestedPgPool, PinnedRuntimeAuthority,
 };
 
 const DEADLINE: Duration = Duration::from_secs(15);

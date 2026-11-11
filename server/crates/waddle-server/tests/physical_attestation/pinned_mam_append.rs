@@ -20,7 +20,6 @@ use xmpp_parsers::message::MessageType;
 
 use super::{dark_attestor_fixture, test_url, url_with_schema, Fixture, CATALOG_GRANT_LOCK};
 
-const BUILTIN: &str = "TEMPLATE template0 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C'";
 const INDEXES: [&str; 10] = [
     "mam_messages_pkey",
     "idx_mam_room_timestamp",
@@ -226,7 +225,7 @@ async fn seed(fixture: &Fixture, id: &str, origin: &str, seq: i64, rich: Option<
 async fn origin_observation_preserves_order_refusals_and_scope() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new_with_database_options(url, BUILTIN).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let diagnostic = diagnostic(&fixture).await;
     let old = tombstone(None);
     seed(&fixture, "old", "ordered", 1, Some(&old)).await;
@@ -302,7 +301,7 @@ async fn origin_observation_preserves_order_refusals_and_scope() {
 async fn append_related_shape_and_grant_drift_refuse() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new_with_database_options(url, BUILTIN).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let diagnostic = diagnostic(&fixture).await;
     assert!(observe(&diagnostic, &incoming("missing"))
         .await
@@ -413,7 +412,7 @@ async fn stale_and_unknown_database_collation_versions_refuse_before_probe() {
 async fn sequence_index_replacement_after_wait_refuses_on_the_original_backend() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new_with_database_options(url, BUILTIN).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let diagnostic = diagnostic(&fixture).await;
     let messages = oid(&fixture, "mam_messages").await;
     let sequences = oid(&fixture, "mam_archive_sequences").await;
@@ -477,7 +476,7 @@ async fn sequence_index_replacement_after_wait_refuses_on_the_original_backend()
 async fn cancelled_receiver_retains_admission_until_rollback() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new_with_database_options(url, BUILTIN).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let diagnostic = diagnostic(&fixture).await;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();

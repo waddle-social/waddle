@@ -44,7 +44,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
     let Some(url) = test_url() else {
         return;
     };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let config = prepare_candidate_application_fixture(&fixture).await;
     let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
         .fetch_one(&fixture.admin)

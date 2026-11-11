@@ -1,5 +1,8 @@
 //! Unregistered GC experiment. Custody writers are quiescent for this lab.
-use super::*;
+use super::{
+    assert_no_guarded_dml, begin, commit, forged_proof, proof, quote_identifier,
+    render_definer_api_candidate, writer_lock, Fixture, PgConnection, TABLES,
+};
 
 const FK_TRANSITION: &str =
     include_str!("../../src/db/migrations/owner/ingress_gc_fk_transition_v1_candidate.sql");

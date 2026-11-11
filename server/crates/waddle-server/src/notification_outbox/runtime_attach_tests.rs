@@ -1,7 +1,5 @@
-use super::{
-    schema::{OUTBOX_OWNER_PREPARED_REVISION, OUTBOX_OWNER_STATE_TABLE, OUTBOX_SCHEMA_GATE},
-    NotificationOutboxRuntimeAttachError, NotificationOutboxStore, OwnerPreparationProof,
-};
+use super::schema::{OUTBOX_OWNER_PREPARED_REVISION, OUTBOX_OWNER_STATE_TABLE, OUTBOX_SCHEMA_GATE};
+use super::{NotificationOutboxRuntimeAttachError, NotificationOutboxStore, OwnerPreparationProof};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 use anyhow::{anyhow, bail, Result};
 use sqlx::postgres::{PgConnectOptions, PgPool};

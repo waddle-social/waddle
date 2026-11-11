@@ -2,7 +2,8 @@
 //! This verifier does not select a store or establish the external catalog
 //! mutation and old-backend cutoff premise.
 
-use sqlx::{postgres::types::Oid, PgConnection};
+use sqlx::postgres::types::Oid;
+use sqlx::PgConnection;
 
 use super::{
     catalog_preflight, receipt_catalog, ReceiptOperationPins, RestrictedIngressProfileError, Result,

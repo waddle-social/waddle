@@ -19,9 +19,10 @@ use crate::websocket_transport::{
     WebSocketInput, WebSocketOutput,
 };
 use axum::extract::ws::{Message, WebSocket};
+use futures::future::poll_fn;
 #[cfg(feature = "test-support")]
 use futures::FutureExt;
-use futures::{future::poll_fn, Sink, SinkExt};
+use futures::{Sink, SinkExt};
 use jid::FullJid;
 use kameo::actor::ActorRef;
 use kameo::error::SendError;

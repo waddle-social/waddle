@@ -201,7 +201,7 @@ pub(crate) async fn prepare_space_stores_owner(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) async fn prepare_space_stores_owner_paused_for_test(
     db: Database,
     identity: &PgIdentity,
@@ -468,7 +468,7 @@ async fn verify_no_temporary_shadows(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) async fn verify_temporary_shadow_for_test(
     tx: &mut Transaction<'_>,
 ) -> Result<(), SpaceStoreAttachError> {

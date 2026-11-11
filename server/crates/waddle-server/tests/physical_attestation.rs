@@ -49,6 +49,14 @@ static CATALOG_GRANT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 const CANDIDATE_GUARD: &str =
     include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 
+/// Options for a database whose default collation orders text by byte value
+/// whatever locale the cluster was initialised with. The restricted ingress
+/// profile orders trigger definitions with the database's default collation
+/// and compares them with a manifest pinned under C; the pinned MAM append
+/// refuses any other default collation.
+#[cfg(feature = "test-support")]
+const C_COLLATION_DATABASE: &str = "TEMPLATE template0 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C'";
+
 struct Fixture {
     cluster_admin: PgPool,
     admin: PgPool,
@@ -70,6 +78,11 @@ struct Fixture {
 impl Fixture {
     async fn new(url: String) -> Self {
         Self::new_with_database_options(url, "").await
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn new_with_c_collation(url: String) -> Self {
+        Self::new_with_database_options(url, C_COLLATION_DATABASE).await
     }
 
     async fn new_with_database_options(url: String, database_options: &str) -> Self {

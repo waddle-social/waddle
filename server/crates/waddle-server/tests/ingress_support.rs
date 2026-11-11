@@ -21,8 +21,11 @@ use xmpp_parsers::message::{Lang, Message, MessageType};
 /// each test its own advisory-lock namespace as well as its own catalog.
 pub struct IsolatedPostgresDatabase {
     cluster: sqlx::PgPool,
+    cluster_url: String,
     name: String,
     url: String,
+    /// Cleared once `drop_database` has removed the database.
+    owns_database: bool,
 }
 
 impl IsolatedPostgresDatabase {
@@ -55,8 +58,10 @@ impl IsolatedPostgresDatabase {
         url.set_path(&format!("/{name}"));
         Some(Self {
             cluster,
+            cluster_url,
             name,
             url: url.to_string(),
+            owns_database: true,
         })
     }
 
@@ -66,12 +71,64 @@ impl IsolatedPostgresDatabase {
 
     /// Dropped pools close their connections asynchronously, so sessions of
     /// the finished test can still be attached; `FORCE` ends them.
-    pub async fn drop_database(self) {
+    pub async fn drop_database(mut self) {
         sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.name))
             .execute(&self.cluster)
             .await
             .expect("drop isolated database");
+        self.owns_database = false;
         self.cluster.close().await;
+    }
+}
+
+/// A test that panics, or returns without `drop_database`, still removes its
+/// database. The test's own runtime may be shutting down, so the bounded,
+/// best-effort drop runs on a separate thread and runtime.
+impl Drop for IsolatedPostgresDatabase {
+    fn drop(&mut self) {
+        if !self.owns_database {
+            return;
+        }
+        let cluster_url = self.cluster_url.clone();
+        let name = self.name.clone();
+        let cleanup = std::thread::Builder::new()
+            .name("isolated-database-cleanup".to_owned())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    eprintln!("could not create the cleanup runtime for database {name}");
+                    return;
+                };
+                runtime.block_on(async move {
+                    let cleanup = async {
+                        let pool = sqlx::postgres::PgPoolOptions::new()
+                            .max_connections(1)
+                            .acquire_timeout(std::time::Duration::from_secs(3))
+                            .connect(&cluster_url)
+                            .await?;
+                        sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                            .execute(&pool)
+                            .await?;
+                        pool.close().await;
+                        Ok::<(), sqlx::Error>(())
+                    };
+                    match tokio::time::timeout(std::time::Duration::from_secs(15), cleanup).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => eprintln!("could not drop database {name}: {error}"),
+                        Err(_) => eprintln!("dropping database {name} timed out"),
+                    }
+                });
+            });
+        match cleanup {
+            Ok(thread) => {
+                if thread.join().is_err() {
+                    eprintln!("isolated database cleanup thread panicked");
+                }
+            }
+            Err(error) => eprintln!("could not start isolated database cleanup: {error}"),
+        }
     }
 }
 

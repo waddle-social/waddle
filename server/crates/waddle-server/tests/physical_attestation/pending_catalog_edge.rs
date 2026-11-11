@@ -9,7 +9,8 @@ use waddle_server::pending_delivery::{
     bootstrap_pending_delivery_owner_schema, DatabasePendingDeliveryStorage,
     PendingRuntimeAttachError,
 };
-use waddle_xmpp::pending_delivery::{storage::PendingStorageError, QuotaPolicy};
+use waddle_xmpp::pending_delivery::storage::PendingStorageError;
+use waddle_xmpp::pending_delivery::QuotaPolicy;
 
 const RECEIPT_KEY: i64 = 7_305_784_319_670_198;
 const RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";

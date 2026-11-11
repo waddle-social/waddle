@@ -91,7 +91,7 @@ async fn wait_discard(fixture: &Fixture, pid: i32) {
 async fn pinned_caller_keeps_one_transaction_and_positive_only_reconciliation() {
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let (guarded, leases, _, operations, api, config, pinned, guarded_pins) =
         pinned_receipt_tests::setup(&fixture).await;
     drop(guarded);

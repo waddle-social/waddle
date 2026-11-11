@@ -1,6 +1,6 @@
 mod ingress_support;
 
-use ingress_support::IngressFixture;
+use ingress_support::{IngressFixture, IsolatedPostgresDatabase};
 use waddle_server::ingress::commit::commit_submission;
 use waddle_server::ingress::effects::direct::DurableDirectEffect;
 use waddle_server::ingress::effects::Effect;
@@ -62,6 +62,41 @@ fn archive_plan(
             },
         ))));
     submission
+}
+
+#[tokio::test]
+async fn postgres_isolated_database_is_dropped_when_the_test_panics() {
+    let Some(cluster_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let Some(database) = IsolatedPostgresDatabase::create("panic_cleanup").await else {
+        return;
+    };
+    let name = url::Url::parse(database.url())
+        .expect("isolated database URL")
+        .path()
+        .trim_start_matches('/')
+        .to_owned();
+    let cluster = sqlx::PgPool::connect(&cluster_url)
+        .await
+        .expect("Postgres cluster");
+    let exists = || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1)",
+        )
+        .bind(&name)
+        .fetch_one(&cluster)
+        .await
+        .expect("inspect isolated database")
+    };
+    assert!(exists().await);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _database = database;
+        panic!("exercise isolated database cleanup");
+    }));
+    assert!(panic.is_err());
+    assert!(!exists().await, "isolated database {name} leaked");
+    cluster.close().await;
 }
 
 #[path = "ingress_cases/canonical.rs"]
