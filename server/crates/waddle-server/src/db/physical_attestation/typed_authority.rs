@@ -3,6 +3,11 @@
 //! This is deliberately not wired into server startup. The existing runtime
 //! still owns other raw database handles and V1009 still takes an epoch row
 //! lock. Neither this type nor its tests establish a live P2.1 boundary.
+//!
+//! Serving ingress transactions do not use this type. They begin in
+//! `crate::ingress_substrate::begin_ingress_entry` on the attested serving
+//! pool; that entry shares [`read_epoch_after_prelock`] with this module for
+//! the relation-guard epoch proof.
 
 use std::time::Duration;
 

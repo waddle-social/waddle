@@ -20,6 +20,7 @@ for contract in \
   test_run_nextest_shards \
   test_check_required_tests \
   test_check_test_postgres_env \
+  test_check_ingress_typed_entry \
   test_check_rust_structure \
   test_check_libp2p_rollout \
   test_check_postgres_test_group; do

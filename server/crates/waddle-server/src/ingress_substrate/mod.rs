@@ -112,6 +112,7 @@ tokio::task_local! {
 mod tests;
 
 mod substrate;
+mod typed_entry;
 pub(crate) use substrate::acquire_epoch_lock_first;
 use substrate::decode_stored_alias;
 use substrate::dialect_sql;
@@ -119,7 +120,6 @@ use substrate::discard_database_error;
 pub use substrate::gc_expired_aliases;
 use substrate::gc_retained_child_sql;
 pub use substrate::insert_sm_ref;
-pub(crate) use substrate::prepare_attested_receipt_transaction;
 pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
 pub use substrate::record_message;
@@ -140,7 +140,6 @@ pub(crate) use substrate::DefinerApiCandidateContext;
 pub use substrate::IngressSubstrateError;
 pub use substrate::MessageWriteOutcome;
 pub use substrate::PostgresIngressSubstrate;
-pub(crate) use substrate::PreparedAttestedReceiptWriter;
 pub use substrate::TerminalizeOutcome;
 pub use substrate::ALIAS_RETENTION;
 pub use substrate::EPOCH_GUARDED_TABLES;
@@ -150,4 +149,10 @@ pub(crate) use substrate::{
     prepared_ingress_sql, record_delivery_in_prepared_transaction,
     record_message_in_prepared_transaction, resolve_alias_in_prepared_transaction,
     terminalize_message_in_prepared_transaction, PreparedIngressRelation,
+};
+#[cfg(test)]
+pub(crate) use typed_entry::acquire_within_deadline;
+pub(crate) use typed_entry::{
+    begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
+    IngressEntryError, IngressEntryRequest, IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };

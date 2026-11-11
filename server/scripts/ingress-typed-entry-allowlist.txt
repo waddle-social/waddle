@@ -1,0 +1,20 @@
+# Ingress source files, other than the typed entry, that may call
+# `attest_transaction(`. Format: `<path relative to server/> <call count>`.
+#
+# Every entry is an attach- or verify-time check: it attests a read-only
+# transaction, inspects catalog or archive state, and writes no ingress rows.
+# A transaction that writes ingress rows begins in
+# crates/waddle-server/src/ingress_substrate/typed_entry.rs instead.
+
+# RelationGuardCapability::verify_inner: REPEATABLE READ READ ONLY snapshot
+# that verifies the candidate guard, its ACLs and the owner marker once,
+# before any relation-guard transaction is opened.
+crates/waddle-server/src/ingress_uow/relation_guard.rs 1
+
+# Room-observation schema verification at attach time: a catalog-fenced
+# read-only transaction that checks lineage, schema and the owner marker.
+crates/waddle-server/src/ingress_uow/room_observation/schema.rs 1
+
+# DarkSharedCorrectness::lookup_archive_or_stanza_id: READ COMMITTED READ ONLY
+# archive lookup on the main lane, always rolled back.
+crates/waddle-server/src/ingress/shared_correctness.rs 1

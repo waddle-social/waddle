@@ -163,6 +163,25 @@ impl From<DatabaseError> for IngressUowError {
     }
 }
 
+impl From<crate::ingress_substrate::IngressEntryError> for IngressUowError {
+    /// The typed ingress entry reports its refusals unconverted; database
+    /// and substrate failures take the same classification here as when a
+    /// unit-of-work statement fails directly.
+    fn from(error: crate::ingress_substrate::IngressEntryError) -> Self {
+        use crate::ingress_substrate::IngressEntryError;
+        match error {
+            IngressEntryError::AcquisitionTimeout => Self::Timeout,
+            IngressEntryError::Database(error) => error.into(),
+            IngressEntryError::BoundsUnproven => Self::TransactionBoundsUnproven,
+            IngressEntryError::Preparation(error) => error.into(),
+            IngressEntryError::EpochUnsupported { live, supported } => {
+                Self::EpochUnsupported { live, supported }
+            }
+            IngressEntryError::EpochProofMissing => Self::EpochProofMissing,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
