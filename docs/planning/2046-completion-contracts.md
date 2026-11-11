@@ -43,7 +43,7 @@ Every open item on the issue belongs to exactly one milestone.
 | # | Milestone | Issues | Open items | Exit |
 | --- | --- | --- | --- | --- |
 | M0 | Contracts and baseline | package A | 5 | The decisions below pass the architecture gate; the field-owner table is reviewed; workload budgets are recorded |
-| M1 | Restricted database runtime | #2116, #1689 | 8 | The server serves under the runtime role; both `UnconvertedStores` refusals and the owner-as-runtime startup path are deleted |
+| M1 | Restricted database runtime | #2116, #1689 | 8 | On PostgreSQL the server serves under the runtime role, correctness writes go through the typed transaction entry, and both `UnconvertedStores` refusals and the PostgreSQL owner-as-runtime startup path are deleted |
 | M2 | Durable mailbox and remote-room acceptance | #1986, #2118, #1948 | 4 | The origin handled count advances only after owner acceptance; clustered frozen manifests are enabled in the production path |
 | M3 | Connection, account and SM cutover | #2137, #2138, #2139, package B | 22 | The connection actor is the only `/ws` owner; `WsConnState` writers, `dual_registration` and registry authority are deleted |
 | M4 | Relay lane cutovers | #2173, #2174, #2175 | 3 | Each lane is served from the mailbox; its ordered-relay path is deleted and its wire version bumped |
@@ -55,10 +55,17 @@ Every open item on the issue belongs to exactly one milestone.
 
 M1 → M2 → M4 is the database track. M3's single-node gaps (listed below) do
 not depend on M1 or M2: they move existing behaviour behind the actor under a
-test-selected configuration. The two tracks therefore run in parallel and join
-at M3's production activation, which needs M1's transaction authority for the
-durable SM and account rows and M2's acceptance custody. M5's client work and
-the [#2106](https://github.com/waddle-social/waddle/issues/2106) qualification
+test-selected configuration, and their proving suites run on single-node
+SQLite. The two tracks therefore run in parallel and join at M3's production
+activation, which needs M1's transaction authority for the durable SM and
+account rows and M2's acceptance custody.
+
+M3's production activation precedes M4. M3 gates and version-bumps
+`deliver_ordered` for the actor endpoint; M4 then retires each lane from that
+bumped version.
+
+M5's client work and the
+[#2106](https://github.com/waddle-social/waddle/issues/2106) qualification
 environment have no upstream dependency and start immediately. M6 and M7 are
 last, in that order.
 
@@ -68,19 +75,39 @@ last, in that order.
 
 Each incompatible activation uses the `Recreate` strategy with all server pods
 stopped before the new version starts. Package G permits this in place of
-mixed-version compatibility. The cutover runbook verifies that no old backend
-or prepared transaction remains, and that the owner login is disabled for the
-runtime, before the first runtime pod starts.
+mixed-version compatibility.
+
+Stopping pods does not stop their backends: a session blocked on a lock held
+by the owner migration can complete its write afterwards, and the code says so
+(`S/db/runtime_startup.rs:361-367`, `S/db/bootstrap.rs:221-223`). The chart's
+cutover guard inspects pods only. Every activation therefore runs in this
+order:
+
+1. Stop the server pods.
+2. Rotate the credential of the login the old version used, so it cannot
+   reconnect. For M1 that is the owner login; for later activations it is the
+   runtime login.
+3. Terminate the remaining backends of that login.
+4. Verify zero such backends and zero rows in `pg_prepared_xacts`.
+5. Run the owner phase and migrations.
+6. Start the new version.
+
+The new binary additionally requires an activation value that an old writer
+fails on inside its own transaction. Today the only such fence is the protocol
+epoch, and it covers the 13 guarded ingress tables
+(`S/ingress_substrate/substrate.rs:38-50`). The SM, binding and mailbox tables
+that M2 and M3 add are enrolled under the same guard when they are created, so
+steps 2–4 are a second line of defence and not the only one.
 
 Consequence: the open items that require continuous in-database fencing of old
 writers during a transition (the V1014 claim reset, pending-delivery MAM
-cleanup and inbox legacy-row deletion) reduce to that runbook precondition
-plus one startup check. Steady-state fences between live nodes are unaffected.
+cleanup and inbox legacy-row deletion) reduce to this procedure. Steady-state
+fences between live nodes are unaffected.
 
 ### D2. The restricted runtime serves on the attested, non-pinned pool
 
 `AttestationMode::LegacyDark` already supports all 26 `attest_transaction`
-call sites and most store attach paths
+call sites, and the global runtime attach is built on it
 (`S/db/bootstrap.rs:224-357`). Pinned mode cannot serve: `attest_transaction`
 returns `UnconvertedPinnedTransaction` (`S/db/physical_attestation.rs:251-253`),
 and several sites attest after `BEGIN`/`LOCK`, which conflicts with the pinned
@@ -88,14 +115,34 @@ lock order (for example `S/clustering/lease.rs:1154-1181`).
 
 Proposal: serve on the attested non-pinned pool and keep the pinned read-only
 preflight (`S/db/runtime_startup.rs:353-367`) as a one-shot startup gate.
-P2.1 is complete when the runtime role cannot own, alter or create schema
-objects, every store attaches and operates under it, and the typed transaction
-entry is the only route to a correctness transaction. Hostile-catalog and OID
-pin proofs defend against a privileged mutator rather than the runtime role;
-under D1 they are a runbook precondition and are not extended further.
+Hostile-catalog and OID pin proofs defend against a privileged mutator rather
+than the runtime role; under D1 they are a runbook precondition and are not
+extended further.
 
-Open for the gate: whether the `SECURITY DEFINER` attestor pins its own
-`search_path`, and whether an unknown `COMMIT` on the runtime ingress path
+What this mode does and does not give: each checkout attests login, schema and
+lineage (`S/db/physical_attestation.rs:571-597,729-745`). It does not attest
+the ledger or epoch manifest per transaction, and the pool still exposes raw
+`execute`, `query` and `begin` (`S/db/backend.rs:826,847`). Most of the 26
+`attest_transaction` sites are attach-time checks, not serving writes. Role
+separation alone is therefore not P2.1.
+
+P2.1 is complete in two parts:
+
+- **Role separation.** The runtime role cannot own, alter or create schema
+  objects, and every store attaches and operates under it.
+- **Typed authority.** The typed transaction entry, which is a fixture today
+  (`S/db/physical_attestation/typed_authority.rs:1-5`), is wired into startup.
+  The ingress hot path and every table that M2 and M3 add are reachable only
+  through it; other existing writers convert when their owning milestone
+  touches them, and M6 verifies none remains.
+
+This supersedes packages 3 and 4 of
+[`2116-single-node-serving-cutover.md`](2116-single-node-serving-cutover.md)
+as M1 scope. Package 3 (typed operation identities) is the typed-authority
+part above. Package 4 (the SM source and recipient interlock) needs pump
+quiescence, which only the connection actor provides, so it moves to M3.
+
+Open for the gate: whether an unknown `COMMIT` on the runtime ingress path
 needs more than the duplicate-effect policy that owner mode has today.
 
 ### D3. Connection and binding identity
@@ -110,8 +157,15 @@ transport_generation }` identifies one physical transport incarnation and
   failed resume on the same socket.
 - The account coordinator records the exact binding and is its only
   publisher. A full JID resolves to a `BindingRef` before delivery.
-- `LocalConnectionBindingId` and the process-local `ConnectionGeneration`
-  counter are deleted at the M3 activation.
+- The process-local `ConnectionGeneration` counter is deleted at the M3
+  activation.
+- `LocalConnectionBindingId` is deleted only after remote-hosted mirrors carry
+  a `BindingRef`. Today a mirror's admission holds `binding_ref: None` and is
+  fenced by the local ID alone (`REG/connection_registry/endpoint.rs:218-231`),
+  and the v4 registration snapshot carries only `ConnectionRef`
+  ([`2046-binding-ref-identity.md`](2046-binding-ref-identity.md)). M3
+  therefore includes a registration-snapshot version bump and the production
+  use of admission activation, which is test-only today (`endpoint.rs:233`).
 
 ### D4. Publication, compensation and old-writer transfer
 
@@ -120,10 +174,18 @@ transport_generation }` identifies one physical transport incarnation and
   retires the provisional binding by exact `BindingRef`.
 - An unknown resume or registration commit stays unresolved under the same
   operation identity. Only a known rejection proceeds to a fresh bind.
-- Same-node transfer waits for observed pump termination within a deadline; a
-  missed deadline fences the node. Cross-node transfer cannot observe the old
-  pump, so the durable session records an exposure ceiling and the old node
-  loses write authority with its lease.
+- Same-node transfer waits for observed pump termination within a deadline. A
+  missed deadline takes the terminal failure path (`S/clustering/node.rs:437,505`),
+  not the recoverable fence (`node.rs:433`): a recoverable fence would re-admit
+  connections while the unobserved pump could still write.
+- The wait belongs to the connection actor's retirement, never to the account
+  coordinator's mailbox turn. The coordinator records the pending replacement
+  and returns; the retiring actor reports completion as a message. The retiring
+  actor takes its detach snapshot from its own projection (D5), so it does not
+  call back into a coordinator that is waiting for it.
+- Cross-node transfer cannot observe the old pump, so the durable session
+  records an exposure ceiling and the old node loses write authority with its
+  lease.
 - Node lease, user claim, binding, resource, SM session and operation outcome
   commit in one transaction through M1's typed entry.
 
@@ -140,17 +202,17 @@ proposed owner is stated.
 | | `sm_state` | **C** Durable SM owns counters and unacked custody; the actor holds a projection hydrated under the session claim |
 | | `sm_ingress_fence`, `pending_sm_enable_commit` | Durable SM; the actor holds the handle |
 | | `sm_recovery_required`, `terminal_sm_recovery*` | **C** Deleted once append-before-accept is durable; durable SM until then |
-| | `occupancy_session` | **C** Durable session, because it survives resume; projection in the actor |
-| | `carbons_enabled`, `roster_interested`, `blocklist_interested` | **C** Account coordinator; the per-stream copy is deleted |
-| | `presence_*`, `pending_subscribes_flushed` | **C** Deleted as copies; the durable session is the resume snapshot source |
+| | `occupancy_session` | **C** The occupancy authority (`xmpp_occupancy_authority`), which also covers binds without SM and the remint after a failed resume; projection in the actor |
+| | `carbons_enabled`, `roster_interested`, `blocklist_interested` | **C** Account coordinator is the authority; the actor keeps a read-only projection for its detach snapshot |
+| | `presence_*`, `pending_subscribes_flushed` | **C** Account coordinator is the authority; the actor keeps a read-only projection, and the durable session is the resume snapshot source |
 | | `local_io_relinquishment`, `write_interruption` | Transport pump |
 | | `ingress_generation`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ordered_relay_handoff_tx` | Deleted |
 | `ConnectionEntry` | `connection_ref`, `binding_ref` | Account coordinator |
 | | `endpoint`, `force_detach_*`, `resume_control` | **C** Connection actor: it owns outbound order; the pump receives serialized frames only |
 | | `binding_permit`, `local_io_relinquishment`, `write_interruption` | **C** Transport pump; revocation is issued by the connection actor |
 | | `carbons_enabled`, `roster_interested`, `blocklist_interested`, `presence_available`, `presence_priority`, `archive_dispatch` | Account coordinator |
-| | `offline_flushed`, `pending_subscribes_flushed` | **C** Account coordinator, keyed by binding and carried across resume by the durable session |
-| | `sm_stream_id`, `occupancy_session` | **C** Durable session; the account coordinator holds a projection |
+| | `offline_flushed`, `pending_subscribes_flushed` | **C** Account coordinator, keyed by SM session where one exists and by binding otherwise. A resume mints a new binding, so a binding key alone would repeat the flush; `DetachedSession` does not carry `offline_flushed` today and must |
+| | `sm_stream_id`, `occupancy_session` | **C** Durable session and occupancy authority respectively; the account coordinator holds projections |
 | | `binding_id`, `hosting`, `terminal_ordering_retry` | Deleted |
 | `ConnectionRegistry` | `connections`, `bind_slots` | Account coordinator |
 | | `sm_stream_owners` | Durable SM |
@@ -191,10 +253,19 @@ In dependency order. Sizes are estimates from reading source.
    (`S/server/lifecycle.rs:180`), extension grant sync (`http.rs:1254`),
    account reconcile (`:1293`), notification ancestry adoption (`:1447`) and
    room observers (`:1615`).
-5. **Replace the refusal with the attach (S).** `S/main.rs:94` calls
-   `attach_verified_global_runtime` and takes the pool; delete
-   `S/server/lifecycle.rs:95-97`.
-6. **Deployment (M).** CNPG creates only the owner role
+5. **Request-time DDL and per-store URLs (S).** Webhook delivery creates its
+   table lazily on first request (`S/server/routes/webhook_delivery.rs:112`,
+   `livekit_webhook.rs:61`), which a WebSocket exit test does not reach. Seven
+   child `*_database_url` settings (`S/server/config.rs:112-146`) are refused
+   under attestation (`S/server/http.rs:2085`) and are removed.
+6. **Typed authority (L).** Wire the typed transaction entry into startup and
+   route the four ingress hot-path sites through it
+   (`S/ingress/shared_correctness.rs:170`, `S/ingress_uow/relation_guard.rs:181,273`,
+   `S/ingress_substrate/substrate.rs:2113`). See D2.
+7. **Replace the refusal with the attach (S).** `S/main.rs:94` calls
+   `attach_verified_global_runtime_with_control_plane`, which clustering
+   needs, and takes the pool; delete `S/server/lifecycle.rs:95-97`.
+8. **Deployment (M).** CNPG creates only the owner role
    (`infrastructure/waddle.cloud/gitops/waddle-server/postgresql-cluster.yaml:9-12`)
    and the chart has no owner job, runtime credential or attestation variable.
 
@@ -202,6 +273,11 @@ Exit test: invert
 `restricted_startup_runs_pinned_preflight_then_refuses_store_activation`
 (`server/crates/waddle-server/tests/physical_attestation/runtime_startup.rs:22`)
 and add a PostgreSQL 17 WebSocket session with XEP-0198 under the runtime role.
+
+SQLite keeps its single-role startup (`S/main.rs:96-99`). It has no role
+model, it is the backend for development and for the `*_ws` suites that prove
+M3, and it is not a production configuration. Only the PostgreSQL
+owner-as-runtime path is deleted.
 
 ## M3 gaps: the connection actor owns a single-node `/ws` session
 
@@ -222,11 +298,22 @@ and is proven by the named suite under a test-selected actor.
 | 10 | Drain-guard and panic-fence parity | `W/connection.rs:349-403` | S | owner panic test |
 | 11 | Selector in the upgrade handler and admission gate | `W/connection.rs:130,157`, `S/server/state.rs:259` | S | every `*_ws` suite under the selector |
 
-After step 11 the actor hosts the legacy handlers and `WsConnState`. The
-field moves in D5, durable SM, exact account bindings and the clustered paths
-(remote resource proxy activation, cross-node force-detach, the
-`deliver_ordered` version bump) follow, and the production activation waits
-for M1 and M2.
+Step 7's regression for publication order is ignored until the remote enqueue
+paths are gated (`server/crates/waddle-server/tests/xep0198_attached_resume_ws.rs:680`);
+that gating is part of step 5.
+
+After step 11 the actor hosts the legacy handlers and `WsConnState`. What
+follows, before the production activation:
+
+- the field moves in D5, durable SM and exact account bindings;
+- the SM source and recipient interlock moved here from #2116 (D2);
+- the registration-snapshot version bump that carries `BindingRef` to remote
+  mirrors, and production admission activation (D3);
+- remote resource proxy activation, cross-node force-detach and the
+  `deliver_ordered` version bump;
+- enrolment of the new SM and binding tables under the activation guard (D1).
+
+The production activation waits for M1 and M2.
 
 ## M7: schema baseline
 
@@ -238,9 +325,15 @@ Scope:
 - The ledgered catalog: global V1–V15 (`MIG/global.rs:765-855`) and waddle
   V1001–V1030 (`MIG/waddle.rs:1744-1926`), each with SQLite and PostgreSQL SQL.
 - The stores that build schema outside the ledger with their own `ALTER`
-  chains: inbox, PubSub, SM persistence, pending delivery, notification outbox
-  and activity, spaces metadata, channel links, call teardown outbox, room
-  effect outbox and MAM. The baseline is incomplete unless these are folded in.
+  chains: inbox, PubSub, SM persistence (portable and fenced), pending
+  delivery, notification outbox and activity, push service, push registrations
+  and VAPID, spaces metadata, channel links, call teardown outbox, room effect
+  outbox, MUC destroy outbox, durable MUC, room observation, clustering claims,
+  nodes, key slots and allowlist, and MAM. The baseline is incomplete unless
+  these are folded in.
+- "Per database" means the server's PostgreSQL database and its SQLite
+  equivalent. M1 removes the per-store database URLs, so there is one. Colony,
+  the website and SpiceDB keep their own schema tooling and are out of scope.
 - Roles and grants from M1, so a fresh deployment is provisioned by the
   baseline alone.
 - Whatever M1–M5 registered from the candidate SQL under `MIG/owner/`; unused
@@ -255,8 +348,10 @@ roughly 85 runner tests plus the tests that name versions.
 
 Hazards: every existing database fails validation against the new catalog, so
 the cutover is either a fresh database or an explicit ledger rewrite under the
-same lineage. The baseline must be proven schema-equivalent to the migrated
-result on both drivers before the history is deleted.
+same lineage. A fresh database has a new system identifier and new OIDs, so
+the attestation document, its pins and the attestor are reissued with it. The
+baseline must be proven schema-equivalent to the migrated result on both
+drivers before the history is deleted.
 
 Open for the gate: authoring the baseline before M1 would let the role and
 grant matrix land once rather than as forward migrations that M7 then folds
@@ -272,3 +367,5 @@ keeps the baseline last.
 - The M3 proof suites are matched by name; their contents were not read.
 - Workload, latency and memory budgets need the #2106 environment and are not
   recorded yet.
+- The mailbox design for M2 and M4, CNPG role management and credential
+  rotation were not examined.
