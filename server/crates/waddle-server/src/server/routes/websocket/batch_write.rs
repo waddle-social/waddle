@@ -181,7 +181,7 @@ pub(super) async fn write_response_batch_with_admission<S, SE, R, RE, F>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
     F: Into<ResponseFrame>,
 {
@@ -205,7 +205,7 @@ pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
     let report = write_response_batch_report_with_admission(
@@ -261,7 +261,7 @@ pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
     F: Into<ResponseFrame>,
 {
@@ -289,7 +289,7 @@ async fn write_response_batch_impl<S, SE, R, RE>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
     let total_frames = frames.len();
@@ -629,7 +629,7 @@ async fn await_send_window_recovery<S, SE, R, RE>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
     if conn.write_interruption.is_cancelled() {
@@ -1039,7 +1039,7 @@ async fn drain_ready_inbound<S, SE, R, RE>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
     loop {
@@ -1059,6 +1059,9 @@ where
         if conn.deferred_inbound.len() >= NORMAL_DEFERRED_INBOUND_CAP {
             return DrainSignal::Idle;
         }
+        // Take every frame the socket already holds, as a reader polling its
+        // own socket would, and not only the one a pump has brought forward.
+        reader.settle_inbound().await;
         let Some(next) = reader.next().now_or_never() else {
             // Nothing buffered right now — back to writing.
             return DrainSignal::Idle;

@@ -267,6 +267,39 @@ pub(super) struct RegistrationChannels<'a> {
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
 }
 
+/// An inbound half that can bring forward a frame its socket already holds.
+///
+/// A reader that polls its own socket has such a frame ready on the first
+/// poll, so the default does nothing. An input fed by a pump task has to ask
+/// the pump and wait for its answer.
+pub(super) trait SettleInbound {
+    fn settle_inbound(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
+}
+
+impl<T: SettleInbound + Send + ?Sized> SettleInbound for &mut T {
+    fn settle_inbound(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        (**self).settle_inbound()
+    }
+}
+
+/// Scripted readers in unit tests are polled directly.
+#[cfg(test)]
+impl<T> SettleInbound for futures::stream::Pending<T> {}
+
+#[cfg(test)]
+impl<A, B> SettleInbound for futures::stream::Chain<A, B> {}
+
+#[cfg(test)]
+impl<F> SettleInbound for futures::stream::PollFn<F> {}
+
+impl<E: Send> SettleInbound for WebSocketInput<E> {
+    async fn settle_inbound(&mut self) {
+        self.settle().await;
+    }
+}
+
 pub(super) struct ConnectionIo<'a, S, R> {
     pub(super) sender: &'a mut S,
     pub(super) receiver: &'a mut R,
@@ -335,6 +368,18 @@ const TRANSPORT_QUEUE_BYTES: usize = u32::MAX as usize;
 /// custodian to report both pumps joined before leaving the inventory slot in
 /// place.
 const TRANSPORT_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The same wait before the fatal fence on the owner-panic path.
+const TRANSPORT_PANIC_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long after node or identity revocation the pump custodian stops the
+/// pumps on its own. The owner normally stops them first by dropping its
+/// transport. This backstop has to outlast an owner that is inside a handler
+/// at revocation and then writes its bounded system-shutdown close, or that
+/// close would be lost.
+const TRANSPORT_RETIREMENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(
+    super::frame_backstop::STANZA_HANDLER_WEDGE_TIMEOUT.as_secs()
+        + SHUTDOWN_CLOSE_TIMEOUT.as_secs()
+        + 5,
+);
 
 struct LiveSocketState {
     // Keep the pre-extraction drop order on cancellation: channels and timers
@@ -403,9 +448,18 @@ impl LiveWebSocketConnection {
             // once the custodian has seen both pumps and the owner's marker
             // task finish. A pump that does not join keeps its slot, so
             // capacity never exceeds the sockets still held.
-            if let Some(observer) = transport.get() {
-                release_transport_slot(&inventory, observer).await;
-            }
+            // After a panic the fatal fence must not wait behind a pump that
+            // is slow to join, so that path gives the join only a short head
+            // start and finishes the wait once the node is fenced.
+            let join_bound = if panicked {
+                TRANSPORT_PANIC_JOIN_TIMEOUT
+            } else {
+                TRANSPORT_JOIN_TIMEOUT
+            };
+            let mut slot_released = match transport.get() {
+                Some(observer) => release_transport_slot(&inventory, observer, join_bound).await,
+                None => true,
+            };
             if panicked {
                 #[cfg(feature = "test-support")]
                 if let Some(barrier) = panic_caught {
@@ -420,6 +474,19 @@ impl LiveWebSocketConnection {
                 if let Some(barrier) = panic_fenced {
                     barrier.arrive().await;
                 }
+                if !slot_released {
+                    if let Some(observer) = transport.get() {
+                        slot_released =
+                            release_transport_slot(&inventory, observer, TRANSPORT_JOIN_TIMEOUT)
+                                .await;
+                    }
+                }
+            }
+            if !slot_released {
+                error!(
+                    ?connection_ref,
+                    "WebSocket transport pumps did not join; the inventory slot stays held"
+                );
             }
             drop(drain_guard);
         });
@@ -491,7 +558,12 @@ impl LiveWebSocketConnection {
             output: ws_sender,
         } = match self
             .admission
-            .start_socket(*socket, limits, SHUTDOWN_CLOSE_TIMEOUT)
+            .start_socket(
+                *socket,
+                &self.state.deps.app_state.websocket_inventory,
+                limits,
+                TRANSPORT_RETIREMENT_DEADLINE,
+            )
             .await
         {
             Ok(transport) => transport,
@@ -504,28 +576,7 @@ impl LiveWebSocketConnection {
                 return;
             }
         };
-        // The custodian joins this task before it reports the connection
-        // joined. It ends when the owner returns or unwinds.
         let _ = transport.set(transport_observer.clone());
-        let (_owner_finished, owner_running) = tokio::sync::oneshot::channel::<()>();
-        if let Err(error) = self
-            .state
-            .deps
-            .app_state
-            .websocket_inventory
-            .register_auxiliary_task(
-                self.admission.connection_ref(),
-                tokio::spawn(async move {
-                    let _ = owner_running.await;
-                }),
-            )
-        {
-            error!(
-                %error,
-                connection_ref = ?self.admission.connection_ref(),
-                "WebSocket owner could not register with its transport custodian"
-            );
-        }
         let state = &self.state;
         let admission = &self.admission;
         let admission_permit = admission.permit();
@@ -710,7 +761,7 @@ impl LiveWebSocketConnection {
             // socket already holds must therefore be ready before the select
             // is polled, as it would be for a task reading its own socket.
             if !deferred_pending {
-                ws_receiver.settle().await;
+                ws_receiver.settle_inbound().await;
             }
             tokio::select! {
                 biased;
@@ -1129,16 +1180,20 @@ impl LiveWebSocketConnection {
     }
 }
 
-async fn release_transport_slot(inventory: &IoCustodianInventory, observer: &IoCustodianObserver) {
-    match tokio::time::timeout(TRANSPORT_JOIN_TIMEOUT, observer.wait_until_joined()).await {
-        Ok(_) => {
-            inventory.prune_joined();
-        }
-        Err(_) => error!(
-            connection_ref = ?observer.connection_ref(),
-            "WebSocket transport pumps did not join; the inventory slot stays held"
-        ),
+/// Free the connection's inventory slot once its custodian reports the pumps
+/// and the owner's marker task joined. Returns whether that happened in time.
+async fn release_transport_slot(
+    inventory: &IoCustodianInventory,
+    observer: &IoCustodianObserver,
+    bound: std::time::Duration,
+) -> bool {
+    let joined = tokio::time::timeout(bound, observer.wait_until_joined())
+        .await
+        .is_ok();
+    if joined {
+        inventory.prune_joined();
     }
+    joined
 }
 
 /// Channel state carried from the live loop into its connection-owned shutdown.
@@ -1856,7 +1911,7 @@ pub(super) async fn handle_inbound_text<S, SE, R, RE>(
 where
     S: futures::Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + SettleInbound,
     RE: std::fmt::Display,
 {
     #[cfg(feature = "test-support")]
@@ -2240,7 +2295,7 @@ async fn handle_ordered_relay_handoff_completion<S, SE, R, RE>(
 where
     S: futures::Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + SettleInbound,
     RE: std::fmt::Display,
 {
     if shutdown.is_cancelled() || permit.revalidate().is_err() {

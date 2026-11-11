@@ -8,6 +8,7 @@
 use super::super::batch_write::{
     write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
 };
+use super::super::connection::SettleInbound;
 use super::super::state::{WebSocketState, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP};
 use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::create_test_websocket_state;
@@ -35,6 +36,8 @@ impl ScriptedReader {
         }
     }
 }
+
+impl SettleInbound for ScriptedReader {}
 
 impl Stream for ScriptedReader {
     type Item = Result<Message, Infallible>;
@@ -465,7 +468,9 @@ fn sink_texts(sink: &CollectSink) -> Vec<String> {
 
 /// Reader with the given frames already buffered, then Pending forever
 /// (like a live socket with nothing more to read — NOT end-of-stream).
-fn reader_with(frames: Vec<Message>) -> impl Stream<Item = Result<Message, Infallible>> + Unpin {
+fn reader_with(
+    frames: Vec<Message>,
+) -> impl Stream<Item = Result<Message, Infallible>> + Unpin + SettleInbound {
     stream::iter(frames.into_iter().map(Ok)).chain(stream::pending())
 }
 
@@ -480,7 +485,7 @@ async fn write_response_batch<S, SE, R, RE>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::super::send::WebSocketWriteError,
-    R: Stream<Item = Result<Message, RE>> + Unpin,
+    R: Stream<Item = Result<Message, RE>> + Unpin + SettleInbound,
     RE: std::fmt::Display,
 {
     let lifecycle = crate::clustering::NodeLifecycle::new();

@@ -987,6 +987,9 @@ pub(crate) struct LiveSocketTransport {
 /// after the pumps have joined as well.
 pub(crate) struct LiveSocketCleanup {
     guard: Option<crate::server::routes::websocket::supervised_io::AuxiliaryCleanupGuard>,
+    /// Ends the marker task the custodian joins before it reports the
+    /// connection joined.
+    _owner_finished: Option<oneshot::Sender<()>>,
 }
 
 impl Drop for LiveSocketCleanup {
@@ -1007,18 +1010,24 @@ impl LegacySocketAdmission {
     pub(crate) async fn start_socket(
         &mut self,
         socket: WebSocket,
+        inventory: &IoCustodianInventory,
         limits: TransportLimits,
         retirement_deadline: Duration,
     ) -> Result<LiveSocketTransport, SocketAdmissionError> {
         let Some(mut reservation) = self.reservation.take() else {
             return Err(SocketAdmissionError::WrongReservation);
         };
-        let cleanup = reservation.retain_until_auxiliary_cleanup()?;
+        // From here the custodian waits for this guard and for one marker
+        // task before it frees the slot, on success and on failure alike.
+        let mut cleanup = LiveSocketCleanup {
+            guard: Some(reservation.retain_until_auxiliary_cleanup()?),
+            _owner_finished: None,
+        };
         let admission = SocketAdmission {
             authority: Arc::clone(&self.authority),
             reservation,
         };
-        let (custodian, input, output) = admission
+        let started = admission
             .start_socket_with_hook(
                 socket,
                 limits,
@@ -1027,15 +1036,32 @@ impl LegacySocketAdmission {
                 || std::future::ready(()),
                 |_| std::future::ready(()),
             )
-            .await?;
-        Ok(LiveSocketTransport {
-            observer: custodian.observer(),
-            cleanup: LiveSocketCleanup {
-                guard: Some(cleanup),
-            },
-            input,
-            output: output.into_message_sink(),
-        })
+            .await;
+        let (owner_finished, owner_running) = oneshot::channel::<()>();
+        let registered = inventory.register_auxiliary_task(
+            &self.authority.connection_ref,
+            tokio::spawn(async move {
+                let _ = owner_running.await;
+            }),
+        );
+        match started {
+            Ok((custodian, input, output)) => {
+                // Without the marker the custodian would never report this
+                // connection joined, so its slot could not be freed.
+                registered?;
+                cleanup._owner_finished = Some(owner_finished);
+                Ok(LiveSocketTransport {
+                    observer: custodian.observer(),
+                    cleanup,
+                    input,
+                    output: output.into_message_sink(),
+                })
+            }
+            // A start that failed before its reservation became an indexed
+            // entry has already returned the slot and has nothing to register
+            // with. Otherwise the marker ends here with `owner_finished`.
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), SocketAdmissionError> {
