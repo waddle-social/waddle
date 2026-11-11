@@ -11,6 +11,10 @@
 # group. If a test only uses a unique schema with no shared lock assertions,
 # list it in scripts/postgres-schema-isolated.txt. Per-test databases are
 # isolated from both shared tables and database-scoped advisory locks.
+# Migrations and store bootstrap take the database-scoped catalog mutation
+# fence with a bounded try-lock, so a fixture that runs them for many
+# concurrent tests needs a per-test database: a unique schema leaves those
+# tests contending for the one fence until an acquisition times out.
 # If you add a new test module that reads
 # WADDLE_TEST_POSTGRES_URL (through
 # waddle_ws_test_support::require_test_postgres_url), add it to the filter

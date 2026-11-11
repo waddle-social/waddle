@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::ingress_support::IngressFixture;
+use crate::ingress_support::{IngressFixture, IsolatedPostgresDatabase};
 use crate::support::{
     bare, candidate, drain_deps_with_noop_activity, noop_activity_reader, register_push_target,
     settings_projection, target_named, StubRoomPolicy,
@@ -498,16 +498,12 @@ async fn sqlite_foundation_absent_standalone_drain() {
 #[tokio::test]
 async fn postgres_foundation_absent_standalone_drain() {
     use waddle_server::db::{Database, DatabaseConfig};
-    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
+    // A private database holds no ingress foundation and shares no
+    // database-scoped advisory lock with concurrently bootstrapping tests.
+    let Some(isolated) = IsolatedPostgresDatabase::create("t1_standalone").await else {
         return;
     };
-    let admin = sqlx::PgPool::connect(&database_url).await.expect("admin");
-    let schema = format!("waddle_t1_standalone_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .expect("isolated schema");
-    let mut url = url::Url::parse(&database_url).expect("database URL");
+    let mut url = url::Url::parse(isolated.url()).expect("database URL");
     let retained: Vec<(String, String)> = url
         .query_pairs()
         .filter(|(key, _)| key != "options")
@@ -516,10 +512,7 @@ async fn postgres_foundation_absent_standalone_drain() {
     url.query_pairs_mut()
         .clear()
         .extend_pairs(retained)
-        .append_pair(
-            "options",
-            &format!("-c search_path={schema} -c lock_timeout=2s -c statement_timeout=3s"),
-        );
+        .append_pair("options", "-c lock_timeout=2s -c statement_timeout=3s");
     let database = Database::from_config(
         "t1-no-foundation",
         &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string()),
@@ -527,11 +520,7 @@ async fn postgres_foundation_absent_standalone_drain() {
     .await
     .expect("database");
     foundation_absent_drain(database).await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .expect("drop schema");
-    admin.close().await;
+    isolated.drop_database().await;
 }
 
 async fn exhausted_policy_settles_candidate(fixture: IngressFixture) {

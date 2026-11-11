@@ -90,11 +90,18 @@ struct LabLane {
     ingress: Database,
     verifier: IngressUnitOfWork,
     uow: IngressUnitOfWork,
-    fixture: RelationGuardLabToken,
+    /// Present only when the lab installed the unregistered candidate guard
+    /// and its owner marker. A lab on the registered guard has neither, so
+    /// there is no candidate capability to verify.
+    fixture: Option<RelationGuardLabToken>,
 }
 
 impl LabLane {
-    async fn new(pool: AttestedPgPool, lineage: &AttestedLineage) -> anyhow::Result<Self> {
+    async fn new(
+        pool: AttestedPgPool,
+        lineage: &AttestedLineage,
+        candidate_guard: bool,
+    ) -> anyhow::Result<Self> {
         let main =
             Database::from_attested_postgres_pool_with_ingress("relation-guard-lab", pool, 2, 2)
                 .await
@@ -105,15 +112,19 @@ impl LabLane {
             action: None,
         };
         let verifier = IngressUnitOfWork::open(main.clone(), lineage_config.clone())?;
-        let capability = verifier
-            .verify_relation_guard_capability()
-            .await
-            .context("verify relation-guard candidate")?;
-        let uow = IngressUnitOfWork::open(ingress.clone(), lineage_config)?;
-        let fixture = RelationGuardLabToken {
-            ingress: ingress.clone(),
-            capability,
+        let fixture = if candidate_guard {
+            let capability = verifier
+                .verify_relation_guard_capability()
+                .await
+                .context("verify relation-guard candidate")?;
+            Some(RelationGuardLabToken {
+                ingress: ingress.clone(),
+                capability,
+            })
+        } else {
+            None
         };
+        let uow = IngressUnitOfWork::open(ingress.clone(), lineage_config)?;
         Ok(Self {
             main,
             ingress,
@@ -121,6 +132,12 @@ impl LabLane {
             uow,
             fixture,
         })
+    }
+
+    fn candidate(&self) -> anyhow::Result<&RelationGuardLabToken> {
+        self.fixture
+            .as_ref()
+            .context("lab was created without the candidate relation guard")
     }
 }
 
@@ -392,11 +409,16 @@ impl Lab {
         }
         #[cfg(feature = "clustering")]
         if !candidate_guard {
+            // The closed room-archive writer holds column-level UPDATE only,
+            // so its rollback stages can revoke exactly the privilege a
+            // statement needs. Narrow the table-level grants shared with the
+            // candidate lab before granting the columns.
             for statement in [
                 format!("GRANT UPDATE (id) ON guarded.ingress_protocol_epoch TO {runtime}"),
                 format!("REVOKE UPDATE ON guarded.ingress_messages FROM {runtime}"),
                 format!("GRANT UPDATE (terminal_at, retention_eligible_at) ON guarded.ingress_messages TO {runtime}"),
                 format!("GRANT SELECT, UPDATE (entity_type) ON guarded.clustering_claims TO {runtime}"),
+                format!("REVOKE UPDATE ON guarded.ingress_effect_intents FROM {runtime}"),
                 format!("GRANT UPDATE (payload) ON guarded.ingress_effect_intents TO {runtime}"),
                 format!("GRANT SELECT, INSERT ON guarded.ingress_archive_dispatch TO {runtime}"),
                 format!("GRANT SELECT, INSERT ON guarded.mam_messages TO {runtime}"),
@@ -423,7 +445,7 @@ impl Lab {
         )?;
         let config = install(&installer_options, config, Uuid::new_v4()).await?;
         let attested = attested_pool(runtime_options.clone(), config.clone(), 4, Duration::from_secs(5))?;
-        let lane = LabLane::new(attested, &lineage)
+        let lane = LabLane::new(attested, &lineage, candidate_guard)
             .await
             .context("initialize attested relation-guard lane")?;
         Ok(Self { resources: None, cluster: cluster.clone(), admin, owner_options, runtime_options, lane, database_name,
@@ -444,7 +466,7 @@ impl Lab {
     async fn begin(&self) -> anyhow::Result<CandidateTransaction<'_>> {
         self.lane
             .uow
-            .begin_in_relation_guard_lab(&self.lane.fixture)
+            .begin_in_relation_guard_lab(self.lane.candidate()?)
             .await
             .context("relation-lab UOW begin")
     }
@@ -804,7 +826,7 @@ async fn ingress_lane_boundary(lab: &Lab) -> anyhow::Result<()> {
     ensure!(
         matches!(
             wrong_lineage
-                .begin_in_relation_guard_lab(&lab.lane.fixture)
+                .begin_in_relation_guard_lab(lab.lane.candidate()?)
                 .await,
             Err(IngressUowError::Lineage(_))
         ),
@@ -957,7 +979,7 @@ async fn shadow_and_wrong_pool(
     ensure!(
         matches!(
             wrong_pool
-                .begin_in_relation_guard_lab(&lab.lane.fixture)
+                .begin_in_relation_guard_lab(lab.lane.candidate()?)
                 .await,
             Err(IngressUowError::AttestedPoolRequired)
         ),
@@ -966,7 +988,7 @@ async fn shadow_and_wrong_pool(
     ensure!(
         matches!(
             wrong_pool
-                .begin_with_relation_guard(&lab.lane.fixture.capability)
+                .begin_with_relation_guard(&lab.lane.candidate()?.capability)
                 .await,
             Err(IngressUowError::RelationGuardCapability(
                 RelationGuardCapabilityError::WrongPool
@@ -987,7 +1009,7 @@ async fn shadow_and_wrong_pool(
     ensure!(
         matches!(
             wrong_lane
-                .begin_in_relation_guard_lab(&lab.lane.fixture)
+                .begin_in_relation_guard_lab(lab.lane.candidate()?)
                 .await,
             Err(IngressUowError::AttestedPoolRequired)
         ),
@@ -1010,7 +1032,7 @@ async fn shadow_and_wrong_pool(
     ensure!(
         lab.lane
             .uow
-            .begin_with_relation_guard(&lab.lane.fixture.capability)
+            .begin_with_relation_guard(&lab.lane.candidate()?.capability)
             .await
             .is_err(),
         "a previously issued capability survived owner-marker drift"
@@ -1132,7 +1154,7 @@ async fn prepared_descendant_api_checks(lab: &Lab) -> anyhow::Result<()> {
     let target = Uuid::new_v4();
     lab.write(message_key, &digest, &intent, source).await?;
 
-    let capability = lab.lane.fixture.capability();
+    let capability = lab.lane.candidate()?.capability();
     let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
     let binding = DeliveryEffectRepository::bind_effect(
         &mut transaction,
@@ -1181,7 +1203,7 @@ async fn prepared_descendant_api_checks(lab: &Lab) -> anyhow::Result<()> {
 }
 
 async fn prepared_alias_sm_archive_api_checks(lab: &Lab) -> anyhow::Result<()> {
-    let capability = lab.lane.fixture.capability();
+    let capability = lab.lane.candidate()?.capability();
 
     let sender: BareJid = "alias-author@example.test".parse()?;
     let target = NormalizedTarget::Bare("alias-target@example.test".parse()?);
@@ -1331,7 +1353,7 @@ async fn room_observation_relation_uow_checks(lab: &Lab) -> anyhow::Result<()> {
     };
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
-    let capability = lab.lane.fixture.capability();
+    let capability = lab.lane.candidate()?.capability();
 
     {
         let mut transaction = lab.lane.uow.begin_with_relation_guard(capability).await?;
@@ -1846,7 +1868,7 @@ async fn concurrency_and_transition(
 
     first_writer.commit().await?;
     let uow = lab.lane.uow.clone();
-    let capability = lab.lane.fixture.capability.clone();
+    let capability = lab.lane.candidate()?.capability.clone();
     let queued_digest = digest.clone();
     let queued_intent = intent.clone();
     let later = tokio::spawn(async move {
@@ -2071,7 +2093,7 @@ async fn lost_commit_ack(
         .ssl_mode(sqlx::postgres::PgSslMode::Disable)
         .options([("search_path", "guarded")]);
     let pool = attested_pool(options, lab.config.clone(), 4, Duration::from_secs(5))?;
-    let lane = LabLane::new(pool, &lab.lineage)
+    let lane = LabLane::new(pool, &lab.lineage, true)
         .await
         .context("initialize proxy-backed relation-guard lane")?;
     let old = std::mem::replace(&mut lab.lane, lane);

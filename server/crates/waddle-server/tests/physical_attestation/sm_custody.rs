@@ -833,14 +833,8 @@ async fn delayed_commit_schedule(committed: bool) {
         "the barrier must be inside COMMIT, not a precommit statement"
     );
     if committed {
-        let pid = child.id().expect("origin PID").to_string();
-        assert!(tokio::process::Command::new("/bin/kill")
-            .arg("-STOP")
-            .arg(&pid)
-            .status()
-            .await
-            .expect("stop origin before receiving COMMIT reply")
-            .success());
+        // Stop the origin before it can receive the COMMIT reply.
+        waddle_ws_test_support::suspend_child_process(child.id().expect("origin PID"));
     } else {
         child
             .start_kill()

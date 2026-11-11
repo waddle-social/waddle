@@ -69,6 +69,10 @@ pub async fn connect_local_postgres(
     ensure_loopback_addresses(&addresses)?;
     let stream = TcpStream::connect(addresses.as_slice()).await?;
     ensure_loopback_addresses(&[stream.peer_addr()?])?;
+    // Proxies forward each frame as separate tag, length and body writes.
+    // Without TCP_NODELAY every forwarded frame waits for the peer's delayed
+    // acknowledgement, which a Unix-socket upstream never imposes.
+    stream.set_nodelay(true)?;
     Ok(Box::new(stream))
 }
 
