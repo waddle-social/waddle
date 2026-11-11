@@ -5,7 +5,10 @@
 # search_path and never reset or alter shared application tables. Database-
 # isolated tests also have a private PostgreSQL advisory-lock namespace. Tests
 # that assert availability of database-wide locks stay in the `postgres`
-# group, even when their application tables use a unique schema.
+# group, even when their application tables use a unique schema. A fixture
+# shared by many concurrent tests that runs migrations or store bootstrap
+# needs a per-test database: those paths take the database-scoped catalog
+# mutation fence with a bounded try-lock, which a unique schema still shares.
 # scripts/check_postgres_test_group.py requires every other Postgres-backed
 # test to match the group filter in .config/nextest.toml, and fails on entries
 # here that no longer need listing.
@@ -18,13 +21,16 @@
 #   (including through `include!`).
 
 # Fixtures.
-# IngressFixture::postgres_with_pool (and `postgres`, which calls it): creates
-# `waddle_test_ingress_<name>_<uuid>` on an admin pool that does nothing else
-# but `CREATE SCHEMA` / `DROP SCHEMA` of that name (`close`), and opens the
-# Database, MAM, inbox and activity stores with `search_path=<schema>`. Shared
-# by the integration binaries (`mod ingress_support;`) and the library
-# (`include!` in src/ingress/test_support.rs).
-crates/waddle-server/tests/ingress_support.rs::IngressFixture::postgres_with_pool
+# IsolatedPostgresDatabase::create: creates the database `wti_<label>_<uuid>`
+# on a cluster pool that does nothing else but `CREATE DATABASE` /
+# `DROP DATABASE` of that name, and hands out a URL naming only that database.
+# IngressFixture::postgres and ::postgres_with_pool open the Database, MAM,
+# inbox and activity stores on it, so their migrations and store bootstrap
+# take the database-scoped catalog fence and schema gates in a private
+# advisory-lock namespace. Shared by the integration binaries
+# (`mod ingress_support;`) and the library (`include!` in
+# src/ingress/test_support.rs).
+crates/waddle-server/tests/ingress_support.rs::IsolatedPostgresDatabase::create
 
 # Retirement upgrades create/drop waddle_test_retirement_<uuid> and run all
 # migration DDL and outbox queries with that schema's search_path.
@@ -47,4 +53,5 @@ crates/waddle-server/tests/inbox_owner_commit_unknown.rs  # unique per-test data
 crates/waddle-server/tests/lineage_catalog_fence.rs  # unique per-test database; isolates database-scoped advisory locks
 crates/waddle-server/tests/notification_activity_catalog_fence.rs  # unique per-test database
 crates/waddle-server/tests/notification_activity_commit_unknown.rs  # unique per-test database, role, and schema
+crates/waddle-server/tests/push_registrations_catalog.rs  # unique per-test database and UUID roles
 crates/waddle-xmpp/tests/p3_joint_identity_pg.rs  # unique UUID schema per fixture; no shared lock assertions

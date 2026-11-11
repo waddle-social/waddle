@@ -1651,8 +1651,10 @@ async fn force_detach_cleanup_returns_not_persisted_when_unregister_retry_cannot
 #[tokio::test]
 async fn force_detach_cleanup_returns_not_persisted_when_remote_owner_unregister_proof_is_missing()
 {
-    use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
-    use crate::clustering::{ClusteringHandles, NodeId};
+    use crate::clustering::route_bridge::{
+        track_remote_socket_for_test, OrderedRelayDeliveryBridge,
+    };
+    use crate::clustering::ClusteringHandles;
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
     use tokio_util::sync::CancellationToken;
     use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
@@ -1682,13 +1684,15 @@ async fn force_detach_cleanup_returns_not_persisted_when_remote_owner_unregister
         .protocol
         .connection_registry
         .register(jid.clone(), tx);
-    bridge
-        .test_insert_remote_socket_registration(
-            jid.clone(),
-            owner,
-            NodeId::new("missing-owner-node".to_string()),
-        )
-        .await;
+    // The bridge stays unwired: with no relay services the sender cannot
+    // obtain any proof from the remote owner, which is the case under test.
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(&jid, &owner)
+        .expect("registered socket entry");
+    track_remote_socket_for_test(&bridge, &jid, &entry).await;
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);

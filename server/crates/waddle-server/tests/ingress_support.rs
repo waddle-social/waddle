@@ -12,22 +12,85 @@ use waddle_xmpp::auth::{
 use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, DigestInput, NormalizedTarget};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
+/// A PostgreSQL database that one test creates and drops.
+///
+/// Migrations and store bootstrap take database-scoped advisory locks (the
+/// catalog mutation fence and the per-store schema gates) with bounded
+/// try-locks. Tests sharing one database therefore contend with each other
+/// even when their tables live in separate schemas; a private database gives
+/// each test its own advisory-lock namespace as well as its own catalog.
+pub struct IsolatedPostgresDatabase {
+    cluster: sqlx::PgPool,
+    name: String,
+    url: String,
+}
+
+impl IsolatedPostgresDatabase {
+    /// Returns `None` when no test database is configured and the lane does
+    /// not require one. `label` only makes the database name recognisable.
+    pub async fn create(label: &str) -> Option<Self> {
+        let Some(cluster_url) = waddle_ws_test_support::require_test_postgres_url() else {
+            eprintln!("skipping {label}: WADDLE_TEST_POSTGRES_URL not set");
+            return None;
+        };
+        // PostgreSQL identifiers hold 63 bytes: a 4-byte prefix, at most 26
+        // bytes of the ASCII label, a separator and the 32-byte UUID. The
+        // server folds the unquoted name to lower case, and the connection
+        // URL must name the database exactly as stored.
+        let name = format!(
+            "wti_{:.26}_{}",
+            label.to_ascii_lowercase(),
+            Uuid::new_v4().simple()
+        );
+        let cluster = sqlx::PgPool::connect(&cluster_url)
+            .await
+            .expect("Postgres cluster");
+        // template0 accepts no connections, so a session attached to the
+        // default template cannot make concurrent creations fail.
+        sqlx::query(&format!("CREATE DATABASE {name} TEMPLATE template0"))
+            .execute(&cluster)
+            .await
+            .expect("isolated database");
+        let mut url = url::Url::parse(&cluster_url).expect("Postgres URL");
+        url.set_path(&format!("/{name}"));
+        Some(Self {
+            cluster,
+            name,
+            url: url.to_string(),
+        })
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Dropped pools close their connections asynchronously, so sessions of
+    /// the finished test can still be attached; `FORCE` ends them.
+    pub async fn drop_database(self) {
+        sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.name))
+            .execute(&self.cluster)
+            .await
+            .expect("drop isolated database");
+        self.cluster.close().await;
+    }
+}
+
 pub struct IngressFixture {
     pub db: Database,
     pub uow: IngressUnitOfWork,
     pub principal: AuthenticatedPrincipalRef,
     lineage: LineageConfig,
-    postgres: Option<(sqlx::PgPool, String)>,
+    postgres: Option<IsolatedPostgresDatabase>,
     sqlite_directory: Option<tempfile::TempDir>,
 }
 
 impl IngressFixture {
     /// Attach ingress repositories to an already migrated, enrolled database,
-    /// retaining any fixture-owned PostgreSQL schema for cleanup.
+    /// retaining any fixture-owned PostgreSQL database for cleanup.
     pub async fn existing(
         db: Database,
         lineage: LineageConfig,
-        postgres: Option<(sqlx::PgPool, String)>,
+        postgres: Option<IsolatedPostgresDatabase>,
     ) -> Self {
         let uow =
             IngressUnitOfWork::open(db.clone(), lineage.clone()).expect("ingress unit of work");
@@ -73,43 +136,19 @@ impl IngressFixture {
     }
 
     pub async fn postgres_with_pool(test_name: &str, pool_size: u32) -> Option<Self> {
-        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
-            eprintln!("skipping {test_name}: WADDLE_TEST_POSTGRES_URL not set");
-            return None;
-        };
-        let schema = format!(
-            "waddle_test_ingress_{test_name}_{}",
-            Uuid::new_v4().simple()
-        );
-        let admin = sqlx::PgPool::connect(&database_url)
-            .await
-            .expect("Postgres admin");
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .expect("isolated schema");
-        let mut url = url::Url::parse(&database_url).expect("Postgres URL");
-        let retained: Vec<(String, String)> = url
-            .query_pairs()
-            .filter(|(key, _)| key != "options")
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect();
-        url.query_pairs_mut()
-            .clear()
-            .extend_pairs(retained)
-            .append_pair("options", &format!("-c search_path={schema}"));
-        let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+        let database = IsolatedPostgresDatabase::create(test_name).await?;
+        let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, database.url().to_owned());
         config.pool_size = pool_size;
         let db = Database::from_config("ingress-test", &config)
             .await
             .expect("Postgres database");
-        waddle_xmpp::mam::SqlxMamStorage::open(url.as_str())
+        waddle_xmpp::mam::SqlxMamStorage::open(database.url())
             .await
             .expect("Postgres MAM schema");
-        Some(Self::initialize(db, Some((admin, schema))).await)
+        Some(Self::initialize(db, Some(database)).await)
     }
 
-    async fn initialize(db: Database, postgres: Option<(sqlx::PgPool, String)>) -> Self {
+    async fn initialize(db: Database, postgres: Option<IsolatedPostgresDatabase>) -> Self {
         waddle_server::inbox::DatabaseInboxStorage::open(Some(db.database_url()))
             .await
             .expect("inbox schema");
@@ -256,11 +295,8 @@ impl IngressFixture {
         drop(self.uow);
         drop(self.db);
         drop(self.sqlite_directory);
-        if let Some((admin, schema)) = self.postgres {
-            sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-                .execute(&admin)
-                .await
-                .expect("drop fixture schema");
+        if let Some(database) = self.postgres {
+            database.drop_database().await;
         }
     }
 }

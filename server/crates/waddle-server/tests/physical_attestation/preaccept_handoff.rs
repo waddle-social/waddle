@@ -716,14 +716,7 @@ async fn postgres_preaccept_origin_death_before_commit_reply_retains_exact_opera
             .expect("source COMMIT");
     assert!(committing);
     assert_eq!(snapshot(&c).await, (1, 1, 1, 0));
-    let origin = child.id().expect("origin PID").to_string();
-    assert!(tokio::process::Command::new("/bin/kill")
-        .arg("-STOP")
-        .arg(&origin)
-        .status()
-        .await
-        .expect("stop origin")
-        .success());
+    waddle_ws_test_support::suspend_child_process(child.id().expect("origin PID"));
     let recovery = Arc::clone(&repo);
     let authority = c.authority();
     let seal_task = tokio::spawn(async move { recovery.seal_for_recovery(&authority).await });

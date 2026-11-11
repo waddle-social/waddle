@@ -15,7 +15,8 @@ use waddle_server::ingress::identity::IngressAppendObligationRef;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::{
-    SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, StreamManagementState,
+    SmFrameProvenance, SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome,
+    StreamManagementState,
 };
 use waddle_xmpp::Stanza;
 
@@ -59,7 +60,7 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
     let mut sender = OrderedRelaySenderState::default();
     let mut receiver = OrderedRelayReceiverState::default();
     for sequence in 1..=2 {
-        let offered = sender
+        let mut offered = sender
             .next_envelope(
                 NodeId::new("origin-node".to_owned()),
                 channel.clone(),
@@ -75,6 +76,11 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
                 },
             )
             .expect("next valid ordered sequence");
+        // The sending bridge binds the carried obligation to the explicit
+        // target resource before signing; the receiver rejects an envelope
+        // whose provenance does not match its payload.
+        offered.provenance =
+            SmFrameProvenance::ingress([obligation.clone().into_relayed_for(target.clone()).key]);
         assert_eq!(offered.sequence, OrderedRelaySequence(sequence));
         let wire = serde_json::to_vec(&offered).expect("serialize relay boundary");
         let received: RemoteStanzaEnvelope =

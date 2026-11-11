@@ -859,6 +859,10 @@ async fn lose_proof_rollback(
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (client, _) = listener.accept().await?;
+    // Frames are forwarded as separate tag, length and body writes. Without
+    // TCP_NODELAY each one waits for the client's delayed acknowledgement, and
+    // the pinned checkout's round trips alone would exhaust its acquire budget.
+    client.set_nodelay(true)?;
     let server = crate::postgres_proxy::connect_local_postgres(&upstream).await?;
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = tokio::io::split(server);

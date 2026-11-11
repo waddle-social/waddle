@@ -1189,14 +1189,7 @@ async fn exercise_process_schedule(pilot: &Pilot, mode: &str) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }).await.expect("child blocked inside COMMIT");
-            let pid = child.id().expect("child PID").to_string();
-            assert!(tokio::process::Command::new("/bin/kill")
-                .arg("-STOP")
-                .arg(pid)
-                .status()
-                .await
-                .expect("stop child")
-                .success());
+            waddle_ws_test_support::suspend_child_process(child.id().expect("child PID"));
             sqlx::query("SELECT pg_advisory_unlock(2229001)")
                 .execute(blocker.as_mut().expect("blocker"))
                 .await

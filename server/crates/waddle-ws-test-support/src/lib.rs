@@ -72,6 +72,19 @@ fn waddle_server_bin() -> std::path::PathBuf {
     bin
 }
 
+/// Suspend a child process the calling test spawned and still owns, so the
+/// child cannot observe a reply that has already reached its socket.
+///
+/// Sent via the raw syscall: the Nix test sandbox and NixOS hosts provide no
+/// `/bin/kill`, and an external binary would be a `PATH` dependency.
+pub fn suspend_child_process(pid: u32) {
+    let pid = libc::pid_t::try_from(pid).expect("child PID fits pid_t");
+    // SAFETY: the caller holds the unreaped child handle this PID came from,
+    // so the signal cannot reach a recycled PID.
+    let rc = unsafe { libc::kill(pid, libc::SIGSTOP) };
+    assert_eq!(rc, 0, "kill(SIGSTOP) failed for pid {pid}");
+}
+
 // ---------------------------------------------------------------------------
 // Test server harness
 // ---------------------------------------------------------------------------
