@@ -281,6 +281,40 @@ owner-as-runtime path is deleted.
 
 ## M3 gaps: the connection actor owns a single-node `/ws` session
 
+### Step 0: the live loop runs on the supervised pumps
+
+Package D's first item is observed pump termination before handlers move. It
+can be delivered on the live path instead of the dark one, which gives M3 an
+activation before step 1 and exercises the pumps under every existing `*_ws`
+suite.
+
+- The live owner task already owns `WsConnState` exclusively
+  (`W/connection.rs:349-406`). What it lacks is the transport boundary: it
+  splits the socket itself (`W/connection.rs:454`) and writes inline.
+- Only one alias names the concrete socket types (`W/connection.rs:317-318`).
+  The handlers are generic over `Sink<Message>` (29 bounds across
+  `batch_write.rs`, `send.rs`, `connection.rs` and `outbound.rs`).
+- The supervised start exists and is unused outside tests
+  (`SocketAdmission::start_socket`, `S/websocket_transport.rs:672`). Its output
+  is a `Sink<WebSocketOutboundFrame>` that restricts close and terminal frames
+  to typed constructors (`S/websocket_transport.rs:1546-1652,1799`), and its
+  input is a `Stream` (`:150`).
+
+The change is an adapter that presents the supervised output as
+`Sink<Message>` (data frames while open, `Message::Close` through
+`transport_close_frame`), completes a flush only when the write receipt is
+terminal so the handlers' "written" assumption holds, and replaces
+`into_legacy` with `start_socket` plus custodian retirement in teardown.
+
+Not yet established: that receipt-terminal flush preserves SM accounting on a
+failed write, how `LocalSocketIo`'s relinquishment witness maps onto the
+supervised `SplitIoRelinquishment`
+([`2046-local-io-relinquishment.md`](2046-local-io-relinquishment.md)), and
+the interaction between `InterruptibleSink` and the supervised live-detach
+phase. These need their own design review before implementation.
+
+### Steps 1–11: the actor replaces the loop
+
 In dependency order. Each step keeps the legacy path selected in production
 and is proven by the named suite under a test-selected actor.
 
