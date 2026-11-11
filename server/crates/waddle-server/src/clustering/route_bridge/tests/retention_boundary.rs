@@ -129,6 +129,9 @@ async fn relay_ack_never_settles_canonical_ancestry_or_starts_retention(fixture:
             sender_full().to_bare(),
         ),
     );
+    // The receiver reserves only an envelope whose signed per-frame claim
+    // matches its obligation, as the ordered sender stamps it.
+    offered.provenance = offered.payload.frame_provenance();
     let bridge = OrderedRelayDeliveryBridge::new(
         CancellationToken::new(),
         &ClusteringMessagingConfig::default(),

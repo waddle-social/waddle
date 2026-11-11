@@ -11,6 +11,7 @@ use super::{
     SM_NS,
 };
 use crate::clustering::relay::RelayRemoteResourceRegistrationStatus;
+use crate::clustering::route_bridge::tests::connection_entry_for_socket_node;
 use crate::clustering::route_bridge::{
     remote_registration_request, remote_registration_request_from_entry, wire_for_test,
     OrderedRelayDeliveryBridge,
@@ -487,11 +488,17 @@ async fn remote_same_generation_resume_preserves_owner_local_sm_snapshot() {
         .clone();
     let mut control = lifecycle.entry.take_force_detach_rx().expect("control");
     let bridge = owner_bridge(&state, &jid).await;
-    let request = remote_registration_request_from_entry(
-        jid.clone(),
-        NodeId::new("resume-socket".to_owned()),
-        &lifecycle.entry,
-    );
+    // The resumed session arrives on another node's transport and carries the
+    // owner-local binding's occupancy generation with it.
+    let resume_socket = NodeId::new("resume-socket".to_owned());
+    let (resumed_tx, _resumed_rx) = mpsc::channel(1);
+    let resumed_entry = connection_entry_for_socket_node(resumed_tx, &resume_socket);
+    *resumed_entry
+        .occupancy_session
+        .lock()
+        .expect("occupancy mutex") = lifecycle.entry.occupancy_session();
+    let request =
+        remote_registration_request_from_entry(jid.clone(), resume_socket, &resumed_entry);
     assert_eq!(
         bridge
             .register_remote_user_resource_on_owner(request.clone())

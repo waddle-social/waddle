@@ -798,8 +798,8 @@ pub(super) fn remote_owner_registration_matches(
 mod tests {
     use super::*;
     use crate::clustering::route_bridge::tests::{
-        origin_identity, receiver_identity, services_with_claims, test_peer_id, SocketLeaseRead,
-        StaticNodeLease,
+        connection_entry_for_socket_node, origin_identity, receiver_identity, services_with_claims,
+        test_peer_id, SocketLeaseRead, StaticNodeLease,
     };
     use crate::clustering::route_bridge::{
         remote_registration_request, RemoteResourceRegistrationId, RemoteResourceSocketGeneration,
@@ -1761,7 +1761,8 @@ mod tests {
     #[tokio::test]
     async fn successor_from_other_socket_returns_busy_before_retirement_awaits() {
         let (fresh_tx, _fresh_rx) = mpsc::channel(1);
-        let fresh_entry = ConnectionEntry::new(fresh_tx);
+        let socket_node = NodeId::new("replacement-socket-node".to_string());
+        let fresh_entry = connection_entry_for_socket_node(fresh_tx, &socket_node);
         let target = "juliet@example.test/phone"
             .parse::<jid::FullJid>()
             .expect("valid full jid");
@@ -1770,7 +1771,7 @@ mod tests {
                 jid: target,
                 registration_id: RemoteResourceRegistrationId::fresh(),
                 socket_generation: RemoteResourceSocketGeneration::next(None),
-                socket_node: NodeId::new("replacement-socket-node".to_string()),
+                socket_node,
                 state: RemoteResourceStateSnapshot::from_entry(&fresh_entry, None),
                 trace: RelayTraceContext::default(),
             },
@@ -1784,7 +1785,8 @@ mod tests {
     async fn successor_from_same_socket_newer_generation_returns_busy_before_retirement_awaits() {
         let old_generation = RemoteResourceSocketGeneration::next(None);
         let (fresh_tx, _fresh_rx) = mpsc::channel(1);
-        let fresh_entry = ConnectionEntry::new(fresh_tx);
+        let socket_node = NodeId::new("same-socket-node".to_string());
+        let fresh_entry = connection_entry_for_socket_node(fresh_tx, &socket_node);
         let target = "juliet@example.test/phone"
             .parse::<jid::FullJid>()
             .expect("valid full jid");
@@ -1793,7 +1795,7 @@ mod tests {
                 jid: target,
                 registration_id: RemoteResourceRegistrationId::fresh(),
                 socket_generation: RemoteResourceSocketGeneration::next(Some(old_generation)),
-                socket_node: NodeId::new("same-socket-node".to_string()),
+                socket_node,
                 state: RemoteResourceStateSnapshot::from_entry(&fresh_entry, None),
                 trace: RelayTraceContext::default(),
             },

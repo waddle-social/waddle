@@ -807,43 +807,45 @@ mod tests {
         );
     }
 
-    /// Poll `pg_locks` until a transaction is queued (ungranted) on the MUC
-    /// schema advisory lock. Postgres exposes a single-bigint advisory key
-    /// with its high 32 bits in `classid`, low 32 bits in `objid`, and
-    /// `objsubid = 1`.
-    async fn wait_for_muc_schema_advisory_waiter(db: &Database) {
-        let waiter = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    /// Wait until a schema bootstrap has lost a try on the held MUC schema
+    /// gate. The bootstrap never queues on the gate: it takes the catalog
+    /// fence, tries the gate without waiting, and on contention rolls back so
+    /// the catalog fence is released between attempts. That acknowledged
+    /// rollback, on a backend of this database that is idle again afterwards,
+    /// is the only server-visible trace of a lost try.
+    async fn wait_for_muc_schema_gate_retry(db: &Database, baseline: &str) {
+        let retried = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let conn = db.guard().await.expect("guard");
                 let mut rows = conn
                     .query(
-                        "SELECT COUNT(*) \
-                         FROM pg_locks \
-                         WHERE locktype = 'advisory' \
-                           AND granted = false \
-                           AND objsubid = 1 \
-                           AND ((classid::bigint << 32) | objid::bigint) = ?",
-                        crate::db_params![MUC_SCHEMA_ADVISORY_LOCK_KEY],
+                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                         WHERE a.datname = current_database() \
+                           AND a.pid <> pg_catalog.pg_backend_pid() \
+                           AND a.state = 'idle' \
+                           AND a.query LIKE 'ROLLBACK%' \
+                           AND a.state_change > CAST(? AS timestamptz))",
+                        crate::db_params![baseline],
                     )
                     .await
-                    .expect("query MUC schema advisory lock waiters");
-                let count = rows
+                    .expect("query MUC schema gate retry rollbacks");
+                let observed = rows
                     .next()
                     .await
-                    .expect("read MUC schema advisory lock waiters")
-                    .expect("advisory waiter count row")
-                    .get::<i64>(0)
-                    .expect("decode advisory waiter count");
-                if count > 0 {
+                    .expect("read MUC schema gate retry rollbacks")
+                    .expect("gate retry row")
+                    .get::<bool>(0)
+                    .expect("decode gate retry observation");
+                if observed {
                     return;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         })
         .await;
         assert!(
-            waiter.is_ok(),
-            "MUC schema bootstrap must show an ungranted advisory waiter in pg_locks"
+            retried.is_ok(),
+            "MUC schema bootstrap must roll back and retry while its advisory gate is held"
         );
     }
 
@@ -4159,6 +4161,19 @@ mod tests {
             .await
             .expect("take MUC schema advisory lock");
 
+        let baseline = {
+            let conn = db.guard().await.expect("guard");
+            let mut rows = conn
+                .query("SELECT pg_catalog.clock_timestamp()::text", ())
+                .await
+                .expect("query gate retry baseline");
+            rows.next()
+                .await
+                .expect("read gate retry baseline")
+                .expect("gate retry baseline row")
+                .get::<String>(0)
+                .expect("decode gate retry baseline")
+        };
         let open_db = db.clone();
         let mut open = tokio::spawn(async move {
             PostgresMucRoomStore::open(
@@ -4169,7 +4184,7 @@ mod tests {
             .await
         });
 
-        wait_for_muc_schema_advisory_waiter(&db).await;
+        wait_for_muc_schema_gate_retry(&db, &baseline).await;
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(100), &mut open)
                 .await

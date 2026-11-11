@@ -1,13 +1,13 @@
 use super::{
-    mpsc, origin_identity, other_identity, receiver_identity, remote_registration_request,
-    remote_registration_request_from_entry, services_with_claims, target_bare, target_entity,
-    target_full, test_peer_id, user_entity, Arc, AtomicBool, CancellationToken, ClaimError,
-    ClusteringMessagingConfig, ConnectionEntry, Duration, LocalResourcePresence, NodeId,
-    NodeIdentity, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, Ordering,
-    RelayAskError, RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUnregisterStatus,
-    RelaySendEffect, RelaySendFailure, RelayTraceContext, RelayUnregisterRemoteUserResource,
-    RemoteOwnerRegistration, RemoteResourceRegistrationId, RemoteResourceSocketGeneration,
-    SocketLeaseRead, StaticNodeLease,
+    connection_entry_for_current_node, mpsc, origin_identity, other_identity, receiver_identity,
+    remote_registration_request, remote_registration_request_from_entry, services_with_claims,
+    target_bare, target_entity, target_full, test_peer_id, user_entity, Arc, AtomicBool,
+    CancellationToken, ClaimError, ClusteringMessagingConfig, ConnectionEntry, Duration,
+    LocalResourcePresence, NodeId, NodeIdentity, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, Ordering, RelayAskError, RelayRemoteResourceRegistrationStatus,
+    RelayRemoteResourceUnregisterStatus, RelaySendEffect, RelaySendFailure, RelayTraceContext,
+    RelayUnregisterRemoteUserResource, RemoteOwnerRegistration, RemoteResourceRegistrationId,
+    RemoteResourceSocketGeneration, SocketLeaseRead, StaticNodeLease,
 };
 use crate::clustering::relay::RelayResourcePresenceReply;
 use crate::clustering::resource_presence::{ClusterMembership, ResourcePresenceAsker};
@@ -331,7 +331,12 @@ async fn owner_sweep_retires_obsolete_mirror_but_preserves_rebound_socket() {
         .await
         .expect("peer absence probe started");
     let (tx, _rx) = mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    // The rebound transport is minted under the socket node's own current
+    // lease incarnation, which is the one the owner's lease read reports.
+    let entry = connection_entry_for_current_node(
+        tx,
+        fixture.socket.services.get().expect("socket services"),
+    );
     let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
     *entry.occupancy_session.lock().expect("occupancy mutex") = Some(generation);
     let socket_owner = entry.binding_id();

@@ -437,20 +437,23 @@ impl OrderedRelayDeliveryBridge {
                 status: RelayRemoteResourceFrameStatus::Unavailable,
             };
         };
+        // A registration whose transport was not minted under this node's
+        // active lease incarnation, or is no longer the registry's entry, is
+        // treated as absent: no frame is ever offered to it. An obligation
+        // frame still resolves its durable status below before reporting an
+        // absent registration, because a send that was already accepted (or
+        // is still ambiguous) must not be answered `Unavailable`: that reply
+        // lets the owner fall back to detached delivery of the same message.
         let registration = {
             let registrations = self.remote_socket_resources.lock().await;
             registrations
                 .get(&msg.frame.jid)
                 .filter(|registration| registration.registration_id == msg.frame.registration_id)
                 .cloned()
-        };
-        if registration.as_ref().is_none_or(|registration| {
-            !remote_socket_connection_ref_is_current(&services, &msg.frame.jid, registration)
-        }) {
-            return RelayRemoteResourceFrameReply {
-                status: RelayRemoteResourceFrameStatus::Unavailable,
-            };
         }
+        .filter(|registration| {
+            remote_socket_connection_ref_is_current(&services, &msg.frame.jid, registration)
+        });
         if let Some(obligation) = msg.frame.ingress_append.as_ref() {
             let Some(state) = services.web_socket_state.upgrade() else {
                 return RelayRemoteResourceFrameReply {

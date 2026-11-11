@@ -32,7 +32,9 @@ fn obligation_envelope() -> RemoteStanzaEnvelope {
         *ingress_append = Some(obligation());
     }
     RemoteStanzaEnvelope {
-        provenance: Default::default(),
+        // An obligation-bearing payload is consistent only with the exact
+        // per-frame claim derived from it, as the ordered sender stamps it.
+        provenance: payload.frame_provenance(),
         asserted_origin_node: origin_node(),
         channel: OrderedRelayChannel {
             recipient: OrderedRelayRecipient::FullJid(recipient),
@@ -236,6 +238,17 @@ fn replace_obligation(envelope: &mut RemoteStanzaEnvelope, obligation: IngressAp
     *ingress_append = Some(obligation);
 }
 
+/// Replace the obligation and restamp the per-frame claim derived from it, so
+/// the envelope is judged on the obligation itself rather than on a claim left
+/// over from the previous payload.
+fn replace_obligation_and_provenance(
+    envelope: &mut RemoteStanzaEnvelope,
+    obligation: IngressAppendObligationRef,
+) {
+    replace_obligation(envelope, obligation);
+    envelope.provenance = envelope.payload.frame_provenance();
+}
+
 #[test]
 fn ingress_append_obligation_survives_envelope_serde_round_trip() {
     let envelope = obligation_envelope();
@@ -290,7 +303,7 @@ fn receiver_nacks_changed_ingress_append_obligation_while_pending_and_after_ack(
         let mut receiver = OrderedRelayReceiverState::default();
         let envelope = obligation_envelope();
         let mut changed = envelope.clone();
-        replace_obligation(&mut changed, obligation);
+        replace_obligation_and_provenance(&mut changed, obligation);
         assert!(
             envelope_is_consistent(&changed),
             "test fingerprint, not structure"
@@ -323,8 +336,9 @@ fn receiver_rejects_ingress_append_obligation_on_bare_recipient_before_effects()
     let mut envelope = obligation_envelope();
     envelope.channel = channel();
     envelope.payload = message_payload("ingress-append");
+    envelope.provenance = envelope.payload.frame_provenance();
     assert!(envelope_is_consistent(&envelope));
-    replace_obligation(&mut envelope, obligation());
+    replace_obligation_and_provenance(&mut envelope, obligation());
     assert!(!envelope_is_consistent(&envelope));
     let mut receiver = OrderedRelayReceiverState::default();
     assert_parse_failure_without_reservation(&mut receiver, envelope);
@@ -338,7 +352,7 @@ fn receiver_rejects_ineligible_ingress_append_obligation_before_effects() {
     let mut ineligible = obligation();
     ineligible.receipt.kind =
         EffectReceiptKind::from_storage(IngressEffectKind::ArchiveAuthoritative.storage_tag());
-    replace_obligation(&mut envelope, ineligible);
+    replace_obligation_and_provenance(&mut envelope, ineligible);
     assert!(!envelope_is_consistent(&envelope));
     let mut receiver = OrderedRelayReceiverState::default();
     assert_parse_failure_without_reservation(&mut receiver, envelope);
