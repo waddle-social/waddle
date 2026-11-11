@@ -351,7 +351,8 @@ mod local_actor_retirement_tests {
     use crate::clustering::relay::RelayRemoteResourceRegistrationStatus;
     use crate::clustering::route_bridge::remote_registration_request_from_entry;
     use crate::clustering::route_bridge::tests::{
-        origin_identity, receiver_identity, services_with_claims, test_peer_id,
+        connection_entry_for_socket_node, origin_identity, receiver_identity, services_with_claims,
+        test_peer_id,
     };
     use crate::clustering::NodeId;
     use crate::config::ClusteringMessagingConfig;
@@ -444,13 +445,11 @@ mod local_actor_retirement_tests {
         drop(guard);
         tokio::time::resume();
         let (tx, _rx) = mpsc::channel(1);
-        let replacement = ConnectionEntry::new(tx);
+        let successor_node = NodeId::new("successor".to_owned());
+        let replacement = connection_entry_for_socket_node(tx, &successor_node);
         *replacement.occupancy_session.lock().expect("generation") = Some(generation);
-        let request = remote_registration_request_from_entry(
-            jid.clone(),
-            NodeId::new("successor".to_owned()),
-            &replacement,
-        );
+        let request =
+            remote_registration_request_from_entry(jid.clone(), successor_node, &replacement);
         assert_eq!(request.state.occupancy_session, Some(generation));
         assert!(crate::occupancy_authority::is_current(
             &services.occupancy_database,

@@ -1,8 +1,8 @@
 use super::{
-    connection_entry_for_current_node, deliver_local_after_target_refresh_outcome,
-    deliver_reserved_bare_presence_direct, deliver_reserved_muc_proxy, envelope,
-    envelope_for_services, iq_payload, mpsc, origin_identity, other_identity,
-    payload_for_recipient, receiver_identity, sender_full, services_with_claims,
+    connection_entry_for_current_node, connection_entry_for_socket_node,
+    deliver_local_after_target_refresh_outcome, deliver_reserved_bare_presence_direct,
+    deliver_reserved_muc_proxy, envelope, envelope_for_services, iq_payload, mpsc, origin_identity,
+    other_identity, payload_for_recipient, receiver_identity, sender_full, services_with_claims,
     services_with_claims_and_blocking, sign_envelope, signed_envelope_for_services, target_bare,
     target_full, test_peer_id, validate_claims, Arc, BroadcastOutcome, CancellationToken,
     ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, Duration, FullJidDeliveryOutcome,
@@ -2214,7 +2214,8 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
     );
 
     let (fresh_tx, _fresh_rx) = mpsc::channel(1);
-    let fresh_entry = connection_entry_for_current_node(fresh_tx, &services);
+    let successor_socket_node = NodeId::new("replacement-socket-node".to_string());
+    let fresh_entry = connection_entry_for_socket_node(fresh_tx, &successor_socket_node);
     let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
     *fresh_entry
         .occupancy_session
@@ -2227,7 +2228,7 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
         jid: target.clone(),
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_generation: RemoteResourceSocketGeneration::next(None),
-        socket_node: NodeId::new("replacement-socket-node".to_string()),
+        socket_node: successor_socket_node,
         state: RemoteResourceStateSnapshot::from_entry(
             &fresh_entry,
             services.connection_registry.presence_state(&target),

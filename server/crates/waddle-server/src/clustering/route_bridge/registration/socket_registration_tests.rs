@@ -4,7 +4,8 @@ use super::{
 };
 use crate::clustering::claims::NodeLeaseStore;
 use crate::clustering::route_bridge::tests::{
-    origin_identity, receiver_identity, services_with_claims, test_peer_id,
+    connection_entry_for_current_node, origin_identity, receiver_identity, services_with_claims,
+    test_peer_id,
 };
 use crate::config::ClusteringMessagingConfig;
 use std::collections::VecDeque;
@@ -92,7 +93,9 @@ impl RegistrationLeaseFixture {
 
     async fn register(&self) -> RemoteResourceRegisterOutcome {
         let (tx, _rx) = mpsc::channel(1);
-        let entry = ConnectionEntry::new(tx);
+        // Registration is offered only for a transport minted under this
+        // node's current lease incarnation.
+        let entry = connection_entry_for_current_node(tx, &self.services);
         let owner = self
             .services
             .connection_registry
@@ -221,9 +224,16 @@ async fn registration_demand_expiry_requires_an_active_fresh_local_lease() {
         } else {
             fixture.lapse_heartbeat(&fixture.local).await;
         }
+        // A lapsed local lease can still be renewed, so that attempt stays
+        // retryable. A disabled identity is terminal for this clustering
+        // lifetime: registration refuses it before any relay exchange.
         assert_eq!(
             fixture.register().await,
-            RemoteResourceRegisterOutcome::Retryable
+            if disable {
+                RemoteResourceRegisterOutcome::Failed
+            } else {
+                RemoteResourceRegisterOutcome::Retryable
+            }
         );
         assert!(
             fixture
@@ -418,7 +428,7 @@ async fn register_with_claim_reads(
     });
     let jid: jid::FullJid = "alice@example.test/reconnect".parse().expect("jid");
     let (tx, _rx) = mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = connection_entry_for_current_node(tx, &services);
     let owner = services
         .connection_registry
         .register_entry(jid.clone(), entry.clone());

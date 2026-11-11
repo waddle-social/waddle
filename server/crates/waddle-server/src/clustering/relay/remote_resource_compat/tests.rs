@@ -441,10 +441,9 @@ fn current_versioned_wire_corpus_is_pinned() {
 #[tokio::test]
 async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_handlers() {
     use crate::clustering::route_bridge::tests::{
-        origin_identity, receiver_identity, services_with_claims,
+        connection_entry_for_current_node, origin_identity, receiver_identity, services_with_claims,
     };
     use kameo::remote::RemoteMessage;
-    use waddle_xmpp::registry::ConnectionEntry;
     assert_eq!(
         <RelayActor as RemoteMessage<RouteV9>>::REMOTE_ID,
         "waddle.clustering.relay.remote_resource_route.v9"
@@ -478,7 +477,7 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
     bridge.wire(Arc::clone(&services));
     let target: jid::FullJid = "b@example.test/tablet".parse().expect("target");
     let (tx, mut rx) = mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = connection_entry_for_current_node(tx, &services);
     let owner = entry.binding_id();
     services
         .connection_registry

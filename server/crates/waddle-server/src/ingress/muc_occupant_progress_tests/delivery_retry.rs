@@ -233,29 +233,32 @@ async fn reply_during_in_flight_reflection(release_predecessor: bool) {
         test_hooks::pause_after_delivery_append(older.message_key.expect("A key"), sender.clone());
     let blocked = test_hooks::pause_after_blocked_dispatch(newer.message_key.expect("B key"));
     let completed = tokio::sync::Notify::new();
+    // Two executions are polled side by side under nested joins and
+    // timeouts. Inline, their combined state exceeds the test thread's
+    // stack, so each execution keeps its state on the heap.
     let older_execution = async {
-        let report = execute_effects(
+        let report = Box::pin(execute_effects(
             &fixture.uow,
             &fixture.db,
             older,
             &ImmediateSink,
             &deps,
             Duration::from_secs(5),
-        )
+        ))
         .await;
         completed.notify_one();
         report
     };
     let newer_execution = async {
         append.wait_until_reached().await;
-        let execute = execute_effects(
+        let execute = Box::pin(execute_effects(
             &fixture.uow,
             &fixture.db,
             newer,
             &ImmediateSink,
             &deps,
             Duration::from_secs(5),
-        );
+        ));
         let finish_predecessor = async {
             blocked.wait_until_reached().await;
             if release_predecessor {

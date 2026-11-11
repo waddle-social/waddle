@@ -1,11 +1,11 @@
 //! Timestamp-only relay metadata preserves native SM custody without ingress authority.
 use super::{
-    envelope_for_services, mpsc, origin_identity, receiver_identity, sender_full,
-    services_with_claims, sign_envelope, target_full, test_peer_id, Arc, CancellationToken,
-    ClusteringMessagingConfig, ConnectionEntry, Keypair, Lang, Message, NodeId, NodeIdentity,
-    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNack,
-    OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayReply, OutboundStanza,
-    RelayRouteRemoteResourceStanza, RelayTraceContext, RemoteOwnerRegistration,
+    connection_entry_for_current_node, envelope_for_services, mpsc, origin_identity,
+    receiver_identity, sender_full, services_with_claims, sign_envelope, target_full, test_peer_id,
+    Arc, CancellationToken, ClusteringMessagingConfig, ConnectionEntry, Keypair, Lang, Message,
+    NodeId, NodeIdentity, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    OrderedRelayNack, OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayReply,
+    OutboundStanza, RelayRouteRemoteResourceStanza, RelayTraceContext, RemoteOwnerRegistration,
     RemoteResourceOutboundFrame, RemoteResourceRegistrationId, RemoteResourceRouteTarget,
     RemoteResourceSocketGeneration, RemoteStanza, RemoteStanzaEnvelope, Stanza,
 };
@@ -121,7 +121,9 @@ pub(crate) async fn register_live_target(
     mpsc::Receiver<OutboundStanza>,
 ) {
     let (sender, receiver) = mpsc::channel(4);
-    let entry = ConnectionEntry::new(sender);
+    // A socket-node frame reaches only a transport minted under the node's
+    // current lease incarnation.
+    let entry = connection_entry_for_current_node(sender, services);
     let owner = entry.binding_id();
     services
         .connection_registry

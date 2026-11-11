@@ -3239,14 +3239,31 @@ mod tests {
         block_once: AtomicBool,
     }
 
-    #[async_trait]
-    impl LocallyClaimedEntities for BlockingOwnedLocalClaims {
-        async fn owned(&self) -> Vec<Entity> {
+    impl BlockingOwnedLocalClaims {
+        /// Stall the first local inventory read until released. Fencing reads
+        /// `owned()` and the terminal room drain reads the exact claim-fence
+        /// snapshot, so either read can be the one that is held.
+        async fn block_first_inventory_read(&self) {
             if !self.block_once.swap(true, Ordering::SeqCst) {
                 self.owned_started.notify_one();
                 self.owned_release.notified().await;
             }
+        }
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for BlockingOwnedLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            self.block_first_inventory_read().await;
             Vec::new()
+        }
+
+        async fn room_claim_fences_for_drain(
+            &self,
+            _owner: &NodeIdentity,
+        ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+            self.block_first_inventory_read().await;
+            Some(Vec::new())
         }
 
         async fn demote(&self, _entity: &Entity) {}
@@ -3260,6 +3277,15 @@ mod tests {
     impl LocallyClaimedEntities for BlockingSealLocalClaims {
         async fn owned(&self) -> Vec<Entity> {
             vec![self.entity.clone()]
+        }
+
+        // The terminal room drain seals only entities named by this exact
+        // claim-fence snapshot, so the held seal is reachable through it.
+        async fn room_claim_fences_for_drain(
+            &self,
+            _owner: &NodeIdentity,
+        ) -> Option<Vec<(Entity, ClaimEpoch)>> {
+            Some(vec![(self.entity.clone(), ClaimEpoch(1))])
         }
 
         async fn demote(&self, _entity: &Entity) {}
@@ -4547,8 +4573,8 @@ mod tests {
         let retirements = lease.retirements.clone();
         let claims: Arc<dyn ClaimStore> =
             Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
-        // Hold the drain in `owned()` so the heartbeat's fencing loss, not
-        // drain completion, decides the outcome.
+        // Hold the drain in its claim-fence snapshot so the heartbeat's
+        // fencing loss, not drain completion, decides the outcome.
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(BlockingOwnedLocalClaims {
             owned_started: Arc::new(tokio::sync::Notify::new()),
             owned_release: Arc::new(tokio::sync::Notify::new()),

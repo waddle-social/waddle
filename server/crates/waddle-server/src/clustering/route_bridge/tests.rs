@@ -75,6 +75,28 @@ pub(crate) enum SocketLeaseRead {
     },
 }
 
+/// Lease epoch [`StaticNodeLease`] reports for a node without a scripted read.
+pub(crate) const FIXTURE_NODE_EPOCH: &str = "fixture-epoch";
+
+/// A transport on `socket_node`, minted under the lease incarnation
+/// [`StaticNodeLease`] reports for that node. The owner admits a remote
+/// registration only when its physical reference names the source node's
+/// unexpired incarnation.
+pub(crate) fn connection_entry_for_socket_node(
+    sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
+    socket_node: &NodeId,
+) -> ConnectionEntry {
+    ConnectionEntry::new_for_connection(
+        sender,
+        waddle_xmpp::ownership::ConnectionRef::fresh(
+            waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(
+                socket_node.as_str(),
+                FIXTURE_NODE_EPOCH,
+            )),
+        ),
+    )
+}
+
 pub(crate) struct StaticNodeLease {
     pub(crate) socket_read: Option<Arc<std::sync::Mutex<SocketLeaseRead>>>,
     pub(crate) origin: NodeIdentity,
@@ -108,7 +130,7 @@ impl NodeLeaseStore for StaticNodeLease {
                 reads.fetch_add(1, Ordering::SeqCst);
                 Ok(identity)
             }
-            None => Ok(Some(NodeIdentity::new(node.as_str(), "fixture-epoch"))),
+            None => Ok(Some(NodeIdentity::new(node.as_str(), FIXTURE_NODE_EPOCH))),
         }
     }
 
