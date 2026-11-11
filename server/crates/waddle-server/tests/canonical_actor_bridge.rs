@@ -180,6 +180,8 @@ impl Harness {
             capacity: MaxWebSocketConnections::from_raw(Some("1")).expect("capacity"),
             clustered_identity: identity.map(Some),
             barriers: AdmissionTestBarriers::default(),
+            live_connection_host: None,
+            ws_keepalive: None,
         })
         .await;
         let (event_tx, events) = mpsc::unbounded_channel();

@@ -13,13 +13,44 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 
+/// Extra server environment that hosts every live loop in the connection
+/// actor. Only a server built with `test-support` honours it.
+#[cfg(feature = "test-support")]
+const ACTOR_HOST: (&str, &str) = (waddle_ws_test_support::LIVE_CONNECTION_HOST_ENV, "actor");
+
 /// SIGTERM with a live authenticated client: the client receives
 /// `system-shutdown` then the framing `<close/>`, and the process
 /// exits well within the drain timeout instead of hanging until
 /// SIGKILL.
 #[tokio::test]
 async fn sigterm_closes_live_session_with_system_shutdown_and_exits() {
-    let mut server = TestServer::start_with_extra_envs(&[], &[("WADDLE_DRAIN_TIMEOUT_SECS", "5")]);
+    sigterm_closes_live_session_with_system_shutdown_and_exits_case(
+        TestServer::start_with_extra_envs(&[], &[("WADDLE_DRAIN_TIMEOUT_SECS", "5")]),
+    )
+    .await;
+}
+
+/// The same case with the live loop hosted by the connection actor.
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn sigterm_closes_live_session_with_system_shutdown_and_exits_under_the_actor_host() {
+    sigterm_closes_live_session_with_system_shutdown_and_exits_case(
+        TestServer::start_with_extra_envs(&[], &[("WADDLE_DRAIN_TIMEOUT_SECS", "5"), ACTOR_HOST]),
+    )
+    .await;
+}
+
+/// A server that honours the host selection refuses a value it does not
+/// know. This is what shows the `_under_the_actor_host` cases reach the
+/// server process instead of silently running the default host.
+#[cfg(feature = "test-support")]
+#[test]
+#[should_panic(expected = "Server exited before writing its port file")]
+fn server_refuses_an_unknown_live_connection_host() {
+    TestServer::start_with_extra_envs(&[], &[(ACTOR_HOST.0, "neither")]);
+}
+
+async fn sigterm_closes_live_session_with_system_shutdown_and_exits_case(mut server: TestServer) {
     let mut client = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
