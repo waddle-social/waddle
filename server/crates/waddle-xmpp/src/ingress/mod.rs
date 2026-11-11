@@ -8,6 +8,7 @@ mod epoch;
 mod error;
 mod generation;
 mod keys;
+pub mod mailbox;
 mod ordinal;
 mod stored_message_payload;
 mod stream;
