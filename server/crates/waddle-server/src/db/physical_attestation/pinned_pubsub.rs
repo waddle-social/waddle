@@ -6,6 +6,7 @@
 //! writers and privileged or uncooperative catalog and ACL mutators. The
 //! advisory fence coordinates only participants; v3 quiescence is procedural.
 
+use crate::db::DarkEpochAclStage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -329,7 +330,13 @@ async fn inspect_transaction(
     if !acquired {
         return Ok(Inspection::Retry);
     }
-    prepare_read_only_entry(tx, authority, None).await?;
+    prepare_read_only_entry(
+        tx,
+        authority,
+        DarkEpochAclStage::RelationGuardEpochZero,
+        None,
+    )
+    .await?;
     let connection = tx
         .postgres_connection()
         .ok_or(PinnedPubSubInventoryError::InvalidPins)?;

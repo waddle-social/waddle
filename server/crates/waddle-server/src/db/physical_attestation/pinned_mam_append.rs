@@ -8,6 +8,7 @@
 //! are independently trusted. This returns neither an append capability nor
 //! a reusable catalog proof.
 
+use crate::db::DarkEpochAclStage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -239,7 +240,13 @@ async fn inspect(
     if !acquired {
         return Ok(Inspection::Retry);
     }
-    prepare_read_only_entry(tx, authority, None).await?;
+    prepare_read_only_entry(
+        tx,
+        authority,
+        DarkEpochAclStage::RelationGuardEpochZero,
+        None,
+    )
+    .await?;
     let connection = tx
         .postgres_connection()
         .ok_or(PinnedMamAppendError::InvalidPins)?;

@@ -1,8 +1,8 @@
 use super::{
     bad_format_iq_error, bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
     global_database, internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error,
-    not_authorized_iq_error, row_value, warn, Arc, DbExecute, DbQueryOne, Element, FullJid,
-    PubSubItem, VCardStore, Value, ValueExt, WebSocketState,
+    not_authorized_iq_error, row_value, warn, Arc, DbQueryOne, Element, FullJid, PubSubItem,
+    VCardStore, Value, ValueExt, WebSocketState,
 };
 use waddle_xmpp::xep::xep0049::{self, PrivateStorageError};
 
@@ -320,23 +320,20 @@ pub(super) async fn handle_private_storage_iq(
             .db_pool
             .global_actor()
             .clone()
-            .ask(DbExecute {
-                sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
-                params: vec![
-                    Value::from(bare_jid.to_string()),
-                    Value::from(key.namespace),
-                    Value::from(xml_content),
-                ],
-            })
+            .ask(crate::db::private_xml::upsert(
+                &bare_jid,
+                &key.namespace,
+                &xml_content,
+            ))
             .await
         {
             warn!(jid = %bare_jid, error = %error, "Failed to store private XML");
             return vec![build_iq_error_xml_typed(
-                            iq.id(),
-                            response_from,
-                            response_to,
-                            internal_server_error_iq_error("Internal server error."),
-                        )];
+                iq.id(),
+                response_from,
+                response_to,
+                internal_server_error_iq_error("Internal server error."),
+            )];
         }
         return vec![iq_to_xml(xep0049::build_private_storage_success(iq))];
     }

@@ -74,8 +74,11 @@ pub struct DatabaseMamStorage {
 enum MamAuthority {
     Attested {
         capability: Box<AttestedPostgresWriterCapability>,
+        /// Present when the node serves clustered and fences archive writes
+        /// with claims. A single-node attachment holds none: its unfenced
+        /// operations work and a fenced one is refused.
         #[cfg(feature = "clustering")]
-        claim_authority: Box<VerifiedMainClaimOccupancy>,
+        claim_authority: Option<Box<VerifiedMainClaimOccupancy>>,
     },
     LegacyOwner {
         #[cfg(feature = "clustering")]
@@ -203,6 +206,28 @@ impl DatabaseMamStorage {
         mam_owner: PgRoleName,
         claim_schema: PgSchemaName,
     ) -> Result<Self, DatabaseMamStorageError> {
+        Self::attach_with_fencing(database, mam_owner, claim_schema, true).await
+    }
+
+    /// Attach for a node that serves without clustering. The schema, owner
+    /// and runtime-grant checks are those of [`Self::attach`]; no claim
+    /// table is verified because a single node holds no claims. Such a node
+    /// never builds a fence context, so a fenced store request is refused
+    /// as not owned. A clustered node must use [`Self::attach`].
+    pub async fn attach_single_node(
+        database: &Database,
+        mam_owner: PgRoleName,
+        claim_schema: PgSchemaName,
+    ) -> Result<Self, DatabaseMamStorageError> {
+        Self::attach_with_fencing(database, mam_owner, claim_schema, false).await
+    }
+
+    async fn attach_with_fencing(
+        database: &Database,
+        mam_owner: PgRoleName,
+        claim_schema: PgSchemaName,
+        claim_fencing: bool,
+    ) -> Result<Self, DatabaseMamStorageError> {
         if database.driver() != DatabaseDriver::Postgres || !database.is_main_lane() {
             return Err(DatabaseMamStorageError::AttestedMainDatabaseRequired);
         }
@@ -222,14 +247,22 @@ impl DatabaseMamStorage {
             return Err(DatabaseMamStorageError::UnsafeClaimPrivileges);
         }
         #[cfg(feature = "clustering")]
-        let claim_authority = attach_main_claim_occupancy(database.clone()).await?;
+        let claim_authority = if claim_fencing {
+            Some(Box::new(
+                attach_main_claim_occupancy(database.clone()).await?,
+            ))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "clustering"))]
+        let _ = claim_fencing;
 
         let storage = Self {
             database: database.clone(),
             authority: MamAuthority::Attested {
                 capability: Box::new(capability),
                 #[cfg(feature = "clustering")]
-                claim_authority: Box::new(claim_authority),
+                claim_authority,
             },
             mam_schema,
             mam_owner,
@@ -392,7 +425,10 @@ impl DatabaseMamStorage {
             match &self.authority {
                 MamAuthority::Attested {
                     claim_authority, ..
-                } if !claim_authority.belongs_to_main_pool(&self.database) => {
+                } if !claim_authority
+                    .as_ref()
+                    .is_some_and(|authority| authority.belongs_to_main_pool(&self.database)) =>
+                {
                     return Err(DatabaseMamStorageError::UnsafeClaimPrivileges);
                 }
                 MamAuthority::LegacyOwner {
@@ -543,6 +579,22 @@ impl MamStorage for DatabaseMamStorage {
                 }
             ) {
                 return self.store_message(archive_jid, message).await;
+            }
+            if matches!(
+                &self.authority,
+                MamAuthority::Attested {
+                    claim_authority: None,
+                    ..
+                }
+            ) {
+                // A single-node attachment holds no claims, and a node that
+                // serves without clustering never builds a fence context. A
+                // fenced request here means the caller believes this node
+                // holds a claim it cannot hold, so refuse the write instead
+                // of storing it without the fence the caller asked for.
+                return Err(MamStorageError::NotOwner {
+                    entity: fence.entity.clone(),
+                });
             }
             run_operation!(self, true, true, connection => {
                 SqlxMamStorage::store_message_fenced_on_postgres_connection_in_schema(
@@ -730,6 +782,12 @@ async fn verify_mam_writer_privileges(
              SELECT oid FROM pg_catalog.pg_roles WHERE rolname = $4
            ), target AS (
              SELECT oid, nspname, nspowner, nspacl FROM pg_catalog.pg_namespace WHERE nspname = $1
+           ), monitor AS (
+             -- The schema ACL admits pg_monitor for owner-granted, non-grantable
+             -- USAGE: room observation preparation grants it for monitoring
+             -- reads. Joining the role, rather than resolving it inside a
+             -- NOT IN list, keeps an absent role from admitting anything.
+             SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'pg_monitor'
            ), relations AS (
              SELECT c.*, n.oid AS namespace_oid, n.nspowner
              FROM pg_catalog.pg_class c
@@ -766,9 +824,10 @@ async fn verify_mam_writer_privileges(
                    SELECT 1 FROM pg_catalog.aclexplode(
                      COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a
                    WHERE a.grantee <> n.nspowner
-                     AND (a.grantee NOT IN (r.oid, f.oid,
-                              COALESCE($5::bigint::oid,r.oid), COALESCE($6::bigint::oid,r.oid),
-                              CASE WHEN $5::bigint IS NULL THEN r.oid ELSE pg_catalog.to_regrole('pg_monitor') END)
+                     AND (NOT (a.grantee IN (r.oid, f.oid,
+                                 COALESCE($5::bigint::oid,r.oid), COALESCE($6::bigint::oid,r.oid))
+                               OR EXISTS (SELECT 1 FROM monitor m
+                                          WHERE m.oid = a.grantee AND a.grantor = n.nspowner))
                           OR a.is_grantable OR a.privilege_type <> 'USAGE'))
                FROM runtime r CROSS JOIN owner o CROSS JOIN definer f
                CROSS JOIN installer i CROSS JOIN target n
@@ -842,9 +901,12 @@ async fn verify_mam_writer_privileges(
                  COALESCE((SELECT nspacl FROM target),
                           pg_catalog.acldefault('n', (SELECT nspowner FROM target)))
                ) a CROSS JOIN runtime r CROSS JOIN definer f CROSS JOIN target n
-               WHERE a.grantee <> n.nspowner AND a.grantee NOT IN (r.oid, f.oid,
-                   COALESCE($5::bigint::oid,r.oid), COALESCE($6::bigint::oid,r.oid),
-                   CASE WHEN $5::bigint IS NULL THEN r.oid ELSE pg_catalog.to_regrole('pg_monitor') END))
+               WHERE a.grantee <> n.nspowner
+                 AND NOT (a.grantee IN (r.oid, f.oid,
+                            COALESCE($5::bigint::oid,r.oid), COALESCE($6::bigint::oid,r.oid))
+                          OR EXISTS (SELECT 1 FROM monitor m
+                                     WHERE m.oid = a.grantee AND a.grantor = n.nspowner
+                                       AND a.privilege_type = 'USAGE' AND NOT a.is_grantable)))
            "#,
     );
     let safe: bool = sqlx::query_scalar(&query)

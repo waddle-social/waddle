@@ -46,7 +46,8 @@ use super::muc_muji_clear::{
     WebhookEffectOutcome,
 };
 use super::webhook_delivery::{
-    DatabaseWebhookDeliveryStore, WebhookDeliveryObservation, WebhookDeliveryStore, WebhookEventId,
+    DatabaseWebhookDeliveryStore, WebhookDeliveryAttachError, WebhookDeliveryObservation,
+    WebhookDeliveryStore, WebhookEventId,
 };
 use super::websocket::{note_participant_left_by_call_id, WebSocketState};
 
@@ -57,14 +58,23 @@ struct WebhookRouterState {
 
 /// Axum router for the LiveKit webhook endpoint. Mounted under
 /// `/api/v1/livekit/webhook` by [`crate::server::http`].
-pub fn router(websocket_state: Arc<WebSocketState>) -> Router {
-    let deliveries = Arc::new(DatabaseWebhookDeliveryStore::new(
-        websocket_state.deps.app_state.db_pool.global().clone(),
-    ));
-    Router::new()
+///
+/// The delivery ledger is attached here, at startup. Under the restricted
+/// runtime role it must already be owner-prepared; otherwise the store
+/// creates it on first use.
+pub async fn router(
+    websocket_state: Arc<WebSocketState>,
+) -> Result<Router, WebhookDeliveryAttachError> {
+    let database = websocket_state.deps.app_state.db_pool.global().clone();
+    let deliveries = Arc::new(if database.uses_attested_postgres_pool() {
+        DatabaseWebhookDeliveryStore::attach_existing(database).await?
+    } else {
+        DatabaseWebhookDeliveryStore::new(database)
+    });
+    Ok(Router::new()
         .route("/api/v1/livekit/webhook", post(livekit_webhook_handler))
         .layer(Extension(websocket_state))
-        .with_state(WebhookRouterState { deliveries })
+        .with_state(WebhookRouterState { deliveries }))
 }
 
 /// Which LiveKit payload kind a delivery carried, as the closed

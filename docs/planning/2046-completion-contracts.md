@@ -115,6 +115,9 @@ lock order (for example `S/clustering/lease.rs:1154-1181`).
 
 Proposal: serve on the attested non-pinned pool and keep the pinned read-only
 preflight (`S/db/runtime_startup.rs:353-367`) as a one-shot startup gate.
+The preflight checks the epoch relation in the V1009 stage: the runtime holds
+`SELECT` plus a column-level `UPDATE (id)`, which the registered guard's
+`FOR SHARE` read needs and which cannot change the epoch.
 Hostile-catalog and OID pin proofs defend against a privileged mutator rather
 than the runtime role; under D1 they are a runbook precondition and are not
 extended further.
@@ -269,10 +272,14 @@ In dependency order. Sizes are estimates from reading source.
    (`infrastructure/waddle.cloud/gitops/waddle-server/postgresql-cluster.yaml:9-12`)
    and the chart has no owner job, runtime credential or attestation variable.
 
-Exit test: invert
-`restricted_startup_runs_pinned_preflight_then_refuses_store_activation`
-(`server/crates/waddle-server/tests/physical_attestation/runtime_startup.rs:22`)
-and add a PostgreSQL 17 WebSocket session with XEP-0198 under the runtime role.
+Exit test:
+`restricted_startup_runs_pinned_preflight_then_refuses_unprepared_stores`
+(`server/crates/waddle-server/tests/physical_attestation/runtime_startup.rs`)
+covers the refusal of a database no owner phase prepared, and
+`restricted_runtime_role_serves_without_ddl`
+(`server/crates/waddle-server/tests/restricted_runtime_startup.rs`) runs a
+PostgreSQL 17 WebSocket session under the runtime role; a session with
+XEP-0198 under that role is still to be added.
 
 SQLite keeps its single-role startup (`S/main.rs:96-99`). It has no role
 model, it is the backend for development and for the `*_ws` suites that prove

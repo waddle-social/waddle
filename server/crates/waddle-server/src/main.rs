@@ -89,14 +89,21 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                 let preparation = identity.preflight(&db_runtime.database_url, limits).await?;
                 info!(
                     transition_id = %preparation.transition_id(),
-                    "Restricted runtime pinned read-only preflight passed; serving remains disabled"
+                    "Restricted runtime pinned read-only preflight passed"
                 );
-                anyhow::bail!(db::runtime_startup::RuntimeStartupError::UnconvertedStores);
+                // The runtime role holds no DDL privilege, so nothing is
+                // migrated or provisioned here: the owner phase prepared every
+                // schema, and each store attaches to it during startup.
+                let pool = identity
+                    .attach_serving(preparation, &db_runtime.database_url, limits)
+                    .await?;
+                info!("Restricted runtime attached its attested serving pool");
+                (pool, None, None)
             }
             None => {
-                // The existing owner startup remains for SQLite and legacy
-                // deployments until their separately provisioned role handoff
-                // and remaining runtime attachments are complete.
+                // Owner startup: this credential owns the schema, so it
+                // migrates and provisions before serving. SQLite has no role
+                // model and always starts this way.
                 let mut db_config =
                     db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
                 db_config.pool_size = db_runtime.pool_size;

@@ -6,6 +6,7 @@
 //! transaction. Privileged catalog, role, ACL and uncooperative data writes
 //! must be independently quiescent throughout this observation and its use.
 
+use crate::db::DarkEpochAclStage;
 use sqlx::postgres::types::Oid;
 use sqlx::{PgConnection, Postgres, Transaction as SqlxTransaction};
 use thiserror::Error;
@@ -31,6 +32,7 @@ pub enum PinnedCatalogError {
 pub(super) async fn verify_pinned_epoch_manifest_catalog(
     tx: &mut Transaction<'_>,
     authority: &PinnedRuntimeAuthority,
+    stage: DarkEpochAclStage,
 ) -> Result<(), PinnedCatalogError> {
     let schema = &authority.config.postgres().schema.name.0;
     let qualified_schema = quote_identifier(schema);
@@ -41,11 +43,11 @@ pub(super) async fn verify_pinned_epoch_manifest_catalog(
         .execute(&mut *connection)
         .await?;
 
-    verify_catalog(tx, authority).await?;
+    verify_catalog(tx, authority, stage).await?;
     lock_relation(tx, &qualified_schema, "ingress_protocol_epoch").await?;
-    verify_catalog(tx, authority).await?;
+    verify_catalog(tx, authority, stage).await?;
     lock_relation(tx, &qualified_schema, "ingress_epoch_guard_manifest").await?;
-    verify_catalog(tx, authority).await?;
+    verify_catalog(tx, authority, stage).await?;
 
     let connection = tx
         .postgres_connection()
@@ -60,6 +62,7 @@ pub(super) async fn verify_pinned_epoch_manifest_catalog(
 pub(super) async fn verify_pinned_epoch_manifest_catalog_sqlx(
     tx: &mut SqlxTransaction<'_, Postgres>,
     authority: &PinnedRuntimeAuthority,
+    stage: DarkEpochAclStage,
 ) -> Result<(), PinnedCatalogError> {
     let schema = &authority.config.postgres().schema.name.0;
     let qualified_schema = quote_identifier(schema);
@@ -68,16 +71,16 @@ pub(super) async fn verify_pinned_epoch_manifest_catalog_sqlx(
         .execute(&mut *connection)
         .await?;
 
-    verify_catalog_connection(connection, authority).await?;
+    verify_catalog_connection(connection, authority, stage).await?;
     lock_relation_connection(connection, &qualified_schema, "ingress_protocol_epoch").await?;
-    verify_catalog_connection(connection, authority).await?;
+    verify_catalog_connection(connection, authority, stage).await?;
     lock_relation_connection(
         connection,
         &qualified_schema,
         "ingress_epoch_guard_manifest",
     )
     .await?;
-    verify_catalog_connection(connection, authority).await?;
+    verify_catalog_connection(connection, authority, stage).await?;
 
     sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
         .bind(format!("{qualified_schema}, pg_temp"))
@@ -113,16 +116,26 @@ async fn lock_relation_connection(
 async fn verify_catalog(
     tx: &mut Transaction<'_>,
     authority: &PinnedRuntimeAuthority,
+    stage: DarkEpochAclStage,
 ) -> Result<(), PinnedCatalogError> {
     let connection = tx
         .postgres_connection()
         .ok_or(PhysicalAttestationError::PostgresRequired)?;
-    verify_catalog_connection(connection, authority).await
+    verify_catalog_connection(connection, authority, stage).await
 }
 
+/// `stage` selects the runtime ACL the epoch relation must carry exactly.
+/// The relation-guard stage requires SELECT alone. The V1009 stage is the
+/// one the registered guard and the ingress substrate serve under: they read
+/// the epoch row `FOR SHARE`, which PostgreSQL permits only with an UPDATE
+/// privilege, so it requires table-level SELECT plus exactly one column
+/// item, a non-grantable owner-granted UPDATE on `id`. The row's
+/// `CHECK (id = 1)` keeps that grant from changing the epoch. The guard
+/// manifest is SELECT-only in both stages.
 async fn verify_catalog_connection(
     connection: &mut PgConnection,
     authority: &PinnedRuntimeAuthority,
+    stage: DarkEpochAclStage,
 ) -> Result<(), PinnedCatalogError> {
     let epoch = Oid(authority.epoch_relation_oid);
     let manifest = Oid(authority.guard_manifest_relation_oid);
@@ -179,6 +192,7 @@ async fn verify_catalog_connection(
         .bind(owner)
         .bind(runtime)
         .bind(Oid(authority.epoch_primary_index_oid))
+        .bind(matches!(stage, DarkEpochAclStage::V1009EpochZero))
         .fetch_one(&mut *connection)
         .await?;
     if !exact {
@@ -313,7 +327,8 @@ SELECT (SELECT pg_catalog.count(*) FROM targets) = 2
     OR NOT pg_catalog.has_table_privilege($5, c.oid, 'SELECT')
     OR pg_catalog.has_table_privilege($5, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
     OR pg_catalog.has_table_privilege($5, c.oid, 'SELECT WITH GRANT OPTION,INSERT WITH GRANT OPTION,UPDATE WITH GRANT OPTION,DELETE WITH GRANT OPTION,TRUNCATE WITH GRANT OPTION,REFERENCES WITH GRANT OPTION,TRIGGER WITH GRANT OPTION,MAINTAIN WITH GRANT OPTION')
-    OR pg_catalog.has_any_column_privilege($5, c.oid, 'INSERT,UPDATE,REFERENCES')
+    OR pg_catalog.has_any_column_privilege($5, c.oid, 'INSERT,REFERENCES')
+    OR (NOT ($7 AND c.is_epoch) AND pg_catalog.has_any_column_privilege($5, c.oid, 'UPDATE'))
     OR pg_catalog.has_any_column_privilege($5, c.oid, 'SELECT WITH GRANT OPTION,INSERT WITH GRANT OPTION,UPDATE WITH GRANT OPTION,REFERENCES WITH GRANT OPTION')
     OR NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(c.relacl) acl
        WHERE acl.grantee = $5 AND acl.grantor = c.relowner
@@ -326,8 +341,19 @@ SELECT (SELECT pg_catalog.count(*) FROM targets) = 2
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
        CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl
        WHERE a.attrelid = c.oid AND (acl.grantee = 0::pg_catalog.oid
-         OR (acl.grantee = $5 AND (acl.grantor <> c.relowner
-           OR acl.is_grantable OR acl.privilege_type <> 'SELECT')))))
+         OR (acl.grantee = $5 AND CASE WHEN $7 AND c.is_epoch
+           THEN NOT (a.attnum = 1 AND a.attname = 'id' AND acl.grantor = c.relowner
+             AND NOT acl.is_grantable AND acl.privilege_type = 'UPDATE')
+           ELSE (acl.grantor <> c.relowner
+             OR acl.is_grantable OR acl.privilege_type <> 'SELECT') END)))
+    OR ($7 AND c.is_epoch AND (
+         (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute a
+          CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl
+          WHERE a.attrelid = c.oid AND acl.grantee = $5) <> 1
+         OR NOT pg_catalog.has_column_privilege($5, c.oid, 1::pg_catalog.int2, 'UPDATE')
+         OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+           WHERE a.attrelid = c.oid AND a.attnum > 1 AND NOT a.attisdropped
+             AND pg_catalog.has_column_privilege($5, c.oid, a.attnum, 'UPDATE')))))
   AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1 AND a.attnum > 0) = 4
   AND (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute a WHERE a.attrelid = $2 AND a.attnum > 0) = 1
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid IN ($1, $2) AND a.attnum > 0 AND (

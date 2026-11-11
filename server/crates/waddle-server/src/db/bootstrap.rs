@@ -1,8 +1,8 @@
 //! Global owner bootstrap and read-only runtime attachment boundaries.
 //!
-//! The legacy owner operation retains the existing startup sequence. The
-//! explicit restricted mode uses the runtime verifier, but refuses to serve
-//! while other store DDL, role and epoch gates remain unresolved.
+//! Owner startup migrates and provisions under a credential that owns the
+//! schema. The restricted mode attaches a physically attested pool under the
+//! runtime role and verifies lineage, ledger and global ACLs without DDL.
 
 use std::time::Duration;
 

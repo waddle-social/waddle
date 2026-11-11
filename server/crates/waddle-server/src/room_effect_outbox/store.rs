@@ -140,6 +140,16 @@ impl RoomEffectOutboxStore {
         })
     }
 
+    /// Open the serving store on an owner-prepared outbox. The runtime role
+    /// holds no DDL privilege, so the relation is verified through the exact
+    /// attested main-lane handle instead of being created. Queue mutation and
+    /// effect delivery remain gated by the lifecycle and claim authority each
+    /// operation presents.
+    pub async fn attach_serving(db: Database) -> Result<Self, super::RoomEffectRuntimeAttachError> {
+        super::runtime_attach::verify(&db).await?;
+        Ok(Self { db })
+    }
+
     /// Verify the complete owner-prepared MUC room runtime schema through one
     /// bounded, read-only transaction on the exact attested main pool. This is
     /// structural evidence only; it does not select a startup store or grant

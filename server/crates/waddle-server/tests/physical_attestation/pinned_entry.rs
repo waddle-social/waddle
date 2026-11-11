@@ -452,3 +452,72 @@ async fn dark_pinned_entry_rejects_missing_registered_ledger_row() {
     pool.close().await;
     fixture.cleanup().await;
 }
+
+/// The two entry stages require different runtime ACLs on the epoch
+/// relation, and each refuses the other's. The read-only stage admits
+/// SELECT alone; the startup stage requires SELECT plus exactly the
+/// column-level `UPDATE (id)` the registered guard's `FOR SHARE` read needs.
+#[tokio::test]
+async fn dark_pinned_entry_stages_require_their_exact_epoch_grant() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(base_url) = test_url() else { return };
+    let fixture = Fixture::new(base_url).await;
+    let pool = pinned_pool(&fixture, None).await;
+    let epoch = format!("{}.ingress_protocol_epoch", fixture.target);
+    let drift = |result: Result<(), DarkPinnedEntryError>| {
+        matches!(
+            result,
+            Err(DarkPinnedEntryError::Catalog(
+                PinnedCatalogError::CatalogDrift
+            ))
+        )
+    };
+
+    pool.inspect_dark_pinned_read_only_entry()
+        .await
+        .expect("the read-only stage accepts SELECT alone");
+    assert!(
+        drift(pool.inspect_dark_pinned_startup_entry().await),
+        "the startup stage must refuse SELECT alone"
+    );
+
+    sqlx::query(&format!(
+        "GRANT UPDATE (id) ON {epoch} TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant the serving epoch lock privilege");
+    pool.inspect_dark_pinned_startup_entry()
+        .await
+        .expect("the startup stage accepts the serving grant");
+    assert!(
+        drift(pool.inspect_dark_pinned_read_only_entry().await),
+        "the read-only stage must refuse a column update grant"
+    );
+
+    for widening in [
+        format!("GRANT UPDATE (epoch) ON {epoch} TO {}", fixture.runtime),
+        format!("GRANT UPDATE ON {epoch} TO {}", fixture.runtime),
+    ] {
+        sqlx::query(&widening)
+            .execute(&fixture.admin)
+            .await
+            .expect("widen the epoch grant");
+        assert!(
+            drift(pool.inspect_dark_pinned_startup_entry().await),
+            "the startup stage must refuse: {widening}"
+        );
+        sqlx::query(
+            &widening
+                .replacen("GRANT", "REVOKE", 1)
+                .replace(" TO ", " FROM "),
+        )
+        .execute(&fixture.admin)
+        .await
+        .expect("undo the widened epoch grant");
+    }
+
+    pool.close().await;
+    fixture.cleanup().await;
+}

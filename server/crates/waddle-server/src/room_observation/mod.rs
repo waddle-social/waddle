@@ -8,7 +8,11 @@ mod publication;
 mod scheduler;
 mod telemetry;
 
-use crate::ingress_uow::{initialize_room_observations, RoomObservationRepository};
+use crate::db::physical_attestation::PgRoleName;
+use crate::ingress_uow::{
+    initialize_room_observations, verify_attested_room_observation_schema,
+    RoomObservationRepository,
+};
 use crate::server::routes::websocket::WebSocketState;
 use jid::BareJid;
 use std::collections::HashMap;
@@ -33,6 +37,15 @@ pub(crate) enum ObservationRuntimeError {
     RoomUnavailable,
     #[error("room result admission was deferred")]
     AdmissionDeferred,
+    #[error(
+        "the restricted runtime requires the operator-supplied migrator login \
+         (WADDLE_DB_MIGRATOR_LOGIN) to verify the owner-prepared room observation schema"
+    )]
+    DesignatedMigratorRequired,
+    #[error("the restricted runtime database identity does not match this deployment")]
+    RuntimeIdentity,
+    #[error("the owner-prepared room observation schema failed verification: {0}")]
+    OwnerPreparedSchema(#[source] crate::ingress_uow::RoomObservationSchemaError),
 }
 
 pub(crate) struct RoomObservationActors {
@@ -54,7 +67,12 @@ impl RoomExtensionSubscriber for SubscriptionMailbox {
 }
 
 impl RoomObservationActors {
-    pub(crate) async fn start(state: &Arc<WebSocketState>) -> Result<(), ObservationRuntimeError> {
+    /// `designated_migrator` is the operator-supplied login that prepared the
+    /// schema. Only the restricted runtime role consumes it.
+    pub(crate) async fn start(
+        state: &Arc<WebSocketState>,
+        designated_migrator: Option<&PgRoleName>,
+    ) -> Result<(), ObservationRuntimeError> {
         let configured = state
             .deps
             .protocol
@@ -63,7 +81,24 @@ impl RoomObservationActors {
         // Source freshness is shared across replicas. Even a node with no
         // local observers must invalidate old results on accepted edits or
         // retractions, so it initializes the store and binds an empty service.
-        initialize_room_observations(state.deps.app_state.db_pool.global()).await?;
+        let global = state.deps.app_state.db_pool.global();
+        if let Some(capability) = global.attested_pg_writer_capability() {
+            // The restricted runtime role holds no DDL privilege: the owner
+            // phase created the tables, indexes and grants, and this verifies
+            // them read-only on the exact attested main lane.
+            let designated_migrator =
+                designated_migrator.ok_or(ObservationRuntimeError::DesignatedMigratorRequired)?;
+            let expected = capability
+                .attested_lineage_for_deployment(
+                    state.deps.app_state.lineage_config.deployment_uuid,
+                )
+                .map_err(|_| ObservationRuntimeError::RuntimeIdentity)?;
+            verify_attested_room_observation_schema(global, &expected, designated_migrator)
+                .await
+                .map_err(ObservationRuntimeError::OwnerPreparedSchema)?;
+        } else {
+            initialize_room_observations(global).await?;
+        }
         let authority = &state.deps.protocol.ingress;
         crate::ingress_uow::run_with_retry(5, || async {
             let mut tx = authority.observation_transaction().await?;

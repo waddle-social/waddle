@@ -10,6 +10,7 @@
 //! historical archives. This is not a startup selector or a general MAM store
 //! authority.
 
+use crate::db::DarkEpochAclStage;
 use std::sync::Arc;
 
 use sqlx::postgres::types::Oid;
@@ -220,7 +221,13 @@ async fn lookup(
 ) -> Result<Option<ArchivedMessage>, PinnedMamLookupError> {
     let mut transaction = database.begin().await.map_err(DarkPinnedEntryError::from)?;
     let outcome = tokio::time::timeout(ENTRY_DEADLINE, async {
-        prepare_entry(&mut transaction, authority, None).await?;
+        prepare_entry(
+            &mut transaction,
+            authority,
+            DarkEpochAclStage::RelationGuardEpochZero,
+            None,
+        )
+        .await?;
         preflight_mam(&mut transaction, authority, pins).await?;
         if let Some(pause) = pause {
             let connection = transaction

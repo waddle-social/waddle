@@ -59,6 +59,8 @@ pub(crate) enum WebhookDeliveryError {
     InvalidStatus(String),
     #[error("webhook delivery '{0}' was not observed before completion")]
     UnknownDelivery(String),
+    #[error("the restricted runtime must attach the owner-prepared webhook delivery ledger")]
+    OwnerPreparationRequired,
     #[cfg(test)]
     #[error("in-memory webhook delivery store lock was poisoned")]
     LockPoisoned,
@@ -80,6 +82,65 @@ pub(crate) struct DatabaseWebhookDeliveryStore {
     last_pruned_at_ms: std::sync::atomic::AtomicI64,
 }
 
+/// Failure to attach the delivery ledger under the restricted runtime role.
+#[derive(Debug, Error)]
+pub enum WebhookDeliveryAttachError {
+    #[error("webhook delivery attachment requires the attested PostgreSQL main lane")]
+    AttestedMainLaneRequired,
+    #[error("the owner phase has not prepared the webhook delivery ledger")]
+    OwnerPreparationMissing(#[source] DatabaseError),
+    #[error("the webhook delivery ledger does not match the owner-prepared shape at {component}")]
+    InvalidShape { component: &'static str },
+    #[error("webhook delivery runtime role or privileges are unsafe at {component}")]
+    UnsafeRuntimePrivileges { component: &'static str },
+    #[error("webhook delivery attachment inspection timed out")]
+    InspectionTimeout,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+const ATTACH_INSPECTION_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+const ATTACH_ROLLBACK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `(column, type, not null)` of the owner-prepared PostgreSQL ledger.
+const POSTGRES_COLUMNS: [(&str, &str, bool); 5] = [
+    ("event_id", "text", true),
+    ("status", "text", true),
+    ("attempt_count", "integer", true),
+    ("first_seen_ms", "bigint", true),
+    ("completed_at_ms", "bigint", false),
+];
+
+/// Create the delivery ledger and its retention index. The statements need
+/// schema-owner privilege, so the restricted runtime role never runs them:
+/// its owner phase calls this before the runtime attaches.
+pub(crate) async fn initialize_owner_schema(db: &Database) -> Result<(), DatabaseError> {
+    let timestamp_type = crate::db::i64_sql_type(db.driver());
+    let connection = db.guard().await?;
+    connection
+        .execute(
+            &format!(
+                "CREATE TABLE IF NOT EXISTS webhook_deliveries (\
+                    event_id TEXT PRIMARY KEY, \
+                    status TEXT NOT NULL CHECK (status IN ('processing','done')), \
+                    attempt_count INTEGER NOT NULL, \
+                    first_seen_ms {timestamp_type} NOT NULL, \
+                    completed_at_ms {timestamp_type} NULL\
+                )"
+            ),
+            (),
+        )
+        .await?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_done_prune \
+             ON webhook_deliveries (status, completed_at_ms)",
+            (),
+        )
+        .await?;
+    Ok(())
+}
+
 impl DatabaseWebhookDeliveryStore {
     pub(crate) fn new(db: Database) -> Self {
         Self {
@@ -87,6 +148,18 @@ impl DatabaseWebhookDeliveryStore {
             initialized: OnceCell::new(),
             last_pruned_at_ms: std::sync::atomic::AtomicI64::new(0),
         }
+    }
+
+    /// Attach to the owner-prepared ledger through the exact attested main
+    /// lane. The check is read-only: a missing or drifted relation is a
+    /// startup failure, never something the runtime role repairs.
+    pub(crate) async fn attach_existing(db: Database) -> Result<Self, WebhookDeliveryAttachError> {
+        verify_owner_prepared(&db).await?;
+        Ok(Self {
+            db,
+            initialized: OnceCell::new_with(Some(())),
+            last_pruned_at_ms: std::sync::atomic::AtomicI64::new(0),
+        })
     }
 
     /// At most one observe per [`PRUNE_INTERVAL_MS`] wins the CAS and
@@ -112,30 +185,15 @@ impl DatabaseWebhookDeliveryStore {
     async fn initialize(&self) -> Result<(), WebhookDeliveryError> {
         self.initialized
             .get_or_try_init(|| async {
-                let timestamp_type = crate::db::i64_sql_type(self.db.driver());
-                let connection = self.db.guard().await?;
-                connection
-                    .execute(
-                        &format!(
-                            "CREATE TABLE IF NOT EXISTS webhook_deliveries (\
-                                event_id TEXT PRIMARY KEY, \
-                                status TEXT NOT NULL CHECK (status IN ('processing','done')), \
-                                attempt_count INTEGER NOT NULL, \
-                                first_seen_ms {timestamp_type} NOT NULL, \
-                                completed_at_ms {timestamp_type} NULL\
-                            )"
-                        ),
-                        (),
-                    )
-                    .await?;
-                connection
-                    .execute(
-                        "CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_done_prune \
-                         ON webhook_deliveries (status, completed_at_ms)",
-                        (),
-                    )
-                    .await?;
-                Ok::<(), DatabaseError>(())
+                // An attested pool belongs to the restricted runtime role,
+                // which holds no DDL privilege. Only `attach_existing` may
+                // mark such a store usable.
+                if self.db.uses_attested_postgres_pool() {
+                    return Err(WebhookDeliveryError::OwnerPreparationRequired);
+                }
+                initialize_owner_schema(&self.db)
+                    .await
+                    .map_err(WebhookDeliveryError::from)
             })
             .await?;
         Ok(())
@@ -280,6 +338,148 @@ impl DatabaseWebhookDeliveryStore {
             .get::<i64>(0)
             .map_err(WebhookDeliveryError::from)
     }
+}
+
+/// Verify the owner-prepared ledger in one bounded read-only transaction on
+/// the attested main lane: relation shape, primary key, status constraint,
+/// retention index, and the exact runtime table privileges.
+async fn verify_owner_prepared(db: &Database) -> Result<(), WebhookDeliveryAttachError> {
+    if db.driver() != crate::db::DatabaseDriver::Postgres || !db.is_main_lane() {
+        return Err(WebhookDeliveryAttachError::AttestedMainLaneRequired);
+    }
+    let capability = db
+        .attested_pg_writer_capability()
+        .ok_or(WebhookDeliveryAttachError::AttestedMainLaneRequired)?;
+    db.verify_attested_pg_writer_capability(&capability)
+        .map_err(DatabaseError::from)?;
+    let schema = capability.identity().schema.name.0.clone();
+    let mut tx = db.begin_catalog_fenced_read_only(&[]).await?;
+    let inspect = async {
+        crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+            .await
+            .map_err(|error| match error {
+                crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                    WebhookDeliveryAttachError::Database(error)
+                }
+                crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { .. } => {
+                    WebhookDeliveryAttachError::InvalidShape {
+                        component: "transaction wait bounds",
+                    }
+                }
+            })?;
+        let quoted = crate::db::physical_attestation::quote_identifier(&schema);
+        tx.execute(
+            &format!("LOCK TABLE {quoted}.\"webhook_deliveries\" IN ACCESS SHARE MODE"),
+            (),
+        )
+        .await
+        .map_err(WebhookDeliveryAttachError::OwnerPreparationMissing)?;
+        capability.attest_transaction(&mut tx).await?;
+        verify_shape(&mut tx, &schema).await?;
+        if let Some(component) =
+            crate::db::runtime_store_acl::unexpected_webhook_executable_schema(&mut tx, &schema)
+                .await?
+        {
+            return Err(WebhookDeliveryAttachError::InvalidShape { component });
+        }
+        if let Some(component) =
+            crate::db::runtime_store_acl::verify_webhook_deliveries(&mut tx, &schema).await?
+        {
+            return Err(WebhookDeliveryAttachError::UnsafeRuntimePrivileges { component });
+        }
+        Ok::<(), WebhookDeliveryAttachError>(())
+    };
+    let inspection = tokio::time::timeout(ATTACH_INSPECTION_WAIT, inspect)
+        .await
+        .unwrap_or(Err(WebhookDeliveryAttachError::InspectionTimeout));
+    if !tx.rollback_bounded_discard(ATTACH_ROLLBACK_WAIT).await {
+        return Err(DatabaseError::CatalogMutationRollbackUnconfirmed.into());
+    }
+    inspection
+}
+
+async fn verify_shape(
+    tx: &mut crate::db::Transaction<'_>,
+    schema: &str,
+) -> Result<(), WebhookDeliveryAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = 'webhook_deliveries' \
+               AND c.relkind = 'r' AND c.relpersistence = 'p' \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            crate::db_params![schema],
+        )
+        .await?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await? {
+        columns.push((
+            row.get::<String>(0)?,
+            row.get::<String>(1)?,
+            row.get::<bool>(2)?,
+        ));
+    }
+    drop(rows);
+    let matches = columns.len() == POSTGRES_COLUMNS.len()
+        && columns.iter().zip(POSTGRES_COLUMNS).all(
+            |((name, kind, not_null), (expected_name, expected_kind, expected_not_null))| {
+                name == expected_name && kind == expected_kind && *not_null == expected_not_null
+            },
+        );
+    if !matches {
+        return Err(WebhookDeliveryAttachError::InvalidShape {
+            component: "columns",
+        });
+    }
+    let mut rows = tx
+        .query(
+            "SELECT \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k \
+                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND k.convalidated \
+                   AND ARRAY(SELECT a.attname::text \
+                     FROM pg_catalog.unnest(k.conkey) WITH ORDINALITY key(attnum, position) \
+                     JOIN pg_catalog.pg_attribute a \
+                       ON a.attrelid = c.oid AND a.attnum = key.attnum \
+                     ORDER BY key.position) = ARRAY['event_id']) = 1, \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k \
+                 WHERE k.conrelid = c.oid AND k.contype = 'c' AND k.convalidated \
+                   AND pg_catalog.pg_get_constraintdef(k.oid) = \
+                     'CHECK ((status = ANY (ARRAY[''processing''::text, ''done''::text])))') = 1, \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_index x \
+                 JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid \
+                 WHERE x.indrelid = c.oid AND i.relname = 'idx_webhook_deliveries_done_prune' \
+                   AND x.indisvalid AND x.indisready AND x.indislive AND NOT x.indisunique \
+                   AND x.indpred IS NULL AND x.indexprs IS NULL \
+                   AND ARRAY(SELECT a.attname::text \
+                     FROM pg_catalog.unnest(x.indkey) WITH ORDINALITY key(attnum, position) \
+                     JOIN pg_catalog.pg_attribute a \
+                       ON a.attrelid = c.oid AND a.attnum = key.attnum \
+                     ORDER BY key.position) = ARRAY['status', 'completed_at_ms']) = 1 \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = 'webhook_deliveries'",
+            crate::db_params![schema],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(WebhookDeliveryAttachError::InvalidShape {
+            component: "relation",
+        })?;
+    for (index, component) in ["primary key", "status constraint", "retention index"]
+        .into_iter()
+        .enumerate()
+    {
+        if !row.get::<bool>(index)? {
+            return Err(WebhookDeliveryAttachError::InvalidShape { component });
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]

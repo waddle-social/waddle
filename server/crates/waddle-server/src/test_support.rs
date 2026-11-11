@@ -138,6 +138,19 @@ pub async fn attach_pending_startup(
     crate::server::attach_pending_startup_for_test(selection, global).await
 }
 
+/// Exercise the webhook delivery ledger attachment that restricted startup
+/// runs before mounting the LiveKit webhook route.
+#[cfg(feature = "test-support")]
+pub async fn attach_webhook_delivery_ledger(
+    global: &Database,
+) -> Result<(), crate::server::WebhookDeliveryAttachError> {
+    crate::server::routes::webhook_delivery::DatabaseWebhookDeliveryStore::attach_existing(
+        global.clone(),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Exercise production MAM startup selection without starting HTTP. The
 /// observation includes the lineage alias target derived from the selected
 /// production branch, if this attachment shares the global boundary.

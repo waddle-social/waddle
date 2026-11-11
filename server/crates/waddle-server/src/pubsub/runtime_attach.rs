@@ -1196,6 +1196,68 @@ pub(super) async fn verify_owner_attach_lock_function(
     verify_attach_lock_function_shape(tx, schema, None, false).await
 }
 
+/// SQL predicate that holds only for the owner-prepared attach-lock function.
+///
+/// `routine` and `namespace` name the `pg_proc` row and its `pg_namespace`
+/// row; the predicate carries one `?` placeholder for the exact function
+/// body of that schema. PubSub attachment and room observation verification
+/// both build on this text, so the function one of them requires is exactly
+/// the function the other exempts.
+fn attach_lock_function_shape_sql(routine: &str, namespace: &str) -> String {
+    format!(
+        "{routine}.proname = '{PUBSUB_ATTACH_LOCK_FUNCTION}' \
+         AND {routine}.pronamespace = {namespace}.oid \
+         AND {routine}.prokind = 'f' AND {routine}.prosecdef \
+         AND {routine}.proowner = {namespace}.nspowner \
+         AND {routine}.prorettype = 'pg_catalog.void'::pg_catalog.regtype \
+         AND {routine}.prolang = (SELECT oid FROM pg_catalog.pg_language WHERE lanname = 'sql') \
+         AND {routine}.pronargs = 0 AND {routine}.pronargdefaults = 0 \
+         AND {routine}.provariadic = 0 AND NOT {routine}.proretset \
+         AND {routine}.provolatile = 'v' AND NOT {routine}.proleakproof \
+         AND {routine}.proparallel = 'u' \
+         AND {routine}.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[] \
+         AND {routine}.prosrc = ?"
+    )
+}
+
+/// SQL predicate that holds only when the function ACL is the owner plus one
+/// non-grantable EXECUTE for the role row named by `runtime`.
+fn attach_lock_runtime_grant_sql(routine: &str, runtime: &str) -> String {
+    format!(
+        "pg_catalog.has_function_privilege({runtime}.oid, {routine}.oid, 'EXECUTE') \
+         AND NOT pg_catalog.has_function_privilege( \
+           {runtime}.oid, {routine}.oid, 'EXECUTE WITH GRANT OPTION') \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE({routine}.proacl, \
+           pg_catalog.acldefault('f', {routine}.proowner))) a \
+           WHERE a.grantee = 0 OR a.grantee NOT IN ({routine}.proowner, {runtime}.oid) \
+             OR (a.grantee = {runtime}.oid AND (a.privilege_type <> 'EXECUTE' OR a.is_grantable)) \
+             OR (a.grantee = {routine}.proowner AND a.privilege_type <> 'EXECUTE'))"
+    )
+}
+
+/// The exact attach-lock function with its runtime grant, as one predicate
+/// with one `?` placeholder, and the body value to bind to it.
+///
+/// PubSub attachment requires the runtime to execute this owner-owned
+/// `SECURITY DEFINER` function. A verifier that otherwise refuses such
+/// functions exempts a routine only when this whole predicate holds, so a
+/// changed body, configuration, signature or ACL is still refused.
+pub(crate) fn runtime_attach_lock_pin(
+    schema: &str,
+    routine: &str,
+    namespace: &str,
+    runtime: &str,
+) -> (String, String) {
+    (
+        format!(
+            "{} AND {}",
+            attach_lock_function_shape_sql(routine, namespace),
+            attach_lock_runtime_grant_sql(routine, runtime)
+        ),
+        owner::attach_lock_function_body(schema),
+    )
+}
+
 async fn verify_attach_lock_function_shape(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -1203,29 +1265,20 @@ async fn verify_attach_lock_function_shape(
     verify_runtime_grant: bool,
 ) -> Result<(), PubSubRuntimeAttachError> {
     let body = owner::attach_lock_function_body(schema);
+    let shape = attach_lock_function_shape_sql("p", "n");
     let runtime_grant = if verify_runtime_grant {
-        "pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE') \
-         AND NOT pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE WITH GRANT OPTION') \
-         AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl, \
-           pg_catalog.acldefault('f', p.proowner))) a \
-           WHERE a.grantee = 0 OR a.grantee NOT IN (p.proowner, runtime.oid) \
-             OR (a.grantee = runtime.oid AND (a.privilege_type <> 'EXECUTE' OR a.is_grantable)) \
-             OR (a.grantee = p.proowner AND a.privilege_type <> 'EXECUTE'))"
+        attach_lock_runtime_grant_sql("p", "runtime")
     } else {
         "NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl, \
            pg_catalog.acldefault('f', p.proowner))) a \
            WHERE a.grantee = 0 OR (a.grantee <> p.proowner \
              AND (a.privilege_type <> 'EXECUTE' OR a.is_grantable)))"
+            .to_owned()
     };
     let query = format!(
         "SELECT pg_catalog.count(*)::bigint, pg_catalog.min(p.oid::bigint), \
          COALESCE(pg_catalog.bool_and( \
-           p.prokind = 'f' AND p.prosecdef AND p.proowner = n.nspowner \
-           AND p.prorettype = 'pg_catalog.void'::pg_catalog.regtype \
-           AND p.prolang = (SELECT oid FROM pg_catalog.pg_language WHERE lanname = 'sql') \
-           AND p.pronargs = 0 AND p.pronargdefaults = 0 AND p.provariadic = 0 AND NOT p.proretset \
-           AND p.provolatile = 'v' AND NOT p.proleakproof AND p.proparallel = 'u' \
-           AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[] AND p.prosrc = ? \
+           {shape} \
            AND (?::bigint IS NULL OR n.oid::bigint = ?::bigint) \
            AND {runtime_grant}), false) \
          FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \

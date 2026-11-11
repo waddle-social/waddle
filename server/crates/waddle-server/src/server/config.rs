@@ -113,6 +113,11 @@ pub struct XmppConfig {
     /// Explicit operator identity handoff for dark attested MAM attachment.
     /// Legacy startup does not consume it.
     pub mam_owner_claim_handoff: Option<MamOwnerClaimHandoff>,
+    /// Operator-supplied login that ran the owner phase
+    /// (`WADDLE_DB_MIGRATOR_LOGIN`). The restricted runtime verifies that it
+    /// is the sole login able to assume the schema owner; it is never
+    /// inferred from the runtime connection. Owner startup does not consume it.
+    pub designated_migrator: Option<PgRoleName>,
     /// Inbox database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub inbox_database_url: ResolvedXmppDatabaseUrl,
     /// Spaces-metadata database URL — prefers dedicated XMPP DSN, otherwise
@@ -182,6 +187,7 @@ impl Default for XmppConfig {
             muc_domain,
             mam_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
             mam_owner_claim_handoff: None,
+            designated_migrator: None,
             inbox_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
             spaces_metadata_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
             channel_space_links_database_url: ResolvedXmppDatabaseUrl::EphemeralFallback,
@@ -268,6 +274,10 @@ impl XmppConfig {
 
         let mam_database_url = resolve_xmpp_database_url("WADDLE_XMPP_MAM_DATABASE_URL");
         let mam_owner_claim_handoff = MamOwnerClaimHandoff::from_env()?;
+        let designated_migrator = nonempty_env("WADDLE_DB_MIGRATOR_LOGIN")?
+            .map(PgRoleName::new)
+            .transpose()
+            .context("invalid WADDLE_DB_MIGRATOR_LOGIN")?;
         let inbox_database_url = resolve_xmpp_database_url("WADDLE_XMPP_INBOX_DATABASE_URL");
         let spaces_metadata_database_url =
             resolve_xmpp_database_url("WADDLE_XMPP_SPACES_METADATA_DATABASE_URL");
@@ -309,6 +319,7 @@ impl XmppConfig {
             muc_domain,
             mam_database_url,
             mam_owner_claim_handoff,
+            designated_migrator,
             inbox_database_url,
             spaces_metadata_database_url,
             channel_space_links_database_url,
