@@ -555,6 +555,128 @@ mod seams {
     }
 
     #[tokio::test]
+    async fn handoff_blocked_socket_cannot_resume_another_live_session() {
+        assert_handoff_blocked_socket_cannot_resume(false).await;
+    }
+
+    #[tokio::test]
+    async fn handoff_blocked_socket_cannot_resume_another_detached_session() {
+        assert_handoff_blocked_socket_cannot_resume(true).await;
+    }
+
+    async fn assert_handoff_blocked_socket_cannot_resume(target_detached: bool) {
+        let (server, seam) =
+            TestServer::start_with_failed_resume_seam(ACCOUNTS, ALICE_BARE, ALICE_PHONE);
+        let (mut owner, stream) = original(&server).await;
+        let stream_id = stream.as_str();
+        seam.arm_stream_with_accepted_frame(stream_id);
+        let mut replacement = authenticate(&server, 0).await;
+        send(
+            &mut replacement,
+            Element::builder("resume", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), stream_id)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )
+        .await;
+        wait_for(
+            &seam,
+            format!("queue-attempt {stream_id} {ALICE_PHONE} Delivered"),
+        )
+        .await;
+        seam.continue_finalization();
+        wait_for(
+            &seam,
+            format!("handoff {stream_id} {ALICE_PHONE} blocked=true"),
+        )
+        .await;
+        let failed = recv(&mut replacement).await;
+        assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+        assert_replaced_transport_closes(&mut owner).await;
+
+        let mut tablet = authenticate(&server, 0).await;
+        tablet.bind("tablet").await.expect("second resource binds");
+        send(
+            &mut tablet,
+            Element::builder("enable", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+        )
+        .await;
+        let enabled = recv(&mut tablet).await;
+        assert!(enabled.is("enabled", SM_NS));
+        assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
+        let tablet_stream = SmSessionId::new(enabled.attr("id").expect("second SM ID"));
+        // An abrupt transport loss leaves the session resumable but detached.
+        let mut tablet = (!target_detached).then_some(tablet);
+
+        send(
+            &mut replacement,
+            Element::builder("resume", SM_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("previd").to_owned(),
+                    tablet_stream.as_str(),
+                )
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )
+        .await;
+        // The old queue's accepted frame may be written first; the terminal
+        // is the first stream-management answer.
+        let terminal: Element = replacement
+            .recv_matching(|frame| {
+                frame.parse::<Element>().is_ok_and(|element| {
+                    element.is("failed", SM_NS) || element.is("resumed", SM_NS)
+                })
+            })
+            .await
+            .expect("resume terminal")
+            .parse()
+            .expect("resume terminal XML");
+        assert!(
+            terminal.is("failed", SM_NS),
+            "blocked socket resume response: {terminal:?}"
+        );
+        assert!(terminal
+            .get_child("unexpected-request", xmpp_parsers::ns::XMPP_STANZAS)
+            .is_some());
+        assert!(
+            matches!(
+                replacement.recv_timeout(Duration::from_millis(100)).await,
+                Err(error) if error.contains("Timeout")
+            ),
+            "the blocked socket must not receive a resumed frame or replay"
+        );
+
+        // A live owner must survive the refusal, including its SM counters.
+        let handled = match tablet.as_mut() {
+            Some(tablet) => {
+                ping(tablet, "tablet-survives-blocked-resume").await;
+                assert_handled(tablet, 1).await;
+                1
+            }
+            None => 0,
+        };
+        let mut fresh = authenticate(&server, 0).await;
+        let resumed = resume(&mut fresh, &tablet_stream, handled).await;
+        assert!(resumed.is("resumed", SM_NS), "resume response: {resumed:?}");
+        assert_eq!(resumed.attr("previd"), Some(tablet_stream.as_str()));
+        if let Some(tablet) = tablet.as_mut() {
+            assert_replaced_transport_closes(tablet).await;
+        }
+        ping(&mut fresh, "tablet-successor").await;
+        fresh.close().await.expect("second session closes");
+
+        seam.release_stale_cleanup();
+        wait_for(
+            &seam,
+            format!("cleanup-finished {stream_id} {ALICE_PHONE} removed=false replacement=false"),
+        )
+        .await;
+        drop(replacement);
+    }
+
+    #[tokio::test]
     #[ignore = "unignore after every local and remote endpoint enqueue path is provisional-gated"]
     async fn published_resume_gap_detaches_then_same_socket_rebind_survives_delayed_cleanup() {
         let (server, seam) =

@@ -736,6 +736,7 @@ async fn handle_xmpp_frame_impl(
             #[cfg(test)]
             resume_binding_attempts,
             phase,
+            resume_endpoint_handoff_blocked: *resume_endpoint_handoff_blocked,
             sm_state,
             sm_ingress_fence,
             sm_inbound_completion,

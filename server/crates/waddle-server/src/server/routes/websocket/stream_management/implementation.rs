@@ -340,6 +340,9 @@ pub(in crate::server::routes::websocket) struct SmCtx<'a> {
     pub(in crate::server::routes::websocket) resume_binding_attempts:
         &'a mut Vec<waddle_xmpp::ownership::BindingRef>,
     pub(in crate::server::routes::websocket) phase: &'a mut ConnectionPhase,
+    /// A failed resume left accepted work on this socket's old outbound
+    /// queue, so the socket cannot publish another binding.
+    pub(in crate::server::routes::websocket) resume_endpoint_handoff_blocked: bool,
     pub(in crate::server::routes::websocket) sm_state: &'a mut StreamManagementState,
     pub(in crate::server::routes::websocket) sm_ingress_fence:
         &'a mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
@@ -950,6 +953,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
         #[cfg(test)]
         resume_binding_attempts,
         phase,
+        resume_endpoint_handoff_blocked,
         sm_state,
         sm_ingress_fence,
         authenticated_session,
@@ -974,8 +978,10 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a
-    // fresh SASL/bind lifecycle of its own.
-    if !phase.allows_stream_management_resume() {
+    // fresh SASL/bind lifecycle of its own, and never on a handoff-blocked
+    // socket, which cannot publish the resumed route. Refuse before detaching
+    // or claiming the session the request names.
+    if !phase.allows_stream_management_resume() || resume_endpoint_handoff_blocked {
         return SmResumeTerminal::failed(
             waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
             SmResumeOutcome::UnexpectedRequest,

@@ -372,7 +372,9 @@ impl MetricAttribute for SmAckOutcome {
 pub enum SmResumeOutcome {
     /// The previous stream resumed successfully.
     Resumed,
-    /// The client attempted resume after starting a fresh session lifecycle.
+    /// The transport could not accept a resume in its current state: it had
+    /// started a fresh session lifecycle, or an earlier failed resume left its
+    /// outbound endpoint unable to publish another binding.
     UnexpectedRequest,
     /// No resumable session existed for the requested stream id.
     NotFound,
