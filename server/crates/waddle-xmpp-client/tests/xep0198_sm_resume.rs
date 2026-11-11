@@ -7,7 +7,8 @@
 use chrono::{TimeZone, Utc};
 use minidom::Element;
 use waddle_xmpp_client::stream_management::{
-    InvalidSmInboundControl, SmAcknowledgementClockAction, SmInboundControl, SmState,
+    InvalidSmInboundControl, SmAcknowledgementClockAction, SmFailureCondition, SmInboundControl,
+    SmState,
 };
 use waddle_xmpp_client::{SmResumeState, StreamId, UnhandledOutboundEntry};
 
@@ -86,7 +87,10 @@ fn xep0198_failed_accepts_only_the_schema_stanza_error_group() {
 
     assert_eq!(
         SmState::parse_inbound_control(&failed),
-        Ok(SmInboundControl::Failed { h: None }),
+        Ok(SmInboundControl::Failed {
+            h: None,
+            condition: Some(SmFailureCondition::ServiceUnavailable),
+        }),
         "XEP-0198 permits one recognized stanza condition",
     );
 

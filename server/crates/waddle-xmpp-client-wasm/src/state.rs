@@ -199,10 +199,52 @@ impl WaddleConfig {
         Ok(())
     }
 
+    /// Attach the full JID the server bound for the session to the resume
+    /// state already configured through one of the `with_resume_state*`
+    /// methods.
+    ///
+    /// A resumed session keeps that JID, whose resource the server may have
+    /// chosen. Without it the resumed session is reported under the
+    /// configured resource. A retry tail that will not be resumed carries no
+    /// bound JID, so the call leaves it unchanged.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error, leaving the configuration unchanged, when
+    /// no resume state is configured or `bound_jid` is not a full JID.
+    pub fn with_resume_bound_jid(&mut self, bound_jid: String) -> Result<(), JsValue> {
+        self.resume_state = Some(
+            resume_state_with_bound_jid(self.resume_state.clone(), &bound_jid)
+                .map_err(|err| js_error(err.to_string()))?,
+        );
+        Ok(())
+    }
+
     /// Copy an opaque resume snapshot into this configuration for the next connection.
     pub fn with_resume_state_handle(&mut self, state: &WaddleResumeState) {
         self.resume_state = Some(state.inner.clone());
     }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum ResumeBoundJidError {
+    #[error("no resume state is configured")]
+    MissingResumeState,
+    #[error("invalid bound JID")]
+    InvalidJid,
+}
+
+pub(crate) fn resume_state_with_bound_jid(
+    state: Option<waddle_xmpp_client::SmResumeState>,
+    bound_jid: &str,
+) -> Result<waddle_xmpp_client::SmResumeState, ResumeBoundJidError> {
+    let state = state.ok_or(ResumeBoundJidError::MissingResumeState)?;
+    let bound_jid = bound_jid
+        .parse::<jid::FullJid>()
+        .map_err(|_| ResumeBoundJidError::InvalidJid)?;
+    if !state.is_resumable() {
+        return Ok(state);
+    }
+    Ok(state.with_bound_jid(Some(bound_jid)))
 }
 
 #[derive(Clone)]
@@ -236,6 +278,9 @@ pub(crate) struct JsResumeState {
     pub(crate) has_unacked_outbound: bool,
     pub(crate) unhandled_outbound_entries: Vec<JsUnhandledOutboundEntry>,
     pub(crate) max_resume_seconds: Option<u32>,
+    /// Full JID the server bound for the session, when the runtime knows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bound_jid: Option<String>,
 }
 
 impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
@@ -262,6 +307,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
             has_unacked_outbound: value.has_unhandled_outbound_stanzas(),
             unhandled_outbound_entries,
             max_resume_seconds: value.max_resume_seconds(),
+            bound_jid: value.bound_jid().map(ToString::to_string),
         }
     }
 }
@@ -769,6 +815,44 @@ mod tests {
         .unwrap();
         let serialized = serde_json::to_value(JsResumeState::from(snapshot)).unwrap();
         assert_eq!(serialized["unhandledOutboundEntries"][0]["rejected"], true);
+    }
+
+    #[test]
+    fn resume_state_bound_jid_round_trips_and_is_omitted_when_unknown() {
+        let state = waddle_xmpp_client::SmResumeState::try_new(
+            waddle_xmpp_client::StreamId::new("stream"),
+            3,
+            5,
+        )
+        .unwrap();
+
+        let without = serde_json::to_value(JsResumeState::from(state.clone())).unwrap();
+        assert!(without.get("boundJid").is_none());
+
+        let restored =
+            resume_state_with_bound_jid(Some(state.clone()), "alice@example.com/assigned").unwrap();
+        assert_eq!(
+            restored.bound_jid().map(ToString::to_string).as_deref(),
+            Some("alice@example.com/assigned")
+        );
+        let with = serde_json::to_value(JsResumeState::from(restored)).unwrap();
+        assert_eq!(with["boundJid"], "alice@example.com/assigned");
+
+        assert_eq!(
+            resume_state_with_bound_jid(Some(state.clone()), "alice@example.com"),
+            Err(ResumeBoundJidError::InvalidJid)
+        );
+        assert_eq!(
+            resume_state_with_bound_jid(None, "alice@example.com/assigned"),
+            Err(ResumeBoundJidError::MissingResumeState)
+        );
+        let retry_tail = state.into_fresh_stream_retry_state();
+        assert_eq!(
+            resume_state_with_bound_jid(Some(retry_tail), "alice@example.com/assigned")
+                .unwrap()
+                .bound_jid(),
+            None
+        );
     }
 
     #[test]

@@ -12,10 +12,10 @@ use url::Url;
 use waddle_xmpp_client::{
     AccessToken, AuthenticationRequest, ClientConfig, ClientError, ClientEvent, ClientRequest,
     ClientResource, ConnectionConfig, ConnectionEvent, MessageDeliveryEvent, OAuthBearerConfig,
-    OAuthBearerRequest, SessionBinding, SessionPhase, SmResumeState, StreamFeatures, StreamId,
-    StreamManagementEvent, StreamOpen, TransportEvent, TransportMessage, TransportState,
-    UnhandledOutboundEntry, WebSocketConfig, XmppRuntime, NS_BIND, NS_CLIENT, NS_SASL, NS_SASL2,
-    NS_SM, NS_STREAMS,
+    OAuthBearerRequest, SessionBinding, SessionPhase, SmFailureCondition, SmResumeState,
+    StreamFeatures, StreamId, StreamManagementEvent, StreamOpen, TransportEvent, TransportMessage,
+    TransportState, UnhandledOutboundEntry, WebSocketConfig, XmppRuntime, NS_BIND, NS_CLIENT,
+    NS_SASL, NS_SASL2, NS_SM, NS_STREAMS,
 };
 use waddle_xmpp_core::xep0388_inline::NS_BIND2;
 
@@ -280,10 +280,23 @@ fn sm_failed(events: &[ClientEvent]) -> bool {
         matches!(
             event,
             ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                StreamManagementEvent::Failed
+                StreamManagementEvent::Failed { .. }
             ))
         )
     })
+}
+
+/// The condition of each stream-management failure event, in order.
+fn sm_failure_conditions(events: &[ClientEvent]) -> Vec<Option<SmFailureCondition>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::Failed { condition },
+            )) => Some(*condition),
+            _ => None,
+        })
+        .collect()
 }
 
 fn delivery_acked(events: &[ClientEvent], id: &str) -> bool {
@@ -960,4 +973,126 @@ fn xep0198_stream_error_during_plain_sasl2_authentication_keeps_the_session() {
 
     assert!(!sm_failed(&events));
     assert_eq!(runtime.resume_state(), before);
+}
+
+#[test]
+fn xep0198_failed_resume_reports_the_condition_the_server_gave() {
+    // Inline, with and without a condition.
+    let (mut runtime, _) = runtime_after_features(Some(resume_state()), full_offer());
+    let events = receive(
+        &mut runtime,
+        success("alice@example.com", vec![failed(Some("11"))]),
+    )
+    .unwrap();
+    assert_eq!(
+        sm_failure_conditions(&events),
+        vec![Some(SmFailureCondition::ItemNotFound)]
+    );
+
+    let (mut runtime, _) = runtime_after_features(Some(resume_state()), full_offer());
+    let events = receive(
+        &mut runtime,
+        success(
+            "alice@example.com",
+            vec![Element::builder("failed", NS_SM).build()],
+        ),
+    )
+    .unwrap();
+    assert_eq!(sm_failure_conditions(&events), vec![None]);
+
+    // On the authenticated stream.
+    let (mut runtime, _) = runtime_after_features(Some(resume_state()), sasl2_features(None));
+    receive(&mut runtime, success("alice@example.com", Vec::new())).unwrap();
+    receive(&mut runtime, post_auth_features(true)).unwrap();
+    let mut redirect = Element::builder("redirect", NS_STANZAS).build();
+    redirect.append_text_node("xmpp:elsewhere.example");
+    let events = receive(
+        &mut runtime,
+        Element::builder("failed", NS_SM).append(redirect).build(),
+    )
+    .unwrap();
+    assert_eq!(
+        sm_failure_conditions(&events),
+        vec![Some(SmFailureCondition::Redirect)]
+    );
+}
+
+#[test]
+fn xep0198_failed_enable_reports_the_condition_the_server_gave() {
+    let (mut runtime, _) = runtime_after_features(None, sasl2_features(None));
+    receive(&mut runtime, success("alice@example.com", Vec::new())).unwrap();
+    let bind = receive(&mut runtime, post_auth_features(true)).unwrap();
+    let bind_id = outbound(&bind)[0].attr("id").expect("bind id").to_owned();
+    let bound = receive(
+        &mut runtime,
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), bind_id)
+            .append(
+                Element::builder("bind", NS_BIND)
+                    .append(
+                        Element::builder("jid", NS_BIND)
+                            .append("alice@example.com/macbook")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+    .unwrap();
+    sent(&mut runtime, outbound(&bound)[0].clone());
+
+    let events = receive(
+        &mut runtime,
+        Element::builder("failed", NS_SM)
+            .append(Element::builder("internal-server-error", NS_STANZAS).build())
+            .build(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        sm_failure_conditions(&events),
+        vec![Some(SmFailureCondition::InternalServerError)]
+    );
+}
+
+#[test]
+fn xep0198_failure_the_client_declares_itself_carries_no_condition() {
+    let (mut runtime, _) = runtime_after_features(Some(resume_state()), full_offer());
+
+    let events = receive(
+        &mut runtime,
+        Element::builder("error", NS_STREAMS)
+            .append(Element::builder("internal-server-error", NS_STREAM_ERRORS).build())
+            .build(),
+    )
+    .unwrap();
+
+    assert_eq!(sm_failure_conditions(&events), vec![None]);
+}
+
+#[test]
+fn xep0198_resume_state_without_a_bound_jid_falls_back_to_the_configured_resource() {
+    let state = resume_state();
+    assert_eq!(state.bound_jid(), None);
+    let jid = FullJid::from_str("alice@example.com/assigned-by-server").unwrap();
+    let with_jid = state.clone().with_bound_jid(Some(jid.clone()));
+    assert_eq!(with_jid.bound_jid(), Some(&jid));
+    assert_eq!(with_jid.clone().with_bound_jid(None), state);
+    assert_eq!(with_jid.into_fresh_stream_retry_state().bound_jid(), None);
+
+    let (mut runtime, _) = runtime_after_features(Some(state), full_offer());
+    receive(
+        &mut runtime,
+        success("alice@example.com", vec![resumed("old-sm-id", "12")]),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime
+            .snapshot()
+            .binding
+            .as_ref()
+            .map(|binding| binding.jid.clone()),
+        Some(FullJid::from_str("alice@example.com/macbook").unwrap())
+    );
 }
