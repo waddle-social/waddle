@@ -52,7 +52,7 @@ use waddle_xmpp::pending_delivery::{
 };
 use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenceStorage};
 
-use super::{test_url, CATALOG_GRANT_LOCK};
+use super::{test_url, CATALOG_GRANT_LOCK, C_COLLATION_DATABASE};
 use pinned_pubsub_inventory::{exercise_pinned_pubsub, pinned_pubsub_inventory};
 
 #[path = "combined_restricted_profile_extra.rs"]
@@ -97,9 +97,11 @@ impl Resources {
     async fn database(&mut self, name: &str, owner: &str) -> anyhow::Result<()> {
         self.database = Some((name.to_owned(), owner.to_owned()));
         let mut connection = provisioning_lock(&self.cluster, name).await?;
-        sqlx::query(&format!("CREATE DATABASE {name} OWNER {owner}"))
-            .execute(&mut connection)
-            .await?;
+        sqlx::query(&format!(
+            "CREATE DATABASE {name} OWNER {owner} {C_COLLATION_DATABASE}"
+        ))
+        .execute(&mut connection)
+        .await?;
         connection.close().await?;
         Ok(())
     }

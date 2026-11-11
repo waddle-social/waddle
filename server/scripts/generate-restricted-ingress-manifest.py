@@ -2,7 +2,9 @@
 """Derive the dark PG17 manifest in a rollback-only disposable database.
 
 Requires an administrator URL in WADDLE_TEST_POSTGRES_URL and psql on PATH
-(or PSQL pointing to it). Uses the actual ordered migration catalog and
+(or PSQL pointing to it). The database's default collation must be C, for
+example one created from template0 with LOCALE_PROVIDER builtin and
+BUILTIN_LOCALE 'C'. Uses the actual ordered migration catalog and
 canonical pending owner source DDL. No existing target objects are dropped.
 This is a developer artifact producer, never a startup installer.
 """
@@ -120,7 +122,11 @@ def pending_owner_schema(source, recovery):
 def produce(sources):
     sql = (
         "BEGIN; DO $$ BEGIN IF current_setting('server_version_num')::integer "
-        "NOT BETWEEN 170000 AND 179999 THEN RAISE EXCEPTION 'requires PG17'; END IF; END $$; "
+        "NOT BETWEEN 170000 AND 179999 THEN RAISE EXCEPTION 'requires PG17'; END IF; "
+        # The structure query orders trigger definitions with the database's
+        # default collation, and the pinned manifest records byte order.
+        "IF NOT ('RI_x'::text < 'ingress'::text) THEN RAISE EXCEPTION "
+        "'requires a database whose default collation is C'; END IF; END $$; "
         f"CREATE ROLE {API}; CREATE ROLE {RUNTIME}; "
         f"CREATE SCHEMA {SCHEMA}; SET search_path={SCHEMA};\n"
     )

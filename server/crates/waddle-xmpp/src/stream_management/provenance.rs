@@ -5,7 +5,8 @@
 
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
 use crate::ingress::MessageKey;
-use serde::{de, ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
+use serde::ser::SerializeSeq;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum encoded provenance and number of claims retained for a single frame.
 pub const MAX_SM_PROVENANCE_BYTES: usize = 16 * 1024;

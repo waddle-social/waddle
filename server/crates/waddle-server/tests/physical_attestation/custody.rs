@@ -1,7 +1,12 @@
 //! Disposable PostgreSQL 17 custody composition; no serving path is enabled.
 
 use super::super::super::{url_with_schema, Fixture};
-use super::*;
+use super::{
+    attested_pool, direct_pin, installed_v1009, now, pg_attempt, pg_seed_transaction,
+    postgres_fixture, request, seed_pg_direct, test_url, ChronoDuration, Database, DatabasePool,
+    DirectAdmission, DirectAdmissionLimits, DirectAdmissionOutcome, Duration, IngressUnitOfWork,
+    LineageConfig, ALIAS_RETENTION, CATALOG_GRANT_LOCK,
+};
 use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::db::physical_attestation::{
     custody_lab_postgres_ddl, CustodyBinding, CustodyDisposition, CustodyLab, CustodyLabError,

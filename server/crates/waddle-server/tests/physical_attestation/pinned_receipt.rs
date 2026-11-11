@@ -389,7 +389,7 @@ pub(super) async fn setup(
 async fn pinned_receipt_holds_fences_and_recovers_only_positive_results() {
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let (authority, leases, grant, operations, api, config, pinned, pins) = setup(&fixture).await;
 
     for wrong in [
@@ -1142,7 +1142,7 @@ async fn live_executor_retains_pinned_attempt_past_its_five_second_budget() {
 
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let ingress = live_ingress_fixture(&fixture).await;
     let (decision, recovered, state) = live_call_decision(&ingress, "pinned-slow").await;
     let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;
@@ -1234,7 +1234,7 @@ async fn live_executor_positive_readback_retains_original_backend_and_capacity()
 
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let ingress = live_ingress_fixture(&fixture).await;
     let (decision, _, state) = live_call_decision(&ingress, "pinned-lost-ack").await;
     let (next, _, _) = live_call_decision(&ingress, "pinned-capacity").await;
@@ -1337,7 +1337,7 @@ async fn live_executor_absent_readback_does_not_repeat_an_unknown_attempt() {
 
     let _guard = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
-    let fixture = Fixture::new(url).await;
+    let fixture = Fixture::new_with_c_collation(url).await;
     let ingress = live_ingress_fixture(&fixture).await;
     let (decision, _, state) = live_call_decision(&ingress, "pinned-unknown").await;
     let (pinned, leases, grant, _, api, _, _, _) = setup(&fixture).await;

@@ -7,7 +7,8 @@ use waddle_server::db::physical_attestation::{
     PinnedSelectedEntryError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 
-use super::{pinned_entry_tests::pinned_pool, test_url, Fixture, CATALOG_GRANT_LOCK};
+use super::pinned_entry_tests::pinned_pool;
+use super::{test_url, Fixture, CATALOG_GRANT_LOCK};
 
 const WAIT: Duration = Duration::from_secs(15);
 

@@ -666,7 +666,12 @@
               # The 200-round steal/veto stress test deliberately exercises
               # deadlocks. Detect cycles promptly without changing lock or
               # statement timeouts, transaction semantics, or test rounds.
-              pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses= -c deadlock_timeout=50ms" -w start
+              # This cluster lives in the build's temporary directory and is
+              # discarded with it, so nothing reads its files after a crash.
+              # Durability is off because isolated fixtures create and drop a
+              # database per test: each drop forces a checkpoint, and with
+              # durable flushes those checkpoints stall every other session.
+              pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses= -c deadlock_timeout=50ms -c fsync=off -c synchronous_commit=off -c full_page_writes=off" -w start
               createdb -h "$PGHOST" -p "$PGPORT" -U waddle_test waddle_test
               export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
               # Postgres is provisioned here, so a Postgres-backed test that

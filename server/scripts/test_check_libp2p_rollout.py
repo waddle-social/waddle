@@ -74,11 +74,18 @@ class BaselineValidationTests(unittest.TestCase):
             kameo.mkdir(parents=True)
             (kameo / "Cargo.toml").write_text('[package]\nname = "kameo"\nversion = "0.20.0"\n')
             subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            # The developer's signing configuration must not reach this
+            # fixture: a signing default turns the lightweight tag into an
+            # annotated one that needs a message and a key.
             subprocess.run([
                 "git", "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                "-c", "commit.gpgSign=false",
                 "commit", "-qm", "test(server): preserve a baseline reference for validation",
             ], cwd=repository, check=True)
-            subprocess.run(["git", "tag", "rollout-baseline"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "-c", "tag.gpgSign=false", "tag", "rollout-baseline"],
+                cwd=repository, check=True,
+            )
             expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
             blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"], cwd=repository, input=b"not a commit").decode().strip()
             with patch.object(rollout, "ROOT", repository):
