@@ -35,7 +35,7 @@ pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + super::connection::SettleInbound,
     RE: std::fmt::Display,
 {
     let OutboundAuthority { permit, shutdown } = authority;

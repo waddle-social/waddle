@@ -32,10 +32,12 @@ use super::{
 use crate::clustering::NodeAdmissionPermit;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
-use crate::websocket_transport::LegacySocketAdmission;
+use crate::websocket_transport::{
+    IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits, LiveSocketTransport,
+    TransportLimits, WebSocketInput, WebSocketMessageSink,
+};
 use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
-use futures::stream::{SplitSink, SplitStream};
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -265,6 +267,39 @@ pub(super) struct RegistrationChannels<'a> {
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
 }
 
+/// An inbound half that can bring forward a frame its socket already holds.
+///
+/// A reader that polls its own socket has such a frame ready on the first
+/// poll, so the default does nothing. An input fed by a pump task has to ask
+/// the pump and wait for its answer.
+pub(super) trait SettleInbound {
+    fn settle_inbound(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
+}
+
+impl<T: SettleInbound + Send + ?Sized> SettleInbound for &mut T {
+    fn settle_inbound(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        (**self).settle_inbound()
+    }
+}
+
+/// Scripted readers in unit tests are polled directly.
+#[cfg(test)]
+impl<T> SettleInbound for futures::stream::Pending<T> {}
+
+#[cfg(test)]
+impl<A, B> SettleInbound for futures::stream::Chain<A, B> {}
+
+#[cfg(test)]
+impl<F> SettleInbound for futures::stream::PollFn<F> {}
+
+impl<E: Send> SettleInbound for WebSocketInput<E> {
+    async fn settle_inbound(&mut self) {
+        self.settle().await;
+    }
+}
+
 pub(super) struct ConnectionIo<'a, S, R> {
     pub(super) sender: &'a mut S,
     pub(super) receiver: &'a mut R,
@@ -314,8 +349,37 @@ enum LiveSocketPhase {
     Transitioning,
 }
 
-type LiveSocketIo =
-    LocalSocketIo<InterruptibleSink<SplitSink<WebSocket, Message>>, SplitStream<WebSocket>>;
+type LiveSocketIo = LocalSocketIo<
+    InterruptibleSink<WebSocketMessageSink<axum::Error>>,
+    WebSocketInput<axum::Error>,
+>;
+
+/// Outbound pump queue for one connection. The loop writes one frame and
+/// waits for its flush, so the count only has to cover a frame in flight plus
+/// the short terminal sequence. Outbound frames have no byte cap of their own.
+const TRANSPORT_OUTBOUND_FRAMES: usize = 4;
+/// Inbound pump queue for one connection. The reader pump reads on demand, so
+/// at most one frame waits here. The byte bound stays above anything the
+/// WebSocket layer can deliver, so oversized stanzas still reach the protocol
+/// handler's own limit and stream error.
+const TRANSPORT_INBOUND_FRAMES: usize = 1;
+const TRANSPORT_QUEUE_BYTES: usize = u32::MAX as usize;
+/// How long the owner task waits, once the owner has finished, for the pump
+/// custodian to report both pumps joined before leaving the inventory slot in
+/// place.
+const TRANSPORT_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The same wait before the fatal fence on the owner-panic path.
+const TRANSPORT_PANIC_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long after node or identity revocation the pump custodian stops the
+/// pumps on its own. The owner normally stops them first by dropping its
+/// transport. This backstop has to outlast an owner that is inside a handler
+/// at revocation and then writes its bounded system-shutdown close, or that
+/// close would be lost.
+const TRANSPORT_RETIREMENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(
+    super::frame_backstop::STANZA_HANDLER_WEDGE_TIMEOUT.as_secs()
+        + SHUTDOWN_CLOSE_TIMEOUT.as_secs()
+        + 5,
+);
 
 struct LiveSocketState {
     // Keep the pre-extraction drop order on cancellation: channels and timers
@@ -356,6 +420,8 @@ impl LiveWebSocketConnection {
         let drain_guard = self._connection_guard.clone();
         let node_lifecycle = self.state.deps.app_state.node_lifecycle.clone();
         let stop = self.state.deps.shutdown.stop_token();
+        let inventory = self.state.deps.app_state.websocket_inventory.clone();
+        let transport = Arc::new(std::sync::OnceLock::new());
         #[cfg(feature = "test-support")]
         let panic_caught = self
             .state
@@ -373,11 +439,28 @@ impl LiveWebSocketConnection {
             .owner_panic_fenced
             .clone();
         let owner = tokio::spawn(async move {
-            if AssertUnwindSafe(self.run(caller_gone))
+            let panicked = AssertUnwindSafe(self.run(caller_gone, Arc::clone(&transport)))
                 .catch_unwind()
                 .await
-                .is_err()
-            {
+                .is_err();
+            // The owner has returned or unwound, so every transport handle is
+            // dropped and the pumps are stopping. Release the inventory slot
+            // once the custodian has seen both pumps and the owner's marker
+            // task finish. A pump that does not join keeps its slot, so
+            // capacity never exceeds the sockets still held.
+            // After a panic the fatal fence must not wait behind a pump that
+            // is slow to join, so that path gives the join only a short head
+            // start and finishes the wait once the node is fenced.
+            let join_bound = if panicked {
+                TRANSPORT_PANIC_JOIN_TIMEOUT
+            } else {
+                TRANSPORT_JOIN_TIMEOUT
+            };
+            let mut slot_released = match transport.get() {
+                Some(observer) => release_transport_slot(&inventory, observer, join_bound).await,
+                None => true,
+            };
+            if panicked {
                 #[cfg(feature = "test-support")]
                 if let Some(barrier) = panic_caught {
                     barrier.arrive().await;
@@ -391,6 +474,19 @@ impl LiveWebSocketConnection {
                 if let Some(barrier) = panic_fenced {
                     barrier.arrive().await;
                 }
+                if !slot_released {
+                    if let Some(observer) = transport.get() {
+                        slot_released =
+                            release_transport_slot(&inventory, observer, TRANSPORT_JOIN_TIMEOUT)
+                                .await;
+                    }
+                }
+            }
+            if !slot_released {
+                error!(
+                    ?connection_ref,
+                    "WebSocket transport pumps did not join; the inventory slot stays held"
+                );
             }
             drop(drain_guard);
         });
@@ -403,7 +499,11 @@ impl LiveWebSocketConnection {
     }
 
     /// Run the connection through its live I/O loop and shutdown settlement.
-    async fn run(mut self, caller_gone: CancellationToken) {
+    async fn run(
+        mut self,
+        caller_gone: CancellationToken,
+        transport: Arc<std::sync::OnceLock<IoCustodianObserver>>,
+    ) {
         #[cfg(feature = "test-support")]
         if let Some(barrier) = &self
             .state
@@ -444,14 +544,45 @@ impl LiveWebSocketConnection {
         else {
             unreachable!("run starts with the upgraded socket");
         };
+        let limits = match (
+            Limits::new(TRANSPORT_INBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
+            Limits::new(TRANSPORT_OUTBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
+        ) {
+            (Ok(inbound), Ok(outbound)) => TransportLimits::new(inbound, outbound),
+            _ => unreachable!("the transport queue bounds are positive and within range"),
+        };
+        let LiveSocketTransport {
+            observer: transport_observer,
+            cleanup: _transport_cleanup,
+            input: ws_receiver,
+            output: ws_sender,
+        } = match self
+            .admission
+            .start_socket(
+                *socket,
+                &self.state.deps.app_state.websocket_inventory,
+                limits,
+                TRANSPORT_RETIREMENT_DEADLINE,
+            )
+            .await
+        {
+            Ok(transport) => transport,
+            Err(error) => {
+                info!(
+                    %error,
+                    connection_ref = ?self.admission.connection_ref(),
+                    "Closing upgraded WebSocket: transport start was refused"
+                );
+                return;
+            }
+        };
+        let _ = transport.set(transport_observer.clone());
         let state = &self.state;
         let admission = &self.admission;
         let admission_permit = admission.permit();
         let domain = state.deps.auth_state.xmpp_domain.clone();
         let shutdown_token = state.deps.shutdown.stop_token();
         info!(domain = %domain, "XMPP WebSocket connection established");
-
-        let (ws_sender, ws_receiver) = (*socket).split();
 
         // Create outbound channel for receiving messages from other connections.
         // After the session is registered, `pending_tx` is handed to the
@@ -486,9 +617,15 @@ impl LiveWebSocketConnection {
         let ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
             .with_resume_control(live_resume_control.clone());
         // This owner spans live I/O and shutdown settlement, including
-        // cancellation/unwind. It publishes only after both halves are dropped.
-        let (socket_io, witness) = LocalSocketIo::new(ws_sender, ws_receiver);
-        conn.local_io_relinquishment = Some(witness);
+        // cancellation/unwind. The physical halves belong to the pump tasks,
+        // so the witness is theirs: dropping `socket_io` stops the pumps, and
+        // they publish once both halves are gone.
+        let (socket_io, _handles_dropped) = LocalSocketIo::new(ws_sender, ws_receiver);
+        conn.local_io_relinquishment = Some(
+            waddle_xmpp::registry::LocalIoRelinquishment::from_completion(
+                transport_observer.local_io_relinquishment().completion(),
+            ),
+        );
         let (handoff_tx, handoff_rx) = mpsc::unbounded_channel::<OrderedRelayHandoffCompletion>();
         conn.ordered_relay_handoff_tx = Some(handoff_tx);
         // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
@@ -620,6 +757,12 @@ impl LiveWebSocketConnection {
             // pre-select loop), and yields between chunks, so a client
             // streaming frames mid-flood cannot monopolize the executor.
             let deferred_pending = !conn.deferred_inbound.is_empty();
+            // The select below prefers client input to its timers. A frame the
+            // socket already holds must therefore be ready before the select
+            // is polled, as it would be for a task reading its own socket.
+            if !deferred_pending {
+                ws_receiver.settle_inbound().await;
+            }
             tokio::select! {
                 biased;
 
@@ -1035,6 +1178,22 @@ impl LiveWebSocketConnection {
         )
         .await;
     }
+}
+
+/// Free the connection's inventory slot once its custodian reports the pumps
+/// and the owner's marker task joined. Returns whether that happened in time.
+async fn release_transport_slot(
+    inventory: &IoCustodianInventory,
+    observer: &IoCustodianObserver,
+    bound: std::time::Duration,
+) -> bool {
+    let joined = tokio::time::timeout(bound, observer.wait_until_joined())
+        .await
+        .is_ok();
+    if joined {
+        inventory.prune_joined();
+    }
+    joined
 }
 
 /// Channel state carried from the live loop into its connection-owned shutdown.
@@ -1752,7 +1911,7 @@ pub(super) async fn handle_inbound_text<S, SE, R, RE>(
 where
     S: futures::Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + SettleInbound,
     RE: std::fmt::Display,
 {
     #[cfg(feature = "test-support")]
@@ -2136,7 +2295,7 @@ async fn handle_ordered_relay_handoff_completion<S, SE, R, RE>(
 where
     S: futures::Sink<Message, Error = SE> + Unpin,
     SE: super::send::WebSocketWriteError,
-    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + SettleInbound,
     RE: std::fmt::Display,
 {
     if shutdown.is_cancelled() || permit.revalidate().is_err() {

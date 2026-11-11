@@ -658,6 +658,24 @@ impl WsXmppClient {
             .map_err(|e| format!("Send failed: {e}"))
     }
 
+    /// Queue several raw frames and flush them together, so the server finds
+    /// them in its socket buffer at once instead of one per round trip.
+    pub async fn send_raw_burst(
+        &mut self,
+        frames: impl IntoIterator<Item = tungstenite::Message>,
+    ) -> Result<(), String> {
+        for frame in frames {
+            self.ws
+                .feed(frame)
+                .await
+                .map_err(|e| format!("Feed failed: {e}"))?;
+        }
+        self.ws
+            .flush()
+            .await
+            .map_err(|e| format!("Flush failed: {e}"))
+    }
+
     pub async fn recv(&mut self) -> Result<String, String> {
         self.recv_timeout(RECV_TIMEOUT).await
     }

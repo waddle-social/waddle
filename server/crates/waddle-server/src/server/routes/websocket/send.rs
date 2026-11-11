@@ -62,6 +62,8 @@ impl WebSocketWriteError for axum::Error {}
 
 impl WebSocketWriteError for std::io::Error {}
 
+impl WebSocketWriteError for crate::websocket_transport::OutputError<axum::Error> {}
+
 #[cfg(test)]
 impl WebSocketWriteError for &'static str {}
 
@@ -138,9 +140,12 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
 
 /// Result of a WebSocket write that is bound to one admitted node generation.
 ///
-/// `start_send` is the transport commit point: once it has run under a valid
-/// permit, a later lifecycle transition cannot retract the frame from the
-/// sink. Before that point, revocation must suppress the write entirely.
+/// `start_send` is the transport commit point for a sink that enqueues
+/// straight into the socket: once it has run under a valid permit, a later
+/// lifecycle transition cannot retract the frame. Before that point,
+/// revocation must suppress the write entirely. A pump-backed sink applies
+/// the same fence again at the pump's own enqueue; a frame the pump did not
+/// finish because the authority was revoked is reported as revoked.
 pub(super) enum AuthoritySendOutcome {
     Sent,
     TransportClosed,
@@ -385,6 +390,13 @@ where
     // this already-authorized local enqueue is being flushed.
     match tokio::time::timeout(SEND_STALL_TIMEOUT, sender.flush()).await {
         Ok(Ok(())) => AuthoritySendOutcome::Sent,
+        // A pump-backed sink reports a frame it refused or abandoned at its
+        // own authority fence as a flush error. That is the revocation, not a
+        // broken transport, and the caller's revocation path still applies.
+        Ok(Err(error)) if !authoritative() => {
+            debug!(error = %error, "{failure_message}: authority was revoked before the write finished");
+            AuthoritySendOutcome::AuthorityRevoked
+        }
         Ok(Err(error)) => {
             log_write_failure(&error, failure_message);
             AuthoritySendOutcome::TransportClosed

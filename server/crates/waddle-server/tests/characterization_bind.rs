@@ -946,7 +946,7 @@ async fn failed_resume_then_fresh_bind_keeps_the_reserved_socket_identity() {
         .deps
         .app_state
         .websocket_inventory_for_test()
-        .reserved_connection_refs();
+        .connection_refs();
     assert_eq!(reserved.len(), 1);
     let physical = reserved[0].clone();
 
@@ -969,7 +969,7 @@ async fn failed_resume_then_fresh_bind_keeps_the_reserved_socket_identity() {
             .deps
             .app_state
             .websocket_inventory_for_test()
-            .reserved_connection_refs(),
+            .connection_refs(),
         vec![physical.clone()]
     );
 

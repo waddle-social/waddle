@@ -1,19 +1,21 @@
-//! Bounded raw WebSocket transport for a future single connection owner.
+//! Bounded raw WebSocket transport for a single connection owner.
 //!
 //! This boundary does not parse incoming XMPP. Raw frames must be parsed before
 //! entering protocol actor messages. Outgoing data carries this transport's
 //! exact identity and lifecycle authority to the physical sink enqueue.
-//! The supervised adapter remains inactive. The production upgrade path uses
-//! an `AppState`-bound admission as a capacity hold for the legacy loop. Its
-//! authority-bound writes fence the source revision and lifecycle generation
-//! at `start_send`, but it does not start or join these pumps.
+//! The production upgrade path takes an `AppState`-bound admission and starts
+//! these pumps from it for the single-task connection loop, which reads on
+//! demand through [`WebSocketInput`] and writes through
+//! [`WebSocketMessageSink`]. The pump custodian holds the connection's
+//! inventory slot until both pumps have joined and the owner has finished.
 //! Revocation after splitting but before supervised startup gets a bounded
 //! Close attempt on the split writer. If startup is dropped during that window,
 //! an independent bounded cleanup task retains its capacity reservation.
 //!
-//! `SinkExt::send` waits for the physical flush. A protocol owner must instead
-//! keep a `submit` future and receipts selectable alongside inbound frames and
-//! independent control, so a slow writer cannot prevent XEP-0198 ACK handling.
+//! `SinkExt::send` waits for the physical flush, and the single-task loop
+//! relies on that. An owner that must keep handling XEP-0198 acknowledgements
+//! behind a slow writer instead keeps a `submit` future and its receipts
+//! selectable alongside inbound frames and independent control.
 //!
 //! Queue limits cover admitted and in-flight items. The reader can additionally
 //! hold one frame while waiting for capacity; the output adapter can hold one
@@ -89,12 +91,135 @@ pub struct WebSocketInput<E> {
     frames: mpsc::Receiver<QueueItem<Message>>,
     terminal: oneshot::Receiver<OrderedInboundTerminal<Message, E>>,
     finished: bool,
+    demand: Option<Arc<ReadDemand>>,
+    demand_outstanding: bool,
+    /// A frame `settle` took off the queue for the next `poll_next`.
+    settled: Option<QueueItem<Message>>,
+}
+
+/// One-frame read demand from the input to its reader pump.
+///
+/// A reader that runs ahead of its owner reads a peer Close before the owner
+/// has answered the frames in front of it, and the socket then refuses those
+/// answers. With demand the pump reads one frame each time the owner asks for
+/// one, which is the order a single task reading its own socket observes.
+#[derive(Default)]
+struct ReadDemand {
+    granted: std::sync::atomic::AtomicBool,
+    reader: futures::task::AtomicWaker,
+    /// The reader polled the socket for the current grant and found nothing.
+    idle: std::sync::atomic::AtomicBool,
+    owner: futures::task::AtomicWaker,
+}
+
+impl ReadDemand {
+    fn grant(&self) {
+        self.idle.store(false, std::sync::atomic::Ordering::Release);
+        self.granted
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.reader.wake();
+    }
+}
+
+/// A reader half that yields at most one frame per grant. Without a demand
+/// handle it reads freely.
+struct DemandGated<R> {
+    inner: R,
+    demand: Option<Arc<ReadDemand>>,
+    holding: bool,
+}
+
+impl<R> DemandGated<R> {
+    fn new(inner: R, demand: Option<Arc<ReadDemand>>) -> Self {
+        Self {
+            inner,
+            demand,
+            holding: false,
+        }
+    }
+}
+
+impl<R> Stream for DemandGated<R>
+where
+    R: Stream + Unpin,
+{
+    type Item = R::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Some(demand) = &this.demand {
+            if !this.holding {
+                demand.reader.register(cx.waker());
+                if !demand
+                    .granted
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    return Poll::Pending;
+                }
+                this.holding = true;
+            }
+        }
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(item) => {
+                this.holding = false;
+                Poll::Ready(item)
+            }
+            Poll::Pending => {
+                if let Some(demand) = &this.demand {
+                    demand
+                        .idle
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    demand.owner.wake();
+                }
+                Poll::Pending
+            }
+        }
+    }
 }
 
 impl<E> WebSocketInput<E> {
     /// Exact physical connection whose reader owns these frames.
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.connection_ref
+    }
+
+    /// Wait until a frame the socket already holds is ready for `poll_next`,
+    /// or the reader has found the socket empty or has ended.
+    ///
+    /// A demand-driven reader reads in its own task, so a frame the kernel has
+    /// already delivered is not ready on the first poll the way it is for an
+    /// owner reading its own socket. An owner whose `select!` prefers input
+    /// over its timers settles first to keep that preference. This asks for at
+    /// most the one frame the next `poll_next` would ask for, and returns at
+    /// once on an input that does not read on demand.
+    pub(crate) async fn settle(&mut self) {
+        let Some(demand) = self.demand.clone() else {
+            return;
+        };
+        if self.finished || self.settled.is_some() {
+            return;
+        }
+        poll_fn(|cx| match self.frames.poll_recv(cx) {
+            Poll::Ready(Some(frame)) => {
+                self.demand_outstanding = false;
+                self.settled = Some(frame);
+                Poll::Ready(())
+            }
+            Poll::Ready(None) => Poll::Ready(()),
+            Poll::Pending => {
+                if !self.demand_outstanding {
+                    self.demand_outstanding = true;
+                    demand.grant();
+                }
+                demand.owner.register(cx.waker());
+                if demand.idle.load(std::sync::atomic::Ordering::Acquire) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+        })
+        .await;
     }
 }
 
@@ -153,9 +278,26 @@ impl<E> Stream for WebSocketInput<E> {
         if this.finished {
             return Poll::Ready(None);
         }
+        if let Some(frame) = this.settled.take() {
+            return Poll::Ready(Some(Ok(frame.into_inner())));
+        }
         match this.frames.poll_recv(cx) {
-            Poll::Ready(Some(frame)) => return Poll::Ready(Some(Ok(frame.into_inner()))),
-            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(frame)) => {
+                this.demand_outstanding = false;
+                return Poll::Ready(Some(Ok(frame.into_inner())));
+            }
+            Poll::Pending => {
+                // The terminal slot resolves only after the frame queue has
+                // closed, so one grant covers either the next frame or the
+                // terminal value.
+                if let Some(demand) = &this.demand {
+                    if !this.demand_outstanding {
+                        this.demand_outstanding = true;
+                        demand.grant();
+                    }
+                }
+                return Poll::Pending;
+            }
             Poll::Ready(None) => {}
         }
         match Pin::new(&mut this.terminal).poll(cx) {
@@ -643,8 +785,9 @@ impl SocketAdmission {
         self.reservation.retain_until_auxiliary_cleanup()
     }
 
-    /// Consume the admission into the existing single-task WebSocket loop.
-    /// Its reservation is a capacity hold, not a pump-cleanup witness.
+    /// Consume the admission into the single-task WebSocket loop. The loop
+    /// starts its pumps with [`LegacySocketAdmission::start_socket`]; until
+    /// then the reservation is only a capacity hold.
     pub(crate) fn into_legacy(self) -> LegacySocketAdmission {
         let permit = match &self.authority.source {
             IdentitySource::Clustered { source, stamp } => self
@@ -656,7 +799,7 @@ impl SocketAdmission {
         LegacySocketAdmission {
             authority: self.authority,
             permit,
-            _reservation: self.reservation,
+            reservation: Some(self.reservation),
         }
     }
 
@@ -686,6 +829,7 @@ impl SocketAdmission {
             socket,
             limits,
             retirement_deadline,
+            None,
             || std::future::ready(()),
             |_| std::future::ready(()),
         )
@@ -697,6 +841,7 @@ impl SocketAdmission {
         socket: WebSocket,
         limits: TransportLimits,
         retirement_deadline: Duration,
+        demand: Option<Arc<ReadDemand>>,
         after_split: AfterSplitHook,
         hook: Hook,
     ) -> Result<
@@ -726,7 +871,7 @@ impl SocketAdmission {
                 unreachable!("one admission owns one socket")
             };
             let (writer, reader) = socket.split();
-            (reader, writer)
+            (DemandGated::new(reader, demand.clone()), writer)
         });
         let (reader, writer) = match split {
             Ok(halves) => halves,
@@ -769,14 +914,16 @@ impl SocketAdmission {
             close_probe,
         );
         after_split().await;
-        Self::start_with_parts(
+        let (custodian, mut input, output) = Self::start_with_parts(
             parts,
             limits,
             retirement_deadline,
             axum_send_after_close,
             hook,
         )
-        .await
+        .await?;
+        input.demand = demand;
+        Ok((custodian, input, output))
     }
 
     #[cfg(feature = "test-support")]
@@ -806,22 +953,117 @@ impl SocketAdmission {
         Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
         HookFuture: Future<Output = ()> + Send,
     {
-        self.start_socket_with_hook(socket, limits, retirement_deadline, after_split, hook)
+        self.start_socket_with_hook(socket, limits, retirement_deadline, None, after_split, hook)
             .await
     }
 }
 
-/// Non-cloneable capacity hold for the current legacy WebSocket task.
-/// Dropping the owner releases its reservation; this does not establish
-/// independent pump cleanup. Authority-bound writes use the captured source
-/// revision and lifecycle generation at their synchronous enqueue boundary.
+/// Non-cloneable admission for the single-task WebSocket loop. Until the loop
+/// starts its pumps the reservation is a capacity hold that is released when
+/// the owner drops it. Authority-bound writes use the captured source revision
+/// and lifecycle generation at their synchronous enqueue boundary.
 pub(crate) struct LegacySocketAdmission {
     authority: Arc<TransportAuthority>,
     permit: NodeAdmissionPermit,
-    _reservation: IoCustodianReservation,
+    reservation: Option<IoCustodianReservation>,
+}
+
+/// The supervised transport of one live connection.
+pub(crate) struct LiveSocketTransport {
+    /// The only controlling handle is inside `output`: dropping the output
+    /// stops both pumps. This observer does not keep them running.
+    pub(crate) observer: IoCustodianObserver,
+    /// Keeps the connection's inventory slot until the owner has finished its
+    /// own cleanup. See [`LiveSocketCleanup`].
+    pub(crate) cleanup: LiveSocketCleanup,
+    pub(crate) input: WebSocketInput<axum::Error>,
+    pub(crate) output: WebSocketMessageSink<axum::Error>,
+}
+
+/// The owner's half of the inventory slot. Dropping it reports that the owner
+/// holds nothing more for this connection, whether it returned or unwound; a
+/// panicking owner has dropped its transport handles by the time this runs,
+/// and the node is fenced separately. The custodian releases the slot only
+/// after the pumps have joined as well.
+pub(crate) struct LiveSocketCleanup {
+    guard: Option<crate::server::routes::websocket::supervised_io::AuxiliaryCleanupGuard>,
+    /// Ends the marker task the custodian joins before it reports the
+    /// connection joined.
+    _owner_finished: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for LiveSocketCleanup {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            guard.complete();
+        }
+    }
 }
 
 impl LegacySocketAdmission {
+    /// Split the upgraded socket into supervised pumps that read on demand.
+    ///
+    /// The reservation moves into the pump custodian, which holds the
+    /// inventory slot until the pumps have joined and the returned cleanup
+    /// guard has been completed. On failure the socket has already had its
+    /// bounded Close attempt.
+    pub(crate) async fn start_socket(
+        &mut self,
+        socket: WebSocket,
+        inventory: &IoCustodianInventory,
+        limits: TransportLimits,
+        retirement_deadline: Duration,
+    ) -> Result<LiveSocketTransport, SocketAdmissionError> {
+        let Some(mut reservation) = self.reservation.take() else {
+            return Err(SocketAdmissionError::WrongReservation);
+        };
+        // From here the custodian waits for this guard and for one marker
+        // task before it frees the slot, on success and on failure alike.
+        let mut cleanup = LiveSocketCleanup {
+            guard: Some(reservation.retain_until_auxiliary_cleanup()?),
+            _owner_finished: None,
+        };
+        let admission = SocketAdmission {
+            authority: Arc::clone(&self.authority),
+            reservation,
+        };
+        let started = admission
+            .start_socket_with_hook(
+                socket,
+                limits,
+                retirement_deadline,
+                Some(Arc::new(ReadDemand::default())),
+                || std::future::ready(()),
+                |_| std::future::ready(()),
+            )
+            .await;
+        let (owner_finished, owner_running) = oneshot::channel::<()>();
+        let registered = inventory.register_auxiliary_task(
+            &self.authority.connection_ref,
+            tokio::spawn(async move {
+                let _ = owner_running.await;
+            }),
+        );
+        match started {
+            Ok((custodian, input, output)) => {
+                // Without the marker the custodian would never report this
+                // connection joined, so its slot could not be freed.
+                registered?;
+                cleanup._owner_finished = Some(owner_finished);
+                Ok(LiveSocketTransport {
+                    observer: custodian.observer(),
+                    cleanup,
+                    input,
+                    output: output.into_message_sink(),
+                })
+            }
+            // A start that failed before its reservation became an indexed
+            // entry has already returned the slot and has nothing to register
+            // with. Otherwise the marker ends here with `owner_finished`.
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), SocketAdmissionError> {
         self.authority.with_start_authority(|| ())
     }
@@ -1880,6 +2122,159 @@ where
     }
 }
 
+impl<E> WebSocketOutput<E>
+where
+    E: Send + Sync + 'static,
+{
+    /// Present this output as a plain `Sink<Message>`. See
+    /// [`WebSocketMessageSink`] for how frames are classified.
+    pub fn into_message_sink(self) -> WebSocketMessageSink<E> {
+        WebSocketMessageSink { output: self }
+    }
+
+    /// Park one frame for bounded admission. The caller has already checked
+    /// readiness for the frame's class and that no admission is parked.
+    fn start_queued(&mut self, frame: WebSocketOutboundFrame) -> Result<(), OutputError<E>> {
+        self.validate_frame(&frame)?;
+        let terminal = !matches!(frame.authority.mode, FrameMode::Data);
+        let close = is_close(&frame.frame);
+        let size = frame_len_for_limit(&frame.frame);
+        if size > self.max_bytes || u32::try_from(size).is_err() {
+            return Err(OutputError::Admission(AdmissionError::Overloaded));
+        }
+        let sender = self.sender.clone();
+        self.pending = Some(Box::pin(async move {
+            sender
+                .send_wait_fenced(frame.frame, size, frame.authority)
+                .await
+                .map(|receipt| OutstandingWrite { receipt, terminal })
+        }));
+        self.close_submitted |= close;
+        Ok(())
+    }
+}
+
+/// Which readiness rule applies to a classified frame.
+#[derive(Clone, Copy)]
+enum MessageClass {
+    Data,
+    Terminal { close: bool },
+}
+
+/// A `Sink<Message>` over a supervised output, for an owner that writes one
+/// frame at a time and treats a completed flush as a completed socket write.
+///
+/// `poll_flush` returns `Ok` only after the pump has flushed every frame this
+/// sink started, so `SinkExt::send` keeps the meaning it has on a split
+/// socket. A frame the pump refuses or cannot finish is a flush error.
+///
+/// Frames are classified by content, because the caller has no typed way to
+/// name a terminal frame:
+///
+/// - `Message::Close` becomes the transport close and ends ordinary data.
+/// - The fixed system-shutdown stream error moves the output into shutdown
+///   mode, where it and the framing close that follows are written even after
+///   the node generation or process token is revoked. Any other frame is then
+///   refused.
+/// - Every other frame is ordinary data and carries the usual authority.
+pub struct WebSocketMessageSink<E> {
+    output: WebSocketOutput<E>,
+}
+
+impl<E> WebSocketMessageSink<E>
+where
+    E: Send + Sync + 'static,
+{
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        self.output.connection_ref()
+    }
+
+    fn classify(
+        &mut self,
+        frame: Message,
+    ) -> Result<(WebSocketOutboundFrame, MessageClass), OutputError<E>> {
+        if let Message::Close(close) = frame {
+            let frame = self.output.transport_close_frame(close)?;
+            return Ok((frame, MessageClass::Terminal { close: true }));
+        }
+        match self.output.authority.phase() {
+            TransportPhase::Open
+                if frame == fixed_terminal_text(FixedTerminalText::SystemShutdown) =>
+            {
+                self.output.begin_shutdown()?;
+                let frame = self.output.shutdown_error_frame()?;
+                Ok((frame, MessageClass::Terminal { close: false }))
+            }
+            TransportPhase::Open => Ok((self.output.data_frame(frame)?, MessageClass::Data)),
+            TransportPhase::Shutdown
+                if frame == fixed_terminal_text(FixedTerminalText::FramingClose) =>
+            {
+                let frame = self.output.framing_close_frame()?;
+                Ok((frame, MessageClass::Terminal { close: false }))
+            }
+            TransportPhase::CloseOnly => Err(OutputError::Closing),
+            TransportPhase::Shutdown | TransportPhase::LiveDetach => Err(OutputError::InvalidFrame),
+        }
+    }
+
+    /// Classify and park one frame. No admission may be parked.
+    fn start(&mut self, frame: Message) -> Result<(), OutputError<E>> {
+        if self.output.closing || self.output.close_submitted || self.output.pending.is_some() {
+            return Err(OutputError::Closing);
+        }
+        let (frame, class) = self.classify(frame)?;
+        // With no parked admission these checks only inspect receipts that
+        // already exist, so they never register the waker.
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let ready = match class {
+            MessageClass::Data => self.output.poll_ready_inner(&mut cx),
+            MessageClass::Terminal { close } => self.output.poll_ready_terminal(&mut cx, close),
+        };
+        match ready {
+            Poll::Ready(result) => result?,
+            Poll::Pending => return Err(OutputError::Closing),
+        }
+        self.output.start_queued(frame)
+    }
+}
+
+impl<E> Sink<Message> for WebSocketMessageSink<E>
+where
+    E: Send + Sync + 'static,
+{
+    type Error = OutputError<E>;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if this.output.closing || this.output.close_submitted {
+            return Poll::Ready(Err(OutputError::Closing));
+        }
+        this.output.poll_pending(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, frame: Message) -> Result<(), Self::Error> {
+        self.get_mut().start(frame)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        let retiring = this.output.authority.phase() != TransportPhase::Open;
+        this.output.poll_flush_inner(cx, retiring)
+    }
+
+    /// Write the transport close if none was sent, then wait for its flush.
+    /// This does not wait for the peer's reply or for the pumps to join; the
+    /// owner retires the custodian separately.
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        std::task::ready!(this.output.poll_pending(cx))?;
+        if !this.output.close_submitted {
+            this.start(Message::Close(None))?;
+        }
+        this.output.poll_flush_inner(cx, true)
+    }
+}
+
 fn frame_len_for_limit(frame: &Message) -> usize {
     match frame {
         Message::Text(text) => text.len(),
@@ -2115,6 +2510,9 @@ impl SocketAdmission {
             frames,
             terminal: terminal_rx,
             finished: false,
+            demand: None,
+            demand_outstanding: false,
+            settled: None,
         };
         let output = WebSocketOutput {
             sender,

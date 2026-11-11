@@ -22,6 +22,13 @@ pub enum LocalIoRelinquishmentOutcome {
 }
 
 impl LocalIoRelinquishment {
+    /// Observe halves that another owner holds, such as transport pump
+    /// tasks. The sender must publish `true` only after both half
+    /// destructors have returned, and close without publishing otherwise.
+    pub fn from_completion(completion: watch::Receiver<bool>) -> Self {
+        Self { completion }
+    }
+
     /// A false result includes both a live owner and an unobserved teardown.
     pub fn is_relinquished(&self) -> bool {
         *self.completion.borrow()

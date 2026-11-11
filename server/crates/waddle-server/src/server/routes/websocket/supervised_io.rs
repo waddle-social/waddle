@@ -1317,6 +1317,16 @@ impl IoCustodianInventory {
             .collect()
     }
 
+    /// Test-only snapshot of every indexed identity, started or not.
+    #[cfg(feature = "test-support")]
+    pub fn connection_refs(&self) -> Vec<ConnectionRef> {
+        let entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries.keys().cloned().collect()
+    }
+
     /// Reacquire observation by exact physical-connection identity.
     pub fn observe(&self, connection_ref: &ConnectionRef) -> Option<IoCustodianObserver> {
         let entries = match self.entries.lock() {
