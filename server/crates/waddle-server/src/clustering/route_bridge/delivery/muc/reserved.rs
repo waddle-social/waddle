@@ -343,7 +343,22 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
                 ConnectionGeneration::INITIAL,
             ),
         };
-        Ok(authority.commit(&submission).await)
+        // Acceptance seams: the owner's commit is the room's acceptance of
+        // the relayed message, so the suite can stop on either side of it.
+        #[cfg(feature = "test-support")]
+        crate::clustering::acceptance_seams::hold_owner_acceptance(
+            crate::clustering::acceptance_seams::OwnerAcceptancePoint::BeforeCommit,
+            message,
+        )
+        .await;
+        let decision = authority.commit(&submission).await;
+        #[cfg(feature = "test-support")]
+        crate::clustering::acceptance_seams::hold_owner_acceptance(
+            crate::clustering::acceptance_seams::OwnerAcceptancePoint::AfterCommit,
+            message,
+        )
+        .await;
+        Ok(decision)
     })
     .await
     .map_err(|_| {

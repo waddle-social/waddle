@@ -16,6 +16,11 @@ use crate::db::{Database, DatabaseDriver};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// File-armed fault seams on the room owner's side of a relayed groupchat
+/// message, for the two-node acceptance suite. Absent from every build
+/// without the `test-support` feature.
+#[cfg(all(feature = "clustering", feature = "test-support"))]
+pub(crate) mod acceptance_seams;
 /// Peer-allowlist store. Public: the multi-process cluster harness
 /// provisions the control-plane schema through the same `ensure_schema`
 /// path production uses, never a diverging inline DDL copy.

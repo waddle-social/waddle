@@ -494,3 +494,14 @@ waddle-server::restricted_runtime_startup mam_admits_only_the_exact_monitor_sche
 waddle-server::restricted_runtime_startup room_observation_exempts_only_the_exact_pubsub_lock_function
 waddle-server::restricted_runtime_startup owner_phase_is_idempotent_and_fails_closed_on_unclassified_state
 waddle-server::restricted_runtime_startup owner_phase_refuses_a_schema_public_can_use
+
+# #1948 remote-room acceptance fault harness: two real nodes, the sender's
+# XEP-0198 handled count against the room owner's durable acceptance. The
+# `*_characterizes_*` tests pin the current early acknowledgement and are
+# replaced by their `#[ignore]`d contract tests when the origin gates `h` on
+# owner acceptance; the other two already hold and guard reply-loss and
+# origin-restart recovery against a second acceptance.
+waddle-server::xep0045_xep0198_remote_acceptance h_while_owner_commit_paused_characterizes_current_early_ack
+waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit_characterizes_current_silent_loss
+waddle-server::xep0045_xep0198_remote_acceptance reply_loss_recovers_same_acceptance
+waddle-server::xep0045_xep0198_remote_acceptance origin_sigkill_after_owner_commit
