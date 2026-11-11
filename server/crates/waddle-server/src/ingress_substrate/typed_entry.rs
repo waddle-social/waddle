@@ -200,7 +200,6 @@ impl<'a> IngressEntryTransaction<'a> {
 
     /// Release the transaction to a caller that owns its remaining lifetime
     /// itself. The witness travels with it, never without it.
-    #[cfg(feature = "test-support")]
     pub(crate) fn into_parts(self) -> (Transaction<'a>, Option<PreparedAttestedReceiptWriter>) {
         (self.transaction, self.prepared)
     }

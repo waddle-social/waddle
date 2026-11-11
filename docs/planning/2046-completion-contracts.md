@@ -142,8 +142,9 @@ P2.1 is complete in two parts:
   prepared-writer witness the ingress repositories take, and the ingress unit
   of work stores the entry's transaction, so it cannot wrap one that skipped
   the entry. `scripts/check-ingress-typed-entry.py` fails the clippy lanes
-  when `attest_transaction(` appears elsewhere in the ingress modules outside
-  an allowlist of read-only attach-time checks. The closed authority in
+  when the ingress modules attest a transaction, open one directly on a
+  database handle, or take the epoch row lock without the entry's witness,
+  outside an allowlist that names each exception. The closed authority in
   `S/db/physical_attestation/typed_authority.rs` remains a fixture and is not
   wired into startup. Every table that M2 and M3 add is reachable only
   through the entry; other existing writers convert when their owning
@@ -271,22 +272,24 @@ In dependency order. Sizes are estimates from reading source.
    `livekit_webhook.rs:61`), which a WebSocket exit test does not reach. Seven
    child `*_database_url` settings (`S/server/config.rs:112-146`) are refused
    under attestation (`S/server/http.rs:2085`) and are removed.
-6. **Typed authority (L).** The ingress unit of work, the pooled receipt
-   writer with its post-commit readback, and the test-support raw writers
-   begin through `begin_ingress_entry`
+6. **Typed authority (L).** The ingress unit of work and the pooled receipt
+   writer with its post-commit readback begin through `begin_ingress_entry`
    (`S/ingress_substrate/typed_entry.rs`), which holds the two per-transaction
-   `attest_transaction` calls (installed guard and relation guard). The three
-   other calls in the ingress modules are read-only attach-time checks and are
-   allowlisted (`server/scripts/ingress-typed-entry-allowlist.txt`). Still
-   open: the entry does not attest the ledger or epoch manifest per
-   transaction; the pool still exposes raw `execute`, `query` and `begin`;
-   attach-time checks outside the ingress modules call `attest_transaction`
-   directly; the raw ingress writers that take the epoch row lock without
-   attesting (`begin_raw_ingress_writer` in
-   `S/ingress_uow/effect_descendants.rs`, `IngressSubstrate::begin` in
-   `S/ingress_substrate/substrate.rs`, and the unattested receipt writer in
-   `S/ingress_substrate/authority.rs`) do not use the entry; and the clustered
-   stores have no entry. See D2.
+   `attest_transaction` calls (installed guard and relation guard). On an
+   attested pool the raw ingress writers do too: `begin_raw_ingress_writer`
+   (`S/ingress_uow/effect_descendants.rs`), used by the notification and push
+   outboxes, and `PostgresIngressSubstrate::begin`
+   (`S/ingress_substrate/substrate.rs`). The pooled receipt writer's other
+   branch runs only on a handle without attestation. Every remaining direct
+   attestation, direct begin and epoch lock in the ingress modules is
+   allowlisted with its reason
+   (`server/scripts/ingress-typed-entry-allowlist.txt`). Still open: the
+   entry does not attest the ledger or epoch manifest per transaction; the
+   pool still exposes raw `execute`, `query` and `begin`; attach-time checks
+   outside the ingress modules call `attest_transaction` directly; the alias
+   GC deletes epoch-guarded rows on the serving pool without attesting its
+   transaction (`gc_candidate_batch` in `S/ingress_substrate/substrate.rs`);
+   and the clustered stores have no entry. See D2.
 7. **Replace the refusal with the attach (S).** `S/main.rs:94` calls
    `attach_verified_global_runtime_with_control_plane`, which clustering
    needs, and takes the pool; delete `S/server/lifecycle.rs:95-97`.
