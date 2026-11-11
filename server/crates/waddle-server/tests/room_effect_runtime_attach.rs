@@ -1,5 +1,5 @@
 //! Restricted PostgreSQL room-effect outbox attachment.
-#![cfg(feature = "test-support")]
+#![cfg(all(feature = "test-support", feature = "clustering"))]
 
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use std::future::Future;
