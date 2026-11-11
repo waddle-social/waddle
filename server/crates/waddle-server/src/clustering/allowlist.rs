@@ -51,6 +51,96 @@ pub enum AllowlistError {
          refusing to apply an empty set from a populated table"
     )]
     AllRowsInvalid { rows: usize },
+    /// Schema creation was asked of a restricted runtime handle, which holds
+    /// no DDL privilege; the owner prepares the table.
+    #[error("the peer-allowlist table is prepared by the owner, not through an attested handle")]
+    OwnerHandleRequired,
+}
+
+/// Fail-closed refusal to prepare the peer allowlist through an owner handle.
+#[derive(Debug, thiserror::Error)]
+pub enum AllowlistOwnerPreparationError {
+    #[error("peer-allowlist owner preparation requires a non-runtime PostgreSQL owner handle")]
+    OwnerHandleRequired,
+    #[error("peer-allowlist owner identity, role, or schema is unsafe")]
+    UnsafeOwnerBoundary,
+    #[error("peer-allowlist enrollment requires a non-empty set of distinct PeerIds")]
+    InvalidPeerSet,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+const ALLOWLIST_TABLE_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS clustering_peer_allowlist (
+        peer_id     TEXT PRIMARY KEY,
+        enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+"#;
+
+/// Serializes peer-allowlist owner preparation across owner sessions.
+const ALLOWLIST_OWNER_ADVISORY_LOCK: i64 = 6_841_445_497_037_938_002;
+
+/// Create the peer allowlist if it is missing and make its rows exactly
+/// `peer_ids`, in one owner transaction: PeerIds outside the set are revoked
+/// and missing ones enrolled, while rows already enrolled keep their
+/// enrollment time. The runtime only ever reads this table, so the owner
+/// phase is the enrollment authority for a restricted deployment.
+pub async fn prepare_peer_allowlist_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+    peer_ids: &[PeerId],
+) -> Result<(), AllowlistOwnerPreparationError> {
+    if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+        return Err(AllowlistOwnerPreparationError::OwnerHandleRequired);
+    }
+    let enrolled = peer_ids
+        .iter()
+        .map(PeerId::to_string)
+        .collect::<HashSet<_>>();
+    if enrolled.is_empty() || enrolled.len() != peer_ids.len() {
+        return Err(AllowlistOwnerPreparationError::InvalidPeerSet);
+    }
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![ALLOWLIST_OWNER_ADVISORY_LOCK],
+    )
+    .await?;
+    crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+        .await
+        .map_err(|_| AllowlistOwnerPreparationError::UnsafeOwnerBoundary)?;
+    tx.execute("SET LOCAL default_table_access_method = heap", ())
+        .await?;
+    tx.execute(ALLOWLIST_TABLE_SQL, ()).await?;
+    let mut rows = tx
+        .query("SELECT peer_id FROM clustering_peer_allowlist", ())
+        .await?;
+    let mut existing = HashSet::new();
+    while let Some(row) = rows.next().await? {
+        existing.insert(row.get::<String>(0)?);
+    }
+    drop(rows);
+    for revoked in existing.difference(&enrolled) {
+        tx.execute(
+            "DELETE FROM clustering_peer_allowlist WHERE peer_id = ?",
+            crate::db_params![revoked.clone()],
+        )
+        .await?;
+    }
+    for added in enrolled.difference(&existing) {
+        tx.execute(
+            "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+            crate::db_params![added.clone()],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Read-only view of the enrolled peer set. A trait so a dedicated
@@ -92,17 +182,11 @@ impl PostgresAllowlistStore {
 #[async_trait]
 impl AllowlistStore for PostgresAllowlistStore {
     async fn ensure_schema(&self) -> Result<(), AllowlistError> {
+        if self.db.uses_attested_postgres_pool() {
+            return Err(AllowlistError::OwnerHandleRequired);
+        }
         let conn = self.db.guard().await?;
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS clustering_peer_allowlist (
-                peer_id     TEXT PRIMARY KEY,
-                enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-            "#,
-            (),
-        )
-        .await?;
+        conn.execute(ALLOWLIST_TABLE_SQL, ()).await?;
         Ok(())
     }
 

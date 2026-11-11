@@ -38,8 +38,9 @@ pub enum ClaimOccupancyAttachError {
     Database(#[from] DatabaseError),
 }
 
-/// Evidence of claims and occupancy structure on one physically attested
-/// main pool. It does not authorize mutations, validate the control-plane
+/// Evidence of claim, node, steal-intent, reaper-cursor, peer-allowlist and
+/// occupancy structure, and the runtime's exact privileges on each, on one
+/// physically attested main pool. It does not authorize mutations, validate the control-plane
 /// lane, establish historical sequence provenance, or activate an epoch.
 pub struct VerifiedMainClaimOccupancy {
     capability: AttestedPostgresWriterCapability,
@@ -77,6 +78,15 @@ const fn column(name: &'static str, kind: &'static str, not_null: bool) -> Colum
 const fn text(name: &'static str, not_null: bool) -> Column {
     column(name, "text", not_null)
 }
+const fn defaulted(name: &'static str, kind: &'static str, default: &'static str) -> Column {
+    Column {
+        name,
+        kind,
+        not_null: true,
+        identity: "",
+        default: Some(default),
+    }
+}
 struct Index {
     name: &'static str,
     columns: &'static str,
@@ -86,7 +96,10 @@ struct Index {
 struct Table {
     name: &'static str,
     columns: &'static [Column],
+    /// Primary key columns, or empty for a table without one.
     primary: &'static str,
+    /// Column lists of the table's UNIQUE constraints.
+    unique: &'static [&'static str],
     checks: &'static [&'static str],
     indexes: &'static [Index],
     insert: bool,
@@ -106,6 +119,31 @@ const CLAIM_COLUMNS: &[Column] = &[
         identity: "",
         default: Some("nextval('clustering_claim_epoch_seq'::regclass)"),
     },
+];
+const NODE_COLUMNS: &[Column] = &[
+    text("node_id", true),
+    text("node_epoch", true),
+    defaulted("heartbeat", "timestamp with time zone", "now()"),
+    defaulted("expired", "boolean", "false"),
+    text("pod_template_hash", false),
+    defaulted("draining", "boolean", "false"),
+    text("peer_id", false),
+    defaulted("first_seen", "timestamp with time zone", "now()"),
+];
+const STEAL_INTENT_COLUMNS: &[Column] = &[
+    text("entity", true),
+    text("reporter_node", true),
+    defaulted("created_at", "timestamp with time zone", "now()"),
+];
+const STEAL_INTENT_INDEXES: &[Index] = &[Index {
+    name: "clustering_steal_intents_entity_created_at",
+    columns: "entity,created_at",
+    options: "0,0",
+}];
+const REAPER_CURSOR_COLUMNS: &[Column] = &[text("lane", true), text("cursor_entity", false)];
+const ALLOWLIST_COLUMNS: &[Column] = &[
+    text("peer_id", true),
+    defaulted("enrolled_at", "timestamp with time zone", "now()"),
 ];
 const OCCUPANCY_COLUMNS: &[Column] = &[text("full_jid", true), text("generation", true)];
 const CLAIM_INDEXES: &[Index] = &[
@@ -130,6 +168,7 @@ const TABLES: &[Table] = &[
         name: "clustering_claims",
         columns: CLAIM_COLUMNS,
         primary: "entity",
+        unique: &[],
         checks: &[],
         indexes: CLAIM_INDEXES,
         insert: true,
@@ -140,10 +179,56 @@ const TABLES: &[Table] = &[
         name: "xmpp_occupancy_authority",
         columns: OCCUPANCY_COLUMNS,
         primary: "full_jid",
+        unique: &[],
         checks: &[],
         indexes: &[],
         insert: true,
         update: true,
+        delete: false,
+    },
+    Table {
+        name: "clustering_nodes",
+        columns: NODE_COLUMNS,
+        primary: "node_id",
+        unique: &[],
+        checks: &[],
+        indexes: &[],
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    Table {
+        name: "clustering_steal_intents",
+        columns: STEAL_INTENT_COLUMNS,
+        primary: "",
+        unique: &["entity,reporter_node"],
+        checks: &[],
+        indexes: STEAL_INTENT_INDEXES,
+        insert: true,
+        update: true,
+        delete: true,
+    },
+    Table {
+        name: "clustering_orphan_reaper_cursors",
+        columns: REAPER_CURSOR_COLUMNS,
+        primary: "lane",
+        unique: &[],
+        checks: &[],
+        indexes: &[],
+        insert: true,
+        update: true,
+        delete: false,
+    },
+    // Enrollment is owner-controlled: the runtime only reads it.
+    Table {
+        name: "clustering_peer_allowlist",
+        columns: ALLOWLIST_COLUMNS,
+        primary: "peer_id",
+        unique: &[],
+        checks: &[],
+        indexes: &[],
+        insert: false,
+        update: false,
         delete: false,
     },
 ];
@@ -323,7 +408,8 @@ async fn verify_constraints(
          WHERE n.nspname = ? AND c.relname = ?",
         crate::db_params![schema, table.name],
     ).await?;
-    let mut primary = false;
+    let mut primary = Vec::new();
+    let mut unique = Vec::new();
     let mut checks = Vec::new();
     let mut count = 0usize;
     while let Some(row) = rows.next().await? {
@@ -336,8 +422,17 @@ async fn verify_constraints(
             return Err(ClaimOccupancyAttachError::InvalidConstraint { table: table.name });
         }
         match kind.as_str() {
-            "p" => {
-                primary = !primary && row.get::<bool>(4)? && row.get::<String>(5)? == table.primary;
+            // A key constraint counts only with a valid, immediate index.
+            "p" | "u" => {
+                if !row.get::<bool>(4)? {
+                    return Err(ClaimOccupancyAttachError::InvalidConstraint { table: table.name });
+                }
+                let columns = row.get::<String>(5)?;
+                if kind == "p" {
+                    primary.push(columns);
+                } else {
+                    unique.push(columns);
+                }
             }
             "c" => checks.push(row.get::<String>(6)?),
             _ => return Err(ClaimOccupancyAttachError::InvalidConstraint { table: table.name }),
@@ -346,8 +441,17 @@ async fn verify_constraints(
     checks.sort_unstable();
     let mut expected = table.checks.to_vec();
     expected.sort_unstable();
-    if !primary
-        || count != 1 + table.checks.len()
+    unique.sort_unstable();
+    let mut expected_unique = table.unique.to_vec();
+    expected_unique.sort_unstable();
+    let expected_primary: &[&str] = if table.primary.is_empty() {
+        &[]
+    } else {
+        std::slice::from_ref(&table.primary)
+    };
+    if primary.iter().map(String::as_str).collect::<Vec<_>>() != expected_primary
+        || unique.iter().map(String::as_str).collect::<Vec<_>>() != expected_unique
+        || count != expected_primary.len() + table.unique.len() + table.checks.len()
         || checks.iter().map(String::as_str).collect::<Vec<_>>() != expected
     {
         return Err(ClaimOccupancyAttachError::InvalidConstraint { table: table.name });
@@ -374,7 +478,9 @@ async fn verify_indexes(
         .await?
         .ok_or(ClaimOccupancyAttachError::InvalidIndex { table: table.name })?
         .get(0)?;
-    if count != (1 + table.indexes.len()) as i64 {
+    // One index backs each key constraint; the rest are named below.
+    let key_indexes = usize::from(!table.primary.is_empty()) + table.unique.len();
+    if count != (key_indexes + table.indexes.len()) as i64 {
         return Err(ClaimOccupancyAttachError::InvalidIndex { table: table.name });
     }
     for index in table.indexes {

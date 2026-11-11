@@ -54,6 +54,17 @@ mod schema;
 #[cfg(feature = "test-support")]
 pub mod snapshot_revision_candidate;
 pub use runtime_attach::SmRuntimeAttachError;
+
+/// Verify the owner-prepared stream management relations and the runtime's
+/// write privileges on them in one read-only snapshot of the attested main
+/// pool. Shared by the portable and the claim-fenced stores, which use the
+/// same relations.
+#[cfg(feature = "clustering")]
+pub(crate) async fn verify_runtime_postgres_schema(
+    db: &crate::db::Database,
+) -> Result<(), SmRuntimeAttachError> {
+    runtime_attach::verify(db, true).await
+}
 pub use schema::bootstrap_schema_owner as bootstrap_portable_sm_owner_schema;
 
 use codec::{

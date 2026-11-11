@@ -14,6 +14,10 @@
 //! PostgreSQL through `WADDLE_TEST_REQUIRE_POSTGRES=1` and fail if it is missing.
 #![cfg(feature = "test-support")]
 
+#[cfg(feature = "clustering")]
+#[path = "restricted_runtime_startup/clustered.rs"]
+mod clustered;
+
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -503,6 +507,8 @@ impl Provisioned {
             runtime: role(&roles.runtime),
             attestation_definer: role(&roles.definer),
             vapid_root_key: SESSION_KEY.as_bytes().to_vec(),
+            #[cfg(feature = "clustering")]
+            clustering: None,
         };
         Self {
             cluster,
@@ -522,6 +528,21 @@ impl Provisioned {
 
 impl Prepared {
     async fn new(url: &str) -> Self {
+        Self::from_provisioned(Provisioned::new(url).await, url).await
+    }
+
+    /// Run the owner phase with the provisioned plan, then install the
+    /// attestor and build the runtime handoff.
+    async fn from_provisioned(provisioned: Provisioned, url: &str) -> Self {
+        let lineage = run_owner_phase(&provisioned.owner_url, &provisioned.plan)
+            .await
+            .expect("owner phase prepares the runtime schemas");
+        Self::attest(provisioned, lineage, url).await
+    }
+
+    /// Install the attestor on a database the owner phase has prepared and
+    /// build the runtime handoff for it.
+    async fn attest(provisioned: Provisioned, lineage: AttestedLineage, url: &str) -> Self {
         let Provisioned {
             cluster,
             admin,
@@ -530,10 +551,7 @@ impl Prepared {
             base,
             owner_url,
             plan,
-        } = Provisioned::new(url).await;
-        let lineage = run_owner_phase(&owner_url, &plan)
-            .await
-            .expect("owner phase prepares the runtime schemas");
+        } = provisioned;
 
         // The attestor is installed by its own login, after the owner phase.
         let operation_id = Uuid::new_v4();
@@ -949,7 +967,7 @@ async fn attach_serving_pool(prepared: &Prepared) -> DatabasePool {
         .await
         .expect("pinned preflight under the runtime login");
     identity
-        .attach_serving(preparation, &prepared.runtime_url, POOL_LIMITS)
+        .attach_serving(preparation, &prepared.runtime_url, POOL_LIMITS, None)
         .await
         .expect("attested serving pool under the runtime login")
 }
@@ -993,6 +1011,67 @@ async fn assert_runtime_owns_nothing(prepared: &Prepared) {
     assert_eq!(owned, 0, "the runtime role must own no catalog object");
 }
 
+/// Attach every store a restricted runtime attaches whether or not it is
+/// clustered, in startup order, through the selection functions startup
+/// calls. MAM and the ingress authority are attached by the caller, which
+/// knows the topology.
+async fn attach_single_node_stores(
+    prepared: &Prepared,
+    pool: &DatabasePool,
+    inherited: &ResolvedXmppDatabaseUrl,
+) {
+    let main = pool.global();
+    MucDestroyCompletionOutboxStore::attach_existing(main.clone())
+        .await
+        .expect("attach MUC destroy completion outbox");
+    waddle_server::test_support::create_inbox_startup_for_test(inherited, main)
+        .await
+        .expect("attach inbox");
+    DatabaseSpacesMetadataStore::attach_existing(main.clone())
+        .await
+        .expect("attach spaces metadata");
+    DatabaseChannelSpaceLinkStore::attach_existing(main.clone())
+        .await
+        .expect("attach channel-space links");
+    waddle_server::server::create_pubsub_storage(main, inherited)
+        .await
+        .expect("attach PubSub");
+    CallTeardownOutboxStore::attach_existing(
+        main.clone(),
+        SharedNodeIdentity::new(NodeIdentity::local()),
+    )
+    .await
+    .expect("attach call teardown outbox");
+    RoomEffectOutboxStore::attach_serving(main.clone())
+        .await
+        .expect("attach room effect outbox");
+    waddle_server::test_support::attach_pending_startup(inherited, main)
+        .await
+        .expect("attach pending delivery");
+    waddle_server::test_support::attach_sm_startup(inherited, main, false)
+        .await
+        .expect("attach stream management");
+    // Push registrations, Push Service, VAPID, notification outbox and
+    // notification activity, with the root key the owner phase sealed under.
+    let _push = verify_attested_push_notification_stores(
+        main.clone(),
+        SESSION_KEY.as_bytes(),
+        "push.localhost".parse().expect("push service JID"),
+    )
+    .await
+    .expect("attach Push and notification stores");
+    waddle_server::test_support::attach_webhook_delivery_ledger(main)
+        .await
+        .expect("attach webhook delivery ledger");
+    verify_attested_room_observation_schema(
+        main,
+        &prepared.lineage,
+        &role(&prepared.roles.migrator),
+    )
+    .await
+    .expect("verify room observation schema");
+}
+
 /// The owner phase prepares every store the non-clustered runtime attaches
 /// at startup, and the runtime role attaches each one read-only on its
 /// attested pool. The attachments run in startup order through the same
@@ -1029,55 +1108,7 @@ async fn owner_phase_prepares_the_stores_the_runtime_role_attaches() {
     let main = pool.global();
     let inherited = ResolvedXmppDatabaseUrl::InheritedGlobal(prepared.runtime_url.clone());
 
-    MucDestroyCompletionOutboxStore::attach_existing(main.clone())
-        .await
-        .expect("attach MUC destroy completion outbox");
-    waddle_server::test_support::create_inbox_startup_for_test(&inherited, main)
-        .await
-        .expect("attach inbox");
-    DatabaseSpacesMetadataStore::attach_existing(main.clone())
-        .await
-        .expect("attach spaces metadata");
-    DatabaseChannelSpaceLinkStore::attach_existing(main.clone())
-        .await
-        .expect("attach channel-space links");
-    waddle_server::server::create_pubsub_storage(main, &inherited)
-        .await
-        .expect("attach PubSub");
-    CallTeardownOutboxStore::attach_existing(
-        main.clone(),
-        SharedNodeIdentity::new(NodeIdentity::local()),
-    )
-    .await
-    .expect("attach call teardown outbox");
-    RoomEffectOutboxStore::attach_serving(main.clone())
-        .await
-        .expect("attach room effect outbox");
-    waddle_server::test_support::attach_pending_startup(&inherited, main)
-        .await
-        .expect("attach pending delivery");
-    waddle_server::test_support::attach_sm_startup(&inherited, main, false)
-        .await
-        .expect("attach stream management");
-    // Push registrations, Push Service, VAPID, notification outbox and
-    // notification activity, with the root key the owner phase sealed under.
-    let _push = verify_attested_push_notification_stores(
-        main.clone(),
-        SESSION_KEY.as_bytes(),
-        "push.localhost".parse().expect("push service JID"),
-    )
-    .await
-    .expect("attach Push and notification stores");
-    waddle_server::test_support::attach_webhook_delivery_ledger(main)
-        .await
-        .expect("attach webhook delivery ledger");
-    verify_attested_room_observation_schema(
-        main,
-        &prepared.lineage,
-        &role(&prepared.roles.migrator),
-    )
-    .await
-    .expect("verify room observation schema");
+    attach_single_node_stores(&prepared, &pool, &inherited).await;
     DatabaseMamStorage::attach_single_node(
         main,
         role(&prepared.roles.schema_owner),

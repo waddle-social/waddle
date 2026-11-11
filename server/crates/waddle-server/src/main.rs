@@ -95,7 +95,7 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                 // migrated or provisioned here: the owner phase prepared every
                 // schema, and each store attaches to it during startup.
                 let pool = identity
-                    .attach_serving(preparation, &db_runtime.database_url, limits)
+                    .attach_serving(preparation, &db_runtime.database_url, limits, None)
                     .await?;
                 info!("Restricted runtime attached its attested serving pool");
                 (pool, None, None)

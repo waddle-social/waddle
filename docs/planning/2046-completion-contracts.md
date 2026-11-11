@@ -259,10 +259,17 @@ In dependency order. Sizes are estimates from reading source.
    `verify_attested_push_notification_stores` already composes five of them
    and discards the handles (`S/server/push_notification_runtime.rs:70-120`).
 3. **Clustering under the runtime role (L).** Production runs two clustered
-   replicas. `start_if_enabled` runs schema DDL (`S/clustering/node.rs:1166`);
-   durable MUC `open` refuses attested pools
-   (`S/muc_durable/implementation.rs:400`); clustered SM refuses
-   (`S/server/http.rs:2118-2120`).
+   replicas. The owner phase prepares and adopts the claim, allowlist,
+   keypair-pool and durable room relations
+   (`S/server/runtime_owner.rs`, `prepare_clustering`), and each clustering
+   store has a verifying runtime attachment
+   (`PostgresClaimStore::attach_runtime`,
+   `PostgresKeypairSlotLease::attach_existing`,
+   `PostgresMucRoomStore::attach_runtime`,
+   `PostgresFencedSmPersistence::attach_runtime`). Startup does not select
+   them: `start_if_enabled` runs schema DDL (`S/clustering/node.rs`), and
+   clustered SM refuses under the attested pool (`S/server/http.rs`,
+   `AttestedClusteredSmUnsupported`).
 4. **Remaining startup writes and DDL (M).** `EnsureSchema`
    (`S/server/lifecycle.rs:180`), extension grant sync (`http.rs:1254`),
    account reconcile (`:1293`), notification ancestry adoption (`:1447`) and

@@ -4,9 +4,13 @@
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
+use waddle_server::clustering::allowlist::{
+    prepare_peer_allowlist_owner, AllowlistOwnerPreparationError,
+};
 use waddle_server::clustering::claims::{
-    attach_main_claim_occupancy, initialize_fresh_claims_owner, ClaimOccupancyAttachError,
-    ClaimOwnerPreparationError, PostgresClaimStore,
+    attach_main_claim_occupancy, initialize_fresh_claims_owner, prepare_claims_owner,
+    ClaimOccupancyAttachError, ClaimOwnerPreparationError, ClaimStoreAttachError,
+    PostgresClaimStore,
 };
 use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
@@ -404,9 +408,24 @@ async fn claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs() {
             .await
             .unwrap();
     assert!(sentinel.is_some());
-    // V0013 owner-migration shape was installed above; this node table is
-    // only the acquire fixture and is not part of the verified capability.
-    owner_db.guard().await.unwrap().execute("CREATE TABLE clustering_nodes (node_id TEXT PRIMARY KEY, node_epoch TEXT NOT NULL, draining BOOLEAN NOT NULL DEFAULT FALSE)", ()).await.unwrap();
+    // The adopting preparation completes the fresh claim authority with the
+    // node, steal-intent and reaper-cursor relations and refuses a runtime
+    // handle. It leaves the claim table and the epoch sequence as they are.
+    assert!(matches!(
+        prepare_claims_owner(&runtime, &identity).await,
+        Err(ClaimOwnerPreparationError::OwnerHandleRequired)
+    ));
+    prepare_claims_owner(&owner_db, &identity)
+        .await
+        .expect("adopt the fresh claim authority");
+    let enrolled = [libp2p::PeerId::random(), libp2p::PeerId::random()];
+    assert!(matches!(
+        prepare_peer_allowlist_owner(&runtime, &identity, &enrolled).await,
+        Err(AllowlistOwnerPreparationError::OwnerHandleRequired)
+    ));
+    prepare_peer_allowlist_owner(&owner_db, &identity, &enrolled)
+        .await
+        .expect("enroll the peer allowlist");
     run_sql(
         &f,
         &format!(
@@ -423,14 +442,32 @@ async fn claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs() {
         ),
     )
     .await;
-    run_sql(
-        &f,
-        &format!(
-            "GRANT SELECT ON {}.clustering_nodes TO {}",
-            f.target, f.runtime
-        ),
-    )
-    .await;
+    // The claim relations alone are not the verified capability: the node,
+    // steal-intent, reaper-cursor and allowlist relations each need their
+    // exact runtime privileges.
+    for (table, privileges) in [
+        ("clustering_nodes", "SELECT, INSERT, UPDATE"),
+        ("clustering_steal_intents", "SELECT, INSERT, UPDATE, DELETE"),
+        ("clustering_orphan_reaper_cursors", "SELECT, INSERT, UPDATE"),
+        ("clustering_peer_allowlist", "SELECT"),
+    ] {
+        assert!(
+            matches!(
+                attach_main_claim_occupancy(runtime.clone()).await,
+                Err(ClaimOccupancyAttachError::Relation { .. }
+                    | ClaimOccupancyAttachError::UnsafeRuntimePrivileges { .. })
+            ),
+            "attachment must refuse before {table} is granted"
+        );
+        run_sql(
+            &f,
+            &format!(
+                "GRANT {privileges} ON {}.{table} TO {}",
+                f.target, f.runtime
+            ),
+        )
+        .await;
+    }
     run_sql(
         &f,
         &format!(
@@ -445,7 +482,14 @@ async fn claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs() {
     assert!(proof.belongs_to_main_pool(&runtime));
     assert!(!proof.belongs_to_main_pool(&pool.ingress()));
     assert!(!proof.belongs_to_main_pool(other_pool.global()));
-    let store = std::sync::Arc::new(PostgresClaimStore::new(runtime.clone()));
+    assert!(matches!(
+        PostgresClaimStore::attach_runtime(other_pool.global().clone(), &proof),
+        Err(ClaimStoreAttachError::ClaimAuthorityMismatch)
+    ));
+    let store = std::sync::Arc::new(
+        PostgresClaimStore::attach_runtime(runtime.clone(), &proof)
+            .expect("claim store attaches with matching evidence"),
+    );
     let entity = Entity::new(
         EntityType::RoomActor,
         "room@conference.example.test".to_owned(),
@@ -600,6 +644,141 @@ async fn claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs() {
         ),
     )
     .await;
+    // A rerun of the adopting preparation keeps retained claims and never
+    // rewinds the epoch sequence.
+    prepare_claims_owner(&owner_db, &identity)
+        .await
+        .expect("rerun the claim preparation");
+    let (last_value, retained_epoch): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT (SELECT last_value FROM {0}.clustering_claim_epoch_seq), \
+                (SELECT max(claim_epoch) FROM {0}.clustering_claims)",
+        f.target
+    ))
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!((last_value, retained_epoch), (second.0, second.0));
+    attach_main_claim_occupancy(runtime.clone())
+        .await
+        .expect("attachment after the rerun");
+
+    // Each added relation is verified exactly: an excess privilege, a
+    // changed shape or an extra index refuses the attachment.
+    for (grant, revoke, refusal) in [
+        (
+            format!(
+                "GRANT INSERT ON {}.clustering_peer_allowlist TO {}",
+                f.target, f.runtime
+            ),
+            format!(
+                "REVOKE INSERT ON {}.clustering_peer_allowlist FROM {}",
+                f.target, f.runtime
+            ),
+            "peer allowlist write privilege",
+        ),
+        (
+            format!(
+                "GRANT DELETE ON {}.clustering_nodes TO {}",
+                f.target, f.runtime
+            ),
+            format!(
+                "REVOKE DELETE ON {}.clustering_nodes FROM {}",
+                f.target, f.runtime
+            ),
+            "node delete privilege",
+        ),
+        (
+            format!(
+                "REVOKE UPDATE ON {}.clustering_orphan_reaper_cursors FROM {}",
+                f.target, f.runtime
+            ),
+            format!(
+                "GRANT UPDATE ON {}.clustering_orphan_reaper_cursors TO {}",
+                f.target, f.runtime
+            ),
+            "missing reaper cursor update privilege",
+        ),
+    ] {
+        run_sql(&f, &grant).await;
+        assert!(
+            matches!(
+                attach_main_claim_occupancy(runtime.clone()).await,
+                Err(ClaimOccupancyAttachError::UnsafeRuntimePrivileges { .. })
+            ),
+            "{refusal} must refuse the attachment"
+        );
+        run_sql(&f, &revoke).await;
+    }
+    run_sql(
+        &f,
+        &format!(
+            "ALTER TABLE {}.clustering_nodes ADD COLUMN unexpected text",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        attach_main_claim_occupancy(runtime.clone()).await,
+        Err(ClaimOccupancyAttachError::InvalidTable {
+            table: "clustering_nodes"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "ALTER TABLE {}.clustering_nodes DROP COLUMN unexpected",
+            f.target
+        ),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "CREATE INDEX unexpected_intent_idx ON {}.clustering_steal_intents (reporter_node)",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        attach_main_claim_occupancy(runtime.clone()).await,
+        Err(ClaimOccupancyAttachError::InvalidIndex {
+            table: "clustering_steal_intents"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!("DROP INDEX {}.unexpected_intent_idx", f.target),
+    )
+    .await;
+    run_sql(
+        &f,
+        &format!(
+            "ALTER TABLE {0}.clustering_steal_intents \
+             DROP CONSTRAINT clustering_steal_intents_entity_reporter_node_key",
+            f.target
+        ),
+    )
+    .await;
+    assert!(matches!(
+        attach_main_claim_occupancy(runtime.clone()).await,
+        Err(ClaimOccupancyAttachError::InvalidConstraint {
+            table: "clustering_steal_intents"
+        })
+    ));
+    run_sql(
+        &f,
+        &format!(
+            "ALTER TABLE {0}.clustering_steal_intents \
+             ADD CONSTRAINT clustering_steal_intents_entity_reporter_node_key \
+             UNIQUE (entity, reporter_node)",
+            f.target
+        ),
+    )
+    .await;
+    attach_main_claim_occupancy(runtime.clone())
+        .await
+        .expect("attachment after restoring the added relations");
+
     run_sql(
         &f,
         &format!(

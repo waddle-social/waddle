@@ -143,8 +143,70 @@ pub enum KeypoolOwnerError {
     ActivationNotReady,
     #[error("keypair-pool generation is missing or already active")]
     InvalidGenerationState,
+    #[error(
+        "a keypair-slot table created by an unattested runtime exists and the plan does not \
+         retire it"
+    )]
+    LegacyKeypairSlots,
+    #[error("the unattested keypair-slot table does not have the shape this owner can retire")]
+    LegacyShapeMismatch,
+    #[error(
+        "keypair slot {slot} is still leased by {holder}; its last heartbeat was {age_ms} ms ago \
+         on the database clock"
+    )]
+    LegacyLeaseLive {
+        slot: i32,
+        holder: String,
+        age_ms: i64,
+    },
+    #[error("the activation delay is shorter than the lease lifetime being retired")]
+    ActivationDelayBelowLegacyTtl,
+    #[error("the enrolled keypair pool has a different generation or PeerId order")]
+    EnrollmentMismatch,
+    #[error("the enrolled keypair-pool relations or guards do not have the expected shape")]
+    EnrolledShape(#[source] LeaseAttachError),
     #[error(transparent)]
     Database(#[from] DatabaseError),
+}
+
+/// What the owner does with a `clustering_keypair_slots` table that has no
+/// enrollment: the table an unattested runtime creates for itself, whose rows
+/// name no enrolled generation or PeerId.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LegacyKeypairSlots {
+    /// Refuse the preparation and leave the table untouched.
+    #[default]
+    Refuse,
+    /// Drop the table and create the enrolled one, but only while no row is
+    /// leased. A row is leased when it has a holder, is not marked expired
+    /// and its heartbeat is newer than `legacy_ttl` on the database clock;
+    /// `legacy_ttl` must be at least the lease lifetime the unattested
+    /// runtime was configured with. Holder history in the table is lost.
+    Retire { legacy_ttl: Duration },
+}
+
+/// The keypair pool an owner enrolls or adopts.
+#[derive(Debug, Clone, Copy)]
+pub struct KeypoolEnrollment<'a> {
+    /// Generation the enrollment is recorded under.
+    pub generation: uuid::Uuid,
+    /// Ordered PeerIds; slot `n` leases `peer_ids[n]`.
+    pub peer_ids: &'a [PeerId],
+    /// Restricted login that leases slots.
+    pub runtime_role: &'a str,
+    /// How long a newly enrolled generation stays pending.
+    pub activation_delay: Duration,
+    pub legacy: LegacyKeypairSlots,
+}
+
+/// State of the enrolled generation after an owner preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeypoolPreparation {
+    /// Runtime attachment accepts the generation.
+    Active,
+    /// The activation delay has not elapsed; a later preparation with the
+    /// same enrollment activates it.
+    Pending,
 }
 
 /// The keypair-slot lease store. A trait so a dedicated control-plane pool
@@ -254,6 +316,67 @@ impl PostgresKeypairSlotLease {
             return Err(KeypoolOwnerError::OwnerHandleRequired);
         }
         activate_keypool_owner(db, identity, generation).await
+    }
+
+    /// Bring the keypair authority to the active enrollment `enrollment`
+    /// names, creating, adopting or completing it as needed:
+    ///
+    /// - nothing exists: the tables, guards and grants are created and the
+    ///   generation is enrolled pending;
+    /// - only an unenrolled lease table exists: refused, or retired under
+    ///   [`LegacyKeypairSlots::Retire`] and then enrolled pending;
+    /// - an enrollment exists: its shape and guards are verified, guard
+    ///   functions that run with the owner's privileges are switched to
+    ///   run with the caller's, and a different generation or PeerId order is
+    ///   refused.
+    ///
+    /// A pending generation is activated once its delay has elapsed and the
+    /// lease table is empty. Repeating the call on an active matching
+    /// enrollment changes nothing, and lease rows are never rewritten.
+    pub async fn prepare_keypool_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+        enrollment: &KeypoolEnrollment<'_>,
+    ) -> Result<KeypoolPreparation, KeypoolOwnerError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(KeypoolOwnerError::PostgresRequired);
+        }
+        if db.attested_pg_writer_capability().is_some() {
+            return Err(KeypoolOwnerError::OwnerHandleRequired);
+        }
+        validate_peer_order(enrollment.peer_ids)
+            .map_err(|_| KeypoolOwnerError::InvalidPeerOrder)?;
+        crate::db::physical_attestation::validate_identifier(
+            enrollment.runtime_role,
+            "keypool runtime role",
+        )
+        .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+        prepare_keypool_owner(db, identity, enrollment).await
+    }
+
+    /// Switch keypair guard functions that carry `SECURITY DEFINER` to run
+    /// with the calling role's privileges, in one owner transaction, and
+    /// report how many were switched. Nothing else about the enrollment is
+    /// read or changed; [`Self::prepare_keypool_owner`] verifies the exact
+    /// guard pin afterwards. An owner phase runs this before any check that
+    /// refuses owner-privileged triggers on relations the runtime writes.
+    pub async fn convert_definer_guards_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+        runtime_role: &str,
+    ) -> Result<usize, KeypoolOwnerError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(KeypoolOwnerError::PostgresRequired);
+        }
+        if db.attested_pg_writer_capability().is_some() {
+            return Err(KeypoolOwnerError::OwnerHandleRequired);
+        }
+        crate::db::physical_attestation::validate_identifier(runtime_role, "keypool runtime role")
+            .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+        let mut tx = begin_keypool_owner(db, identity, runtime_role).await?;
+        let converted = convert_definer_guards(&mut tx, &identity.schema.name.0).await?;
+        tx.commit().await?;
+        Ok(converted)
     }
 
     /// Attach the exact attested main and independent control-plane pools to
@@ -656,14 +779,26 @@ BEGIN
 END;
 "#;
 
-async fn initialize_keypool_owner(
-    db: &Database,
+/// Which keypair authority objects the schema already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeypairInventory {
+    /// No lease table, enrollment table, guard function or guard trigger.
+    Absent,
+    /// Only the lease table, with none of the enrollment objects: the table
+    /// an unattested runtime creates for itself.
+    LegacySlotsOnly,
+    /// At least one enrollment table, guard function or guard trigger.
+    Enrolled,
+}
+
+/// Open the owner transaction every keypool preparation runs in: the
+/// keypool advisory lock, the pinned owner schema, schema USAGE for the
+/// runtime and the runtime role checks.
+async fn begin_keypool_owner<'a>(
+    db: &'a Database,
     identity: &crate::db::lineage::PgIdentity,
-    generation: uuid::Uuid,
-    peer_ids: &[PeerId],
     runtime_role: &str,
-    activation_delay_ms: i64,
-) -> Result<(), KeypoolOwnerError> {
+) -> Result<Transaction<'a>, KeypoolOwnerError> {
     let mut tx = db.begin().await?;
     tx.execute(
         "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
@@ -686,13 +821,21 @@ async fn initialize_keypool_owner(
     )
     .await?;
     verify_keypool_runtime_candidate(&mut tx, schema_name, runtime_role).await?;
+    Ok(tx)
+}
 
+async fn keypair_inventory(
+    tx: &mut Transaction<'_>,
+    schema_name: &str,
+) -> Result<KeypairInventory, KeypoolOwnerError> {
     let mut existing = tx
         .query(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-               WHERE n.nspname = ? AND c.relname IN \
-                 ('clustering_keypair_slots','clustering_keypool','clustering_keypool_slots')) \
+               WHERE n.nspname = ? AND c.relname = ?), \
+             EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+               WHERE n.nspname = ? AND c.relname IN (?, ?)) \
              OR EXISTS (SELECT 1 FROM pg_catalog.pg_proc p \
                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
                WHERE n.nspname = ? AND p.proname IN (?, ?, ?, ?)) \
@@ -702,6 +845,10 @@ async fn initialize_keypool_owner(
                WHERE n.nspname = ? AND t.tgname IN (?, ?, ?, ?, ?, ?))",
             crate::db_params![
                 schema_name,
+                KEYPAIR_SLOT_TABLE,
+                schema_name,
+                KEYPAIR_POOL_TABLE,
+                KEYPAIR_POOL_SLOTS_TABLE,
                 schema_name,
                 KEYPAIR_GUARD_FUNCTION,
                 KEYPAIR_POOL_GUARD_FUNCTION,
@@ -717,10 +864,332 @@ async fn initialize_keypool_owner(
             ],
         )
         .await?;
-    if matches!(existing.next().await?, Some(row) if row.get::<bool>(0)?) {
+    let Some(row) = existing.next().await? else {
+        return Err(KeypoolOwnerError::ExistingAuthority);
+    };
+    Ok(match (row.get::<bool>(0)?, row.get::<bool>(1)?) {
+        (_, true) => KeypairInventory::Enrolled,
+        (true, false) => KeypairInventory::LegacySlotsOnly,
+        (false, false) => KeypairInventory::Absent,
+    })
+}
+
+async fn initialize_keypool_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+    generation: uuid::Uuid,
+    peer_ids: &[PeerId],
+    runtime_role: &str,
+    activation_delay_ms: i64,
+) -> Result<(), KeypoolOwnerError> {
+    let mut tx = begin_keypool_owner(db, identity, runtime_role).await?;
+    let schema_name = &identity.schema.name.0;
+    if keypair_inventory(&mut tx, schema_name).await? != KeypairInventory::Absent {
         return Err(KeypoolOwnerError::ExistingAuthority);
     }
+    create_keypool_generation(
+        &mut tx,
+        schema_name,
+        generation,
+        peer_ids,
+        runtime_role,
+        activation_delay_ms,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
 
+async fn prepare_keypool_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+    enrollment: &KeypoolEnrollment<'_>,
+) -> Result<KeypoolPreparation, KeypoolOwnerError> {
+    let delay_ms = i64::try_from(enrollment.activation_delay.as_millis())
+        .map_err(|_| KeypoolOwnerError::InvalidPeerOrder)?;
+    let mut tx = begin_keypool_owner(db, identity, enrollment.runtime_role).await?;
+    let schema_name = &identity.schema.name.0;
+    let state = match keypair_inventory(&mut tx, schema_name).await? {
+        KeypairInventory::Absent => {
+            create_keypool_generation(
+                &mut tx,
+                schema_name,
+                enrollment.generation,
+                enrollment.peer_ids,
+                enrollment.runtime_role,
+                delay_ms,
+            )
+            .await?;
+            KeypoolPreparation::Pending
+        }
+        KeypairInventory::LegacySlotsOnly => {
+            let LegacyKeypairSlots::Retire { legacy_ttl } = enrollment.legacy else {
+                return Err(KeypoolOwnerError::LegacyKeypairSlots);
+            };
+            // A holder that outlives the liveness check below could still
+            // believe in its lease for one more lifetime; the pending
+            // generation must not activate inside that window.
+            if enrollment.activation_delay < legacy_ttl {
+                return Err(KeypoolOwnerError::ActivationDelayBelowLegacyTtl);
+            }
+            retire_legacy_keypair_slots(&mut tx, schema_name, legacy_ttl).await?;
+            create_keypool_generation(
+                &mut tx,
+                schema_name,
+                enrollment.generation,
+                enrollment.peer_ids,
+                enrollment.runtime_role,
+                delay_ms,
+            )
+            .await?;
+            KeypoolPreparation::Pending
+        }
+        KeypairInventory::Enrolled => {
+            adopt_enrolled_keypool(&mut tx, schema_name, enrollment).await?
+        }
+    };
+    tx.commit().await?;
+    if state == KeypoolPreparation::Active {
+        return Ok(state);
+    }
+    match activate_keypool_owner(db, identity, enrollment.generation).await {
+        Ok(()) => Ok(KeypoolPreparation::Active),
+        Err(KeypoolOwnerError::ActivationNotReady) => Ok(KeypoolPreparation::Pending),
+        Err(error) => Err(error),
+    }
+}
+
+/// Drop an unenrolled lease table inside the caller's transaction, which
+/// then creates the enrolled one. The table must be exactly what the
+/// unattested runtime creates and hold no leased row; `DROP TABLE` without
+/// `CASCADE` additionally refuses any object that depends on it.
+async fn retire_legacy_keypair_slots(
+    tx: &mut Transaction<'_>,
+    schema_name: &str,
+    legacy_ttl: Duration,
+) -> Result<(), KeypoolOwnerError> {
+    let schema = crate::db::physical_attestation::quote_identifier(schema_name);
+    tx.execute(
+        &format!("LOCK TABLE {schema}.{KEYPAIR_SLOT_TABLE} IN ACCESS EXCLUSIVE MODE"),
+        (),
+    )
+    .await?;
+    let mut shape = tx
+        .query(
+            "SELECT c.relkind = 'r' AND c.relpersistence = 'p' \
+                    AND NOT c.relispartition AND c.relowner = n.nspowner \
+                    AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+                    AND c.reloftype = 0 \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
+                      WHERE tr.tgrelid = c.oid OR tr.tgconstrrelid = c.oid) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con \
+                      WHERE (con.conrelid = c.oid AND con.contype <> 'p') \
+                         OR con.confrelid = c.oid) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw \
+                      WHERE rw.ev_class = c.oid) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inh \
+                      WHERE inh.inhrelid = c.oid OR inh.inhparent = c.oid) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dependent \
+                      WHERE dependent.refclassid = 'pg_catalog.pg_class'::regclass \
+                        AND dependent.refobjid = c.oid \
+                        AND dependent.classid = 'pg_catalog.pg_rewrite'::regclass) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ?",
+            crate::db_params![schema_name, KEYPAIR_SLOT_TABLE],
+        )
+        .await?;
+    if !matches!(shape.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(KeypoolOwnerError::LegacyShapeMismatch);
+    }
+    drop(shape);
+    let columns = verify_columns_contract(
+        tx,
+        schema_name,
+        KEYPAIR_SLOT_TABLE,
+        &[
+            ("slot_index", "integer", true, None),
+            ("holder_node", "text", false, None),
+            ("holder_epoch", "text", false, None),
+            ("heartbeat", "timestamp with time zone", true, Some("now()")),
+            ("expired", "boolean", true, Some("true")),
+        ],
+    )
+    .await;
+    let primary_key = match columns {
+        Ok(()) => verify_primary_key(tx, schema_name).await,
+        Err(error) => Err(error),
+    };
+    let index = match primary_key {
+        Ok(()) => verify_index_shape(tx, schema_name).await,
+        Err(error) => Err(error),
+    };
+    match index {
+        Ok(()) => {}
+        Err(LeaseAttachError::Database(error)) => return Err(error.into()),
+        Err(_) => return Err(KeypoolOwnerError::LegacyShapeMismatch),
+    }
+    let ttl_ms = i64::try_from(legacy_ttl.as_millis())
+        .map_err(|_| KeypoolOwnerError::ActivationDelayBelowLegacyTtl)?;
+    // Liveness is judged on the database clock. The `expired` flag alone is
+    // not enough to call a row leased, and a heartbeat ahead of the clock is
+    // newer than any cutoff, so it counts as leased.
+    let mut live = tx
+        .query(
+            &format!(
+                "SELECT slot_index, holder_node, \
+                    (EXTRACT(EPOCH FROM (now() - heartbeat)) * 1000)::bigint \
+                 FROM {schema}.{KEYPAIR_SLOT_TABLE} \
+                 WHERE holder_node IS NOT NULL AND NOT expired \
+                   AND heartbeat > now() - (? || ' milliseconds')::interval \
+                 ORDER BY slot_index LIMIT 1"
+            ),
+            crate::db_params![ttl_ms.to_string()],
+        )
+        .await?;
+    if let Some(row) = live.next().await? {
+        return Err(KeypoolOwnerError::LegacyLeaseLive {
+            slot: row.get(0)?,
+            holder: row.get(1)?,
+            age_ms: row.get(2)?,
+        });
+    }
+    drop(live);
+    tx.execute(&format!("DROP TABLE {schema}.{KEYPAIR_SLOT_TABLE}"), ())
+        .await?;
+    Ok(())
+}
+
+/// Alter each keypair guard function that carries `SECURITY DEFINER` to
+/// `SECURITY INVOKER` and return how many were altered.
+async fn convert_definer_guards(
+    tx: &mut Transaction<'_>,
+    schema_name: &str,
+) -> Result<usize, KeypoolOwnerError> {
+    let schema = crate::db::physical_attestation::quote_identifier(schema_name);
+    let mut definer = tx
+        .query(
+            "SELECT p.proname::text FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = ? AND p.proname IN (?, ?, ?, ?) \
+               AND p.pronargs = 0 AND p.prosecdef",
+            crate::db_params![
+                schema_name,
+                KEYPAIR_GUARD_FUNCTION,
+                KEYPAIR_POOL_GUARD_FUNCTION,
+                KEYPAIR_MAP_GUARD_FUNCTION,
+                KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+            ],
+        )
+        .await?;
+    let mut functions = Vec::new();
+    while let Some(row) = definer.next().await? {
+        functions.push(row.get::<String>(0)?);
+    }
+    drop(definer);
+    for function in &functions {
+        let function = crate::db::physical_attestation::quote_identifier(function);
+        tx.execute(
+            &format!("ALTER FUNCTION {schema}.{function}() SECURITY INVOKER"),
+            (),
+        )
+        .await?;
+    }
+    Ok(functions.len())
+}
+
+/// Verify an existing enrollment against `enrollment` and report its state.
+/// Guard functions that carry `SECURITY DEFINER` are altered to run as
+/// the calling role before the exact guard pin is checked, so a database
+/// enrolled with definer guards converges on the verified shape.
+async fn adopt_enrolled_keypool(
+    tx: &mut Transaction<'_>,
+    schema_name: &str,
+    enrollment: &KeypoolEnrollment<'_>,
+) -> Result<KeypoolPreparation, KeypoolOwnerError> {
+    let schema = crate::db::physical_attestation::quote_identifier(schema_name);
+    convert_definer_guards(tx, schema_name).await?;
+
+    let shape = async {
+        verify_table_shape(tx, schema_name).await?;
+        verify_columns(tx, schema_name).await?;
+        verify_primary_key(tx, schema_name).await?;
+        verify_index_shape(tx, schema_name).await?;
+        verify_keypool_tables(tx, schema_name).await?;
+        verify_keypair_guard(tx, schema_name, Some(enrollment.runtime_role)).await
+    };
+    match shape.await {
+        Ok(()) => {}
+        Err(LeaseAttachError::Database(error)) => return Err(error.into()),
+        Err(error) => return Err(KeypoolOwnerError::EnrolledShape(error)),
+    }
+
+    let mut pool = tx
+        .query(
+            &format!(
+                "SELECT generation::text, state, slot_count \
+                 FROM {schema}.{KEYPAIR_POOL_TABLE} WHERE singleton"
+            ),
+            (),
+        )
+        .await?;
+    let Some(row) = pool.next().await? else {
+        return Err(KeypoolOwnerError::EnrollmentMismatch);
+    };
+    let generation: String = row.get(0)?;
+    let state: String = row.get(1)?;
+    let slot_count: i32 = row.get(2)?;
+    drop(pool);
+    if generation != enrollment.generation.to_string()
+        || usize::try_from(slot_count).ok() != Some(enrollment.peer_ids.len())
+    {
+        return Err(KeypoolOwnerError::EnrollmentMismatch);
+    }
+    let mut slots = tx
+        .query(
+            &format!(
+                "SELECT slot_index, peer_id FROM {schema}.{KEYPAIR_POOL_SLOTS_TABLE} \
+                 WHERE generation = ?::uuid ORDER BY slot_index"
+            ),
+            crate::db_params![generation],
+        )
+        .await?;
+    let mut enrolled = Vec::new();
+    while let Some(row) = slots.next().await? {
+        let slot_index: i32 = row.get(0)?;
+        if usize::try_from(slot_index).ok() != Some(enrolled.len()) {
+            return Err(KeypoolOwnerError::EnrollmentMismatch);
+        }
+        enrolled.push(row.get::<String>(1)?);
+    }
+    drop(slots);
+    let expected = enrollment
+        .peer_ids
+        .iter()
+        .map(PeerId::to_string)
+        .collect::<Vec<_>>();
+    if enrolled != expected {
+        return Err(KeypoolOwnerError::EnrollmentMismatch);
+    }
+    match state.as_str() {
+        "active" => Ok(KeypoolPreparation::Active),
+        "pending" => Ok(KeypoolPreparation::Pending),
+        _ => Err(KeypoolOwnerError::EnrollmentMismatch),
+    }
+}
+
+/// Create the enrollment tables, the lease table, their guards and grants,
+/// and enroll `peer_ids` as a pending generation. The caller has established
+/// that none of these objects exists.
+async fn create_keypool_generation(
+    tx: &mut Transaction<'_>,
+    schema_name: &str,
+    generation: uuid::Uuid,
+    peer_ids: &[PeerId],
+    runtime_role: &str,
+    activation_delay_ms: i64,
+) -> Result<(), KeypoolOwnerError> {
+    let schema = crate::db::physical_attestation::quote_identifier(schema_name);
     tx.execute(
         &format!(
             "CREATE TABLE {schema}.{KEYPAIR_POOL_TABLE} (\
@@ -767,7 +1236,7 @@ async fn initialize_keypool_owner(
     tx.execute(
         &format!(
             "CREATE FUNCTION {schema}.{KEYPAIR_GUARD_FUNCTION}() RETURNS trigger \
-             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             LANGUAGE plpgsql SECURITY INVOKER SET search_path = {function_path} \
              AS $keypair_guard${KEYPAIR_GUARD_BODY}$keypair_guard$"
         ),
         (),
@@ -785,7 +1254,7 @@ async fn initialize_keypool_owner(
     tx.execute(
         &format!(
             "CREATE FUNCTION {schema}.{KEYPAIR_POOL_GUARD_FUNCTION}() RETURNS trigger \
-             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             LANGUAGE plpgsql SECURITY INVOKER SET search_path = {function_path} \
              AS $keypair_pool_guard${KEYPAIR_POOL_GUARD_BODY}$keypair_pool_guard$"
         ),
         (),
@@ -803,7 +1272,7 @@ async fn initialize_keypool_owner(
     tx.execute(
         &format!(
             "CREATE FUNCTION {schema}.{KEYPAIR_MAP_GUARD_FUNCTION}() RETURNS trigger \
-             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             LANGUAGE plpgsql SECURITY INVOKER SET search_path = {function_path} \
              AS $keypair_map_guard${KEYPAIR_MAP_GUARD_BODY}$keypair_map_guard$"
         ),
         (),
@@ -821,7 +1290,7 @@ async fn initialize_keypool_owner(
     tx.execute(
         &format!(
             "CREATE FUNCTION {schema}.{KEYPAIR_TRUNCATE_GUARD_FUNCTION}() RETURNS trigger \
-             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             LANGUAGE plpgsql SECURITY INVOKER SET search_path = {function_path} \
              AS $keypair_truncate_guard${KEYPAIR_TRUNCATE_GUARD_BODY}$keypair_truncate_guard$"
         ),
         (),
@@ -907,7 +1376,6 @@ async fn initialize_keypool_owner(
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -1196,7 +1664,7 @@ async fn verify_keypair_slot_snapshot(
     verify_runtime_acl(tx, schema).await?;
     verify_keypool_tables(tx, schema).await?;
     verify_keypool_acl(tx, schema).await?;
-    verify_keypair_guard(tx, schema).await?;
+    verify_keypair_guard(tx, schema, None).await?;
     read_enrolled_peer_order(tx, schema, expected_peer_ids).await
 }
 
@@ -1909,81 +2377,90 @@ async fn verify_read_only_relation_acl(
     Ok(())
 }
 
+struct KeypairGuard {
+    table: &'static str,
+    trigger: &'static str,
+    function: &'static str,
+    trigger_type: i16,
+    body: &'static str,
+}
+
+/// Row guards fire before INSERT, UPDATE and DELETE (the pool guard before
+/// UPDATE and DELETE only); the truncate guards fire per statement.
+const KEYPAIR_GUARDS: [KeypairGuard; 6] = [
+    KeypairGuard {
+        table: KEYPAIR_SLOT_TABLE,
+        trigger: KEYPAIR_GUARD_TRIGGER,
+        function: KEYPAIR_GUARD_FUNCTION,
+        trigger_type: 31,
+        body: KEYPAIR_GUARD_BODY,
+    },
+    KeypairGuard {
+        table: KEYPAIR_POOL_TABLE,
+        trigger: KEYPAIR_POOL_GUARD_TRIGGER,
+        function: KEYPAIR_POOL_GUARD_FUNCTION,
+        trigger_type: 27,
+        body: KEYPAIR_POOL_GUARD_BODY,
+    },
+    KeypairGuard {
+        table: KEYPAIR_POOL_SLOTS_TABLE,
+        trigger: KEYPAIR_MAP_GUARD_TRIGGER,
+        function: KEYPAIR_MAP_GUARD_FUNCTION,
+        trigger_type: 31,
+        body: KEYPAIR_MAP_GUARD_BODY,
+    },
+    KeypairGuard {
+        table: KEYPAIR_SLOT_TABLE,
+        trigger: KEYPAIR_SLOT_TRUNCATE_TRIGGER,
+        function: KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+        trigger_type: 34,
+        body: KEYPAIR_TRUNCATE_GUARD_BODY,
+    },
+    KeypairGuard {
+        table: KEYPAIR_POOL_TABLE,
+        trigger: KEYPAIR_POOL_TRUNCATE_TRIGGER,
+        function: KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+        trigger_type: 34,
+        body: KEYPAIR_TRUNCATE_GUARD_BODY,
+    },
+    KeypairGuard {
+        table: KEYPAIR_POOL_SLOTS_TABLE,
+        trigger: KEYPAIR_MAP_TRUNCATE_TRIGGER,
+        function: KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+        trigger_type: 34,
+        body: KEYPAIR_TRUNCATE_GUARD_BODY,
+    },
+];
+
 async fn verify_keypair_guard(
     tx: &mut Transaction<'_>,
     schema: &str,
+    runtime_role: Option<&str>,
 ) -> Result<(), LeaseAttachError> {
-    verify_one_keypair_guard(
-        tx,
-        schema,
-        KEYPAIR_SLOT_TABLE,
-        KEYPAIR_GUARD_TRIGGER,
-        KEYPAIR_GUARD_FUNCTION,
-        31,
-        KEYPAIR_GUARD_BODY,
-    )
-    .await?;
-    verify_one_keypair_guard(
-        tx,
-        schema,
-        KEYPAIR_POOL_TABLE,
-        KEYPAIR_POOL_GUARD_TRIGGER,
-        KEYPAIR_POOL_GUARD_FUNCTION,
-        27,
-        KEYPAIR_POOL_GUARD_BODY,
-    )
-    .await?;
-    verify_one_keypair_guard(
-        tx,
-        schema,
-        KEYPAIR_POOL_SLOTS_TABLE,
-        KEYPAIR_MAP_GUARD_TRIGGER,
-        KEYPAIR_MAP_GUARD_FUNCTION,
-        31,
-        KEYPAIR_MAP_GUARD_BODY,
-    )
-    .await?;
-    verify_one_keypair_guard(
-        tx,
-        schema,
-        KEYPAIR_SLOT_TABLE,
-        KEYPAIR_SLOT_TRUNCATE_TRIGGER,
-        KEYPAIR_TRUNCATE_GUARD_FUNCTION,
-        34,
-        KEYPAIR_TRUNCATE_GUARD_BODY,
-    )
-    .await?;
-    verify_one_keypair_guard(
-        tx,
-        schema,
-        KEYPAIR_POOL_TABLE,
-        KEYPAIR_POOL_TRUNCATE_TRIGGER,
-        KEYPAIR_TRUNCATE_GUARD_FUNCTION,
-        34,
-        KEYPAIR_TRUNCATE_GUARD_BODY,
-    )
-    .await?;
-    verify_one_keypair_guard(
-        tx,
-        schema,
-        KEYPAIR_POOL_SLOTS_TABLE,
-        KEYPAIR_MAP_TRUNCATE_TRIGGER,
-        KEYPAIR_TRUNCATE_GUARD_FUNCTION,
-        34,
-        KEYPAIR_TRUNCATE_GUARD_BODY,
-    )
-    .await
+    for guard in &KEYPAIR_GUARDS {
+        verify_one_keypair_guard(tx, schema, runtime_role, guard).await?;
+    }
+    Ok(())
 }
 
+/// One guard trigger and its function, pinned exactly. The functions run
+/// with the privileges of the role whose statement fires them, so the slot
+/// guard can read only what the runtime may read and no guard can write on
+/// the owner's behalf. `runtime_role` names the role that must not hold
+/// EXECUTE; `None` checks the session's own role.
 async fn verify_one_keypair_guard(
     tx: &mut Transaction<'_>,
     schema: &str,
-    table: &str,
-    trigger_name: &str,
-    function_name: &str,
-    trigger_type: i16,
-    function_body: &str,
+    runtime_role: Option<&str>,
+    guard: &KeypairGuard,
 ) -> Result<(), LeaseAttachError> {
+    let KeypairGuard {
+        table,
+        trigger: trigger_name,
+        function: function_name,
+        trigger_type,
+        body: function_body,
+    } = *guard;
     let function_path = format!("search_path=pg_catalog, {schema}, pg_temp");
     let mut rows = tx
         .query(
@@ -1992,12 +2469,13 @@ async fn verify_one_keypair_guard(
                       AND tr.tgenabled = 'O' AND tr.tgtype = ? \
                       AND tr.tgnargs = 0 AND tr.tgqual IS NULL \
                       AND proc.proname = ? AND proc.proowner = ns.nspowner \
-                      AND proc.prosecdef AND proc.provolatile = 'v' \
+                      AND NOT proc.prosecdef AND proc.provolatile = 'v' \
                       AND proc.pronargs = 0 AND proc.prorettype = 'pg_catalog.trigger'::regtype \
                       AND language.lanname = 'plpgsql' \
                       AND proc.proconfig = ARRAY[?]::text[] \
                       AND pg_catalog.btrim(proc.prosrc) = pg_catalog.btrim(?) \
-                      AND NOT pg_catalog.has_function_privilege(current_user, proc.oid, 'EXECUTE') \
+                      AND NOT pg_catalog.has_function_privilege( \
+                        COALESCE(?, current_user::text)::name, proc.oid, 'EXECUTE') \
                       AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
                         COALESCE(proc.proacl, pg_catalog.acldefault('f', proc.proowner)) \
                       ) acl WHERE acl.grantee <> proc.proowner)), false) \
@@ -2014,6 +2492,7 @@ async fn verify_one_keypair_guard(
                 function_name,
                 function_path,
                 function_body,
+                runtime_role,
                 schema,
                 table,
                 trigger_name,

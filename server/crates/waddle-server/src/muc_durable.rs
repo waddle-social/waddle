@@ -5687,4 +5687,4 @@ use implementation::CommitReconciliation;
 
 #[cfg(test)]
 use implementation::MUC_SCHEMA_ADVISORY_LOCK_KEY;
-pub use implementation::{MucOwnerPreparationError, PostgresMucRoomStore};
+pub use implementation::{MucOwnerPreparationError, MucRuntimeAttachError, PostgresMucRoomStore};

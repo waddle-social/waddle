@@ -169,4 +169,4 @@ use implementation::remove_sm_claim_fence_if;
 #[cfg(test)]
 use implementation::sm_session_entity;
 
-pub use implementation::PostgresFencedSmPersistence;
+pub use implementation::{FencedSmRuntimeAttachError, PostgresFencedSmPersistence};
