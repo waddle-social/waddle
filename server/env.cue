@@ -760,6 +760,8 @@ schema.#Project & {
 					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
 					"scripts/check_required_tests.py", "scripts/test_check_required_tests.py",
 					"scripts/check-test-postgres-env.py", "scripts/test_check_test_postgres_env.py",
+					"scripts/check-ingress-typed-entry.py", "scripts/test_check_ingress_typed_entry.py",
+					"scripts/ingress-typed-entry-allowlist.txt",
 					"scripts/check-ci-helper-contracts.sh",
 					".config/required-cluster-tests.txt",
 					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],

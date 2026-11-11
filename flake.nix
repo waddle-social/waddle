@@ -556,6 +556,8 @@
             ./server/scripts/check-poison-recovery.py
             ./server/scripts/check-rust-structure.py
             ./server/scripts/check-test-postgres-env.py
+            ./server/scripts/check-ingress-typed-entry.py
+            ./server/scripts/ingress-typed-entry-allowlist.txt
             ./server/crates
             ./server/extensions
             ./server/vendor
@@ -762,6 +764,7 @@
                 ${pkgs.python3}/bin/python3 scripts/check-poison-recovery.py
                 ${pkgs.python3}/bin/python3 scripts/check-rust-structure.py --server-only
                 ${pkgs.python3}/bin/python3 scripts/check-test-postgres-env.py
+                ${pkgs.python3}/bin/python3 scripts/check-ingress-typed-entry.py
               '';
             }
           );

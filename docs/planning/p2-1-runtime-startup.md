@@ -151,9 +151,11 @@ query, an upload slot, push device registration with enable and disable, and
 XEP-0198 enable, acknowledgement and same-node resumption. It then checks that
 the catalog is unchanged and that a relay in front of PostgreSQL saw no
 catalog-changing statement and no `insufficient_privilege` error on any
-runtime connection. Old-writer drain, physical primary fencing and typed
-transaction authority remain gates. No role or epoch activation is implied by
-this configuration or by a successful local test.
+runtime connection. Old-writer drain and physical primary fencing remain
+gates, as do the parts of typed transaction authority listed under
+[Typed ingress transaction entry](#typed-ingress-transaction-entry). No role
+or epoch activation is implied by this configuration or by a successful local
+test.
 
 Three verifier rules make the joint role graph satisfiable. Each admits one
 exact shape and refuses any deviation:
@@ -220,6 +222,61 @@ pinned-path modules, including statements whose table name is formatted in.
 `ingress_origin_aliases` needs `UPDATE` because alias resolution locks its row
 with `FOR UPDATE OF`, and `roster_versions` needs `DELETE` because startup
 prunes the version of an owner whose roster holds a dangling contact.
+
+## Typed ingress transaction entry
+
+On the serving pool every ingress transaction that attests its connection
+begins in `ingress_substrate::typed_entry::begin_ingress_entry`. The ingress
+unit of work, the pooled effect-receipt writer and its post-commit readback
+all call it; so do the test-support raw writers. A request names, as typed
+values, what those callers differ in:
+
+- the authority: unattested (SQLite, or PostgreSQL without attestation), the
+  registered V1009 guard on an attested pool, or the candidate relation guard;
+- how the transaction is acquired, and an optional acquisition deadline;
+- optional explicit `lock_timeout` and `statement_timeout` values;
+- the clamp an attested transaction applies: 100 ms and 250 ms for writers,
+  3 s and 5 s for the relation guard.
+
+On an attested pool with the registered guard the entry sends, in order:
+`BEGIN`; `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`; the explicit
+timeouts, if any; the clamp; `LOCK TABLE ONLY <schema>.ingress_protocol_epoch
+IN ACCESS SHARE MODE`; the physical attestor; the schema OID and isolation
+checks; the transaction-local `search_path`; the epoch read; the
+`waddle.protocol_epoch` proof settings; and the epoch row read `FOR SHARE`
+that the V1009 guard trigger otherwise requests on each protected write. It
+then refuses an epoch above the one the binary implements. Without
+attestation it takes the epoch row lock first and, on PostgreSQL, installs
+the proof settings; SQLite sends only its write-intent `BEGIN` and the epoch
+read.
+
+The entry returns an `IngressEntryTransaction`. On an attested pool it carries
+a `PreparedAttestedReceiptWriter`, the witness the ingress repositories use to
+address schema-qualified relations. Only the entry constructs either type, and
+`IngressUowTransaction` stores the entry's value, so a unit-of-work
+transaction cannot be assembled around a transaction that skipped the entry.
+A commit error is returned as it is; each caller keeps its own policy for a
+commit whose outcome is unknown.
+
+`server/scripts/check-ingress-typed-entry.py` runs in the clippy lanes and
+fails when `attest_transaction(` appears in `ingress/`, `ingress_uow/` or
+`ingress_substrate/` outside the entry. Read-only attach-time checks are
+listed, with their exact call count, in
+`server/scripts/ingress-typed-entry-allowlist.txt`.
+
+What the entry does not do:
+
+- It attests the physical connection identity and lineage, not the migration
+  ledger or the epoch guard manifest; those are checked once by the startup
+  preflight.
+- The pool type still exposes raw `begin`, `execute` and `query`. Raw ingress
+  writers that take the epoch row lock without attesting
+  (`ingress_uow::begin_raw_ingress_writer`, used by the notification and push
+  outboxes, `IngressSubstrate::begin`, and the unattested receipt writer) do
+  not go through it.
+- Attach-time checks in other stores call the attestor directly on their own
+  read-only transactions.
+- The clustered stores are refused under the attested pool and have no entry.
 
 ## Dark outbox attachment slice
 

@@ -2231,7 +2231,7 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         }
     );
     transaction
-        .transaction
+        .transaction_mut()
         .execute(
             "DELETE FROM mam_messages WHERE id = ?",
             crate::db_params![stanza_id.id.clone()],

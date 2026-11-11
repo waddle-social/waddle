@@ -8,7 +8,10 @@ use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 async fn ingress_transaction_acquisition_expiry_maps_to_timeout_without_database() {
     let lock = Duration::from_millis(100);
     let started = tokio::time::Instant::now();
-    let result = super::acquire_transaction_with_timeout(lock, std::future::pending()).await;
+    let result =
+        crate::ingress_substrate::acquire_within_deadline(Some(lock), std::future::pending())
+            .await
+            .map_err(IngressUowError::from);
     assert!(matches!(result, Err(IngressUowError::Timeout)));
     assert_eq!(started.elapsed(), lock);
 }

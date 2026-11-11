@@ -2,6 +2,7 @@
 
 use super::authority;
 use super::refresh_retention;
+pub(in crate::ingress_substrate) use super::typed_entry::PreparedAttestedReceiptWriter;
 use super::Arc;
 use super::BareJid;
 use super::DbRetryClass;
@@ -23,6 +24,7 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
+#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
@@ -281,34 +283,19 @@ impl PostgresIngressSubstrate {
         &self,
         capability: &AttestedPostgresWriterCapability,
     ) -> Result<Transaction<'_>, IngressSubstrateError> {
-        self.db
-            .verify_attested_pg_writer_capability(capability)
-            .map_err(DatabaseError::from)
-            .map_err(discard_database_error)?;
-
-        let mut tx = self
-            .db
-            .begin_immediate()
-            .await
-            .map_err(discard_database_error)?;
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-            .await
-            .map_err(discard_database_error)?;
-        if !tighten_local_transaction_timeouts(&mut tx)
-            .await
-            .map_err(discard_database_error)?
-        {
-            return Err(IngressSubstrateError::Database {
-                retry_class: DbRetryClass::NotRetryable,
-            });
-        }
-        let epoch = prepare_attested_receipt_transaction(&mut tx, capability)
-            .await?
-            .protocol_epoch();
-        if epoch > supported_protocol_epoch() {
-            return Err(IngressSubstrateError::UnsupportedLiveEpoch);
-        }
-        Ok(tx)
+        let entry = super::begin_ingress_entry(
+            &self.db,
+            super::IngressEntryRequest {
+                authority: super::IngressEntryAuthority::InstalledGuard(capability),
+                acquisition: super::IngressEntryAcquisition::Immediate,
+                acquisition_deadline: None,
+                explicit_timeouts: None,
+                clamp: super::IngressEntryClamp::Writer,
+            },
+        )
+        .await
+        .map_err(super::IngressEntryError::into_substrate_error)?;
+        Ok(entry.into_parts().0)
     }
 
     async fn begin_inner(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
@@ -2080,174 +2067,6 @@ async fn delete_gc_message(
     Ok(deleted)
 }
 
-/// Prepare a writer from the physical attestor's complete identity.
-///
-/// The schema-qualified epoch relation lock is the first SQL operation after
-/// transaction isolation and timeout setup. Only then does the writer run
-/// the trusted physical attestor on this same transaction connection, before
-/// reading the epoch or taking application locks. This path never derives
-/// identity from the active search path or DSN.
-pub(crate) async fn prepare_attested_receipt_transaction(
-    tx: &mut Transaction<'_>,
-    capability: &AttestedPostgresWriterCapability,
-) -> Result<PreparedAttestedReceiptWriter, IngressSubstrateError> {
-    if tx.driver() != DatabaseDriver::Postgres {
-        return Err(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        });
-    }
-
-    let expected = &capability.identity().schema;
-    let relation = format!(
-        "{}.ingress_protocol_epoch",
-        quote_postgres_identifier(&expected.name.0)
-    );
-    tx.execute(
-        &format!("LOCK TABLE ONLY {relation} IN ACCESS SHARE MODE"),
-        (),
-    )
-    .await
-    .map_err(discard_database_error)?;
-
-    capability
-        .attest_transaction(tx)
-        .await
-        .map_err(discard_database_error)?;
-
-    let mut schema_rows = tx
-        .query(
-            "SELECT oid::text FROM pg_catalog.pg_namespace WHERE nspname = ?",
-            crate::db_params![expected.name.0.clone()],
-        )
-        .await
-        .map_err(discard_database_error)?;
-    let actual_schema_oid = schema_rows
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::SchemaIdentityMismatch)?
-        .get::<String>(0)
-        .map_err(discard_database_error)?
-        .parse::<u32>()
-        .map_err(|_| IngressSubstrateError::SchemaIdentityMismatch)?;
-    drop(schema_rows);
-    if actual_schema_oid != expected.oid {
-        return Err(IngressSubstrateError::SchemaIdentityMismatch);
-    }
-
-    let mut isolation_rows = tx
-        .query("SELECT current_setting('transaction_isolation')", ())
-        .await
-        .map_err(discard_database_error)?;
-    let isolation = isolation_rows
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::ReadCommittedRequired)?
-        .get::<String>(0)
-        .map_err(discard_database_error)?;
-    if isolation != "read committed" {
-        return Err(IngressSubstrateError::ReadCommittedRequired);
-    }
-    drop(isolation_rows);
-
-    // PostgreSQL searches the temporary schema before ordinary schemas unless
-    // it is explicitly ordered. Keep the attested schema first and pg_temp
-    // last for the remainder of this transaction; receipt SQL is also
-    // explicitly schema-qualified at its repository boundary.
-    let search_path = format!("{}, pg_temp", quote_postgres_identifier(&expected.name.0));
-    let mut search_path_rows = tx
-        .query(
-            "SELECT pg_catalog.set_config('search_path', ?, true)",
-            crate::db_params![search_path],
-        )
-        .await
-        .map_err(discard_database_error)?;
-    search_path_rows
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })?;
-    drop(search_path_rows);
-
-    let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
-    let mut proof = tx
-        .query(
-            "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
-            crate::db_params![fresh_epoch.to_storage().to_string()],
-        )
-        .await
-        .map_err(discard_database_error)?;
-    proof
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })?;
-    drop(proof);
-
-    let locked_epoch = read_epoch_in_relation(tx, &relation, true).await?;
-    if locked_epoch != fresh_epoch {
-        return Err(IngressSubstrateError::EpochChangedDuringPreparation);
-    }
-    Ok(PreparedAttestedReceiptWriter {
-        protocol_epoch: locked_epoch,
-        schema: expected.name.0.clone(),
-        relation_guard: false,
-        definer_api_candidate: false,
-    })
-}
-
-/// Evidence that the transaction was prepared on the attested PostgreSQL
-/// connection before application locks or writes. The type stays private to
-/// the crate and is stored inside the owning UoW transaction.
-pub(crate) struct PreparedAttestedReceiptWriter {
-    protocol_epoch: ProtocolEpoch,
-    schema: String,
-    relation_guard: bool,
-    definer_api_candidate: bool,
-}
-
-impl PreparedAttestedReceiptWriter {
-    /// Construct only after the same-transaction relation capability has
-    /// verified its owner marker and installed the epoch proof.
-    pub(crate) fn for_relation_guard(
-        capability: &AttestedPostgresWriterCapability,
-        protocol_epoch: ProtocolEpoch,
-    ) -> Self {
-        Self {
-            protocol_epoch,
-            schema: capability.identity().schema.name.0.clone(),
-            relation_guard: true,
-            definer_api_candidate: false,
-        }
-    }
-
-    pub(crate) fn protocol_epoch(&self) -> ProtocolEpoch {
-        self.protocol_epoch
-    }
-
-    pub(crate) fn schema(&self) -> &str {
-        &self.schema
-    }
-
-    pub(crate) fn uses_relation_guard(&self) -> bool {
-        self.relation_guard
-    }
-
-    pub(crate) fn uses_definer_api_candidate(&self) -> bool {
-        self.definer_api_candidate
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(crate) fn enable_definer_api_candidate_for_test(&mut self) {
-        self.definer_api_candidate = true;
-    }
-}
-
 /// Lexical authority for calling only the unregistered definer API while a
 /// restricted-login candidate is under test. The context borrows the
 /// prepared proof from the same transaction and carries only its attested
@@ -2356,7 +2175,7 @@ pub(crate) fn prepared_ingress_sql(
     }
 }
 
-async fn read_epoch_in_relation(
+pub(in crate::ingress_substrate) async fn read_epoch_in_relation(
     tx: &mut Transaction<'_>,
     relation: &str,
     for_share: bool,

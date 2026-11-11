@@ -14,12 +14,16 @@ use super::{IngressUowError, IngressUowTransaction};
 #[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
-#[cfg(feature = "test-support")]
-use crate::ingress_substrate::prepare_attested_receipt_transaction;
 use crate::ingress_substrate::DefinerApiCandidateContext;
 use crate::ingress_substrate::{
     acquire_epoch_lock_first, prepared_ingress_relation, prepared_ingress_sql,
     supported_protocol_epoch, PreparedAttestedReceiptWriter, PreparedIngressRelation,
+};
+#[cfg(feature = "test-support")]
+#[cfg(feature = "test-support")]
+use crate::ingress_substrate::{
+    begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
+    IngressEntryRequest,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -55,20 +59,18 @@ pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
     if db.driver() != DatabaseDriver::Postgres {
         return Err(IngressUowError::PostgresRequired);
     }
-    db.verify_attested_pg_writer_capability(capability)
-        .map_err(DatabaseError::from)?;
-    let mut tx = db.begin_immediate().await?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-        .await?;
-    bound_raw_transaction(&mut tx).await?;
-    let live = prepare_attested_receipt_transaction(&mut tx, capability)
-        .await?
-        .protocol_epoch();
-    let supported = supported_protocol_epoch();
-    if live > supported {
-        return Err(IngressUowError::EpochUnsupported { live, supported });
-    }
-    Ok(tx)
+    let entry = begin_ingress_entry(
+        db,
+        IngressEntryRequest {
+            authority: IngressEntryAuthority::InstalledGuard(capability),
+            acquisition: IngressEntryAcquisition::Immediate,
+            acquisition_deadline: None,
+            explicit_timeouts: None,
+            clamp: IngressEntryClamp::Writer,
+        },
+    )
+    .await?;
+    Ok(entry.into_parts().0)
 }
 
 /// Begin a raw writer prepared for the dark SECURITY DEFINER API experiment.
@@ -86,16 +88,19 @@ pub(crate) async fn begin_raw_ingress_writer_with_definer_api_candidate<'a>(
     db.verify_attested_pg_writer_capability(capability)
         .map_err(DatabaseError::from)?;
     relation_guard.verify_for_database(db, capability)?;
-    let mut tx = db.begin_immediate().await?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-        .await?;
-    bound_raw_transaction(&mut tx).await?;
-    let mut prepared = relation_guard.prepare_transaction(&mut tx).await?;
-    let live = prepared.protocol_epoch();
-    let supported = supported_protocol_epoch();
-    if live > supported {
-        return Err(IngressUowError::EpochUnsupported { live, supported });
-    }
+    let entry = begin_ingress_entry(
+        db,
+        IngressEntryRequest {
+            authority: IngressEntryAuthority::RelationGuard(relation_guard),
+            acquisition: IngressEntryAcquisition::Immediate,
+            acquisition_deadline: None,
+            explicit_timeouts: None,
+            clamp: IngressEntryClamp::Writer,
+        },
+    )
+    .await?;
+    let (tx, prepared) = entry.into_parts();
+    let mut prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
     prepared.enable_definer_api_candidate_for_test();
     Ok((tx, prepared))
 }

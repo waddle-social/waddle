@@ -5,6 +5,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+use waddle_xmpp::ingress::ProtocolEpoch;
 
 use crate::config::LineageConfig;
 use crate::db::physical_attestation::{
@@ -249,10 +250,18 @@ impl RelationGuardCapability {
         Ok(())
     }
 
-    pub(crate) async fn prepare_transaction(
+    /// The attested writer capability this guard was verified against.
+    pub(crate) fn writer(&self) -> &AttestedPostgresWriterCapability {
+        &self.writer
+    }
+
+    /// Take the epoch and owner-marker relation barriers. The typed ingress
+    /// entry calls this first, so the barriers precede the physical attestor
+    /// and every application lock.
+    pub(crate) async fn prelock_relations(
         &self,
         transaction: &mut Transaction<'_>,
-    ) -> Result<crate::ingress_substrate::PreparedAttestedReceiptWriter, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         let quoted_schema = quote_postgres_identifier(&self.schema_name);
         transaction
             .execute(
@@ -270,7 +279,18 @@ impl RelationGuardCapability {
                 (),
             )
             .await?;
-        self.writer.attest_transaction(transaction).await?;
+        Ok(())
+    }
+
+    /// Re-verify the owner marker, pin the search path, and prove the epoch.
+    /// The typed ingress entry calls this after it has attested the same
+    /// transaction connection; the returned epoch alone grants nothing, since
+    /// only the entry can mint the prepared-writer witness.
+    pub(crate) async fn prove_epoch_after_attestation(
+        &self,
+        transaction: &mut Transaction<'_>,
+    ) -> Result<ProtocolEpoch, DatabaseError> {
+        let quoted_schema = quote_postgres_identifier(&self.schema_name);
         verify_owner_marker(
             transaction,
             &self.owner_role,
@@ -306,19 +326,13 @@ impl RelationGuardCapability {
         let connection = transaction.postgres_connection().ok_or_else(|| {
             DatabaseError::QueryFailed("relation-guard requires PostgreSQL".to_owned())
         })?;
-        let epoch = crate::db::physical_attestation::read_epoch_after_prelock(
+        crate::db::physical_attestation::read_epoch_after_prelock(
             connection,
             &self.schema_name,
             self.schema_oid,
         )
         .await
-        .map_err(|_| DatabaseError::QueryFailed("relation-guard epoch proof failed".to_owned()))?;
-        Ok(
-            crate::ingress_substrate::PreparedAttestedReceiptWriter::for_relation_guard(
-                &self.writer,
-                epoch,
-            ),
-        )
+        .map_err(|_| DatabaseError::QueryFailed("relation-guard epoch proof failed".to_owned()))
     }
 }
 

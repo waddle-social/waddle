@@ -11,9 +11,11 @@ use super::{
     MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid, WireHandledCount,
 };
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
-use crate::db::DatabaseError;
 use crate::ingress::room_manifest::{FrozenRoomManifest, StoredRoomManifest};
-use crate::ingress_substrate::prepare_attested_receipt_transaction;
+use crate::ingress_substrate::{
+    begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
+    IngressEntryError, IngressEntryRequest,
+};
 use xmpp_parsers::message::Message;
 
 #[cfg(feature = "test-support")]
@@ -1203,28 +1205,22 @@ async fn record_receipt_pooled_attested(
     kind: EffectReceiptKind,
     hash: &[u8; 32],
 ) -> Result<(), IngressSubstrateError> {
-    db.verify_attested_pg_writer_capability(capability)
-        .map_err(DatabaseError::from)
-        .map_err(discard_database_error)?;
-    let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-        .await
-        .map_err(discard_database_error)?;
-    if !super::tighten_local_transaction_timeouts(&mut tx)
-        .await
-        .map_err(discard_database_error)?
-    {
-        return Err(IngressSubstrateError::Database {
-            retry_class: crate::ingress_uow::DbRetryClass::NotRetryable,
-        });
-    }
-    let prepared = prepare_attested_receipt_transaction(&mut tx, capability).await?;
-    if prepared.protocol_epoch() > supported_protocol_epoch() {
-        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
-    }
-    record_receipt_in_prepared_transaction(&mut tx, key, kind, hash, Some(prepared.schema()))
-        .await?;
-    let commit = tx.commit().await;
+    let mut entry = begin_ingress_entry(
+        db,
+        IngressEntryRequest {
+            authority: IngressEntryAuthority::InstalledGuard(capability),
+            acquisition: IngressEntryAcquisition::Immediate,
+            acquisition_deadline: None,
+            explicit_timeouts: None,
+            clamp: IngressEntryClamp::Writer,
+        },
+    )
+    .await
+    .map_err(IngressEntryError::into_substrate_error)?;
+    let (tx, prepared) = entry.parts_mut();
+    let schema = prepared.map(PreparedAttestedReceiptWriter::schema);
+    record_receipt_in_prepared_transaction(tx, key, kind, hash, schema).await?;
+    let commit = entry.commit().await;
     #[cfg(feature = "test-support")]
     let acknowledgement_lost = take_pooled_receipt_commit_ack_loss();
     #[cfg(not(feature = "test-support"))]
@@ -1249,26 +1245,23 @@ async fn exact_receipt_exists_after_commit_error(
     kind: EffectReceiptKind,
     hash: &[u8; 32],
 ) -> Result<bool, IngressSubstrateError> {
-    let mut tx = db.begin().await.map_err(discard_database_error)?;
-    db.verify_attested_pg_writer_capability(capability)
-        .map_err(DatabaseError::from)
-        .map_err(discard_database_error)?;
-    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-        .await
-        .map_err(discard_database_error)?;
-    if !super::tighten_local_transaction_timeouts(&mut tx)
-        .await
-        .map_err(discard_database_error)?
-    {
-        return Err(IngressSubstrateError::Database {
-            retry_class: crate::ingress_uow::DbRetryClass::NotRetryable,
-        });
-    }
-    let prepared = prepare_attested_receipt_transaction(&mut tx, capability).await?;
-    if prepared.protocol_epoch() > supported_protocol_epoch() {
-        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
-    }
-    exact_receipt_exists(&mut tx, key, kind, hash, prepared.schema()).await
+    let mut entry = begin_ingress_entry(
+        db,
+        IngressEntryRequest {
+            authority: IngressEntryAuthority::InstalledGuard(capability),
+            acquisition: IngressEntryAcquisition::Deferred,
+            acquisition_deadline: None,
+            explicit_timeouts: None,
+            clamp: IngressEntryClamp::Writer,
+        },
+    )
+    .await
+    .map_err(IngressEntryError::into_substrate_error)?;
+    let (tx, prepared) = entry.parts_mut();
+    let schema = prepared
+        .map(PreparedAttestedReceiptWriter::schema)
+        .ok_or(IngressSubstrateError::SchemaIdentityMismatch)?;
+    exact_receipt_exists(tx, key, kind, hash, schema).await
 }
 
 async fn exact_receipt_exists(

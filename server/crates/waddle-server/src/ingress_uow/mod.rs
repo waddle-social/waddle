@@ -5,7 +5,6 @@
 //! projections. Dropping an uncommitted [`IngressUowTransaction`] rolls it
 //! back through [`crate::db::Transaction`].
 
-use crate::db::DatabaseError;
 mod archive_dispatch;
 mod delivery_progress;
 pub(crate) use archive_dispatch::{
@@ -112,10 +111,8 @@ use crate::config::LineageConfig;
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{lineage, Database, DatabaseDriver, Transaction};
 use crate::ingress_substrate::{
-    acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
-};
-use crate::ingress_substrate::{
-    prepare_attested_receipt_transaction, tighten_local_transaction_timeouts,
+    begin_ingress_entry, set_local_transaction_timeouts, IngressEntryAcquisition,
+    IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest, IngressEntryTransaction,
     PreparedAttestedReceiptWriter,
 };
 #[cfg(feature = "clustering")]
@@ -151,10 +148,11 @@ pub struct IngressUnitOfWork {
 /// A private witness that the repository owns the complete transaction.
 pub(crate) struct OwnedAliasScope(());
 
+/// The epoch guard an ingress transaction is opened under.
 #[derive(Clone, Copy)]
-enum EpochPreparation {
+enum EpochPreparation<'g> {
     InstalledGuard,
-    RelationGuard,
+    RelationGuard(&'g RelationGuardCapability),
 }
 
 impl IngressUnitOfWork {
@@ -257,7 +255,7 @@ impl IngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(None, EpochPreparation::InstalledGuard, None)
+        self.begin_inner(None, EpochPreparation::InstalledGuard)
             .await
     }
 
@@ -286,8 +284,7 @@ impl IngressUnitOfWork {
         capability.verify_for_database(&self.db, writer)?;
         self.begin_inner(
             Some((Duration::from_secs(3), Duration::from_secs(5))),
-            EpochPreparation::RelationGuard,
-            Some(capability),
+            EpochPreparation::RelationGuard(capability),
         )
         .await
     }
@@ -301,12 +298,8 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(
-            Some((lock, statement)),
-            EpochPreparation::InstalledGuard,
-            None,
-        )
-        .await
+        self.begin_inner(Some((lock, statement)), EpochPreparation::InstalledGuard)
+            .await
     }
 
     /// Fresh source rediscovery must see parents committed after an earlier
@@ -316,12 +309,8 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(
-            Some((lock, statement)),
-            EpochPreparation::InstalledGuard,
-            None,
-        )
-        .await
+        self.begin_inner(Some((lock, statement)), EpochPreparation::InstalledGuard)
+            .await
     }
 
     /// The fixture's sealed marker binds this experiment to its attested
@@ -343,97 +332,47 @@ impl IngressUnitOfWork {
         Ok(CandidateTransaction { transaction })
     }
 
+    /// Open through the typed ingress entry, then attest lineage.
+    ///
+    /// `bounds` is `(lock, statement)`: the lock bound is also the deadline
+    /// for acquiring the transaction. The installed guard applies both as
+    /// transaction timeouts; the relation guard keeps its own fixed clamp.
     async fn begin_inner(
         &self,
         bounds: Option<(Duration, Duration)>,
-        preparation: EpochPreparation,
-        relation_capability: Option<&RelationGuardCapability>,
+        preparation: EpochPreparation<'_>,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        if let Some(capability) = &self.attested_pg_writer {
-            self.db
-                .verify_attested_pg_writer_capability(capability)
-                .map_err(crate::db::DatabaseError::from)?;
-        }
-        let acquisition = async {
-            match self.db.driver() {
-                DatabaseDriver::Sqlite => self.db.begin_immediate().await,
-                DatabaseDriver::Postgres => self.db.begin().await,
+        let (authority, explicit_timeouts, clamp) = match (preparation, &self.attested_pg_writer) {
+            (EpochPreparation::InstalledGuard, None) => (
+                IngressEntryAuthority::Unattested,
+                bounds,
+                IngressEntryClamp::Writer,
+            ),
+            (EpochPreparation::InstalledGuard, Some(capability)) => (
+                IngressEntryAuthority::InstalledGuard(capability),
+                bounds,
+                IngressEntryClamp::Writer,
+            ),
+            (EpochPreparation::RelationGuard(guard), Some(_)) => (
+                IngressEntryAuthority::RelationGuard(guard),
+                None,
+                IngressEntryClamp::RelationGuard,
+            ),
+            (EpochPreparation::RelationGuard(_), None) => {
+                return Err(IngressUowError::AttestedPoolRequired)
             }
         };
-        let mut transaction = match bounds {
-            Some((lock, _)) => acquire_transaction_with_timeout(lock, acquisition).await?,
-            None => acquisition.await?,
-        };
-        if self.db.driver() == DatabaseDriver::Postgres {
-            // Set isolation before the timeout/epoch/lineage SELECTs can pin
-            // the transaction's first snapshot.
-            transaction
-                .execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                .await?;
-        }
-        if let Some((lock, statement)) = bounds {
-            if matches!(preparation, EpochPreparation::InstalledGuard)
-                && !set_local_transaction_timeouts(&mut transaction, lock, statement).await?
-            {
-                return Err(IngressUowError::TransactionBoundsUnproven);
-            }
-        }
-        if self.attested_pg_writer.is_some() {
-            let bounded = match preparation {
-                EpochPreparation::InstalledGuard => {
-                    tighten_local_transaction_timeouts(&mut transaction).await?
-                }
-                EpochPreparation::RelationGuard => {
-                    bound_relation_guard_transaction(&mut transaction).await?
-                }
-            };
-            if !bounded {
-                return Err(IngressUowError::TransactionBoundsUnproven);
-            }
-        }
-        let (protocol_epoch, prepared_receipt_writer) = match &self.attested_pg_writer {
-            Some(capability) => {
-                let prepared = match preparation {
-                    EpochPreparation::InstalledGuard => {
-                        prepare_attested_receipt_transaction(&mut transaction, capability).await?
-                    }
-                    EpochPreparation::RelationGuard => {
-                        relation_capability
-                            .ok_or(IngressUowError::AttestedPoolRequired)?
-                            .prepare_transaction(&mut transaction)
-                            .await?
-                    }
-                };
-                (prepared.protocol_epoch(), Some(prepared))
-            }
-            None => (acquire_epoch_lock_first(&mut transaction).await?, None),
-        };
-        let supported = supported_protocol_epoch();
-        if protocol_epoch > supported {
-            return Err(IngressUowError::EpochUnsupported {
-                live: protocol_epoch,
-                supported,
-            });
-        }
-
-        let has_attested_writer = self.attested_pg_writer.is_some();
-        if self.db.driver() == DatabaseDriver::Postgres && !has_attested_writer {
-            let mut proof = transaction
-                .query(
-                    r#"
-                SELECT
-                    set_config('waddle.protocol_epoch', ?, true),
-                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
-                "#,
-                    crate::db_params![protocol_epoch.to_storage().to_string()],
-                )
-                .await?;
-            proof
-                .next()
-                .await?
-                .ok_or(IngressUowError::EpochProofMissing)?;
-            drop(proof);
-        }
+        let mut entry = begin_ingress_entry(
+            &self.db,
+            IngressEntryRequest {
+                authority,
+                acquisition: IngressEntryAcquisition::WriterDefault,
+                acquisition_deadline: bounds.map(|(lock, _)| lock),
+                explicit_timeouts,
+                clamp,
+            },
+        )
+        .await?;
 
         // A private in-memory SQLite database is ephemeral by the server's own
         // lineage classification (nothing survives the process, so there is
@@ -446,7 +385,7 @@ impl IngressUnitOfWork {
                     .attested_lineage_for_deployment(self.lineage.deployment_uuid)
                     .map_err(IngressUowError::Lineage)?,
                 None => lineage::verify_in_transaction(
-                    &mut transaction,
+                    entry.transaction_mut(),
                     self.db.driver(),
                     &self.lineage,
                 )
@@ -458,10 +397,8 @@ impl IngressUnitOfWork {
 
         Ok(IngressUowTransaction {
             observations: self.observations.load(std::sync::atomic::Ordering::Acquire),
-            transaction,
-            protocol_epoch,
+            entry,
             lineage,
-            prepared_receipt_writer,
             #[cfg(feature = "clustering")]
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
@@ -469,34 +406,6 @@ impl IngressUnitOfWork {
             authority_guards: Vec::new(),
         })
     }
-}
-
-async fn bound_relation_guard_transaction(
-    transaction: &mut Transaction<'_>,
-) -> Result<bool, DatabaseError> {
-    let mut rows = transaction
-        .query(
-            "SELECT pg_catalog.set_config('lock_timeout', CASE \
-         WHEN pg_catalog.current_setting('lock_timeout')::interval = interval '0 ms' \
-           OR pg_catalog.current_setting('lock_timeout')::interval > interval '3 s' \
-         THEN '3s' ELSE pg_catalog.current_setting('lock_timeout') END, true), \
-         pg_catalog.set_config('statement_timeout', CASE \
-         WHEN pg_catalog.current_setting('statement_timeout')::interval = interval '0 ms' \
-           OR pg_catalog.current_setting('statement_timeout')::interval > interval '5 s' \
-         THEN '5s' ELSE pg_catalog.current_setting('statement_timeout') END, true)",
-            (),
-        )
-        .await?;
-    Ok(rows.next().await?.is_some())
-}
-
-async fn acquire_transaction_with_timeout<'a>(
-    lock: Duration,
-    acquisition: impl std::future::Future<Output = Result<Transaction<'a>, DatabaseError>>,
-) -> Result<Transaction<'a>, IngressUowError> {
-    Ok(tokio::time::timeout(lock, acquisition)
-        .await
-        .map_err(|_| IngressUowError::Timeout)??)
 }
 
 /// The lineage attestation an ingress transaction runs under.
@@ -515,13 +424,14 @@ pub enum IngressLineage {
 /// [`Self::commit`] rolls back the underlying database transaction.
 pub struct IngressUowTransaction<'a> {
     observations: bool,
-    transaction: Transaction<'a>,
-    protocol_epoch: ProtocolEpoch,
+    /// The transaction as the typed ingress entry returned it: the proven
+    /// epoch and, on an attested pool, the receipt-writer evidence captured
+    /// while only the epoch relation prelock was held. Receipt operations
+    /// must never re-prelock after an application row lock has been acquired.
+    /// Only the entry constructs this value, so no unit-of-work transaction
+    /// exists around a transaction that bypassed it.
+    entry: IngressEntryTransaction<'a>,
     lineage: IngressLineage,
-    /// Receipt-specific evidence captured while this transaction still has
-    /// only its epoch relation prelock; receipt operations must never re-prelock
-    /// after an application row lock has been acquired.
-    prepared_receipt_writer: Option<PreparedAttestedReceiptWriter>,
     /// Private capability identity that binds an in-transaction claim fence
     /// to this exact transaction, not merely another transaction sharing the
     /// same pool lifetime.
@@ -617,7 +527,7 @@ impl std::ops::DerefMut for CandidateTransaction<'_> {
 impl<'a> IngressUowTransaction<'a> {
     /// The protocol epoch locked at transaction start.
     pub fn protocol_epoch(&self) -> ProtocolEpoch {
-        self.protocol_epoch
+        self.entry.protocol_epoch()
     }
 
     /// The fencing mode bound to this transaction.
@@ -631,14 +541,14 @@ impl<'a> IngressUowTransaction<'a> {
     }
 
     pub(crate) fn receipt_schema(&self) -> Option<&str> {
-        self.prepared_receipt_writer
-            .as_ref()
+        self.entry
+            .prepared()
             .map(PreparedAttestedReceiptWriter::schema)
     }
 
     pub(crate) fn uses_definer_api_candidate(&self) -> bool {
-        self.prepared_receipt_writer
-            .as_ref()
+        self.entry
+            .prepared()
             .is_some_and(PreparedAttestedReceiptWriter::uses_definer_api_candidate)
     }
 
@@ -647,12 +557,12 @@ impl<'a> IngressUowTransaction<'a> {
     /// cannot create a second connection or transaction.
     #[cfg(feature = "test-support")]
     pub fn enable_definer_api_candidate_for_test(&mut self) -> Result<(), IngressUowError> {
-        if self.transaction.driver() != DatabaseDriver::Postgres {
+        if self.entry.transaction_mut().driver() != DatabaseDriver::Postgres {
             return Err(IngressUowError::PostgresRequired);
         }
         let prepared = self
-            .prepared_receipt_writer
-            .as_mut()
+            .entry
+            .prepared_mut()
             .filter(|prepared| prepared.uses_relation_guard())
             .ok_or(IngressUowError::AttestedPoolRequired)?;
         prepared.enable_definer_api_candidate_for_test();
@@ -670,7 +580,7 @@ impl<'a> IngressUowTransaction<'a> {
     /// Keep the prepared identity and its transaction together when ingress
     /// repositories choose their schema-qualified PostgreSQL statements.
     fn prepared_parts(&mut self) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
-        (&mut self.transaction, self.prepared_receipt_writer.as_ref())
+        self.entry.parts_mut()
     }
 
     pub(crate) fn room_observers_enabled(&self) -> bool {
@@ -679,16 +589,13 @@ impl<'a> IngressUowTransaction<'a> {
 
     /// Commit all ingress and related durable writes atomically.
     pub async fn commit(self) -> Result<(), IngressUowError> {
-        self.transaction
-            .commit()
-            .await
-            .map_err(IngressUowError::from)
+        self.entry.commit().await.map_err(IngressUowError::from)
     }
 
     /// Raw SQL remains confined to ingress repositories so callers cannot
     /// bypass the epoch, lineage, and claim-fencing invariants.
     pub(crate) fn transaction_mut(&mut self) -> &mut Transaction<'a> {
-        &mut self.transaction
+        self.entry.transaction_mut()
     }
 
     /// Install per-transaction PostgreSQL timeout bounds without exposing raw
@@ -698,11 +605,11 @@ impl<'a> IngressUowTransaction<'a> {
         lock_timeout_ms: u64,
         statement_timeout_ms: u64,
     ) -> Result<(), IngressUowError> {
-        if self.transaction.driver() == DatabaseDriver::Sqlite {
+        if self.entry.transaction_mut().driver() == DatabaseDriver::Sqlite {
             return Ok(());
         }
         if set_local_transaction_timeouts(
-            &mut self.transaction,
+            self.entry.transaction_mut(),
             Duration::from_millis(lock_timeout_ms),
             Duration::from_millis(statement_timeout_ms),
         )
