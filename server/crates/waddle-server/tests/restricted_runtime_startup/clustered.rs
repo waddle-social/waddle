@@ -10,8 +10,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine;
-use libp2p::identity::ed25519;
 use libp2p::PeerId;
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
@@ -49,48 +47,13 @@ use waddle_server::sm_persistence_fenced::{
 use waddle_ws_test_support::{require_test_postgres_url, TestServer, WsXmppClient};
 use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity};
 
+use super::support::{keypair_pool, provision_clustered, KeypairPool};
 use super::{
     assert_catalog_unchanged, assert_runtime_owns_nothing, attach_serving_pool,
     attach_single_node_stores, catalog_entries, execute, exercise_muc, owner_phase_stable_entries,
     relation_exists, role, run_owner_phase, startup_identity, Prepared, Provisioned, DOMAIN,
     POOL_LIMITS, SCHEMA,
 };
-
-/// A configured keypair pool: the base64 seeds the server is started with
-/// and the PeerIds the owner enrolls, in the same order.
-struct KeypairPool {
-    seeds: Vec<String>,
-    peer_ids: Vec<PeerId>,
-}
-
-fn keypair_pool(size: usize) -> KeypairPool {
-    let mut seeds = Vec::new();
-    let mut peer_ids = Vec::new();
-    for _ in 0..size {
-        let keypair = ed25519::Keypair::generate();
-        seeds.push(base64::engine::general_purpose::STANDARD.encode(keypair.secret().as_ref()));
-        peer_ids.push(
-            libp2p::identity::Keypair::from(keypair)
-                .public()
-                .to_peer_id(),
-        );
-    }
-    KeypairPool { seeds, peer_ids }
-}
-
-/// A clustering plan for a test that keeps its administrator session open.
-fn clustering_plan(pool: &KeypairPool) -> ClusteringOwnerPlan {
-    ClusteringOwnerPlan {
-        exclusive_database: ExclusiveDatabase::NotChecked,
-        ..ClusteringOwnerPlan::new(pool.peer_ids.clone(), Uuid::new_v4())
-    }
-}
-
-async fn provision_clustered(url: &str, pool: &KeypairPool) -> Provisioned {
-    let mut provisioned = Provisioned::new(url).await;
-    provisioned.plan.clustering = Some(clustering_plan(pool));
-    provisioned
-}
 
 /// The attested serving pool with the separate control-plane pool a
 /// clustered runtime holds.
@@ -1145,5 +1108,85 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
         "a repeated owner phase changed the adopted catalog"
     );
     assert_eq!(clustering_row_digest(&prepared.admin).await, rows);
+    prepared.cleanup().await;
+}
+
+/// A clustered server under the runtime role attaches to what the owner
+/// phase prepared. On a database prepared without the clustering section,
+/// or one whose keypair-pool generation is still pending, it refuses before
+/// it publishes a listener and creates nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clustered_restricted_startup_refuses_an_unprepared_or_pending_database() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let keypairs = keypair_pool(2);
+    let seeds = keypairs.seeds.join(",");
+    let clustered = [
+        ("WADDLE_CLUSTERING_ENABLED", "true"),
+        ("WADDLE_CLUSTERING_KEYPAIR_POOL", seeds.as_str()),
+        ("WADDLE_CLUSTERING_LISTEN_ADDRS", "/ip4/127.0.0.1/tcp/0"),
+    ];
+
+    // Prepared without the clustering section: no claim relation exists.
+    let prepared = Prepared::new(&url).await;
+    let before = catalog_entries(&prepared.admin).await;
+    let (output, listener_published) = prepared.refused_startup(&clustered).await;
+    assert!(
+        output.contains("clustering claim authority attachment failed"),
+        "clustered startup on a database without clustering stores must refuse: {output}"
+    );
+    assert!(
+        !listener_published,
+        "a refused startup published a listener"
+    );
+    assert!(!relation_exists(&prepared.admin, "clustering_claims").await);
+    assert_catalog_unchanged(
+        &prepared.admin,
+        &before,
+        "a refused clustered startup changed the catalog",
+    )
+    .await;
+    prepared.cleanup().await;
+
+    // Prepared with clustering, but the generation is inside its activation
+    // delay: every relation and grant is in place and the lease refuses.
+    let mut provisioned = provision_clustered(&url, &keypairs).await;
+    let mut single_node = provisioned.plan.clone();
+    single_node.clustering = None;
+    let lineage = run_owner_phase(&provisioned.owner_url, &single_node)
+        .await
+        .expect("prepare the database without clustering first");
+    if let Some(clustering) = provisioned.plan.clustering.as_mut() {
+        clustering.activation_delay = Duration::from_secs(3600);
+    }
+    assert!(matches!(
+        run_owner_phase(&provisioned.owner_url, &provisioned.plan).await,
+        Err(RestrictedRuntimeOwnerError::KeypoolActivationPending)
+    ));
+    let prepared = Prepared::attest(provisioned, lineage, &url).await;
+    let before = catalog_entries(&prepared.admin).await;
+    let (output, listener_published) = prepared.refused_startup(&clustered).await;
+    assert!(
+        output.contains("the owner has not activated this keypair-pool generation"),
+        "clustered startup on a pending generation must refuse: {output}"
+    );
+    assert!(
+        !listener_published,
+        "a refused startup published a listener"
+    );
+    let leases: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {SCHEMA}.clustering_keypair_slots"
+    ))
+    .fetch_one(&prepared.admin)
+    .await
+    .expect("count keypair leases");
+    assert_eq!(leases, 0, "a refused startup must not lease a keypair slot");
+    assert_catalog_unchanged(
+        &prepared.admin,
+        &before,
+        "a refused clustered startup changed the catalog",
+    )
+    .await;
     prepared.cleanup().await;
 }

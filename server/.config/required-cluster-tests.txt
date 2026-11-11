@@ -484,10 +484,10 @@ waddle-server::notification_outbox publisher_persistence::sqlite_terminal_transa
 # #2116 restricted database runtime: the owner phase must prepare every store
 # and grant exactly the classified privileges, and the server must start and
 # serve under the runtime role, which holds no DDL privilege, failing closed
-# on a missing relation, a widened grant or clustering. An image whose
-# restricted startup creates schema or refuses to serve must not ship.
+# on a missing relation or a widened grant. An image whose restricted
+# startup creates schema or refuses to serve must not ship.
 waddle-server::restricted_runtime_startup owner_phase_prepares_the_stores_the_runtime_role_attaches
-waddle-server::restricted_runtime_startup restricted_runtime_refuses_instead_of_creating_or_clustering
+waddle-server::restricted_runtime_startup restricted_runtime_refuses_instead_of_creating_a_missing_relation
 waddle-server::restricted_runtime_startup restricted_runtime_role_serves_without_ddl
 waddle-server::restricted_runtime_startup runtime_locks_the_epoch_row_but_cannot_change_it
 waddle-server::restricted_runtime_startup mam_admits_only_the_exact_monitor_schema_grant
@@ -519,3 +519,12 @@ waddle-server::restricted_runtime_startup clustered::clustered_owner_phase_fence
 waddle-server::restricted_runtime_startup clustered::clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built
 waddle-server::restricted_runtime_startup clustered::owner_phase_builds_the_replay_dedup_index_over_retained_rows_or_fails_closed
 waddle-server clustering::lease::runtime_attach_tests::postgres_keypool_owner_retires_an_unenrolled_lease_table_only_when_idle
+
+# #2116 clustered restricted database runtime, serving side: two servers
+# under the runtime role must form a cluster and serve clients on both nodes
+# without DDL and without being refused a privilege, and a clustered start
+# on a database that was not prepared for it must refuse without creating
+# anything. An image whose clustered restricted startup creates schema,
+# falls back to an unfenced store or cannot serve must not ship.
+waddle-server::restricted_clustered_startup two_restricted_nodes_form_a_cluster_and_serve_without_ddl
+waddle-server::restricted_runtime_startup clustered::clustered_restricted_startup_refuses_an_unprepared_or_pending_database

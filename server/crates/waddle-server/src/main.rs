@@ -94,8 +94,16 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                 // The runtime role holds no DDL privilege, so nothing is
                 // migrated or provisioned here: the owner phase prepared every
                 // schema, and each store attaches to it during startup.
+                // A clustered node also holds the control-plane pool that
+                // carries node and claim liveness, under the same login.
+                let control_plane = server_config.clustering.enabled.then_some(
+                    db::bootstrap::ControlPlanePoolLimits {
+                        connections: db_runtime.control_plane_pool_size,
+                        acquire_timeout: db_runtime.acquire_timeout,
+                    },
+                );
                 let pool = identity
-                    .attach_serving(preparation, &db_runtime.database_url, limits, None)
+                    .attach_serving(preparation, &db_runtime.database_url, limits, control_plane)
                     .await?;
                 info!("Restricted runtime attached its attested serving pool");
                 (pool, None, None)

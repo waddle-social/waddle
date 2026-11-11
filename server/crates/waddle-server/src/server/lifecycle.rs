@@ -23,11 +23,6 @@ use super::{select_websocket_mam_storage, start_http_server, HttpServerDeps, Mam
 
 #[derive(Debug, thiserror::Error)]
 pub enum RestrictedStartupError {
-    #[error(
-        "the restricted runtime role cannot serve with clustering enabled: the clustering \
-         stores have no owner-prepared attachment"
-    )]
-    ClusteringUnsupported,
     #[error("the restricted runtime attaches its own notification outbox; an owner-prepared handle was supplied")]
     OwnerOutboxSupplied,
 }
@@ -93,13 +88,9 @@ pub async fn start_with_config_and_owner_outbox(
 ) -> Result<crate::telemetry::MetricsFlush> {
     if db_pool.global().uses_attested_postgres_pool() {
         // The restricted runtime role holds no DDL privilege. Every store
-        // below attaches to relations the owner phase prepared. The
-        // clustering stores (keypair lease, claims, durable MUC, fenced SM)
-        // only have owner constructors, so refuse before binding a listener
-        // rather than run them under this role.
-        if server_config.clustering.enabled {
-            return Err(RestrictedStartupError::ClusteringUnsupported.into());
-        }
+        // below, including the clustering stores, attaches to relations the
+        // owner phase prepared.
+        //
         // An owner-prepared outbox handle belongs to an owner pool. This
         // role attaches the outbox itself on its attested main lane.
         if owner_outbox.is_some() {

@@ -1,5 +1,6 @@
 //! Boot rejects split SM stores before schema initialization or session hydration.
 use super::{create_ingress_sm_storage, IngressColocationError};
+use crate::clustering::ClusteringHandles;
 
 #[tokio::test]
 async fn postgres_sm_requires_the_same_schema_without_clustering() {
@@ -31,31 +32,51 @@ async fn postgres_sm_requires_the_same_schema_without_clustering() {
     let global = crate::db::Database::from_config("ingress-colocation", &config)
         .await
         .expect("global");
-    let backend_error = create_ingress_sm_storage(Some("sqlite::memory:"), false, None, &global)
-        .await
-        .err()
-        .expect("startup rejects a different backend");
+    let backend_error = create_ingress_sm_storage(
+        Some("sqlite::memory:"),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .err()
+    .expect("startup rejects a different backend");
     assert!(matches!(
         backend_error.downcast_ref::<IngressColocationError>(),
         Some(IngressColocationError::Backend)
     ));
-    let shared = create_ingress_sm_storage(Some(global_url.as_str()), false, None, &global)
-        .await
-        .expect("colocated sm");
+    let shared = create_ingress_sm_storage(
+        Some(global_url.as_str()),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .expect("colocated sm");
     let mut alias_url = global_url.clone();
     alias_url
         .query_pairs_mut()
         .append_pair("application_name", "sm-colocation-alias");
-    create_ingress_sm_storage(Some(alias_url.as_str()), false, None, &global)
-        .await
-        .expect("different URL with the same live identity is colocated");
-    create_ingress_sm_storage(None, false, None, &global)
+    create_ingress_sm_storage(
+        Some(alias_url.as_str()),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .expect("different URL with the same live identity is colocated");
+    create_ingress_sm_storage(None, false, &ClusteringHandles::default(), &global)
         .await
         .expect("unset override shares the global PostgreSQL pool");
-    let error = create_ingress_sm_storage(Some(separate_url.as_str()), false, None, &global)
-        .await
-        .err()
-        .expect("startup rejects split sm schema without clustering");
+    let error = create_ingress_sm_storage(
+        Some(separate_url.as_str()),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .err()
+    .expect("startup rejects split sm schema without clustering");
     assert!(matches!(
         error.downcast_ref::<IngressColocationError>(),
         Some(IngressColocationError::PostgresIdentity { .. })
@@ -85,16 +106,26 @@ async fn sqlite_sm_requires_the_same_file_without_clustering() {
         crate::db::Database::open_local("sm-colocation", directory.path().join("global.db"))
             .await
             .expect("global");
-    create_ingress_sm_storage(Some(global.database_url()), false, None, &global)
-        .await
-        .expect("colocated sm");
-    create_ingress_sm_storage(None, false, None, &global)
+    create_ingress_sm_storage(
+        Some(global.database_url()),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .expect("colocated sm");
+    create_ingress_sm_storage(None, false, &ClusteringHandles::default(), &global)
         .await
         .expect("unset override shares durable global storage");
-    let memory_error = create_ingress_sm_storage(Some("sqlite::memory:"), false, None, &global)
-        .await
-        .err()
-        .expect("durable global database rejects private memory sm storage");
+    let memory_error = create_ingress_sm_storage(
+        Some("sqlite::memory:"),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .err()
+    .expect("durable global database rejects private memory sm storage");
     assert!(matches!(
         memory_error.downcast_ref::<IngressColocationError>(),
         Some(IngressColocationError::SqliteDatabase)
@@ -102,10 +133,15 @@ async fn sqlite_sm_requires_the_same_file_without_clustering() {
     let separate = crate::db::Database::open_local("separate-sm", directory.path().join("sm.db"))
         .await
         .expect("separate");
-    let error = create_ingress_sm_storage(Some(separate.database_url()), false, None, &global)
-        .await
-        .err()
-        .expect("startup rejects split sm database");
+    let error = create_ingress_sm_storage(
+        Some(separate.database_url()),
+        false,
+        &ClusteringHandles::default(),
+        &global,
+    )
+    .await
+    .err()
+    .expect("startup rejects split sm database");
     assert!(matches!(
         error.downcast_ref::<IngressColocationError>(),
         Some(IngressColocationError::SqliteDatabase)
@@ -122,7 +158,7 @@ async fn sqlite_sm_private_memory_shares_the_ingress_pool() {
     let global = crate::db::Database::in_memory("sm-colocation")
         .await
         .expect("global");
-    let sm = create_ingress_sm_storage(None, false, None, &global)
+    let sm = create_ingress_sm_storage(None, false, &ClusteringHandles::default(), &global)
         .await
         .expect("shared SM");
     global

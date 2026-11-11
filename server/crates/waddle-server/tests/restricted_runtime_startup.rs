@@ -17,28 +17,24 @@
 #[cfg(feature = "clustering")]
 #[path = "restricted_runtime_startup/clustered.rs"]
 mod clustered;
+#[path = "restricted_runtime_support/mod.rs"]
+mod support;
 
-use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use minidom::Element;
 use sqlx::postgres::{PgConnectOptions, PgPool};
-use sqlx::{Connection, PgConnection, Row};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 use waddle_server::call_teardown_outbox::CallTeardownOutboxStore;
 use waddle_server::channel_space_links::DatabaseChannelSpaceLinkStore;
 use waddle_server::config::{IngressConfig, LineageConfig};
 use waddle_server::db::bootstrap::RuntimePoolLimits;
-use waddle_server::db::lineage::{AttestedLineage, DeploymentUuid, LineageAction, PgSchemaName};
-use waddle_server::db::physical_attestation::{
-    install, DarkPinnedEntryError, PgRoleName, PhysicalAttestationConfig,
-};
+use waddle_server::db::lineage::PgSchemaName;
+use waddle_server::db::physical_attestation::DarkPinnedEntryError;
 use waddle_server::db::runtime_startup::{RuntimeStartupError, RuntimeStartupIdentity};
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool};
+use waddle_server::db::DatabasePool;
 use waddle_server::ingress_substrate::{
     AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
 };
@@ -49,577 +45,45 @@ use waddle_server::mam_runtime::{DatabaseMamStorage, DatabaseMamStorageError};
 use waddle_server::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
 use waddle_server::room_effect_outbox::RoomEffectOutboxStore;
 use waddle_server::server::push_notification_runtime::verify_attested_push_notification_stores;
-use waddle_server::server::runtime_owner::{
-    prepare_restricted_runtime_owner, RestrictedRuntimeOwnerError, RestrictedRuntimeOwnerPlan,
-};
+use waddle_server::server::runtime_owner::RestrictedRuntimeOwnerError;
 use waddle_server::server::{ResolvedXmppDatabaseUrl, WebhookDeliveryAttachError};
 use waddle_server::spaces_metadata::DatabaseSpacesMetadataStore;
 use waddle_ws_test_support::iq::{round_trip, send_iq};
 use waddle_ws_test_support::{require_test_postgres_url, TestServer, WsXmppClient};
 use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
-use waddle_xmpp::stream_management::SM_NS;
 use xmpp_parsers::iq::Iq;
-use xmpp_parsers::message::{Id, Lang, Message, MessageType};
-use xmpp_parsers::ping::Ping;
+use xmpp_parsers::message::MessageType;
 
-const RELEASE_GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-const SESSION_KEY: &str = "integration-test-session-key-32-bytes-long";
-const SCHEMA: &str = "guarded";
-const TRUSTED_SCHEMA: &str = "attestor";
-const RESTRICTED: &str = "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS";
-
-/// What crossed the runtime login's PostgreSQL connections: every error the
-/// server returned and every statement that would change the catalog.
-#[derive(Default)]
-struct Wire {
-    errors: Vec<(String, String)>,
-    catalog_statements: Vec<String>,
-}
-
-/// Incremental PostgreSQL wire-protocol framing for one direction of one
-/// connection. The frontend starts with untyped startup packets; an SSL or
-/// GSS negotiation request is answered by one unframed byte.
-struct Frames {
-    buffer: Vec<u8>,
-    startup: bool,
-}
-
-impl Frames {
-    const SSL_REQUEST: u32 = 80_877_103;
-    const GSS_REQUEST: u32 = 80_877_104;
-
-    fn feed(&mut self, bytes: &[u8], unframed_replies: &AtomicUsize) -> Vec<(u8, Vec<u8>)> {
-        self.buffer.extend_from_slice(bytes);
-        let mut messages = Vec::new();
-        loop {
-            if !self.startup {
-                let pending = unframed_replies.load(Ordering::SeqCst);
-                if pending > 0 && !self.buffer.is_empty() && self.buffer[0] != b'E' {
-                    // The one-byte answer to an SSL or GSS request.
-                    self.buffer.remove(0);
-                    unframed_replies.fetch_sub(1, Ordering::SeqCst);
-                    continue;
-                }
-            }
-            let header = if self.startup { 4 } else { 5 };
-            if self.buffer.len() < header {
-                return messages;
-            }
-            let length_at = header - 4;
-            let length = u32::from_be_bytes(
-                self.buffer[length_at..header]
-                    .try_into()
-                    .expect("four length bytes"),
-            ) as usize;
-            let total = length_at + length;
-            if length < 4 || self.buffer.len() < total {
-                return messages;
-            }
-            let payload = self.buffer[header..total].to_vec();
-            let kind = if self.startup { 0 } else { self.buffer[0] };
-            self.buffer.drain(..total);
-            if self.startup {
-                let code = payload
-                    .get(..4)
-                    .map(|code| u32::from_be_bytes(code.try_into().expect("four code bytes")));
-                if matches!(code, Some(Self::SSL_REQUEST | Self::GSS_REQUEST)) {
-                    unframed_replies.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    self.startup = false;
-                }
-            } else {
-                messages.push((kind, payload));
-            }
-        }
-    }
-}
-
-fn c_string(bytes: &[u8]) -> (String, &[u8]) {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    (
-        String::from_utf8_lossy(&bytes[..end]).into_owned(),
-        bytes.get(end + 1..).unwrap_or_default(),
-    )
-}
-
-/// Whether any statement in `sql` creates, alters, drops or re-grants.
-fn changes_catalog(sql: &str) -> bool {
-    sql.split(';').any(|statement| {
-        let keyword = statement
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-        matches!(
-            keyword.as_str(),
-            "CREATE" | "ALTER" | "DROP" | "GRANT" | "REVOKE" | "TRUNCATE" | "COMMENT" | "REINDEX"
-        )
-    })
-}
-
-fn record_frontend(wire: &Mutex<Wire>, kind: u8, payload: &[u8]) {
-    let sql = match kind {
-        b'Q' => c_string(payload).0,
-        b'P' => c_string(c_string(payload).1).0,
-        _ => return,
-    };
-    if changes_catalog(&sql) {
-        wire.lock()
-            .expect("wire record")
-            .catalog_statements
-            .push(sql);
-    }
-}
-
-fn record_backend(wire: &Mutex<Wire>, kind: u8, payload: &[u8]) {
-    if kind != b'E' {
-        return;
-    }
-    let (mut sqlstate, mut message, mut rest) = (String::new(), String::new(), payload);
-    while let Some((&field, value)) = rest.split_first() {
-        if field == 0 {
-            break;
-        }
-        let (text, remaining) = c_string(value);
-        match field {
-            b'C' => sqlstate = text,
-            b'M' => message = text,
-            _ => {}
-        }
-        rest = remaining;
-    }
-    wire.lock()
-        .expect("wire record")
-        .errors
-        .push((sqlstate, message));
-}
-
-async fn relay<R, W>(
-    mut reader: R,
-    mut writer: W,
-    wire: Arc<Mutex<Wire>>,
-    unframed_replies: Arc<AtomicUsize>,
-    frontend: bool,
-) where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    let mut frames = Frames {
-        buffer: Vec::new(),
-        startup: frontend,
-    };
-    let mut chunk = vec![0_u8; 16 * 1024];
-    while let Ok(read) = reader.read(&mut chunk).await {
-        if read == 0 {
-            break;
-        }
-        for (kind, payload) in frames.feed(&chunk[..read], &unframed_replies) {
-            if frontend {
-                record_frontend(&wire, kind, &payload);
-            } else {
-                record_backend(&wire, kind, &payload);
-            }
-        }
-        if writer.write_all(&chunk[..read]).await.is_err() {
-            break;
-        }
-    }
-    let _ = writer.shutdown().await;
-}
-
-enum Upstream {
-    Tcp(String),
-    Unix(PathBuf),
-}
-
-/// The Unix socket the runtime login connects through. Restricted startup
-/// accepts unauthenticated transport only over a Unix socket, so this
-/// endpoint fronts the lane's PostgreSQL whether that listens on TCP or on
-/// its own socket. Every connection is relayed unchanged and recorded in
-/// [`Wire`], which is how the tests see the runtime's errors and statements
-/// without access to the PostgreSQL log.
-struct SocketEndpoint {
-    directory: tempfile::TempDir,
-    port: u16,
-    wire: Arc<Mutex<Wire>>,
-    forwarder: tokio::task::JoinHandle<()>,
-}
+use support::{
+    assert_catalog_unchanged, catalog_entries, chat_message, collect_until, contains_text,
+    drop_fixture, execute, exercise_stream_management, has_descendant, iq_request, mam_query,
+    muc_presence, probe, role, run_owner_phase, send_element, Prepared, Provisioned,
+    SocketEndpoint, Wire, DOMAIN, RELEASE_GIT_SHA, SCHEMA, SESSION_KEY,
+};
 
 impl SocketEndpoint {
-    async fn for_url(url: &str) -> Self {
-        let options = PgConnectOptions::from_str(url).expect("PostgreSQL test URL");
-        let port = options.get_port();
-        let upstream = match options.get_socket().cloned().or_else(|| {
-            options
-                .get_host()
-                .starts_with('/')
-                .then(|| options.get_host().into())
-        }) {
-            Some(directory) => Upstream::Unix(directory.join(format!(".s.PGSQL.{port}"))),
-            None => Upstream::Tcp(format!("{}:{port}", options.get_host())),
-        };
-        let directory = tempfile::Builder::new()
-            .prefix("wrr")
-            .tempdir()
-            .expect("socket directory");
-        let listener =
-            tokio::net::UnixListener::bind(directory.path().join(format!(".s.PGSQL.{port}")))
-                .expect("bind PostgreSQL socket endpoint");
-        let wire = Arc::new(Mutex::new(Wire::default()));
-        let upstream = Arc::new(upstream);
-        let recorded = Arc::clone(&wire);
-        let forwarder = tokio::spawn(async move {
-            while let Ok((inbound, _)) = listener.accept().await {
-                let upstream = Arc::clone(&upstream);
-                let wire = Arc::clone(&recorded);
-                tokio::spawn(async move {
-                    let unframed = Arc::new(AtomicUsize::new(0));
-                    let (client_read, client_write) = inbound.into_split();
-                    match upstream.as_ref() {
-                        Upstream::Tcp(address) => {
-                            let Ok(outbound) = tokio::net::TcpStream::connect(address).await else {
-                                return;
-                            };
-                            let (server_read, server_write) = outbound.into_split();
-                            tokio::join!(
-                                relay(
-                                    client_read,
-                                    server_write,
-                                    Arc::clone(&wire),
-                                    Arc::clone(&unframed),
-                                    true
-                                ),
-                                relay(server_read, client_write, wire, unframed, false),
-                            );
-                        }
-                        Upstream::Unix(path) => {
-                            let Ok(outbound) = tokio::net::UnixStream::connect(path).await else {
-                                return;
-                            };
-                            let (server_read, server_write) = outbound.into_split();
-                            tokio::join!(
-                                relay(
-                                    client_read,
-                                    server_write,
-                                    Arc::clone(&wire),
-                                    Arc::clone(&unframed),
-                                    true
-                                ),
-                                relay(server_read, client_write, wire, unframed, false),
-                            );
-                        }
-                    }
-                });
-            }
-        });
-        Self {
-            directory,
-            port,
-            wire,
-            forwarder,
-        }
-    }
-
     /// Forget what was recorded so far, such as the deliberate refusals a
     /// test provoked before the interval it asserts on.
     fn reset_wire(&self) {
         *self.wire.lock().expect("wire record") = Wire::default();
     }
-
-    fn take_wire(&self) -> Wire {
-        std::mem::take(&mut *self.wire.lock().expect("wire record"))
-    }
-}
-
-impl Drop for SocketEndpoint {
-    fn drop(&mut self) {
-        self.forwarder.abort();
-    }
-}
-
-struct Roles {
-    database_owner: String,
-    schema_owner: String,
-    migrator: String,
-    runtime: String,
-    old_runtime: String,
-    installer: String,
-    definer: String,
-}
-
-impl Roles {
-    fn all(&self) -> [&String; 7] {
-        [
-            &self.migrator,
-            &self.runtime,
-            &self.old_runtime,
-            &self.installer,
-            &self.schema_owner,
-            &self.definer,
-            &self.database_owner,
-        ]
-    }
-}
-
-/// A database prepared by the owner phase, with the operator handoff the
-/// runtime needs to start against it.
-struct Prepared {
-    cluster: PgPool,
-    admin: PgPool,
-    database: String,
-    roles: Roles,
-    endpoint: SocketEndpoint,
-    lineage: AttestedLineage,
-    runtime_url: String,
-    handoff: String,
-    owner_url: String,
-    plan: RestrictedRuntimeOwnerPlan,
-}
-
-/// Roles, a database and its two schemas, before any owner phase has run.
-struct Provisioned {
-    cluster: PgPool,
-    admin: PgPool,
-    database: String,
-    roles: Roles,
-    base: PgConnectOptions,
-    owner_url: String,
-    plan: RestrictedRuntimeOwnerPlan,
-}
-
-/// Run the owner phase on a fresh handle: the migrator login assumes the
-/// NOLOGIN schema owner.
-async fn run_owner_phase(
-    owner_url: &str,
-    plan: &RestrictedRuntimeOwnerPlan,
-) -> Result<AttestedLineage, RestrictedRuntimeOwnerError> {
-    let mut owner_config = DatabaseConfig::new(DatabaseDriver::Postgres, owner_url.to_owned());
-    owner_config.pool_size = 2;
-    let owner = Database::from_config("restricted runtime owner", &owner_config)
-        .await
-        .expect("owner database");
-    prepare_restricted_runtime_owner(&owner, plan)
-        .await
-        .map(|evidence| evidence.attested_lineage().clone())
-}
-
-async fn drop_fixture(cluster: PgPool, admin: PgPool, database: &str, roles: &Roles) {
-    admin.close().await;
-    execute(&cluster, &format!("DROP DATABASE {database} WITH (FORCE)")).await;
-    for role in roles.all() {
-        execute(&cluster, &format!("DROP ROLE IF EXISTS {role}")).await;
-    }
-    cluster.close().await;
 }
 
 impl Provisioned {
-    async fn new(url: &str) -> Self {
-        let cluster = PgPool::connect(url).await.expect("cluster administrator");
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database = format!("restricted_db_{suffix}");
-        let roles = Roles {
-            database_owner: format!("restricted_dbowner_{suffix}"),
-            schema_owner: format!("restricted_owner_{suffix}"),
-            migrator: format!("restricted_migrator_{suffix}"),
-            runtime: format!("restricted_runtime_{suffix}"),
-            old_runtime: format!("restricted_old_{suffix}"),
-            installer: format!("restricted_installer_{suffix}"),
-            definer: format!("restricted_definer_{suffix}"),
-        };
-        for role in [&roles.database_owner, &roles.schema_owner, &roles.definer] {
-            execute(
-                &cluster,
-                &format!("CREATE ROLE {role} NOLOGIN NOINHERIT {RESTRICTED}"),
-            )
-            .await;
-        }
-        for role in [
-            &roles.migrator,
-            &roles.runtime,
-            &roles.old_runtime,
-            &roles.installer,
-        ] {
-            execute(
-                &cluster,
-                &format!("CREATE ROLE {role} LOGIN NOINHERIT {RESTRICTED}"),
-            )
-            .await;
-        }
-        for statement in [
-            format!(
-                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
-                roles.schema_owner, roles.migrator
-            ),
-            format!(
-                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
-                roles.definer, roles.installer
-            ),
-            format!("CREATE DATABASE {database} OWNER {}", roles.database_owner),
-            format!("REVOKE CONNECT, TEMPORARY ON DATABASE {database} FROM PUBLIC"),
-            format!(
-                "GRANT CONNECT ON DATABASE {database} TO {}, {}, {}",
-                roles.migrator, roles.runtime, roles.installer
-            ),
-        ] {
-            execute(&cluster, &statement).await;
-        }
-
-        let base = PgConnectOptions::from_str(url).expect("PostgreSQL test URL");
-        let admin = PgPool::connect_with(base.clone().database(&database))
-            .await
-            .expect("database administrator");
-        for statement in [
-            "REVOKE ALL ON SCHEMA public FROM PUBLIC".to_owned(),
-            format!(
-                "CREATE SCHEMA {SCHEMA} AUTHORIZATION {}",
-                roles.schema_owner
-            ),
-            format!(
-                "CREATE SCHEMA {TRUSTED_SCHEMA} AUTHORIZATION {}",
-                roles.definer
-            ),
-            "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC".to_owned(),
-            format!(
-                "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {}, {}",
-                roles.schema_owner, roles.definer
-            ),
-        ] {
-            execute(&admin, &statement).await;
-        }
-
-        let owner_url = url_with(
-            url,
-            &database,
-            &roles.migrator,
-            &format!("-c role={} -c search_path={SCHEMA}", roles.schema_owner),
-        );
-        let plan = RestrictedRuntimeOwnerPlan {
-            lineage: LineageConfig {
-                deployment_uuid: Some(DeploymentUuid(Uuid::new_v4())),
-                action: Some(LineageAction::Enroll),
-            },
-            migrator: role(&roles.migrator),
-            schema_owner: role(&roles.schema_owner),
-            runtime: role(&roles.runtime),
-            attestation_definer: role(&roles.definer),
-            vapid_root_key: SESSION_KEY.as_bytes().to_vec(),
-            #[cfg(feature = "clustering")]
-            clustering: None,
-        };
-        Self {
-            cluster,
-            admin,
-            database,
-            roles,
-            base,
-            owner_url,
-            plan,
-        }
-    }
-
     async fn cleanup(self) {
         drop_fixture(self.cluster, self.admin, &self.database, &self.roles).await;
     }
 }
 
 impl Prepared {
-    async fn new(url: &str) -> Self {
-        Self::from_provisioned(Provisioned::new(url).await, url).await
-    }
-
-    /// Run the owner phase with the provisioned plan, then install the
-    /// attestor and build the runtime handoff.
-    async fn from_provisioned(provisioned: Provisioned, url: &str) -> Self {
-        let lineage = run_owner_phase(&provisioned.owner_url, &provisioned.plan)
-            .await
-            .expect("owner phase prepares the runtime schemas");
-        Self::attest(provisioned, lineage, url).await
-    }
-
-    /// Install the attestor on a database the owner phase has prepared and
-    /// build the runtime handoff for it.
-    async fn attest(provisioned: Provisioned, lineage: AttestedLineage, url: &str) -> Self {
-        let Provisioned {
-            cluster,
-            admin,
-            database,
-            roles,
-            base,
-            owner_url,
-            plan,
-        } = provisioned;
-
-        // The attestor is installed by its own login, after the owner phase.
-        let operation_id = Uuid::new_v4();
-        install(
-            &base
-                .clone()
-                .database(&database)
-                .username(&roles.installer)
-                .options([("search_path", SCHEMA)]),
-            PhysicalAttestationConfig::new(
-                lineage.clone(),
-                role(&roles.installer),
-                role(&roles.runtime),
-                role(&roles.definer),
-                PgSchemaName(TRUSTED_SCHEMA.to_owned()),
-            )
-            .expect("attestation configuration"),
-            operation_id,
-        )
-        .await
-        .expect("install physical attestor");
-
-        let endpoint = SocketEndpoint::for_url(url).await;
-        let runtime_url = format!(
-            "postgresql:///{database}?host={}&port={}&user={}&options=-c%20search_path%3D{SCHEMA}",
-            endpoint.directory.path().display(),
-            endpoint.port,
-            roles.runtime
-        );
-        let handoff = handoff(&admin, &roles, &lineage, &runtime_url, operation_id).await;
-        Self {
-            cluster,
-            admin,
-            database,
-            roles,
-            endpoint,
-            lineage,
-            runtime_url,
-            handoff,
-            owner_url,
-            plan,
-        }
-    }
-
-    /// Run the owner phase again on the already prepared database.
-    async fn rerun_owner_phase(&self) -> Result<AttestedLineage, RestrictedRuntimeOwnerError> {
-        run_owner_phase(&self.owner_url, &self.plan).await
-    }
-
     /// Environment that starts the server under the runtime login.
     fn runtime_env(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("WADDLE_DB_DRIVER", "postgres".to_owned()),
-            ("WADDLE_DATABASE_URL", self.runtime_url.clone()),
-            (
-                "WADDLE_DEPLOYMENT_UUID",
-                self.lineage.deployment_uuid.to_string(),
-            ),
-            ("WADDLE_GIT_SHA", RELEASE_GIT_SHA.to_owned()),
-            ("WADDLE_DB_RUNTIME_ATTESTATION", self.handoff.clone()),
-            ("WADDLE_DB_MIGRATOR_LOGIN", self.roles.migrator.clone()),
-            (
-                "WADDLE_XMPP_MAM_SCHEMA_OWNER",
-                self.roles.schema_owner.clone(),
-            ),
-            ("WADDLE_XMPP_MAM_CLAIM_SCHEMA", SCHEMA.to_owned()),
-            ("WADDLE_SESSION_KEY", SESSION_KEY.to_owned()),
-        ]
+        self.runtime_env_for(&self.runtime_url, &self.handoff)
+    }
+
+    async fn new(url: &str) -> Self {
+        Self::from_provisioned(Provisioned::new(url).await, url).await
     }
 
     /// Run the binary to completion, for a startup that must refuse.
@@ -672,250 +136,6 @@ impl Prepared {
         );
         (text, port_file.exists())
     }
-
-    async fn cleanup(self) {
-        drop_fixture(self.cluster, self.admin, &self.database, &self.roles).await;
-        drop(self.endpoint);
-    }
-}
-
-fn role(name: &str) -> PgRoleName {
-    PgRoleName::new(name).expect("generated role name")
-}
-
-async fn execute(pool: &PgPool, statement: &str) {
-    sqlx::query(statement)
-        .execute(pool)
-        .await
-        .unwrap_or_else(|error| panic!("{statement}: {error}"));
-}
-
-fn url_with(base: &str, database: &str, user: &str, options: &str) -> String {
-    let mut url = url::Url::parse(base).expect("PostgreSQL test URL");
-    let retained: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(key, _)| !matches!(key.as_ref(), "user" | "password" | "dbname" | "options"))
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    url.query_pairs_mut()
-        .clear()
-        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
-        .append_pair("dbname", database)
-        .append_pair("user", user)
-        .append_pair("options", options);
-    url.to_string()
-}
-
-/// The operator handoff. Every pin is read by the administrator, never from
-/// the runtime connection it will be checked against.
-async fn handoff(
-    admin: &PgPool,
-    roles: &Roles,
-    lineage: &AttestedLineage,
-    runtime_url: &str,
-    operation_id: Uuid,
-) -> String {
-    // Record the endpoint exactly as the runtime's connection options name it.
-    let endpoint = PgConnectOptions::from_str(runtime_url).expect("runtime URL");
-    let socket_directory = endpoint
-        .get_socket()
-        .map(|path| path.to_string_lossy().into_owned())
-        .or_else(|| {
-            endpoint
-                .get_host()
-                .starts_with('/')
-                .then(|| endpoint.get_host().to_owned())
-        });
-    let row = sqlx::query(
-        "SELECT db.datdba::bigint, n.nspowner::bigint, runtime.oid::bigint, \
-                installer.oid::bigint, definer.oid::bigint, trusted.oid::bigint, \
-                lineage.oid::bigint, lineage_idx.indexrelid::bigint, attestor.oid::bigint, \
-                ledger.oid::bigint, ledger_idx.indexrelid::bigint, epoch.oid::bigint, \
-                epoch_idx.indexrelid::bigint, manifest.oid::bigint, old_runtime.oid::bigint \
-         FROM pg_catalog.pg_database db \
-         JOIN pg_catalog.pg_namespace n ON n.nspname = $1 \
-         JOIN pg_catalog.pg_class lineage \
-           ON lineage.relnamespace = n.oid AND lineage.relname = '_lineage' \
-         JOIN pg_catalog.pg_index lineage_idx \
-           ON lineage_idx.indrelid = lineage.oid AND lineage_idx.indisprimary \
-         JOIN pg_catalog.pg_class ledger \
-           ON ledger.relnamespace = n.oid AND ledger.relname = '_migrations' \
-         JOIN pg_catalog.pg_index ledger_idx \
-           ON ledger_idx.indrelid = ledger.oid AND ledger_idx.indisprimary \
-         JOIN pg_catalog.pg_class epoch \
-           ON epoch.relnamespace = n.oid AND epoch.relname = 'ingress_protocol_epoch' \
-         JOIN pg_catalog.pg_index epoch_idx \
-           ON epoch_idx.indrelid = epoch.oid AND epoch_idx.indisprimary \
-         JOIN pg_catalog.pg_class manifest \
-           ON manifest.relnamespace = n.oid AND manifest.relname = 'ingress_epoch_guard_manifest' \
-         JOIN pg_catalog.pg_namespace trusted ON trusted.nspname = $2 \
-         JOIN pg_catalog.pg_proc attestor \
-           ON attestor.pronamespace = trusted.oid AND attestor.proname = 'read_physical_identity' \
-         JOIN pg_catalog.pg_roles runtime ON runtime.rolname = $3 \
-         JOIN pg_catalog.pg_roles installer ON installer.rolname = $4 \
-         JOIN pg_catalog.pg_roles definer ON definer.rolname = $5 \
-         JOIN pg_catalog.pg_roles old_runtime ON old_runtime.rolname = $6 \
-         WHERE db.datname = pg_catalog.current_database()",
-    )
-    .bind(SCHEMA)
-    .bind(TRUSTED_SCHEMA)
-    .bind(&roles.runtime)
-    .bind(&roles.installer)
-    .bind(&roles.definer)
-    .bind(&roles.old_runtime)
-    .fetch_one(admin)
-    .await
-    .expect("administrator records the startup pins");
-    let oid = |index| u32::try_from(row.get::<i64, _>(index)).expect("OID fits u32");
-    let physical = lineage
-        .postgres_identity
-        .as_ref()
-        .expect("PostgreSQL identity");
-    serde_json::json!({
-        "version": 3,
-        "release_git_sha": RELEASE_GIT_SHA,
-        "deployment_uuid": lineage.deployment_uuid.to_string(),
-        "lineage_uuid": lineage.lineage_uuid.to_string(),
-        "system_identifier": physical.system_identifier.to_string(),
-        "database_oid": physical.database.oid,
-        "database_name": physical.database.name.0,
-        "schema_oid": physical.schema.oid,
-        "schema_name": physical.schema.name.0,
-        "installer_login": roles.installer,
-        "runtime_login": roles.runtime,
-        "definer_role": roles.definer,
-        "trusted_schema": TRUSTED_SCHEMA,
-        "cutover": {
-            "transition_id": Uuid::new_v4().to_string(),
-            "primary": {
-                "provider": "test-postgresql",
-                "cluster_id": "disposable-cluster",
-                "instance_id": "disposable-primary",
-                "endpoint_host": endpoint.get_host(),
-                "endpoint_port": endpoint.get_port(),
-                "endpoint_socket_dir": socket_directory,
-                "observation_record_id": Uuid::new_v4().to_string(),
-            },
-            "old_runtime": {
-                "login": roles.old_runtime,
-                "role_oid": oid(14),
-                "credential_cutoff_record_id": Uuid::new_v4().to_string(),
-            },
-            "listener_cutoff_record_id": Uuid::new_v4().to_string(),
-            "backend_cutoff_record_id": Uuid::new_v4().to_string(),
-            "prepared_transaction_cutoff_record_id": Uuid::new_v4().to_string(),
-            "mutator_policy": {
-                "mode": "quiesced_for_serving_interval",
-                "record_id": Uuid::new_v4().to_string(),
-            },
-        },
-        "pins": {
-            "database_owner_role_oid": oid(0),
-            "schema_owner_role_oid": oid(1),
-            "runtime_role_oid": oid(2),
-            "installer_role_oid": oid(3),
-            "definer_role_oid": oid(4),
-            "trusted_schema_oid": oid(5),
-            "lineage_relation_oid": oid(6),
-            "lineage_primary_index_oid": oid(7),
-            "attestor_function_oid": oid(8),
-            "installation_operation_id": operation_id.to_string(),
-            "ledger_relation_oid": oid(9),
-            "ledger_primary_index_oid": oid(10),
-            "epoch_relation_oid": oid(11),
-            "epoch_primary_index_oid": oid(12),
-            "guard_manifest_relation_oid": oid(13),
-        }
-    })
-    .to_string()
-}
-
-/// The catalog state a restricted runtime must leave alone: every relation,
-/// column, routine (with its `SECURITY DEFINER` flag and configuration),
-/// constraint, trigger and type in the application and attestor schemas with
-/// owner and ACL, every schema, the database ACL, default privileges, and
-/// the role memberships of this fixture's roles. DDL or a grant of any kind
-/// changes this list. An object created and dropped again between two
-/// readings does not; [`Wire`] covers that for the runtime login.
-async fn catalog_entries(admin: &PgPool) -> Vec<String> {
-    sqlx::query_scalar(
-        "SELECT entry FROM ( \
-           SELECT pg_catalog.format('class %s %s %s %s %s %s', c.oid, c.relname, c.relkind, \
-                    c.relowner, c.relnatts, c.relacl) AS entry \
-             FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-            WHERE n.nspname IN ($1, $2) \
-           UNION ALL \
-           SELECT pg_catalog.format('attribute %s %s %s %s %s %s', a.attrelid, a.attnum, \
-                    a.attname, a.atttypid, a.attnotnull, a.attacl) \
-             FROM pg_catalog.pg_attribute a \
-             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-            WHERE n.nspname IN ($1, $2) AND a.attnum > 0 \
-           UNION ALL \
-           SELECT pg_catalog.format('proc %s %s %s %s %s %s %s', p.oid, p.proname, p.proowner, \
-                    p.proacl, pg_catalog.md5(p.prosrc), p.prosecdef, p.proconfig) \
-             FROM pg_catalog.pg_proc p \
-             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-            WHERE n.nspname IN ($1, $2) \
-           UNION ALL \
-           SELECT pg_catalog.format('constraint %s %s %s', k.oid, k.conname, k.conrelid) \
-             FROM pg_catalog.pg_constraint k \
-             JOIN pg_catalog.pg_namespace n ON n.oid = k.connamespace \
-            WHERE n.nspname IN ($1, $2) \
-           UNION ALL \
-           SELECT pg_catalog.format('trigger %s %s %s', t.oid, t.tgname, t.tgrelid) \
-             FROM pg_catalog.pg_trigger t \
-             JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-            WHERE n.nspname IN ($1, $2) \
-           UNION ALL \
-           SELECT pg_catalog.format('namespace %s %s %s %s', n.oid, n.nspname, n.nspowner, n.nspacl) \
-             FROM pg_catalog.pg_namespace n \
-            WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' \
-           UNION ALL \
-           SELECT pg_catalog.format('type %s %s %s %s', t.oid, t.typname, t.typowner, t.typacl) \
-             FROM pg_catalog.pg_type t \
-             JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
-            WHERE n.nspname IN ($1, $2) \
-           UNION ALL \
-           SELECT pg_catalog.format('default_acl %s %s %s %s', da.defaclrole, \
-                    da.defaclnamespace, da.defaclobjtype, da.defaclacl) \
-             FROM pg_catalog.pg_default_acl da \
-           UNION ALL \
-           SELECT pg_catalog.format('membership %s %s %s %s %s', m.roleid::regrole, \
-                    m.member::regrole, m.admin_option, m.inherit_option, m.set_option) \
-             FROM pg_catalog.pg_auth_members m \
-             JOIN pg_catalog.pg_roles r ON r.oid IN (m.roleid, m.member) \
-            WHERE r.rolname LIKE '%' || pg_catalog.substr(pg_catalog.current_database(), 15) \
-           UNION ALL \
-           SELECT pg_catalog.format('database %s %s', d.datdba, d.datacl) \
-             FROM pg_catalog.pg_database d \
-            WHERE d.datname = pg_catalog.current_database() \
-         ) entries ORDER BY entry",
-    )
-    .bind(SCHEMA)
-    .bind(TRUSTED_SCHEMA)
-    .fetch_all(admin)
-    .await
-    .expect("catalog entries")
-}
-
-/// Fail with the entries that differ, not the whole catalog.
-async fn assert_catalog_unchanged(admin: &PgPool, before: &[String], context: &str) {
-    let after = catalog_entries(admin).await;
-    let removed: Vec<&String> = before
-        .iter()
-        .filter(|entry| !after.contains(entry))
-        .collect();
-    let added: Vec<&String> = after
-        .iter()
-        .filter(|entry| !before.contains(entry))
-        .collect();
-    assert!(
-        removed.is_empty() && added.is_empty(),
-        "{context}: removed {removed:#?}, added {added:#?}"
-    );
 }
 
 async fn runtime_connection(prepared: &Prepared) -> PgConnection {
@@ -931,16 +151,6 @@ fn sqlstate(error: &sqlx::Error) -> Option<String> {
         .as_database_error()
         .and_then(|error| error.code())
         .map(|code| code.into_owned())
-}
-
-async fn probe(url: &str) -> reqwest::StatusCode {
-    reqwest::Client::new()
-        .get(url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .unwrap_or_else(|error| panic!("GET {url}: {error}"))
-        .status()
 }
 
 const POOL_LIMITS: RuntimePoolLimits = RuntimePoolLimits {
@@ -1140,24 +350,11 @@ async fn owner_phase_prepares_the_stores_the_runtime_role_attaches() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restricted_runtime_refuses_instead_of_creating_or_clustering() {
+async fn restricted_runtime_refuses_instead_of_creating_a_missing_relation() {
     let Some(url) = require_test_postgres_url() else {
         return;
     };
     let prepared = Prepared::new(&url).await;
-
-    // Clustering has no owner-prepared attachment: refuse before a listener.
-    let (output, listener_published) = prepared
-        .refused_startup(&[("WADDLE_CLUSTERING_ENABLED", "true")])
-        .await;
-    assert!(
-        output.contains("cannot serve with clustering enabled"),
-        "clustered restricted startup must refuse with its typed error: {output}"
-    );
-    assert!(
-        !listener_published,
-        "a refused startup published a listener"
-    );
 
     // The webhook ledger refuses a privilege the owner phase did not grant,
     // and a missing ledger is an attachment error, not something to create.
@@ -1672,6 +869,13 @@ async fn room_observation_exempts_only_the_exact_pubsub_lock_function() {
     prepared.cleanup().await;
 }
 
+async fn iq_result(client: &mut WsXmppClient, request: Iq) -> Option<Element> {
+    match round_trip(client, request).await {
+        Iq::Result { payload, .. } => payload,
+        other => panic!("expected an IQ result, received {other:?}"),
+    }
+}
+
 /// Catalog entries a repeated owner phase must leave alone. Pending delivery
 /// owner preparation drops and recreates its ordinal trigger on every run, so
 /// that one trigger is compared by name and relation, without its OID.
@@ -1921,126 +1125,28 @@ async fn relation_exists(admin: &PgPool, relation: &str) -> bool {
         .expect("inspect relation")
 }
 
-const DOMAIN: &str = "localhost";
 const NS_ROSTER: &str = "jabber:iq:roster";
+
 const NS_VCARD: &str = "vcard-temp";
+
 const NS_PRIVATE: &str = "jabber:iq:private";
+
 const NS_PREFS: &str = "urn:waddle:test:restricted-prefs";
+
 const NS_BLOCKING: &str = "urn:xmpp:blocking";
-const NS_MUC: &str = "http://jabber.org/protocol/muc";
-const NS_MAM: &str = "urn:xmpp:mam:2";
+
 const NS_UPLOAD: &str = "urn:xmpp:http:upload:0";
+
 const NS_PUSH: &str = "urn:xmpp:push:0";
+
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+
 const NS_DATA_FORMS: &str = "jabber:x:data";
-const WIRE_BUDGET: Duration = Duration::from_secs(20);
-
-async fn send_element(client: &mut WsXmppClient, element: Element) {
-    let mut bytes = Vec::new();
-    element.write_to(&mut bytes).expect("serialize stanza");
-    client
-        .send(&String::from_utf8(bytes).expect("stanza UTF-8"))
-        .await
-        .expect("send stanza");
-}
-
-fn iq_request(set: bool, id: &str, to: Option<&str>, payload: Element) -> Iq {
-    let to = to.map(|to| to.parse().expect("IQ recipient"));
-    let id = id.to_owned();
-    if set {
-        Iq::Set {
-            from: None,
-            to,
-            id,
-            payload,
-        }
-    } else {
-        Iq::Get {
-            from: None,
-            to,
-            id,
-            payload,
-        }
-    }
-}
-
-/// Send a request and return the payload of its `result` reply.
-async fn iq_result(client: &mut WsXmppClient, request: Iq) -> Option<Element> {
-    match round_trip(client, request).await {
-        Iq::Result { payload, .. } => payload,
-        other => panic!("expected an IQ result, received {other:?}"),
-    }
-}
-
-/// Receive frames until `done` accepts the stanzas collected so far.
-async fn collect_until(
-    client: &mut WsXmppClient,
-    what: &str,
-    done: impl Fn(&[Element]) -> bool,
-) -> Vec<Element> {
-    let mut collected = Vec::new();
-    let deadline = tokio::time::Instant::now() + WIRE_BUDGET;
-    while !done(&collected) {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let frame = client
-            .recv_timeout(remaining)
-            .await
-            .unwrap_or_else(|error| panic!("{what}: {error}; collected {collected:?}"));
-        if let Ok(element) = frame.parse::<Element>() {
-            collected.push(element);
-        }
-    }
-    collected
-}
-
-fn has_descendant(element: &Element, name: &str, namespace: &str) -> bool {
-    element
-        .children()
-        .any(|child| child.is(name, namespace) || has_descendant(child, name, namespace))
-}
-
-fn contains_text(element: &Element, needle: &str) -> bool {
-    element.text().contains(needle) || element.children().any(|child| contains_text(child, needle))
-}
 
 fn text_element(name: &str, namespace: &str, text: &str) -> Element {
     Element::builder(name, namespace)
         .append(text.to_owned())
         .build()
-}
-
-fn chat_message(to: &str, kind: MessageType, id: &str, body: &str) -> Element {
-    let mut message = Message::new(Some(to.parse().expect("message recipient")));
-    message.id = Some(Id(id.to_owned()));
-    message.type_ = kind;
-    message.bodies.insert(Lang::new(), body.to_owned());
-    message.into()
-}
-
-fn muc_presence(occupant: &str, leave: bool) -> Element {
-    let mut presence = Element::builder("presence", xmpp_parsers::ns::JABBER_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), occupant);
-    presence = if leave {
-        presence.attr(minidom::rxml::xml_ncname!("type").to_owned(), "unavailable")
-    } else {
-        presence.append(Element::builder("x", NS_MUC).build())
-    };
-    presence.build()
-}
-
-/// Run a MAM query and return the forwarded results up to its `<fin/>`.
-async fn mam_query(client: &mut WsXmppClient, id: &str, archive: Option<&str>) -> Vec<Element> {
-    send_iq(
-        client,
-        iq_request(true, id, archive, Element::builder("query", NS_MAM).build()),
-    )
-    .await;
-    collect_until(client, "MAM query", |stanzas| {
-        stanzas
-            .iter()
-            .any(|stanza| stanza.attr("id") == Some(id) && has_descendant(stanza, "fin", NS_MAM))
-    })
-    .await
 }
 
 /// A roster get marks the resource interested, so the following roster set
@@ -2372,90 +1478,6 @@ async fn register_push_device(client: &mut WsXmppClient) -> String {
     find_field_value(&completed, "node").expect("registered push node")
 }
 
-/// Enable XEP-0198 with resumption, have a stanza acknowledged, lose the
-/// transport without closing the stream, and resume on a new one.
-async fn exercise_stream_management(server: &TestServer) {
-    let mut client = WsXmppClient::connect(&server.ws_url())
-        .await
-        .expect("stream management socket");
-    client
-        .authenticate(DOMAIN, "bob", "bob-password")
-        .await
-        .expect("authenticate");
-    client.bind("tablet").await.expect("bind");
-    send_element(
-        &mut client,
-        Element::builder("enable", SM_NS)
-            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
-            .build(),
-    )
-    .await;
-    let enabled = collect_until(&mut client, "stream management enabled", |stanzas| {
-        stanzas.iter().any(|stanza| stanza.is("enabled", SM_NS))
-    })
-    .await
-    .into_iter()
-    .find(|stanza| stanza.is("enabled", SM_NS))
-    .expect("enabled");
-    let stream = enabled.attr("id").expect("resumable stream").to_owned();
-
-    send_iq(&mut client, Iq::from_get("sm-ping", Ping)).await;
-    send_element(&mut client, Element::builder("r", SM_NS).build()).await;
-    let seen = collect_until(&mut client, "ping result and acknowledgement", |stanzas| {
-        stanzas.iter().any(|stanza| stanza.is("a", SM_NS))
-            && stanzas
-                .iter()
-                .any(|stanza| stanza.attr("id") == Some("sm-ping"))
-    })
-    .await;
-    let acknowledged = seen
-        .iter()
-        .find(|stanza| stanza.is("a", SM_NS))
-        .and_then(|ack| ack.attr("h"));
-    assert_eq!(acknowledged, Some("1"), "the server handled one stanza");
-    let handled = seen
-        .iter()
-        .filter(|stanza| matches!(stanza.name(), "iq" | "message" | "presence"))
-        .count();
-    // Dropping the socket ends the transport without a stream close.
-    drop(client);
-
-    let mut resumed = WsXmppClient::connect(&server.ws_url())
-        .await
-        .expect("resumption socket");
-    resumed
-        .authenticate(DOMAIN, "bob", "bob-password")
-        .await
-        .expect("authenticate for resumption");
-    send_element(
-        &mut resumed,
-        Element::builder("resume", SM_NS)
-            .attr(
-                minidom::rxml::xml_ncname!("previd").to_owned(),
-                stream.as_str(),
-            )
-            .attr(
-                minidom::rxml::xml_ncname!("h").to_owned(),
-                handled.to_string(),
-            )
-            .build(),
-    )
-    .await;
-    let response = collect_until(&mut resumed, "resumption", |stanzas| {
-        stanzas
-            .iter()
-            .any(|stanza| stanza.is("resumed", SM_NS) || stanza.is("failed", SM_NS))
-    })
-    .await;
-    assert!(
-        response
-            .iter()
-            .any(|stanza| stanza.is("resumed", SM_NS) && stanza.attr("previd") == Some(&stream)),
-        "the stream must resume on the same node: {response:?}"
-    );
-    resumed.close().await.expect("close resumed stream");
-}
-
 /// The real server under the runtime login. A dangling roster row is seeded
 /// first, so startup also runs its roster prune. The session then covers
 /// login and bind, a direct message, roster set/get with its push, vCard,
@@ -2567,7 +1589,7 @@ async fn restricted_runtime_role_serves_without_ddl() {
         "the personal archive must return the direct message: {personal:?}"
     );
     exercise_upload_and_push(&mut alice).await;
-    exercise_stream_management(&server).await;
+    exercise_stream_management(&server, &server).await;
 
     alice.close().await.expect("alice closes");
     bob.close().await.expect("bob closes");

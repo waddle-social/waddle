@@ -66,6 +66,10 @@ pub enum SwarmError {
     /// The keypair-slot lease could not be acquired or its schema set up.
     #[error(transparent)]
     Lease(#[from] LeaseError),
+    /// The owner-prepared keypair-slot lease did not verify on the attested
+    /// main and control-plane pools.
+    #[error("clustering keypair-slot lease attachment failed: {0}")]
+    LeaseAttach(#[from] super::lease::LeaseAttachError),
     /// A leased pool slot's keypair could not be decoded.
     #[error(transparent)]
     Identity(#[from] identity::IdentityError),
@@ -471,8 +475,16 @@ async fn node_keypair(
         return Err(SwarmError::KeypairPoolRequired);
     }
 
-    let lease = PostgresKeypairSlotLease::new(db.clone());
-    lease.ensure_schema().await?;
+    // The restricted runtime role cannot create the lease table: it attaches
+    // to the owner's enrollment, which also checks the configured pool
+    // against the enrolled PeerId order before any slot is leased.
+    let lease = if db.uses_attested_postgres_pool() {
+        PostgresKeypairSlotLease::attach_existing(db.clone(), &config.keypair_pool).await?
+    } else {
+        let lease = PostgresKeypairSlotLease::new(db.clone());
+        lease.ensure_schema().await?;
+        lease
+    };
     let node = LeaseIdentity {
         node_id: node_id.clone(),
         node_epoch: uuid::Uuid::new_v4(),

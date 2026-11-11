@@ -262,7 +262,9 @@ async fn sm_startup_uses_attested_shared_pool_and_refuses_unsupported_paths() {
             Ok(_) => panic!("clustered attachment must not fall back to portable SM"),
             Err(error) => error,
         };
-    assert!(error.to_string().contains("clustered SM cannot yet attach"));
+    assert!(error
+        .to_string()
+        .contains("clustered attested stream management requires live claim handles"));
     assert_eq!(
         snapshot(&fixture).await,
         before,

@@ -290,8 +290,8 @@ enum IngressColocationError {
         "an attested PostgreSQL {store} store must inherit WADDLE_DATABASE_URL without an explicit override"
     )]
     AttestedStoreRequiresInheritedGlobal { store: &'static str },
-    #[error("clustered SM cannot yet attach to an attested PostgreSQL runtime database")]
-    AttestedClusteredSmUnsupported,
+    #[error("clustered attested stream management requires live claim handles")]
+    AttestedSmClaimsUnavailable,
     #[error("attested MAM storage must inherit WADDLE_DATABASE_URL without an explicit override")]
     AttestedMamRequiresInheritedGlobal,
     #[error("shared owner PostgreSQL {store} storage must inherit WADDLE_DATABASE_URL")]
@@ -2010,7 +2010,7 @@ async fn create_sm_session_registry(
     let sm_persistence = create_ingress_sm_storage(
         ingress_store_url(&sm_database_url, global_db, "SM")?,
         server_config.clustering.enabled,
-        clustering.claim_pair(),
+        clustering,
         global_db,
     )
     .await?;
@@ -2108,7 +2108,7 @@ pub(crate) async fn attach_sm_startup_for_test(
     create_ingress_sm_storage(
         ingress_store_url(selection, global, "SM")?,
         clustering_enabled,
-        None,
+        &ClusteringHandles::default(),
         global,
     )
     .await
@@ -2170,19 +2170,38 @@ async fn ensure_ingress_storage_colocation(
 async fn create_ingress_sm_storage(
     database_url: Option<&str>,
     clustering_enabled: bool,
-    claim_pair: Option<(
-        Arc<dyn waddle_xmpp::ownership::ClaimStore>,
-        waddle_xmpp::ownership::SharedNodeIdentity,
-    )>,
+    clustering: &ClusteringHandles,
     global: &Database,
 ) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
     ensure_ingress_storage_colocation(database_url, global).await?;
     if global.uses_attested_postgres_pool() {
-        // The fenced implementation does not yet have a restricted runtime
-        // attachment. Do not fall back to portable persistence or invoke its
-        // owner initializer under the runtime credential.
+        // A clustered node fences every stream management write on its
+        // claims, so it attaches the fenced store with the live claim pair
+        // and the verified claim authority. Without them it must not fall
+        // back to portable persistence, and it never runs an owner
+        // initializer under the runtime credential.
         if clustering_enabled {
-            return Err(IngressColocationError::AttestedClusteredSmUnsupported.into());
+            #[cfg(feature = "clustering")]
+            {
+                let (claim_store, node_identity) = clustering
+                    .claim_pair()
+                    .ok_or(IngressColocationError::AttestedSmClaimsUnavailable)?;
+                let authority = clustering
+                    .claim_authority
+                    .as_ref()
+                    .ok_or(IngressColocationError::AttestedSmClaimsUnavailable)?;
+                return Ok(Arc::new(
+                    crate::sm_persistence_fenced::PostgresFencedSmPersistence::attach_runtime(
+                        global.clone(),
+                        claim_store,
+                        node_identity,
+                        authority,
+                    )
+                    .await?,
+                ));
+            }
+            #[cfg(not(feature = "clustering"))]
+            return Err(IngressColocationError::AttestedSmClaimsUnavailable.into());
         }
         return Ok(Arc::new(
             crate::sm_persistence::DatabaseSmPersistence::attach_runtime_postgres(global.clone())
@@ -2191,7 +2210,7 @@ async fn create_ingress_sm_storage(
     }
     Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
         clustering_enabled,
-        claim_pair,
+        clustering.claim_pair(),
         global,
     )
     .await?)

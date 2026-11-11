@@ -137,13 +137,18 @@ from its connection: `WADDLE_DB_MIGRATOR_LOGIN` (the login that ran the owner
 phase, checked by the room observation verifier), and
 `WADDLE_XMPP_MAM_SCHEMA_OWNER` with `WADDLE_XMPP_MAM_CLAIM_SCHEMA`.
 
-Startup refuses, before binding a listener, when clustering is enabled
-together with the attested pool: the owner phase prepares the clustering
-stores and each has a verifying attachment, but startup does not select
-those attachments. A store whose relation is missing or drifted fails its
-attachment; the runtime never creates it.
+A store whose relation is missing or drifted fails its attachment; the
+runtime never creates it. With clustering enabled the runtime also attaches
+the clustering stores: it opens a second attested pool under the same login
+for node and claim liveness, verifies the claim, node, steal-intent,
+reaper-cursor, allowlist and occupancy relations once, and attaches the
+keypair lease, the claim store, the durable room store, fenced stream
+management, claim-fenced MAM and claim-fenced pending delivery with that
+evidence. A clustered start on a database prepared without the clustering
+section, or on a keypair-pool generation that is still pending, refuses
+before it publishes a listener.
 
-The non-clustered server serves under the runtime role.
+The server serves under the runtime role, clustered or not.
 `tests/restricted_runtime_startup.rs` starts the real binary on the attested
 pool against a database seeded with a dangling roster row, probes `/healthz`
 and `/readyz`, and runs WebSocket sessions that cover a direct message, roster
@@ -153,8 +158,26 @@ query, an upload slot, push device registration with enable and disable, and
 XEP-0198 enable, acknowledgement and same-node resumption. It then checks that
 the catalog is unchanged and that a relay in front of PostgreSQL saw no
 catalog-changing statement and no `insufficient_privilege` error on any
-runtime connection. Old-writer drain and physical primary fencing remain
-gates, as do the parts of typed transaction authority listed under
+runtime connection.
+
+`tests/restricted_clustered_startup.rs` starts two real binaries under the
+runtime role against a database prepared with a clustering plan, each
+through its own relay. It runs direct messages in both directions between
+clients on different nodes; a room created on one node and joined and
+written to from the other, with the reflection and the owner's archive
+read; XEP-0198 enabled on one node and resumed on the other; and a graceful
+shutdown of the room's owning node, after which the surviving node delivers
+a direct message, takes the room over, accepts a join and a message, and
+serves the archive. Neither relay may record an `insufficient_privilege`
+error or a catalog-changing statement, the catalog must be unchanged, and
+the owner phase must run again on the database afterwards. It does not
+cover a node crash, a keypair-slot steal, an administrative room owner
+transfer, or the archive of an instant room read from a node that does not
+own the room, which the archive access gate refuses with or without the
+restricted role.
+
+Old-writer drain and physical primary fencing remain gates, as do the parts
+of typed transaction authority listed under
 [Typed ingress transaction entry](#typed-ingress-transaction-entry). No role
 or epoch activation is implied by this configuration or by a successful local
 test.
@@ -438,7 +461,9 @@ What the entry does not do:
   pool began through the entry.
 - Attach-time checks in other stores call the attestor directly on their own
   read-only transactions.
-- The clustered stores are refused under the attested pool and have no entry.
+- The clustered stores (claims, keypair lease, durable rooms, fenced stream
+  management) attach under the attested pool and open their own
+  transactions; none goes through the entry.
 
 ## Dark outbox attachment slice
 
@@ -469,5 +494,4 @@ Disposable PostgreSQL tests use separate owner and restricted logins to check
 successful same-pool attachment, DDL denial, malformed shape and grants,
 owner schema changes racing with the attachment lock, and ordinary row writes
 during attachment. SQLite constructor behavior remains covered. Passing these
-tests does not permit clustered serving with the attested pool; clustered
-startup does not select the clustering attachments.
+tests does not by itself permit production serving with the attested pool.

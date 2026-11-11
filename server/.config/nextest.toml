@@ -35,7 +35,7 @@ postgres = { max-threads = 1 }
 # below: give them the machine. Settings resolve per-key from the first
 # matching override, so these binaries still join the postgres group.
 [[profile.default.overrides]]
-filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume) | binary(xep0045_xep0198_remote_acceptance))'
+filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume) | binary(xep0045_xep0198_remote_acceptance) | binary(restricted_clustered_startup))'
 threads-required = 'num-cpus'
 
 # These local full-server tests require each Pending observation within 1 s
@@ -96,6 +96,7 @@ package(waddle-server) & (
     | binary(room_effect_runtime_attach)
     | binary(claim_occupancy_runtime_attach)
     | binary(restricted_runtime_startup)
+    | binary(restricted_clustered_startup)
     | test(clustering::)
     | test(db::)
     | test(inbox::)
@@ -178,5 +179,5 @@ path = "junit.xml"
 # minutes leaves room for every phase to use most of its budget on a loaded
 # runner while still failing a hung test well inside the lane's 55 minutes.
 [[profile.ci.overrides]]
-filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume) | binary(xep0045_xep0198_remote_acceptance) | binary(xmpp_e2e_cue))'
+filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume) | binary(xep0045_xep0198_remote_acceptance) | binary(restricted_clustered_startup) | binary(xmpp_e2e_cue))'
 slow-timeout = { period = "120s", terminate-after = 10 }
