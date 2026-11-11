@@ -978,9 +978,9 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a
-    // fresh SASL/bind lifecycle of its own.
-    // A handoff-blocked socket can never publish the resumed route; refuse
-    // before detaching or claiming the session it names.
+    // fresh SASL/bind lifecycle of its own, and never on a handoff-blocked
+    // socket, which cannot publish the resumed route. Refuse before detaching
+    // or claiming the session the request names.
     if !phase.allows_stream_management_resume() || resume_endpoint_handoff_blocked {
         return SmResumeTerminal::failed(
             waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),

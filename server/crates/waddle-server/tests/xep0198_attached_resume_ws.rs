@@ -556,6 +556,15 @@ mod seams {
 
     #[tokio::test]
     async fn handoff_blocked_socket_cannot_resume_another_live_session() {
+        assert_handoff_blocked_socket_cannot_resume(false).await;
+    }
+
+    #[tokio::test]
+    async fn handoff_blocked_socket_cannot_resume_another_detached_session() {
+        assert_handoff_blocked_socket_cannot_resume(true).await;
+    }
+
+    async fn assert_handoff_blocked_socket_cannot_resume(target_detached: bool) {
         let (server, seam) =
             TestServer::start_with_failed_resume_seam(ACCOUNTS, ALICE_BARE, ALICE_PHONE);
         let (mut owner, stream) = original(&server).await;
@@ -598,6 +607,8 @@ mod seams {
         assert!(enabled.is("enabled", SM_NS));
         assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
         let tablet_stream = SmSessionId::new(enabled.attr("id").expect("second SM ID"));
+        // An abrupt transport loss leaves the session resumable but detached.
+        let mut tablet = (!target_detached).then_some(tablet);
 
         send(
             &mut replacement,
@@ -612,7 +623,7 @@ mod seams {
         .await;
         // The old queue's accepted frame may be written first; the terminal
         // is the first stream-management answer.
-        let failed: Element = replacement
+        let terminal: Element = replacement
             .recv_matching(|frame| {
                 frame.parse::<Element>().is_ok_and(|element| {
                     element.is("failed", SM_NS) || element.is("resumed", SM_NS)
@@ -623,10 +634,10 @@ mod seams {
             .parse()
             .expect("resume terminal XML");
         assert!(
-            failed.is("failed", SM_NS),
-            "blocked socket resume response: {failed:?}"
+            terminal.is("failed", SM_NS),
+            "blocked socket resume response: {terminal:?}"
         );
-        assert!(failed
+        assert!(terminal
             .get_child("unexpected-request", xmpp_parsers::ns::XMPP_STANZAS)
             .is_some());
         assert!(
@@ -638,13 +649,21 @@ mod seams {
         );
 
         // A live owner must survive the refusal, including its SM counters.
-        ping(&mut tablet, "tablet-survives-blocked-resume").await;
-        assert_handled(&mut tablet, 1).await;
+        let handled = match tablet.as_mut() {
+            Some(tablet) => {
+                ping(tablet, "tablet-survives-blocked-resume").await;
+                assert_handled(tablet, 1).await;
+                1
+            }
+            None => 0,
+        };
         let mut fresh = authenticate(&server, 0).await;
-        let resumed = resume(&mut fresh, &tablet_stream, 1).await;
+        let resumed = resume(&mut fresh, &tablet_stream, handled).await;
         assert!(resumed.is("resumed", SM_NS), "resume response: {resumed:?}");
         assert_eq!(resumed.attr("previd"), Some(tablet_stream.as_str()));
-        assert_replaced_transport_closes(&mut tablet).await;
+        if let Some(tablet) = tablet.as_mut() {
+            assert_replaced_transport_closes(tablet).await;
+        }
         ping(&mut fresh, "tablet-successor").await;
         fresh.close().await.expect("second session closes");
 
