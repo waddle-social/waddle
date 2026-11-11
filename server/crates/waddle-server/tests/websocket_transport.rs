@@ -18,7 +18,7 @@ use waddle_server::clustering::NodeLifecycle;
 use waddle_server::websocket_transport::{
     start_websocket_transport, AdmissionError, CustodianState, InboundTerminal, InputError,
     IoCustodianHandle, IoCustodianInventory, Limits, OutputError, StopReason, TestSocketAdmission,
-    TransportLimits, WebSocketInput, WebSocketOutput, WriteProgress,
+    TransportLimits, WebSocketInput, WebSocketMessageSink, WebSocketOutput, WriteProgress,
 };
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 
@@ -1301,4 +1301,151 @@ async fn conflict_bypasses_only_live_interruption_and_foreign_frames_are_rejecte
     assert_eq!(third.sink.starts.load(Ordering::Acquire), 0);
     third.custodian.request_stop(StopReason::Requested);
     assert_joined(&third).await;
+}
+
+const SYSTEM_SHUTDOWN_ERROR: &str = "<stream:error xmlns:stream=\"http://etherx.jabber.org/streams\"><system-shutdown xmlns=\"urn:ietf:params:xml:ns:xmpp-streams\"/></stream:error>";
+const FRAMING_CLOSE: &str = "<close xmlns='urn:ietf:params:xml:ns:xmpp-framing'/>";
+
+/// A message sink over the scripted transport. The peer, input and tokens
+/// stay alive so the pumps keep running until a test stops them.
+struct MessageHarness {
+    messages: WebSocketMessageSink<io::Error>,
+    sink: Arc<SinkState>,
+    custodian: IoCustodianHandle,
+    lifecycle: NodeLifecycle,
+    process_stop: CancellationToken,
+    _peer: mpsc::Sender<io::Result<Message>>,
+    _input: WebSocketInput<io::Error>,
+    _inventory: IoCustodianInventory,
+    _live_interrupt: CancellationToken,
+}
+
+async fn start_message_sink() -> MessageHarness {
+    let Harness {
+        inventory,
+        custodian,
+        input,
+        output,
+        peer,
+        sink,
+        lifecycle,
+        process_stop,
+        live_interrupt,
+        ..
+    } = start((2, 512), (4, 1024)).await;
+    MessageHarness {
+        messages: output.into_message_sink(),
+        sink,
+        custodian,
+        lifecycle,
+        process_stop,
+        _peer: peer,
+        _input: input,
+        _inventory: inventory,
+        _live_interrupt: live_interrupt,
+    }
+}
+
+async fn stop_and_join(custodian: &IoCustodianHandle) {
+    custodian.request_stop(StopReason::Requested);
+    assert_eq!(
+        timeout(TIMEOUT, custodian.wait_until_joined())
+            .await
+            .expect("joined"),
+        CustodianState::Joined
+    );
+}
+
+#[tokio::test]
+async fn message_sink_send_completes_only_after_the_physical_flush() {
+    let mut h = start_message_sink().await;
+    h.sink.stall_flush.store(true, Ordering::Release);
+    let stanza = Message::text("<message id='first'/>");
+    {
+        let send = h.messages.send(stanza.clone());
+        tokio::pin!(send);
+        assert!(timeout(Duration::from_millis(40), &mut send).await.is_err());
+        assert_eq!(h.sink.starts.load(Ordering::Acquire), 1);
+        h.sink.release();
+        timeout(TIMEOUT, send)
+            .await
+            .expect("flush released")
+            .expect("sent");
+    }
+    assert_eq!(*h.sink.frames.lock().expect("frames"), vec![stanza]);
+    stop_and_join(&h.custodian).await;
+}
+
+#[tokio::test]
+async fn message_sink_reports_a_revoked_data_frame_without_writing_it() {
+    let mut h = start_message_sink().await;
+    h.lifecycle.begin_drain();
+    h.process_stop.cancel();
+    let result = timeout(
+        TIMEOUT,
+        h.messages.send(Message::text("<message id='late'/>")),
+    )
+    .await
+    .expect("refusal is prompt");
+    assert!(matches!(
+        result,
+        Err(OutputError::Interrupted(WriteProgress::NotAttempted))
+    ));
+    assert!(h.sink.frames.lock().expect("frames").is_empty());
+    stop_and_join(&h.custodian).await;
+}
+
+#[tokio::test]
+async fn message_sink_writes_the_system_shutdown_close_after_revocation() {
+    let mut h = start_message_sink().await;
+    h.lifecycle.begin_drain();
+    h.process_stop.cancel();
+    timeout(
+        TIMEOUT,
+        h.messages.send(Message::text(SYSTEM_SHUTDOWN_ERROR)),
+    )
+    .await
+    .expect("shutdown error is prompt")
+    .expect("shutdown error written");
+    assert!(matches!(
+        h.messages.send(Message::text("<message id='late'/>")).await,
+        Err(OutputError::InvalidFrame)
+    ));
+    timeout(TIMEOUT, h.messages.send(Message::text(FRAMING_CLOSE)))
+        .await
+        .expect("framing close is prompt")
+        .expect("framing close written");
+    timeout(TIMEOUT, h.messages.close())
+        .await
+        .expect("close is prompt")
+        .expect("close written");
+    assert_eq!(
+        *h.sink.frames.lock().expect("frames"),
+        vec![
+            Message::text(SYSTEM_SHUTDOWN_ERROR),
+            Message::text(FRAMING_CLOSE),
+            Message::Close(None),
+        ]
+    );
+    stop_and_join(&h.custodian).await;
+}
+
+#[tokio::test]
+async fn message_sink_close_does_not_wait_for_the_peer_and_ends_data() {
+    let mut h = start_message_sink().await;
+    let stanza = Message::text("<presence type='unavailable'/>");
+    h.messages.send(stanza.clone()).await.expect("sent");
+    timeout(TIMEOUT, h.messages.close())
+        .await
+        .expect("close does not wait for the peer")
+        .expect("close written");
+    assert!(matches!(
+        h.messages.send(Message::text("<message id='late'/>")).await,
+        Err(OutputError::Closing)
+    ));
+    assert_eq!(
+        *h.sink.frames.lock().expect("frames"),
+        vec![stanza, Message::Close(None)]
+    );
+    stop_and_join(&h.custodian).await;
 }

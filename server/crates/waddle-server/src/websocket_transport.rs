@@ -1880,6 +1880,159 @@ where
     }
 }
 
+impl<E> WebSocketOutput<E>
+where
+    E: Send + Sync + 'static,
+{
+    /// Present this output as a plain `Sink<Message>`. See
+    /// [`WebSocketMessageSink`] for how frames are classified.
+    pub fn into_message_sink(self) -> WebSocketMessageSink<E> {
+        WebSocketMessageSink { output: self }
+    }
+
+    /// Park one frame for bounded admission. The caller has already checked
+    /// readiness for the frame's class and that no admission is parked.
+    fn start_queued(&mut self, frame: WebSocketOutboundFrame) -> Result<(), OutputError<E>> {
+        self.validate_frame(&frame)?;
+        let terminal = !matches!(frame.authority.mode, FrameMode::Data);
+        let close = is_close(&frame.frame);
+        let size = frame_len_for_limit(&frame.frame);
+        if size > self.max_bytes || u32::try_from(size).is_err() {
+            return Err(OutputError::Admission(AdmissionError::Overloaded));
+        }
+        let sender = self.sender.clone();
+        self.pending = Some(Box::pin(async move {
+            sender
+                .send_wait_fenced(frame.frame, size, frame.authority)
+                .await
+                .map(|receipt| OutstandingWrite { receipt, terminal })
+        }));
+        self.close_submitted |= close;
+        Ok(())
+    }
+}
+
+/// Which readiness rule applies to a classified frame.
+#[derive(Clone, Copy)]
+enum MessageClass {
+    Data,
+    Terminal { close: bool },
+}
+
+/// A `Sink<Message>` over a supervised output, for an owner that writes one
+/// frame at a time and treats a completed flush as a completed socket write.
+///
+/// `poll_flush` returns `Ok` only after the pump has flushed every frame this
+/// sink started, so `SinkExt::send` keeps the meaning it has on a split
+/// socket. A frame the pump refuses or cannot finish is a flush error.
+///
+/// Frames are classified by content, because the caller has no typed way to
+/// name a terminal frame:
+///
+/// - `Message::Close` becomes the transport close and ends ordinary data.
+/// - The fixed system-shutdown stream error moves the output into shutdown
+///   mode, where it and the framing close that follows are written even after
+///   the node generation or process token is revoked. Any other frame is then
+///   refused.
+/// - Every other frame is ordinary data and carries the usual authority.
+pub struct WebSocketMessageSink<E> {
+    output: WebSocketOutput<E>,
+}
+
+impl<E> WebSocketMessageSink<E>
+where
+    E: Send + Sync + 'static,
+{
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        self.output.connection_ref()
+    }
+
+    fn classify(
+        &mut self,
+        frame: Message,
+    ) -> Result<(WebSocketOutboundFrame, MessageClass), OutputError<E>> {
+        if let Message::Close(close) = frame {
+            let frame = self.output.transport_close_frame(close)?;
+            return Ok((frame, MessageClass::Terminal { close: true }));
+        }
+        match self.output.authority.phase() {
+            TransportPhase::Open
+                if frame == fixed_terminal_text(FixedTerminalText::SystemShutdown) =>
+            {
+                self.output.begin_shutdown()?;
+                let frame = self.output.shutdown_error_frame()?;
+                Ok((frame, MessageClass::Terminal { close: false }))
+            }
+            TransportPhase::Open => Ok((self.output.data_frame(frame)?, MessageClass::Data)),
+            TransportPhase::Shutdown
+                if frame == fixed_terminal_text(FixedTerminalText::FramingClose) =>
+            {
+                let frame = self.output.framing_close_frame()?;
+                Ok((frame, MessageClass::Terminal { close: false }))
+            }
+            TransportPhase::CloseOnly => Err(OutputError::Closing),
+            TransportPhase::Shutdown | TransportPhase::LiveDetach => Err(OutputError::InvalidFrame),
+        }
+    }
+
+    /// Classify and park one frame. No admission may be parked.
+    fn start(&mut self, frame: Message) -> Result<(), OutputError<E>> {
+        if self.output.closing || self.output.close_submitted || self.output.pending.is_some() {
+            return Err(OutputError::Closing);
+        }
+        let (frame, class) = self.classify(frame)?;
+        // With no parked admission these checks only inspect receipts that
+        // already exist, so they never register the waker.
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let ready = match class {
+            MessageClass::Data => self.output.poll_ready_inner(&mut cx),
+            MessageClass::Terminal { close } => self.output.poll_ready_terminal(&mut cx, close),
+        };
+        match ready {
+            Poll::Ready(result) => result?,
+            Poll::Pending => return Err(OutputError::Closing),
+        }
+        self.output.start_queued(frame)
+    }
+}
+
+impl<E> Sink<Message> for WebSocketMessageSink<E>
+where
+    E: Send + Sync + 'static,
+{
+    type Error = OutputError<E>;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if this.output.closing || this.output.close_submitted {
+            return Poll::Ready(Err(OutputError::Closing));
+        }
+        this.output.poll_pending(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, frame: Message) -> Result<(), Self::Error> {
+        self.get_mut().start(frame)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        let retiring = this.output.authority.phase() != TransportPhase::Open;
+        this.output.poll_flush_inner(cx, retiring)
+    }
+
+    /// Write the transport close if none was sent, then wait for its flush.
+    /// This does not wait for the peer's reply or for the pumps to join; the
+    /// owner retires the custodian separately.
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        std::task::ready!(this.output.poll_pending(cx))?;
+        if !this.output.close_submitted {
+            this.start(Message::Close(None))?;
+        }
+        this.output.poll_flush_inner(cx, true)
+    }
+}
+
 fn frame_len_for_limit(frame: &Message) -> usize {
     match frame {
         Message::Text(text) => text.len(),
