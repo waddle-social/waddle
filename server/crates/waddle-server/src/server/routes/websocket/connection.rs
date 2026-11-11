@@ -33,16 +33,18 @@ use crate::clustering::NodeAdmissionPermit;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 use crate::websocket_transport::{
-    IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits, LiveSocketTransport,
-    TransportLimits, WebSocketInput, WebSocketMessageSink,
+    InputError, IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits,
+    LiveSocketCleanup, LiveSocketTransport, TransportLimits, WebSocketInput, WebSocketMessageSink,
 };
 use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use tokio_util::sync::CancellationToken;
+use waddle_xmpp::protocol::TimerId;
 use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint, SocketOutboundReceiver};
 use waddle_xmpp::stream_management::SmRequest;
 
@@ -344,8 +346,9 @@ struct LiveWebSocketConnection {
 enum LiveSocketPhase {
     Upgraded(Box<WebSocket>),
     Active(Box<LiveSocketState>),
-    // Used only while moving the upgraded socket into the active state. The
-    // transition does not await, so cancellation cannot interrupt it.
+    // Holds the place of a value being moved out: the upgraded socket on its
+    // way into the active state, and the active state on its way into
+    // settlement. Neither move awaits, so cancellation cannot observe it.
     Transitioning,
 }
 
@@ -381,9 +384,21 @@ const TRANSPORT_RETIREMENT_DEADLINE: std::time::Duration = std::time::Duration::
         + 5,
 );
 
+/// Everything the live owner holds for one started connection.
 struct LiveSocketState {
-    // Keep the pre-extraction drop order on cancellation: channels and timers
-    // first, then both physical halves, then the resume owner and conn state.
+    // Fields drop in declaration order when the owner is cancelled or
+    // unwinds, and that order is part of the connection's contract:
+    // - the outbound receiver drops first;
+    // - the transport cleanup guard completes before the physical halves
+    //   drop. On a normal exit `settle` has already consumed `socket_io`, so
+    //   there the guard completes after the halves instead;
+    // - the remaining channels and timers go next, then both physical
+    //   halves, then the resume owner guard and the connection state.
+    outbound_rx: SocketOutboundReceiver,
+    _transport_cleanup: LiveSocketCleanup,
+    // Set when the registry slot was replaced by a newer connection for the
+    // same FullJid. Cleanup then preserves the newcomer's route while sweeping
+    // only this connection's occupancy generation.
     superseded: bool,
     timers: TransportTimers,
     handoff_rx: mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
@@ -391,10 +406,71 @@ struct LiveSocketState {
     _live_resume_owner_guard: LiveResumeOwnerGuard,
     live_resume_control: Arc<waddle_xmpp::registry::LiveResumeControl>,
     conn: WsConnState,
+    // Requests this connection accepted (identity-matched). Each is
+    // acknowledged only after `cleanup_connection_shutdown` has run the
+    // normal XEP-0198 detach-for-resume persistence: the asking lifecycle
+    // must never proceed until the detach-flush this node performs has
+    // landed.
     pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest>,
+    // The cross-node resume live-steal handshake's force-detach receiver
+    // (ADR-0017 Phase 3 Slice 6). `None` until this connection registers: the
+    // registry mints a fresh channel pair per `ConnectionEntry`, and
+    // `handle_inbound_text` takes the receiver half right after registration
+    // succeeds, mirroring the `pending_tx` hand-off.
     force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+    // The sending half of the outbound channel. Registration hands it to the
+    // `ConnectionRegistry` and leaves `None` here, making the registry the
+    // sole holder of the opaque endpoint. When another session registers for
+    // the same FullJid the registry replaces its entry and `outbound_rx`
+    // yields `None`, which is how replacement is detected.
     pending_tx: Option<SocketOutboundEndpoint>,
-    outbound_rx: Option<SocketOutboundReceiver>,
+    turn: TurnGates,
+}
+
+/// The gates one turn of the live loop computes before it waits. They are a
+/// snapshot: the wait and the handler of the same turn see the values
+/// `prepare_turn` stored, whatever the handler changes afterwards.
+#[derive(Clone, Copy, Default)]
+struct TurnGates {
+    /// The XEP-0198 send window is latched shut, so no outbound work is
+    /// pulled this turn.
+    send_window_paused: bool,
+    /// When the paused peer is treated as dead.
+    send_window_pause_deadline: Option<tokio::time::Instant>,
+    /// Deferred inbound frames are queued ahead of the socket.
+    deferred_pending: bool,
+}
+
+/// What the live owner shares with, or borrows from, the rest of the
+/// connection task for the lifetime of the loop and its settlement.
+struct LiveOwnerCtx<'a> {
+    state: &'a Arc<WebSocketState>,
+    admission: &'a LegacySocketAdmission,
+    admission_permit: &'a NodeAdmissionPermit,
+    domain: String,
+    shutdown_token: CancellationToken,
+    caller_gone: &'a CancellationToken,
+}
+
+/// The one event a turn of the live loop waits for, carrying the value its
+/// source yielded. Variants are listed in the priority order `next_event`
+/// polls them.
+enum LoopEvent {
+    IdentityRevoked,
+    PermitRevoked,
+    Shutdown,
+    /// `None` means the registry dropped the sending half.
+    ForceDetach(Option<waddle_xmpp::registry::ForceDetachRequest>),
+    CallerGone,
+    /// The live-resume control serviced its queued requests while polled.
+    LiveResumeServiced,
+    DeferredInbound,
+    Inbound(Option<Result<Message, InputError<axum::Error>>>),
+    // Boxed so the largest payload does not set the size of every event.
+    Outbound(Option<Box<OutboundStanza>>),
+    OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
+    TimerExpired(TimerId),
+    SendWindowPauseDeadline,
 }
 
 fn fence_panicked_owner(lifecycle: &crate::clustering::NodeLifecycle, stop: &CancellationToken) {
@@ -577,41 +653,24 @@ impl LiveWebSocketConnection {
             }
         };
         let _ = transport.set(transport_observer.clone());
-        let state = &self.state;
-        let admission = &self.admission;
-        let admission_permit = admission.permit();
-        let domain = state.deps.auth_state.xmpp_domain.clone();
-        let shutdown_token = state.deps.shutdown.stop_token();
-        info!(domain = %domain, "XMPP WebSocket connection established");
+        let ctx = LiveOwnerCtx {
+            state: &self.state,
+            admission: &self.admission,
+            admission_permit: self.admission.permit(),
+            domain: self.state.deps.auth_state.xmpp_domain.clone(),
+            shutdown_token: self.state.deps.shutdown.stop_token(),
+            caller_gone: &caller_gone,
+        };
+        info!(domain = %ctx.domain, "XMPP WebSocket connection established");
 
-        // Create outbound channel for receiving messages from other connections.
-        // After the session is registered, `pending_tx` is handed to the
-        // ConnectionRegistry and `None`'d out here — the registry becomes the sole
-        // holder of the opaque endpoint. If another session arrives for the same FullJid,
-        // the registry replaces its entry, and our `recv()`
-        // returns `None` — that's how we detect replacement and exit cleanly.
+        // The outbound channel receives messages routed from other
+        // connections; `LiveSocketState` documents how its two halves are
+        // handed over.
         let (outbound_endpoint, outbound_rx) =
             SocketOutboundEndpoint::channel_with_socket_receiver(OUTBOUND_CHANNEL_SIZE);
-        let pending_tx: Option<SocketOutboundEndpoint> = Some(outbound_endpoint);
-
-        // ADR-0017 Phase 3 Slice 6: the cross-node resume live-steal handshake's
-        // force-detach receiver. `None` until this connection registers — the
-        // registry mints a fresh channel pair per `ConnectionEntry`
-        // (`ConnectionEntry::new`), and `handle_inbound_text` takes the receiver
-        // half via `entry.take_force_detach_rx()` immediately after
-        // registration succeeds, mirroring `pending_tx`'s own hand-off pattern.
-        let force_detach_rx: Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>> =
-            None;
-        // Set when this connection is asked (identity-matched) to force-detach.
-        // The ack is deliberately sent only AFTER
-        // `cleanup_connection_shutdown` below has run this connection's normal
-        // XEP-0198 detach-for-resume persistence — the asking lifecycle must
-        // never proceed until the detach-flush this node performs has actually
-        // landed.
-        let pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest> = Vec::new();
 
         // Track connection state
-        let mut conn = WsConnState::new_for_connection_ref(admission.connection_ref().clone());
+        let mut conn = WsConnState::new_for_connection_ref(ctx.admission.connection_ref().clone());
         let live_resume_control = conn.live_resume_control.clone();
         let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
         let ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
@@ -634,14 +693,13 @@ impl LiveWebSocketConnection {
         // authenticating is reaped by the same clock. `TransportReady`
         // arms the keepalive timer; the machine re-arms it on every tick.
         conn.init_prebind_state_machine(
-            &domain,
-            &state.deps.protocol.dispatcher,
-            state.deps.ws_keepalive,
+            &ctx.domain,
+            &ctx.state.deps.protocol.dispatcher,
+            ctx.state.deps.ws_keepalive,
         );
-        // Set when our registry slot was replaced by a newer connection for
-        // the same FullJid. Cleanup then preserves the newcomer's route while
-        // sweeping only this connection's occupancy generation.
         self.phase = LiveSocketPhase::Active(Box::new(LiveSocketState {
+            outbound_rx,
+            _transport_cleanup,
             superseded: false,
             timers: TransportTimers::new(),
             handoff_rx,
@@ -649,13 +707,14 @@ impl LiveWebSocketConnection {
             _live_resume_owner_guard,
             live_resume_control,
             conn,
-            pending_force_detach,
-            force_detach_rx,
-            pending_tx,
-            outbound_rx: Some(outbound_rx),
+            pending_force_detach: Vec::new(),
+            force_detach_rx: None,
+            pending_tx: Some(outbound_endpoint),
+            turn: TurnGates::default(),
         }));
         #[cfg(feature = "test-support")]
-        if let Some(barrier) = &state
+        if let Some(barrier) = &ctx
+            .state
             .deps
             .app_state
             .websocket_admission_test_barriers
@@ -667,245 +726,401 @@ impl LiveWebSocketConnection {
         let LiveSocketPhase::Active(live) = &mut self.phase else {
             unreachable!("the connection was just activated");
         };
-        let LiveSocketState {
+
+        live.start(&ctx).await;
+        loop {
+            if live.prepare_turn(&ctx).await.is_break() {
+                break;
+            }
+            let event = live.next_event(&ctx).await;
+            if live.handle_event(&ctx, event).await.is_break() {
+                break;
+            }
+        }
+
+        let LiveSocketPhase::Active(live) =
+            std::mem::replace(&mut self.phase, LiveSocketPhase::Transitioning)
+        else {
+            unreachable!("the connection stays active until settlement");
+        };
+        live.settle(&ctx).await;
+    }
+}
+
+impl LiveSocketState {
+    /// Tell the pre-bind state machine the transport is up, which arms its
+    /// first timers.
+    async fn start(&mut self, ctx: &LiveOwnerCtx<'_>) {
+        if let Some(sm) = self.conn.state_machine.as_mut() {
+            let events = sm.handle(InboundEvent::TransportReady);
+            let interpret_deps = build_interpret_deps(ctx.state.as_ref(), None);
+            let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+            self.timers.apply(drive.timer_commands);
+        }
+    }
+
+    /// Do the work that precedes every wait: apply the send-window gate, note
+    /// whether deferred frames are queued, and bring a frame the socket
+    /// already holds forward. `Break` ends the loop without waiting.
+    async fn prepare_turn(&mut self, ctx: &LiveOwnerCtx<'_>) -> ControlFlow<()> {
+        let admission = ctx.admission;
+        let admission_permit = ctx.admission_permit;
+        let shutdown_token = &ctx.shutdown_token;
+        let caller_gone = ctx.caller_gone;
+        let Self {
+            socket_io,
+            conn,
+            turn,
+            ..
+        } = self;
+        let Some(socket_halves) = socket_io.as_mut() else {
+            unreachable!("the live connection owns its socket halves");
+        };
+        let (mut ws_sender, ws_receiver) = socket_halves.halves_mut();
+
+        // Loop-level XEP-0198 send-window gate (issue #1219). When the
+        // outstanding unacked count has latched the pause, stop draining the
+        // outbound mpsc (`next_event` guards its `recv()`): producers then
+        // backpressure on the 256-slot channel instead of piling more into
+        // the SM unacked queue, while `ws_receiver` keeps delivering the
+        // `<a/>` acks that shrink the window. On the rising edge send one
+        // forced `<r/>` (the wasm client acks only when asked) and arm a
+        // deadline; on recovery, disarm. No await for this lives inside the
+        // wait itself — acks flow freely and the gate is deadlock-free by
+        // construction.
+        let send_window_paused = conn.sm_state.needs_send_pause();
+        if send_window_paused {
+            let rising_edge = conn.send_window_pause_deadline.is_none();
+            if rising_edge {
+                conn.send_window_pause_deadline =
+                    Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
+                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
+            }
+            // Prompt an ack on the rising edge, and AGAIN whenever the client
+            // has acked since our last prompt but not yet recovered the
+            // window. The wasm client acks only when asked, so without the
+            // re-request a partial ack (XEP-0198 §5 `h` = handled ≤ received)
+            // would strand the stream in the hysteresis band until the
+            // deadline (mirrors the batch writer's inline re-request). The
+            // deadline stays armed from the rising edge as the true dead-peer
+            // bound, so a genuinely stuck client is still detached in time.
+            if (rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked)
+                && !caller_gone.is_cancelled()
+            {
+                conn.send_window_last_request_acked = conn.sm_state.last_acked;
+                if admission.revalidate().is_err() {
+                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                    return ControlFlow::Break(());
+                }
+                if !matches!(
+                    send_ws_message_with_authority(
+                        &mut ws_sender,
+                        Message::Text(SmRequest::to_xml().into()),
+                        "Failed to send SM <r/> at send-window loop pause",
+                        Some((admission_permit, shutdown_token)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
+                    return ControlFlow::Break(());
+                }
+                conn.sm_state.note_ack_request_sent();
+            }
+        } else {
+            conn.send_window_pause_deadline = None;
+        }
+        let send_window_pause_deadline = conn.send_window_pause_deadline;
+
+        // Frames the mid-batch ack drain (issue #1089) pulled off the
+        // socket ahead of the dispatcher must be processed in arrival
+        // order BEFORE the socket is polled again — so `next_event` gates
+        // the socket on the queue being empty, and offers an always-ready
+        // event that processes a bounded ordered chunk per turn. Deferred
+        // processing stays an event of its own (not a loop here), and
+        // yields between chunks, so a client streaming frames mid-flood
+        // cannot monopolize the executor.
+        let deferred_pending = !conn.deferred_inbound.is_empty();
+        *turn = TurnGates {
+            send_window_paused,
+            send_window_pause_deadline,
+            deferred_pending,
+        };
+        // The wait prefers client input to its timers. A frame the socket
+        // already holds must therefore be ready before the wait is polled,
+        // as it would be for a task reading its own socket.
+        if !deferred_pending {
+            ws_receiver.settle_inbound().await;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Wait for exactly one event, preferring the earlier source when several
+    /// are ready. Nothing is handled here. Every source is safe to abandon
+    /// once another one wins: each either yields its value in the same poll
+    /// that takes it from its queue, or keeps its progress in the state it
+    /// borrows (`timers`, the live-resume control), so no value is lost
+    /// between turns.
+    async fn next_event(&mut self, ctx: &LiveOwnerCtx<'_>) -> LoopEvent {
+        let TurnGates {
+            send_window_paused,
+            send_window_pause_deadline,
+            deferred_pending,
+        } = self.turn;
+        let Some(socket_halves) = self.socket_io.as_mut() else {
+            unreachable!("the live connection owns its socket halves");
+        };
+        let (_, ws_receiver) = socket_halves.halves_mut();
+        tokio::select! {
+            biased;
+
+            // Observe source revision changes at turn boundaries. The
+            // bound permit also fences each ordinary synchronous enqueue.
+            _ = ctx.admission.identity_revoked() => LoopEvent::IdentityRevoked,
+
+            // Lifecycle recovery mints a new generation and cannot
+            // resurrect the permit that admitted this connection.
+            _ = ctx.admission_permit.revoked() => LoopEvent::PermitRevoked,
+
+            // Process stop is the highest-priority event. If cancellation and
+            // a queued frame/work item are both ready, no further stanza work
+            // starts after the node has begun draining or failed critically.
+            _ = ctx.shutdown_token.cancelled() => LoopEvent::Shutdown,
+
+            // A force-detach request for this connection's own stream —
+            // deliberately ahead of every inbound/deferred/outbound source in
+            // this biased select: a continuously busy client must not starve
+            // its own termination signal (conflict kill, cross-node steal,
+            // or SM claim demotion, whose fence is already removed — every
+            // starved turn would process stanzas fenceless). Frames the
+            // client already sent are replayed by it after resume (XEP-0198
+            // retransmission), so preempting them loses nothing durable.
+            request = recv_optional(&mut self.force_detach_rx) => LoopEvent::ForceDetach(request),
+
+            // Losing the upgrade callback's waiter requests normal
+            // settlement. In-flight handlers and cleanup are not raced
+            // against this signal, and shutdown/detach retain priority.
+            _ = ctx.caller_gone.cancelled() => LoopEvent::CallerGone,
+
+            // Accepted detach requests stay ahead of new preflight work, so
+            // a stream of rejected attempts cannot starve its own retirement.
+            // Validation still precedes ordinary inbound/deferred work.
+            _ = std::future::poll_fn(|cx| self.live_resume_control.poll(cx)) => {
+                LoopEvent::LiveResumeServiced
+            }
+
+            // A bounded drain-deferred inbound chunk is due.
+            _ = std::future::ready(()), if deferred_pending => LoopEvent::DeferredInbound,
+
+            // Inbound WebSocket messages from the client.
+            msg = ws_receiver.next(), if !deferred_pending => LoopEvent::Inbound(msg),
+
+            // Outbound messages routed from other connections. Gated by the
+            // send-window pause (issue #1219): while paused no new outbound
+            // work is pulled, so its producers backpressure on the mpsc
+            // rather than overflowing the SM unacked queue. The inbound
+            // source above stays active, so client acks keep arriving and
+            // releasing the pause.
+            outbound = self.outbound_rx.recv(), if !send_window_paused => {
+                LoopEvent::Outbound(outbound.map(Box::new))
+            }
+
+            handoff = self.handoff_rx.recv() => LoopEvent::OrderedRelayHandoff(handoff),
+
+            // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only when
+            // the state machine armed a timer.
+            timer_id = self.timers.next_expired() => LoopEvent::TimerExpired(timer_id),
+
+            // Loop-level send-window pause deadline (issue #1219). Fires
+            // only while paused.
+            _ = async {
+                match send_window_pause_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            }, if send_window_paused => LoopEvent::SendWindowPauseDeadline,
+        }
+    }
+
+    /// Handle the one event this turn waited for. `Break` ends the loop and
+    /// leads to settlement.
+    async fn handle_event(&mut self, ctx: &LiveOwnerCtx<'_>, event: LoopEvent) -> ControlFlow<()> {
+        let state = ctx.state;
+        let admission = ctx.admission;
+        let admission_permit = ctx.admission_permit;
+        let domain = ctx.domain.as_str();
+        let shutdown_token = &ctx.shutdown_token;
+        let caller_gone = ctx.caller_gone;
+        let Self {
+            outbound_rx,
             superseded,
             timers,
-            handoff_rx,
             socket_io,
-            live_resume_control,
             conn,
             pending_force_detach,
             force_detach_rx,
             pending_tx,
-            outbound_rx,
             ..
-        } = live.as_mut();
-        let Some(mut outbound_rx) = outbound_rx.take() else {
-            unreachable!("the live connection owns its outbound receiver");
-        };
+        } = self;
         let Some(socket_halves) = socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
         };
         let (mut ws_sender, mut ws_receiver) = socket_halves.halves_mut();
 
-        if let Some(sm) = conn.state_machine.as_mut() {
-            let events = sm.handle(InboundEvent::TransportReady);
-            let interpret_deps = build_interpret_deps(state.as_ref(), None);
-            let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
-            timers.apply(drive.timer_commands);
-        }
-        'connection: loop {
-            // Loop-level XEP-0198 send-window gate (issue #1219). When the
-            // outstanding unacked count has latched the pause, stop draining the
-            // outbound mpsc (its `recv()` arm is guarded below): producers then
-            // backpressure on the 256-slot channel instead of piling more into
-            // the SM unacked queue, while `ws_receiver` keeps delivering the
-            // `<a/>` acks that shrink the window. On the rising edge send one
-            // forced `<r/>` (the wasm client acks only when asked) and arm a
-            // deadline; on recovery, disarm. No await lives inside a select arm
-            // for this — acks flow freely and the gate is deadlock-free by
-            // construction.
-            let send_window_paused = conn.sm_state.needs_send_pause();
-            if send_window_paused {
-                let rising_edge = conn.send_window_pause_deadline.is_none();
-                if rising_edge {
-                    conn.send_window_pause_deadline =
-                        Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
-                    waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
-                }
-                // Prompt an ack on the rising edge, and AGAIN whenever the client
-                // has acked since our last prompt but not yet recovered the
-                // window. The wasm client acks only when asked, so without the
-                // re-request a partial ack (XEP-0198 §5 `h` = handled ≤ received)
-                // would strand the stream in the hysteresis band until the
-                // deadline (mirrors the batch writer's inline re-request). The
-                // deadline stays armed from the rising edge as the true dead-peer
-                // bound, so a genuinely stuck client is still detached in time.
-                if (rising_edge || conn.sm_state.last_acked != conn.send_window_last_request_acked)
-                    && !caller_gone.is_cancelled()
-                {
-                    conn.send_window_last_request_acked = conn.sm_state.last_acked;
-                    if admission.revalidate().is_err() {
-                        close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                        break;
-                    }
-                    if !matches!(
-                        send_ws_message_with_authority(
-                            &mut ws_sender,
-                            Message::Text(SmRequest::to_xml().into()),
-                            "Failed to send SM <r/> at send-window loop pause",
-                            Some((admission_permit, &shutdown_token)),
-                        )
-                        .await,
-                        AuthoritySendOutcome::Sent
-                    ) {
-                        break;
-                    }
-                    conn.sm_state.note_ack_request_sent();
-                }
-            } else {
-                conn.send_window_pause_deadline = None;
+        match event {
+            LoopEvent::IdentityRevoked => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Node identity changed: closing live session"
+                );
+                close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                return ControlFlow::Break(());
             }
-            let send_window_pause_deadline = conn.send_window_pause_deadline;
 
-            // Frames the mid-batch ack drain (issue #1089) pulled off the
-            // socket ahead of the dispatcher must be processed in arrival
-            // order BEFORE the socket is polled again — so the socket arm
-            // below is gated on the queue being empty, and an
-            // always-ready arm processes a bounded ordered chunk per
-            // iteration. Deferred processing stays a select arm (not a
-            // pre-select loop), and yields between chunks, so a client
-            // streaming frames mid-flood cannot monopolize the executor.
-            let deferred_pending = !conn.deferred_inbound.is_empty();
-            // The select below prefers client input to its timers. A frame the
-            // socket already holds must therefore be ready before the select
-            // is polled, as it would be for a task reading its own socket.
-            if !deferred_pending {
-                ws_receiver.settle_inbound().await;
+            LoopEvent::PermitRevoked => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Node lifecycle changed: closing live session"
+                );
+                close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                return ControlFlow::Break(());
             }
-            tokio::select! {
-                biased;
 
-                // Observe source revision changes at select boundaries. The
-                // bound permit also fences each ordinary synchronous enqueue.
-                _ = admission.identity_revoked() => {
-                    info!(
-                        jid = ?conn.phase.bound_jid(),
-                        "Node identity changed: closing live session"
-                    );
-                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                    break;
-                }
+            LoopEvent::Shutdown => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Graceful shutdown: closing live session with system-shutdown stream error"
+                );
+                close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
+                return ControlFlow::Break(());
+            }
 
-                // Lifecycle recovery mints a new generation and cannot
-                // resurrect the permit that admitted this connection.
-                _ = admission_permit.revoked() => {
-                    info!(
-                        jid = ?conn.phase.bound_jid(),
-                        "Node lifecycle changed: closing live session"
-                    );
-                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                    break;
-                }
-
-                // Process stop is the highest-priority event. If cancellation and
-                // a queued frame/work item are both ready, no further stanza work
-                // starts after the node has begun draining or failed critically.
-                _ = shutdown_token.cancelled() => {
-                    info!(
-                        jid = ?conn.phase.bound_jid(),
-                        "Graceful shutdown: closing live session with system-shutdown stream error"
-                    );
-                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                    break;
-                }
-
-                // A force-detach request for this connection's own stream —
-                // deliberately ahead of every inbound/deferred/outbound arm in
-                // this biased select: a continuously busy client must not starve
-                // its own termination signal (conflict kill, cross-node steal,
-                // or SM claim demotion, whose fence is already removed — every
-                // starved iteration would process stanzas fenceless). Frames the
-                // client already sent are replayed by it after resume (XEP-0198
-                // retransmission), so preempting them loses nothing durable. Cross-node
-                // XEP-0198 resume uses the live-steal handshake; stale UserActor
-                // retirement uses the same safe connection-owned close path.
-                // The identity check gates the destructive close itself (defense
-                // in depth against a wrong-identity `previd` forcing a disconnect
-                // before rejection) — a mismatch answers inline and this
-                // connection keeps serving normally; a match sends `<conflict/>`
-                // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
-                // the SAME detach-for-resume cleanup a graceful/keepalive close
-                // uses (never transitions `phase` to `Closing`).
-                request = recv_optional(&mut *force_detach_rx) => {
-                    match request {
-                        Some(request) => {
-                            let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
-                            if !request.targets_binding(conn.binding_ref.as_ref()) {
-                                // Closing the acknowledgement is an unknown outcome,
-                                // never proof that this socket completed cleanup.
-                                debug!("force-detach ignored: binding retired after enqueue");
-                            } else if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
-                                warn!("force-detach rejected: identity mismatch");
-                                let _ = request
-                                    .ack
-                                    .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
-                            } else if shutdown_token.is_cancelled()
-                                || admission_permit.revalidate().is_err()
-                            {
-                                // The old serving generation may no longer emit
-                                // the optional `<conflict/>`. Still acknowledge
-                                // only after normal detach persistence below.
-                                pending_force_detach.push(request);
-                                if let Some(bound_bare) = bound_bare.as_ref() {
-                                    pending_force_detach.extend(drain_ready_force_detach_requests(
-                                        &mut *force_detach_rx,
-                                        bound_bare,
-                                        conn.binding_ref.as_ref(),
-                                    ));
-                                }
-                                break;
-                            } else {
-                                info!("force-detaching this session (<conflict/> close)");
-                                close_live_session_for_force_detach(
-                                    ws_sender.uninterrupted(),
-                                    &*conn,
-                                    admission_permit,
-                                    &shutdown_token,
-                                )
-                                .await;
-                                // Deferred: acked only after this connection's own
-                                // detach-for-resume cleanup below actually runs.
-                                pending_force_detach.push(request);
-                                if let Some(bound_bare) = bound_bare.as_ref() {
-                                    pending_force_detach.extend(drain_ready_force_detach_requests(
-                                        &mut *force_detach_rx,
-                                        bound_bare,
-                                        conn.binding_ref.as_ref(),
-                                    ));
-                                }
-                                break;
+            // Cross-node XEP-0198 resume uses the live-steal handshake; stale
+            // UserActor retirement uses the same safe connection-owned close
+            // path. The identity check gates the destructive close itself
+            // (defense in depth against a wrong-identity `previd` forcing a
+            // disconnect before rejection) — a mismatch answers inline and
+            // this connection keeps serving normally; a match sends
+            // `<conflict/>` (XEP-0198 "Resumption" SHOULD) and closes,
+            // falling through to the SAME detach-for-resume cleanup a
+            // graceful/keepalive close uses (never transitions `phase` to
+            // `Closing`).
+            LoopEvent::ForceDetach(request) => {
+                match request {
+                    Some(request) => {
+                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
+                        if !request.targets_binding(conn.binding_ref.as_ref()) {
+                            // Closing the acknowledgement is an unknown outcome,
+                            // never proof that this socket completed cleanup.
+                            debug!("force-detach ignored: binding retired after enqueue");
+                        } else if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
+                            warn!("force-detach rejected: identity mismatch");
+                            let _ = request
+                                .ack
+                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+                        } else if shutdown_token.is_cancelled()
+                            || admission_permit.revalidate().is_err()
+                        {
+                            // The old serving generation may no longer emit
+                            // the optional `<conflict/>`. Still acknowledge
+                            // only after normal detach persistence in `settle`.
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut *force_detach_rx,
+                                    bound_bare,
+                                    conn.binding_ref.as_ref(),
+                                ));
                             }
-                        }
-                        None => {
-                            // The registry entry was removed (e.g. superseded)
-                            // without this channel ever being used — disable
-                            // this arm for the remainder of the loop.
-                            *force_detach_rx = None;
+                            return ControlFlow::Break(());
+                        } else {
+                            info!("force-detaching this session (<conflict/> close)");
+                            close_live_session_for_force_detach(
+                                ws_sender.uninterrupted(),
+                                &*conn,
+                                admission_permit,
+                                shutdown_token,
+                            )
+                            .await;
+                            // Deferred: acked only after this connection's own
+                            // detach-for-resume cleanup in `settle` actually runs.
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut *force_detach_rx,
+                                    bound_bare,
+                                    conn.binding_ref.as_ref(),
+                                ));
+                            }
+                            return ControlFlow::Break(());
                         }
                     }
+                    None => {
+                        // The registry entry was removed (e.g. superseded)
+                        // without this channel ever being used — disable
+                        // this source for the remainder of the loop.
+                        *force_detach_rx = None;
+                    }
                 }
+            }
 
-                // Losing the upgrade callback's waiter requests normal
-                // settlement. In-flight handlers and cleanup are not raced
-                // against this signal, and shutdown/detach retain priority.
-                _ = caller_gone.cancelled() => {
-                    info!(
-                        connection_ref = ?admission.connection_ref(),
-                        "WebSocket upgrade waiter dropped; settling connection"
-                    );
-                    break;
+            LoopEvent::CallerGone => {
+                info!(
+                    connection_ref = ?admission.connection_ref(),
+                    "WebSocket upgrade waiter dropped; settling connection"
+                );
+                return ControlFlow::Break(());
+            }
+
+            LoopEvent::LiveResumeServiced => {}
+
+            // Process a bounded drain-deferred inbound chunk.
+            LoopEvent::DeferredInbound => {
+                for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
+                    let Some(text) = conn.deferred_inbound.pop_front() else {
+                        break;
+                    };
+                    if !handle_inbound_text(
+                        &text,
+                        domain,
+                        state,
+                        &mut *conn,
+                        RegistrationChannels {
+                            pending_tx: &mut *pending_tx,
+                            outbound_receiver: Some(&*outbound_rx),
+                            force_detach_rx: &mut *force_detach_rx,
+                        },
+                        ConnectionIo {
+                            sender: &mut ws_sender,
+                            receiver: &mut ws_receiver,
+                        },
+                        FrameAuthority {
+                            permit: admission_permit,
+                            shutdown: shutdown_token,
+                        },
+                    )
+                    .await
+                    {
+                        return ControlFlow::Break(());
+                    }
+                    if caller_gone.is_cancelled() {
+                        break;
+                    }
                 }
+                tokio::task::yield_now().await;
+            }
 
-                // Accepted detach requests stay ahead of new preflight work, so
-                // a stream of rejected attempts cannot starve its own retirement.
-                // Validation still precedes ordinary inbound/deferred work.
-                _ = std::future::poll_fn(|cx| live_resume_control.poll(cx)) => {}
-
-                // Process a bounded drain-deferred inbound chunk.
-                _ = std::future::ready(()), if deferred_pending => {
-                    for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
-                        let Some(text) = conn.deferred_inbound.pop_front() else {
-                            break;
-                        };
+            // Handle inbound WebSocket messages from the client
+            LoopEvent::Inbound(msg) => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
                         if !handle_inbound_text(
-                            &text,
-                            &domain,
+                            text.as_str(),
+                            domain,
                             state,
                             &mut *conn,
                             RegistrationChannels {
                                 pending_tx: &mut *pending_tx,
-                                outbound_receiver: Some(&outbound_rx),
+                                outbound_receiver: Some(&*outbound_rx),
                                 force_detach_rx: &mut *force_detach_rx,
                             },
                             ConnectionIo {
@@ -914,266 +1129,223 @@ impl LiveWebSocketConnection {
                             },
                             FrameAuthority {
                                 permit: admission_permit,
-                                shutdown: &shutdown_token,
+                                shutdown: shutdown_token,
                             },
                         )
                         .await
                         {
-                            break 'connection;
-                        }
-                        if caller_gone.is_cancelled() {
-                            break;
+                            return ControlFlow::Break(());
                         }
                     }
-                    tokio::task::yield_now().await;
-                }
-
-                // Handle inbound WebSocket messages from the client
-                msg = ws_receiver.next(), if !deferred_pending => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            if !handle_inbound_text(
-                                text.as_str(),
-                                &domain,
-                                state,
-                                &mut *conn,
-                                RegistrationChannels {
-                                    pending_tx: &mut *pending_tx,
-                                    outbound_receiver: Some(&outbound_rx),
-                                    force_detach_rx: &mut *force_detach_rx,
-                                },
-                                ConnectionIo {
-                                    sender: &mut ws_sender,
-                                    receiver: &mut ws_receiver,
-                                },
-                                FrameAuthority {
-                                    permit: admission_permit,
-                                    shutdown: &shutdown_token,
-                                },
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
-                        Some(Ok(Message::Binary(_))) => {
-                            conn.note_transport_activity();
-                            warn!("Received binary WebSocket message (not supported for XMPP)");
-                        }
-                        Some(Ok(Message::Ping(data))) => {
-                            conn.note_transport_activity();
-                            if !matches!(
-                                send_ws_message_with_authority(
-                                    &mut ws_sender,
-                                    Message::Pong(data),
-                                    "Failed to send pong",
-                                    Some((admission_permit, &shutdown_token)),
-                                )
-                                .await,
-                                AuthoritySendOutcome::Sent
-                            ) {
-                                break;
-                            }
-                        }
-                        Some(Ok(Message::Pong(_))) => {
-                            // Liveness evidence for the keepalive policy —
-                            // any payload counts, no probe correlation
-                            // (issue #1090 "any inbound frame = alive").
-                            conn.note_transport_activity();
-                        }
-                        Some(Ok(Message::Close(_))) => {
-                            info!("WebSocket close requested");
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            error!(error = %e, "WebSocket error");
-                            break;
-                        }
-                        None => {
-                            // Stream ended
-                            debug!("WebSocket stream ended");
-                            break;
-                        }
+                    Some(Ok(Message::Binary(_))) => {
+                        conn.note_transport_activity();
+                        warn!("Received binary WebSocket message (not supported for XMPP)");
                     }
-                }
-
-                // Handle outbound messages routed from other connections.
-                // Gated by the send-window pause (issue #1219): while paused we
-                // do not pull new outbound work, so its producers backpressure on
-                // the mpsc rather than overflowing the SM unacked queue. The
-                // `ws_receiver` arm above stays active, so client acks keep
-                // arriving and releasing the pause.
-                outbound = outbound_rx.recv(), if !send_window_paused => {
-                    match outbound {
-                        Some(outbound_stanza) => {
-                            if !handle_outbound_stanza(
-                                &mut ws_sender,
-                                &mut ws_receiver,
-                                state,
-                                &mut *conn,
-                                &mut *timers,
-                                outbound_stanza,
-                                OutboundAuthority {
-                                    permit: admission_permit,
-                                    shutdown: &shutdown_token,
-                                },
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
-                        None => {
-                            // Outbound channel closed. All clones of the sender (our
-                            // own outbound_tx + any copy held by the registry) have
-                            // been dropped. The only path to this state after
-                            // registration is a replacement register for the same
-                            // FullJid: the registry drops our entry (and with it
-                            // the sender) to install the new session's sender.
-                            // Superseded cleanup preserves the replacement's route
-                            // and does not detach this old stream. It still sweeps
-                            // this stream's occupancy generation in every room.
-                            info!("Outbound channel closed; session superseded by replacement");
-                            *superseded = true;
-                            break;
-                        }
-                    }
-                }
-
-                handoff = handoff_rx.recv() => {
-                    match handoff {
-                        Some(handoff) => {
-                            if !handle_ordered_relay_handoff_completion(
-                                &mut ws_sender,
-                                &mut ws_receiver,
-                                state,
-                                &mut *conn,
-                                handoff,
-                                admission_permit,
-                                &shutdown_token,
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
-                        None => {
-                            warn!("Ordered relay handoff completion channel closed");
-                            break;
-                        }
-                    }
-                }
-
-                // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
-                // when the state machine armed a timer; the tick is fed
-                // back into the machine, whose policy decides: quiet
-                // re-arm, probe + re-arm, or close a dead peer. A
-                // keepalive close breaks the loop with a graceful WS close
-                // handshake and rides the normal shutdown fork below — SM
-                // detach-for-resume when negotiated, full cleanup
-                // otherwise.
-                timer_id = timers.next_expired() => {
-                    let session = conn.authenticated_session.clone();
-                    let principal = session
-                        .as_ref()
-                        .map(super::ResolvedPrincipal::from_authenticated_session);
-                    let Some(sm) = conn.state_machine.as_mut() else {
-                        warn!(timer_id = timer_id.0, "Timer fired without a state machine; disarming");
-                        continue;
-                    };
-                    let events = sm.handle(InboundEvent::Tick(timer_id));
-                    let interpret_deps =
-                        build_interpret_deps(state.as_ref(), principal);
-                    let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
-                    timers.apply(drive.timer_commands);
-                    if !drive.frames.is_empty() {
-                        // No tick pathway emits stanzas today; a frame here
-                        // means a new timer consumer forgot to extend this
-                        // arm with the SM-recording write contract.
-                        warn!(
-                            frames = drive.frames.len(),
-                            "Timer tick produced wire frames; dropping"
-                        );
-                    }
-                    let mut ping_send_failed = false;
-                    for _ in 0..drive.keepalive_probes {
+                    Some(Ok(Message::Ping(data))) => {
+                        conn.note_transport_activity();
                         if !matches!(
                             send_ws_message_with_authority(
                                 &mut ws_sender,
-                                Message::Ping(axum::body::Bytes::new()),
-                                "Failed to send keepalive ping",
-                                Some((admission_permit, &shutdown_token)),
+                                Message::Pong(data),
+                                "Failed to send pong",
+                                Some((admission_permit, shutdown_token)),
                             )
                             .await,
                             AuthoritySendOutcome::Sent
                         ) {
-                            ping_send_failed = true;
-                            break;
+                            return ControlFlow::Break(());
                         }
                     }
-                    if ping_send_failed {
-                        break;
+                    Some(Ok(Message::Pong(_))) => {
+                        // Liveness evidence for the keepalive policy —
+                        // any payload counts, no probe correlation
+                        // (issue #1090 "any inbound frame = alive").
+                        conn.note_transport_activity();
                     }
-                    if drive.close {
-                        // The policy's Log event (relayed above via interpret)
-                        // carries the reason (miss limit vs negotiation
-                        // deadline); this line adds the connection identity
-                        // for correlation with gateway/Loki reset queries.
-                        info!(
-                            jid = ?conn.phase.bound_jid(),
-                            "Keepalive policy closed the connection"
-                        );
-                        let _ = close_ws_connection(
-                            &mut ws_sender,
-                            "Failed to send WebSocket close frame after keepalive close",
-                        )
-                        .await;
-                        break;
+                    Some(Ok(Message::Close(_))) => {
+                        info!("WebSocket close requested");
+                        return ControlFlow::Break(());
                     }
-                }
-
-                // Loop-level send-window pause deadline (issue #1219). Fires
-                // only while paused; if the client never acks the window down in
-                // time it is dead, so break WITHOUT transitioning to Closing —
-                // the cleanup fork below detaches an SM session for resume, and
-                // the retained queue is bounded (pacing kept it ≤ cap) so that
-                // resume stays clean.
-                _ = async {
-                    match send_window_pause_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
+                    Some(Err(e)) => {
+                        error!(error = %e, "WebSocket error");
+                        return ControlFlow::Break(());
                     }
-                }, if send_window_paused => {
-                    waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
-                    warn!(
-                        jid = ?conn.phase.bound_jid(),
-                        deadline_secs = SEND_WINDOW_LOOP_PAUSE_DEADLINE.as_secs(),
-                        "SM send-window loop pause timed out with no recovering ack; \
-                         closing into detach-for-resume"
-                    );
-                    break;
+                    None => {
+                        // Stream ended
+                        debug!("WebSocket stream ended");
+                        return ControlFlow::Break(());
+                    }
                 }
             }
-        }
 
-        let Some(socket_io) = socket_io.take() else {
+            // Handle outbound messages routed from other connections.
+            LoopEvent::Outbound(outbound) => {
+                match outbound {
+                    Some(outbound_stanza) => {
+                        if !handle_outbound_stanza(
+                            &mut ws_sender,
+                            &mut ws_receiver,
+                            state,
+                            &mut *conn,
+                            &mut *timers,
+                            *outbound_stanza,
+                            OutboundAuthority {
+                                permit: admission_permit,
+                                shutdown: shutdown_token,
+                            },
+                        )
+                        .await
+                        {
+                            return ControlFlow::Break(());
+                        }
+                    }
+                    None => {
+                        // Outbound channel closed. All clones of the sender (our
+                        // own outbound_tx + any copy held by the registry) have
+                        // been dropped. The only path to this state after
+                        // registration is a replacement register for the same
+                        // FullJid: the registry drops our entry (and with it
+                        // the sender) to install the new session's sender.
+                        // Superseded cleanup preserves the replacement's route
+                        // and does not detach this old stream. It still sweeps
+                        // this stream's occupancy generation in every room.
+                        info!("Outbound channel closed; session superseded by replacement");
+                        *superseded = true;
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+
+            LoopEvent::OrderedRelayHandoff(handoff) => match handoff {
+                Some(handoff) => {
+                    if !handle_ordered_relay_handoff_completion(
+                        &mut ws_sender,
+                        &mut ws_receiver,
+                        state,
+                        &mut *conn,
+                        handoff,
+                        admission_permit,
+                        shutdown_token,
+                    )
+                    .await
+                    {
+                        return ControlFlow::Break(());
+                    }
+                }
+                None => {
+                    warn!("Ordered relay handoff completion channel closed");
+                    return ControlFlow::Break(());
+                }
+            },
+
+            // The tick is fed back into the state machine, whose policy
+            // decides: quiet re-arm, probe + re-arm, or close a dead peer. A
+            // keepalive close ends the loop with a graceful WS close
+            // handshake and rides the normal shutdown fork in `settle` — SM
+            // detach-for-resume when negotiated, full cleanup otherwise.
+            LoopEvent::TimerExpired(timer_id) => {
+                let session = conn.authenticated_session.clone();
+                let principal = session
+                    .as_ref()
+                    .map(super::ResolvedPrincipal::from_authenticated_session);
+                let Some(sm) = conn.state_machine.as_mut() else {
+                    warn!(
+                        timer_id = timer_id.0,
+                        "Timer fired without a state machine; disarming"
+                    );
+                    return ControlFlow::Continue(());
+                };
+                let events = sm.handle(InboundEvent::Tick(timer_id));
+                let interpret_deps = build_interpret_deps(state.as_ref(), principal);
+                let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+                timers.apply(drive.timer_commands);
+                if !drive.frames.is_empty() {
+                    // No tick pathway emits stanzas today; a frame here
+                    // means a new timer consumer forgot to extend this
+                    // arm with the SM-recording write contract.
+                    warn!(
+                        frames = drive.frames.len(),
+                        "Timer tick produced wire frames; dropping"
+                    );
+                }
+                let mut ping_send_failed = false;
+                for _ in 0..drive.keepalive_probes {
+                    if !matches!(
+                        send_ws_message_with_authority(
+                            &mut ws_sender,
+                            Message::Ping(axum::body::Bytes::new()),
+                            "Failed to send keepalive ping",
+                            Some((admission_permit, shutdown_token)),
+                        )
+                        .await,
+                        AuthoritySendOutcome::Sent
+                    ) {
+                        ping_send_failed = true;
+                        break;
+                    }
+                }
+                if ping_send_failed {
+                    return ControlFlow::Break(());
+                }
+                if drive.close {
+                    // The policy's Log event (relayed above via interpret)
+                    // carries the reason (miss limit vs negotiation
+                    // deadline); this line adds the connection identity
+                    // for correlation with gateway/Loki reset queries.
+                    info!(
+                        jid = ?conn.phase.bound_jid(),
+                        "Keepalive policy closed the connection"
+                    );
+                    let _ = close_ws_connection(
+                        &mut ws_sender,
+                        "Failed to send WebSocket close frame after keepalive close",
+                    )
+                    .await;
+                    return ControlFlow::Break(());
+                }
+            }
+
+            // If the client never acks the window down in time it is dead,
+            // so end the loop WITHOUT transitioning to Closing — the cleanup
+            // fork in `settle` detaches an SM session for resume, and the
+            // retained queue is bounded (pacing kept it ≤ cap) so that
+            // resume stays clean.
+            LoopEvent::SendWindowPauseDeadline => {
+                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
+                warn!(
+                    jid = ?conn.phase.bound_jid(),
+                    deadline_secs = SEND_WINDOW_LOOP_PAUSE_DEADLINE.as_secs(),
+                    "SM send-window loop pause timed out with no recovering ack; \
+                     closing into detach-for-resume"
+                );
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Run the connection-owned shutdown once the loop has ended. The socket
+    /// halves and the outbound receiver move into settlement; everything else
+    /// this state owns drops in field order when settlement returns.
+    async fn settle(mut self: Box<Self>, ctx: &LiveOwnerCtx<'_>) {
+        let Some(socket_io) = self.socket_io.take() else {
             unreachable!("the live connection owns its socket halves until settlement");
         };
-        let mut outbound_rx = outbound_rx.into_receiver();
+        let mut outbound_rx = self.outbound_rx.into_receiver();
         finish_connection(
-            state,
-            &mut *conn,
+            ctx.state,
+            &mut self.conn,
             socket_io,
             FrameAuthority {
-                permit: admission_permit,
-                shutdown: &shutdown_token,
+                permit: ctx.admission_permit,
+                shutdown: &ctx.shutdown_token,
             },
-            *superseded,
+            self.superseded,
             ConnectionShutdownChannels {
                 outbound_rx: &mut outbound_rx,
-                handoff_rx: &mut *handoff_rx,
-                force_detach_rx: &mut *force_detach_rx,
-                pending_force_detach: &mut *pending_force_detach,
+                handoff_rx: &mut self.handoff_rx,
+                force_detach_rx: &mut self.force_detach_rx,
+                pending_force_detach: &mut self.pending_force_detach,
             },
         )
         .await;
