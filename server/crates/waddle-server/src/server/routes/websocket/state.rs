@@ -1941,7 +1941,7 @@ impl WsConnState {
         Self::new_for_node_lease(waddle_xmpp::ownership::NodeLeaseIdentity::local_process())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn new_for_node_lease(
         node_lease: waddle_xmpp::ownership::NodeLeaseIdentity,
     ) -> Self {
@@ -2015,13 +2015,6 @@ impl WsConnState {
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
-    }
-
-    /// Exact identity of this physical WebSocket, shared by every binding
-    /// attempt made on the same socket.
-    #[cfg(feature = "test-support")]
-    pub(super) fn connection_ref(&self) -> &waddle_xmpp::ownership::ConnectionRef {
-        &self.connection_ref
     }
 
     pub(super) fn retire_binding_ref(&mut self) {

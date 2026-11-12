@@ -11,11 +11,6 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 use xmpp_parsers::ping::Ping;
 
-/// Extra server environment that hosts every live loop in the connection
-/// actor. Only a server built with `test-support` honours it.
-#[cfg(feature = "test-support")]
-const ACTOR_HOST: (&str, &str) = (waddle_ws_test_support::LIVE_CONNECTION_HOST_ENV, "actor");
-
 const ACCOUNTS: &[(&str, &str)] = &[
     ("alice", "attached-resume-alice"),
     ("bob", "attached-resume-bob"),
@@ -164,26 +159,7 @@ async fn assert_replaced_transport_closes(client: &mut WsXmppClient) {
 
 #[tokio::test]
 async fn attached_resume_replays_in_order_and_retires_the_original_transport() {
-    attached_resume_replays_in_order_and_retires_the_original_transport_case(
-        TestServer::start_with_extra_accounts(ACCOUNTS),
-    )
-    .await;
-}
-
-/// The same case with the live loop hosted by the connection actor.
-#[cfg(feature = "test-support")]
-#[tokio::test]
-async fn attached_resume_replays_in_order_and_retires_the_original_transport_under_the_actor_host()
-{
-    attached_resume_replays_in_order_and_retires_the_original_transport_case(
-        TestServer::start_with_extra_envs(ACCOUNTS, &[ACTOR_HOST]),
-    )
-    .await;
-}
-
-async fn attached_resume_replays_in_order_and_retires_the_original_transport_case(
-    server: TestServer,
-) {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
     let (mut old, stream) = original(&server).await;
     let old_jid: FullJid = old
         .full_jid

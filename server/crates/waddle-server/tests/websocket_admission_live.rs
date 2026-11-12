@@ -10,7 +10,6 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use waddle_server::config::MaxWebSocketConnections;
-use waddle_server::server::LiveConnectionHost;
 use waddle_server::test_support::{
     router, websocket_state_with_admission, WebSocketAdmissionTestConfig, WebSocketState,
 };
@@ -42,23 +41,20 @@ async fn start(
     identity: Option<Option<SharedNodeIdentity>>,
     barriers: AdmissionTestBarriers,
 ) -> Harness {
-    start_hosted(capacity, identity, barriers, None, None).await
+    start_with_keepalive(capacity, identity, barriers, None).await
 }
 
-/// `host` pins the live connection host; `None` keeps the one the test
-/// process selected.
-async fn start_hosted(
+/// `keepalive` replaces the test server's default keepalive policy.
+async fn start_with_keepalive(
     capacity: usize,
     identity: Option<Option<SharedNodeIdentity>>,
     barriers: AdmissionTestBarriers,
-    host: Option<LiveConnectionHost>,
     keepalive: Option<KeepaliveConfig>,
 ) -> Harness {
     let state = websocket_state_with_admission(WebSocketAdmissionTestConfig {
         capacity: MaxWebSocketConnections::from_raw(Some(&capacity.to_string())).expect("capacity"),
         clustered_identity: identity,
         barriers,
-        live_connection_host: host,
         ws_keepalive: keepalive,
     })
     .await;
@@ -522,16 +518,12 @@ async fn dropping_waiter_during_cleanup_does_not_interrupt_cleanup() {
     );
 }
 
-async fn owner_panic_keeps_guard_until_fenced(
-    drop_waiter: bool,
-    stopping: bool,
-    host: Option<LiveConnectionHost>,
-) {
+async fn owner_panic_keeps_guard_until_fenced(drop_waiter: bool, stopping: bool) {
     let active = Arc::new(AdmissionTestBarrier::default());
     let caught = Arc::new(AdmissionTestBarrier::default());
     let fenced = Arc::new(AdmissionTestBarrier::default());
     let control = Arc::new(CallbackWaiterTestControl::default());
-    let h = start_hosted(
+    let h = start(
         1,
         None,
         AdmissionTestBarriers {
@@ -541,8 +533,6 @@ async fn owner_panic_keeps_guard_until_fenced(
             callback_waiter: Some(Arc::clone(&control)),
             ..Default::default()
         },
-        host,
-        None,
     )
     .await;
     let permit = h
@@ -604,12 +594,12 @@ async fn owner_panic_keeps_guard_until_fenced(
 
 #[tokio::test]
 async fn owner_panic_fences_before_releasing_drain_guard() {
-    owner_panic_keeps_guard_until_fenced(false, false, None).await;
+    owner_panic_keeps_guard_until_fenced(false, false).await;
 }
 
 #[tokio::test]
 async fn owner_panic_during_shutdown_fences_after_waiter_loss() {
-    owner_panic_keeps_guard_until_fenced(true, true, None).await;
+    owner_panic_keeps_guard_until_fenced(true, true).await;
 }
 
 #[tokio::test]
@@ -664,18 +654,17 @@ struct ActorSetup {
     keepalive: Option<KeepaliveConfig>,
 }
 
-/// A server whose connections are hosted by the actor, and the tap that
-/// observes the first of them.
+/// A server and the tap that observes the actor hosting its first
+/// connection.
 async fn start_actor(setup: ActorSetup) -> (Harness, Arc<LiveActorTestTap>) {
     let tap = Arc::new(LiveActorTestTap::default());
-    let h = start_hosted(
+    let h = start_with_keepalive(
         4,
         setup.identity,
         AdmissionTestBarriers {
             live_actor: Some(Arc::clone(&tap)),
             ..setup.barriers
         },
-        Some(LiveConnectionHost::Actor),
         setup.keepalive,
     )
     .await;
@@ -779,16 +768,6 @@ async fn park_with_full_mailbox(tap: &LiveActorTestTap) -> usize {
     tap.pings_handled()
 }
 
-/// The suites that spawn a server process name the host selection through
-/// the harness crate, which cannot depend on the server.
-#[test]
-fn harness_and_server_agree_on_the_host_selection_variable() {
-    assert_eq!(
-        waddle_ws_test_support::LIVE_CONNECTION_HOST_ENV,
-        waddle_server::test_support::LIVE_CONNECTION_HOST_ENV
-    );
-}
-
 fn assert_not_failed(state: &WebSocketState) {
     assert_eq!(state.deps.app_state.node_lifecycle.critical_failure(), None);
 }
@@ -802,7 +781,7 @@ fn assert_fenced_as_owner_panic(state: &WebSocketState) {
 }
 
 #[tokio::test]
-async fn actor_host_settles_when_the_peer_closes() {
+async fn hosting_actor_settles_when_the_peer_closes() {
     let after_cleanup = Arc::new(AdmissionTestBarrier::default());
     let (h, tap, peer) = start_actor_hosted(ActorSetup {
         barriers: AdmissionTestBarriers {
@@ -821,16 +800,6 @@ async fn actor_host_settles_when_the_peer_closes() {
     wait_for_drain(&h.state).await;
     assert_not_failed(&h.state);
     assert_eq!(tap.pings_handled(), 0);
-}
-
-#[tokio::test]
-async fn actor_host_owner_panic_fences_before_releasing_drain_guard() {
-    owner_panic_keeps_guard_until_fenced(false, false, Some(LiveConnectionHost::Actor)).await;
-}
-
-#[tokio::test]
-async fn actor_host_owner_panic_during_shutdown_fences_after_waiter_loss() {
-    owner_panic_keeps_guard_until_fenced(true, true, Some(LiveConnectionHost::Actor)).await;
 }
 
 /// The checks every unsettled stop shares: the slot is free before the fence,
@@ -962,18 +931,17 @@ async fn killing_the_hosting_actor_during_settlement_lets_settlement_finish() {
     assert!(!h.state.deps.shutdown.stop_token().is_cancelled());
 }
 
-async fn panic_during_settlement_fences(host: LiveConnectionHost) {
+#[tokio::test]
+async fn panic_during_settlement_fences_and_releases_the_slot() {
     let settling = Arc::new(AdmissionTestBarrier::default());
     let panic = PanicBarriers::new();
-    let h = start_hosted(
+    let h = start(
         1,
         None,
         AdmissionTestBarriers {
             owner_panic_settling: Some(Arc::clone(&settling)),
             ..panic.barriers()
         },
-        Some(host),
-        None,
     )
     .await;
     let mut peer = connect(&h.url).await.expect("upgrade");
@@ -987,18 +955,8 @@ async fn panic_during_settlement_fences(host: LiveConnectionHost) {
     assert_fenced_without_settling(&h, &panic.caught, &panic.fenced, &panic.after_cleanup).await;
 }
 
-#[tokio::test]
-async fn panic_during_settlement_fences_and_releases_the_slot() {
-    panic_during_settlement_fences(LiveConnectionHost::PlainTask).await;
-}
-
-#[tokio::test]
-async fn actor_host_panic_during_settlement_fences_and_releases_the_slot() {
-    panic_during_settlement_fences(LiveConnectionHost::Actor).await;
-}
-
 /// What is left of one live connection after its runtime, and with it the
-/// owner task, was dropped mid-loop.
+/// owner task and the actor it runs, was dropped mid-loop.
 #[derive(Debug, PartialEq, Eq)]
 struct AfterCancellation {
     slots: usize,
@@ -1007,13 +965,13 @@ struct AfterCancellation {
     stopping: bool,
 }
 
-fn cancel_owner_mid_loop(host: LiveConnectionHost) -> AfterCancellation {
+fn cancel_owner_mid_loop() -> AfterCancellation {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
     let (h, peer) = runtime.block_on(async {
-        let h = start_hosted(1, None, AdmissionTestBarriers::default(), Some(host), None).await;
+        let h = start(1, None, AdmissionTestBarriers::default()).await;
         let mut peer = connect(&h.url).await.expect("upgrade");
         round_trip(&mut peer).await;
         assert_connection_owned(&h.state);
@@ -1037,15 +995,19 @@ fn cancel_owner_mid_loop(host: LiveConnectionHost) -> AfterCancellation {
 }
 
 #[test]
-fn cancelling_the_owner_task_leaves_the_same_state_under_either_host() {
-    let plain = cancel_owner_mid_loop(LiveConnectionHost::PlainTask);
-    let actor = cancel_owner_mid_loop(LiveConnectionHost::Actor);
-    assert_eq!(actor, plain);
+fn cancelling_the_owner_task_releases_the_drain_guard_without_fencing() {
     // Cancellation is not a panic: the drain guard is released and nothing
-    // is fenced.
-    assert_eq!(plain.active_connections, 0);
-    assert!(!plain.failed);
-    assert!(!plain.stopping);
+    // is fenced. The slot stays with the custodian, whose own task went away
+    // with the runtime before it could observe the pumps join.
+    assert_eq!(
+        cancel_owner_mid_loop(),
+        AfterCancellation {
+            slots: 1,
+            active_connections: 0,
+            failed: false,
+            stopping: false,
+        }
+    );
 }
 
 /// With the loop parked and the mailbox full, make a control source ready and

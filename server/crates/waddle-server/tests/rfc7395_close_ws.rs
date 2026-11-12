@@ -19,31 +19,13 @@ const NS_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
 const NS_PING: &str = "urn:xmpp:ping";
 const RECV: Duration = Duration::from_secs(5);
 
-/// Extra server environment that hosts every live loop in the connection
-/// actor. Only a server built with `test-support` honours it.
-#[cfg(feature = "test-support")]
-const ACTOR_HOST: (&str, &str) = (waddle_ws_test_support::LIVE_CONNECTION_HOST_ENV, "actor");
-
 fn text(element: &Element) -> tungstenite::Message {
     tungstenite::Message::Text(String::from(element).into())
 }
 
 #[tokio::test]
 async fn burst_of_stanza_close_and_websocket_close_is_answered_in_order() {
-    burst_of_stanza_close_and_websocket_close_is_answered_in_order_case(TestServer::start()).await;
-}
-
-/// The same case with the live loop hosted by the connection actor.
-#[cfg(feature = "test-support")]
-#[tokio::test]
-async fn burst_of_stanza_close_and_websocket_close_is_answered_in_order_under_the_actor_host() {
-    burst_of_stanza_close_and_websocket_close_is_answered_in_order_case(
-        TestServer::start_with_extra_envs(&[], &[ACTOR_HOST]),
-    )
-    .await;
-}
-
-async fn burst_of_stanza_close_and_websocket_close_is_answered_in_order_case(server: TestServer) {
+    let server = TestServer::start();
     let password = server.fixed_account_password().to_string();
     let mut client = WsXmppClient::connect_and_auth(
         &server.ws_url(),

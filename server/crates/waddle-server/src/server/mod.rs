@@ -58,7 +58,7 @@ pub mod xmpp_state;
 
 pub use config::{MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};
 pub use routes::webhook_delivery::WebhookDeliveryAttachError;
-pub use state::{resolve_server_owner_jids, AppState, AppStateDeps, LiveConnectionHost};
+pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
