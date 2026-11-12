@@ -48,8 +48,16 @@ enum CustodyReadError {
 pub(super) enum OwnedSessionTeardown {
     /// The connection's teardown is complete.
     Finished(ConnectionShutdownOutcome),
-    /// The connection owns no durable session (any more). The caller cleans
-    /// it up as a connection whose stream-management session has ended.
+    /// The session is terminal in the authority, which holds every frame it
+    /// admitted, transfers them to offline delivery and releases the
+    /// session's claim. The caller removes the connection's route and room
+    /// occupancy and runs no promotion of its own: the session has one
+    /// custody, and a promotion beside it could not take custody under a
+    /// claim the authority releases.
+    Ended,
+    /// The connection owns no durable session, or its session could not be
+    /// closed. The caller cleans it up as a connection whose
+    /// stream-management session has ended.
     Continue,
 }
 
@@ -94,7 +102,7 @@ pub(super) async fn settle_owned_session(
         Some((jid, owner_token, entry))
     });
     let (Some((jid, owner_token, entry)), true) = (route, detachable) else {
-        return end_session(state, conn, &owner).await;
+        return end_session(state, conn, &mut owner).await;
     };
 
     let presence_state = state.deps.protocol.connection_registry.presence_state(&jid);
@@ -169,7 +177,7 @@ pub(super) async fn settle_owned_session(
             %stream_id,
             "refusing resumable SM handoff with unfinished ingress authority work"
         );
-        return end_session(state, conn, &owner).await;
+        return end_session(state, conn, &mut owner).await;
     }
     let tail_admitted = owner.admit_unwritten_tail(&conn.sm_state).await;
     match owner.detach(&conn.sm_state, resource).await {
@@ -209,7 +217,13 @@ pub(super) async fn settle_owned_session(
         OwnerRelease::Superseded => {
             OwnedSessionTeardown::Finished(leave_session_to_its_owner(state, conn).await)
         }
-        OwnerRelease::Ended | OwnerRelease::Unavailable => {
+        // Terminal already: the janitor, or the bind that replaced the
+        // resource, settles its custody.
+        OwnerRelease::Ended => {
+            hand_projection_to_caller(conn, &owner);
+            OwnedSessionTeardown::Ended
+        }
+        OwnerRelease::Unavailable => {
             // The session cannot be handed to a resume from here. The
             // connection is cleaned up as one that closed its stream.
             hand_projection_to_caller(conn, &owner);
@@ -220,13 +234,27 @@ pub(super) async fn settle_owned_session(
 }
 
 /// Close the owner's session and transfer what it retained.
+///
+/// Every frame the connection recorded is admitted before the session
+/// closes, so that the transfer carries it. A frame that cannot be admitted
+/// is in no custody and its producer keeps its own retry.
 async fn end_session(
     state: &WebSocketState,
     conn: &mut WsConnState,
-    owner: &DurableSmOwner,
+    owner: &mut DurableSmOwner,
 ) -> OwnedSessionTeardown {
-    match owner.close().await {
+    let tail_admitted = owner.admit_unwritten_tail(&conn.sm_state).await;
+    let released = owner.close().await;
+    #[cfg(feature = "test-support")]
+    super::super::characterization_seams::observe_durable_session_end(
+        owner.session(),
+        matches!(released, OwnerRelease::Committed | OwnerRelease::Ended),
+    );
+    match released {
         OwnerRelease::Committed => {
+            if !tail_admitted {
+                warn!(session = ?owner.session(), "durable SM session closed without every recorded frame in custody");
+            }
             // Transferred now so that a binding replacing this resource
             // finds the frames in offline delivery when it flushes. The
             // settlement retires the session's ingress stream and claim, so
@@ -251,10 +279,12 @@ async fn end_session(
         OwnerRelease::Ended => {}
         OwnerRelease::Unavailable => {
             warn!(session = ?owner.session(), "durable SM session could not be closed at teardown; it keeps a departed owner");
+            hand_projection_to_caller(conn, owner);
+            return OwnedSessionTeardown::Continue;
         }
     }
     hand_projection_to_caller(conn, owner);
-    OwnedSessionTeardown::Continue
+    OwnedSessionTeardown::Ended
 }
 
 /// Drop from the connection's queue the frames the authority retains, so

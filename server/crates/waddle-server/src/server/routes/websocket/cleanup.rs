@@ -792,6 +792,8 @@ impl EndingConnection {
 
     async fn finish(self, state: &WebSocketState, outcome: ConnectionShutdownOutcome) {
         super::account_binding::finish_teardown(state, self.account_binding, outcome).await;
+        #[cfg(feature = "test-support")]
+        super::characterization_seams::observe_teardown_finished();
     }
 }
 
@@ -929,6 +931,17 @@ async fn cleanup_connection_shutdown_inner(
     .await
     {
         durable_sm::OwnedSessionTeardown::Finished(outcome) => return outcome,
+        durable_sm::OwnedSessionTeardown::Ended => {
+            // The authority has the session's custody. What follows treats
+            // the connection as one whose stream closed without a session
+            // to recover or detach, so none of the promotions below runs
+            // beside the authority's transfer.
+            conn.sm_recovery_required = false;
+            conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+            if let Some(jid) = conn.phase.cleanup_jid().cloned() {
+                conn.phase = ConnectionPhase::closing(Some(jid));
+            }
+        }
         durable_sm::OwnedSessionTeardown::Continue => {}
     }
     // Registry ownership protects the replacement's route, not the departing
@@ -1918,6 +1931,8 @@ async fn promote_terminal_recovery_inner(
     jid: &FullJid,
     conn: &mut WsConnState,
 ) -> ConnectionShutdownOutcome {
+    #[cfg(feature = "test-support")]
+    super::characterization_seams::observe_connection_promotion(jid);
     let detached_snapshot = terminal_recovery_snapshot(jid, conn);
     let Some(mut detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
         cleanup_terminal_muc_presence(state, jid, conn).await;

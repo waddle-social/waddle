@@ -391,6 +391,81 @@ async fn closing_a_stream_releases_the_session_and_then_the_binding() {
     assert_eq!(state, 4, "the session is terminal");
 }
 
+/// A closed stream's session has one custody. The durable authority ends the
+/// session and transfers what it retained; the connection does not start a
+/// promotion of its own stream-management queue beside it.
+#[tokio::test]
+async fn closing_a_stream_leaves_its_session_to_the_durable_authority_alone() {
+    let dir = tempfile::tempdir().expect("test directory");
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("database.sqlite").display()
+    );
+    let events = dir.path().join("teardown-custody.events");
+    let events_path = events.to_str().expect("events path").to_owned();
+    let mut envs = SELECTORS.to_vec();
+    envs.push((
+        "WADDLE_TEST_SEAM_TEARDOWN_CUSTODY_EVENTS_FILE",
+        events_path.as_str(),
+    ));
+    let server = TestServer::start_persistent_with_extra_envs(&db_url, ACCOUNTS, &envs);
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("observe SQLite");
+    let mut alice = bound(&server, 0, "laptop").await;
+    send_element(
+        &mut alice,
+        Element::builder("enable", SM_NS)
+            .attr(nc!("resume"), "true")
+            .build(),
+    )
+    .await;
+    alice
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.is("enabled", SM_NS))
+        })
+        .await
+        .expect("enabled");
+    go_available(&mut alice, &pool, "alice@localhost/laptop", 0).await;
+    let attached = wait_for_binding(&pool, "alice@localhost/laptop", |row| {
+        row.is_some_and(|row| row.sm_session_id.is_some())
+    })
+    .await
+    .expect("attached row");
+    let session = attached.sm_session_id.expect("session reference");
+
+    alice.close().await.expect("close the stream");
+    let teardown = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let recorded = std::fs::read_to_string(&events).unwrap_or_default();
+            if recorded.lines().any(|line| line == "teardown-finished") {
+                break recorded;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the closed connection's teardown finishes");
+    let custody: Vec<&str> = teardown
+        .lines()
+        .filter(|line| *line != "teardown-finished")
+        .collect();
+    assert_eq!(
+        custody,
+        vec![format!("durable-end {session} terminal=true")],
+        "the durable authority alone ends the session; the connection starts no promotion"
+    );
+    let state: i64 =
+        sqlx::query_scalar("SELECT state FROM sm_durable_sessions WHERE session_id = ?")
+            .bind(&session)
+            .fetch_one(&pool)
+            .await
+            .expect("the session row");
+    assert_eq!(state, 4, "the session is terminal");
+}
+
 #[tokio::test]
 async fn a_probe_is_answered_from_the_coordinator_state() {
     let fixture = fixture().await;
