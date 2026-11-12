@@ -246,14 +246,6 @@ impl StopSignal {
         Some(result)
     }
 
-    #[cfg(feature = "test-support")]
-    #[cfg_attr(
-        not(all(test, feature = "test-support")),
-        expect(
-            dead_code,
-            reason = "connection retirement does not use the custodian stop listener yet"
-        )
-    )]
     fn set_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -267,7 +259,7 @@ impl StopSignal {
 
     #[expect(
         dead_code,
-        reason = "connection retirement does not use the custodian stop listener yet"
+        reason = "connection retirement observes pump stops through the stop listener only"
     )]
     fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         let mut state = match self.state.lock() {
@@ -1039,7 +1031,7 @@ struct CustodianClient {
         not(all(test, feature = "test-support")),
         expect(
             dead_code,
-            reason = "connection retirement does not use the custodian stop listener yet"
+            reason = "connection retirement observes pump stops through the stop listener only"
         )
     )]
     physical_stop: Arc<PhysicalStopHandoff>,
@@ -1076,7 +1068,7 @@ impl PhysicalStopHandoff {
         not(all(test, feature = "test-support")),
         expect(
             dead_code,
-            reason = "connection retirement does not use the custodian stop listener yet"
+            reason = "connection retirement observes pump stops through the stop listener only"
         )
     )]
     fn enable(&self) -> bool {
@@ -1092,7 +1084,7 @@ impl PhysicalStopHandoff {
         not(all(test, feature = "test-support")),
         expect(
             dead_code,
-            reason = "connection retirement does not use the custodian stop listener yet"
+            reason = "connection retirement observes pump stops through the stop listener only"
         )
     )]
     fn request(&self, reason: StopReason) -> bool {
@@ -1741,7 +1733,7 @@ impl IoCustodianHandle {
     #[cfg(feature = "test-support")]
     #[expect(
         dead_code,
-        reason = "connection retirement does not use the custodian stop listener yet"
+        reason = "connection retirement observes pump stops through the stop listener only"
     )]
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
@@ -1836,7 +1828,7 @@ impl IoCustodianHandle {
         not(all(test, feature = "test-support")),
         expect(
             dead_code,
-            reason = "connection retirement does not use the custodian stop listener yet"
+            reason = "connection retirement observes pump stops through the stop listener only"
         )
     )]
     pub(crate) fn enable_physical_stop_handoff(&self) -> bool {
@@ -1856,18 +1848,16 @@ impl IoCustodianHandle {
         not(all(test, feature = "test-support")),
         expect(
             dead_code,
-            reason = "connection retirement does not use the custodian stop listener yet"
+            reason = "connection retirement observes pump stops through the stop listener only"
         )
     )]
     pub(crate) fn request_physical_stop(&self, reason: StopReason) -> bool {
         self.client.physical_stop.request(reason)
     }
 
-    #[cfg(feature = "test-support")]
-    #[expect(
-        dead_code,
-        reason = "connection retirement does not use the custodian stop listener yet"
-    )]
+    /// Install the owner's pump-stop observer. It runs once, synchronously,
+    /// with the first stop reason, before cancellation is visible to the
+    /// pumps, and at once if the pumps have already stopped.
     pub(crate) fn set_stop_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_listener(listener);
     }
@@ -1876,7 +1866,7 @@ impl IoCustodianHandle {
     /// before either pump-stop cancellation or graceful shutdown is visible.
     #[expect(
         dead_code,
-        reason = "connection retirement does not use the custodian stop listener yet"
+        reason = "connection retirement observes pump stops through the stop listener only"
     )]
     pub(crate) fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_retirement_listener(listener);

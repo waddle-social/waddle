@@ -2,9 +2,8 @@ use std::collections::BTreeSet;
 #[cfg(feature = "clustering")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "clustering")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "clustering")]
 use tokio::sync::mpsc;
 use waddle_xmpp::stream_management::StreamManagementState;
 use waddle_xmpp::Stanza;
@@ -18,25 +17,64 @@ pub struct OrderedRelayHandoffCompletion {
     pub replies: Vec<Stanza>,
 }
 
+/// How many ordered-relay handoffs one connection may have outstanding. It
+/// matches the connection's outbound endpoint queue and its actor mailbox.
+/// Each outstanding handoff holds one slot of the completion queue from the
+/// moment its stanza is routed, so the queue can never hold more completions
+/// than this and a completion never waits for room.
+pub const ORDERED_RELAY_HANDOFF_CAPACITY: usize = 256;
+
+/// The sending half of a connection's bounded handoff completion queue.
+pub type OrderedRelayHandoffSender = mpsc::Sender<OrderedRelayHandoffCompletion>;
+/// The receiving half, owned by the connection.
+pub type OrderedRelayHandoffReceiver = mpsc::Receiver<OrderedRelayHandoffCompletion>;
+
+/// Create one connection's handoff completion queue.
+pub fn ordered_relay_handoff_channel() -> (OrderedRelayHandoffSender, OrderedRelayHandoffReceiver) {
+    mpsc::channel(ORDERED_RELAY_HANDOFF_CAPACITY)
+}
+
+/// Why a stanza was not given a deferred handoff. Nothing was routed yet: the
+/// caller routes the stanza without one and waits for the relay inside its
+/// own handler, which is the backpressure the connection already applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg(feature = "clustering")]
+pub enum OrderedRelayHandoffRefusal {
+    #[error("the connection has its full count of ordered-relay handoffs outstanding")]
+    Full,
+    #[error("the connection no longer receives ordered-relay handoff completions")]
+    Closed,
+}
+
 #[derive(Debug, Clone)]
 #[cfg(feature = "clustering")]
 pub struct OrderedRelayHandoffHandle {
     inbound_sequence: OrderedRelayInboundSequence,
-    tx: mpsc::UnboundedSender<OrderedRelayHandoffCompletion>,
+    // The queue slot this handoff reserved. The first completion uses it.
+    slot: Arc<Mutex<Option<mpsc::OwnedPermit<OrderedRelayHandoffCompletion>>>>,
     deferred: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "clustering")]
 impl OrderedRelayHandoffHandle {
-    pub fn new(
+    /// Reserve a completion slot for one inbound stanza, or refuse without
+    /// waiting when the connection's bound is reached.
+    pub fn reserve(
         inbound_sequence: OrderedRelayInboundSequence,
-        tx: mpsc::UnboundedSender<OrderedRelayHandoffCompletion>,
-    ) -> Self {
-        Self {
+        tx: &OrderedRelayHandoffSender,
+    ) -> Result<Self, OrderedRelayHandoffRefusal> {
+        let slot = tx
+            .clone()
+            .try_reserve_owned()
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => OrderedRelayHandoffRefusal::Full,
+                mpsc::error::TrySendError::Closed(_) => OrderedRelayHandoffRefusal::Closed,
+            })?;
+        Ok(Self {
             inbound_sequence,
-            tx,
+            slot: Arc::new(Mutex::new(Some(slot))),
             deferred: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     pub fn mark_deferred(&self) -> bool {
@@ -49,11 +87,20 @@ impl OrderedRelayHandoffHandle {
         self.deferred.load(Ordering::Acquire)
     }
 
+    /// Deliver the completion through the reserved slot. A handoff completes
+    /// once; a later call finds the slot used and does nothing.
     pub fn complete(&self, replies: Vec<Stanza>) {
-        let _ = self.tx.send(OrderedRelayHandoffCompletion {
-            inbound_sequence: self.inbound_sequence,
-            replies,
-        });
+        let slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .take();
+        if let Some(slot) = slot {
+            slot.send(OrderedRelayHandoffCompletion {
+                inbound_sequence: self.inbound_sequence,
+                replies,
+            });
+        }
     }
 }
 

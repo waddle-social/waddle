@@ -2243,7 +2243,8 @@ async fn assert_replay_gap_rollback_endpoint_custody(
 
     let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let (_handoff_tx, mut handoff_rx) =
+        crate::server::routes::interpret::ordered_relay_handoff_channel();
     let mut force_detach_rx = None;
     let mut pending_force_detach = Vec::new();
     finish_connection(
@@ -2254,6 +2255,7 @@ async fn assert_replay_gap_rollback_endpoint_custody(
             permit: &permit,
             shutdown: &shutdown,
         },
+        crate::server::routes::websocket::connection::RetirementCause::PeerClose,
         false,
         ConnectionShutdownChannels {
             outbound_rx: &mut rx,

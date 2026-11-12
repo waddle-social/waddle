@@ -1,3 +1,4 @@
+use super::connection::{BindingPublisher, BindingStage};
 use super::session_init::load_blocklist_for_bind;
 use super::state::WsConnState;
 use super::stream_management::{
@@ -237,6 +238,113 @@ fn registration_authoritative(
     !shutdown.is_cancelled() && permit.revalidate().is_ok()
 }
 
+/// Publishes bindings into the connection registry, mirrors them into the
+/// account's `UserActor` (or the remote node's proxy for it), and retires
+/// them owner-gated.
+struct RegistryBindingPublisher<'a> {
+    state: &'a WebSocketState,
+}
+
+/// The publisher every binding of this server goes through. Substituting the
+/// account coordinator means returning its publisher here.
+fn binding_publisher(state: &WebSocketState) -> RegistryBindingPublisher<'_> {
+    RegistryBindingPublisher { state }
+}
+
+impl BindingPublisher for RegistryBindingPublisher<'_> {
+    type Published = waddle_xmpp::registry::LocalConnectionBindingId;
+    type Confirmation = MirrorRegisterOutcome;
+
+    fn publish(
+        &self,
+        jid: &FullJid,
+        entry: waddle_xmpp::registry::ConnectionEntry,
+    ) -> Option<Self::Published> {
+        self.state
+            .deps
+            .protocol
+            .connection_registry
+            .register_socket_entry(jid.clone(), entry)
+    }
+
+    /// ADR-0017 Phase 1 completion: registration into the actor tree is
+    /// authoritative and fail-closed. The mirror shares the same `Arc`-backed
+    /// `ConnectionEntry` that was published (obtained owner-gated, carrying
+    /// the presence and stream id set after publication), so the actor sees
+    /// live presence and carbons updates without per-site mirroring.
+    ///
+    /// `None` means the slot was already superseded by a racing reconnect on
+    /// the same resource: the replacement owns the slot and performs its own
+    /// authoritative register, so there is nothing for this binding to
+    /// mirror.
+    async fn confirm(
+        &self,
+        jid: &FullJid,
+        owner: Self::Published,
+        resumed: bool,
+    ) -> Option<Self::Confirmation> {
+        let state = self.state;
+        let entry = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry_if_owner(jid, &owner)?;
+        let mirror_outcome = if resumed {
+            retry_resumed_registration_busy(|| {
+                crate::server::dual_registration::mirror_register_outcome(
+                    &state.deps.protocol.user_registry,
+                    jid.clone(),
+                    entry.clone(),
+                )
+            })
+            .await
+        } else {
+            crate::server::dual_registration::mirror_register_outcome(
+                &state.deps.protocol.user_registry,
+                jid.clone(),
+                entry.clone(),
+            )
+            .await
+        };
+        Some(match mirror_outcome {
+            MirrorRegisterOutcome::ForeignOwner => {
+                #[cfg(test)]
+                if let Ok((entered, release)) = FOREIGN_OWNER_GATE.try_with(Clone::clone) {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                register_remote_clustered_resource(state, jid, entry, owner).await
+            }
+            outcome => outcome,
+        })
+    }
+
+    /// Unregistering also clears the presence state published with the
+    /// binding. kameo's reply timeout does not cancel an already-enqueued
+    /// handler, so a register that timed out may still land in the actor tree
+    /// after this. The owner-gated mirror unregister reaps it: the
+    /// `UserRegistryActor` mailbox is FIFO, so it is ordered after the
+    /// register ask and prunes the phantom if it ran late, and owner-gating
+    /// leaves a racing replacement untouched.
+    async fn retire(&self, jid: &FullJid, owner: Self::Published) {
+        self.state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister_if_owner(jid, &owner);
+        crate::server::dual_registration::mirror_unregister(
+            &self.state.deps.protocol.user_registry,
+            jid,
+            Some(owner),
+        )
+        .await;
+    }
+
+    async fn retire_remote(&self, jid: &FullJid, owner: Self::Published) {
+        unregister_remote_clustered_resource_if_owner(self.state, jid, &owner).await;
+    }
+}
+
 async fn rollback_registered_connection(
     state: &WebSocketState,
     jid: &FullJid,
@@ -244,18 +352,9 @@ async fn rollback_registered_connection(
     conn: &mut WsConnState,
 ) {
     conn.retire_binding_ref();
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .unregister_if_owner(jid, owner);
-    crate::server::dual_registration::mirror_unregister(
-        &state.deps.protocol.user_registry,
-        jid,
-        Some(*owner),
-    )
-    .await;
-    unregister_remote_clustered_resource_if_owner(state, jid, owner).await;
+    let publisher = binding_publisher(state);
+    publisher.retire(jid, *owner).await;
+    publisher.retire_remote(jid, *owner).await;
     conn.registry_owner = None;
 }
 
@@ -507,7 +606,13 @@ where
         }
     } else {
         conn.retire_binding_ref();
-        waddle_xmpp::ownership::BindingRef::fresh(conn.connection_ref.clone())
+        match conn.bindings.prepare_next() {
+            Ok(prepared) => prepared.attempt.binding_ref,
+            Err(refusal) => {
+                error!(%refusal, "bind could not mint a binding identity");
+                return RegistrationAfterFrame::SessionInitializationFailed;
+            }
+        }
     };
 
     let blocklist = if resumed {
@@ -642,6 +747,16 @@ where
         return RegistrationAfterFrame::Unchanged;
     };
 
+    // Only the attempt this connection last prepared may be published. A
+    // resume carries the identity it minted when the attempt began.
+    if !matches!(
+        conn.bindings.current(),
+        Some((current, BindingStage::Prepared)) if current == &binding_ref
+    ) {
+        error!(jid = %jid, "binding identity is not this connection's prepared attempt");
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
+    let published_binding = binding_ref.clone();
     conn.binding_ref = Some(binding_ref.clone());
     let mut entry = match &conn.local_io_relinquishment {
         Some(witness) => waddle_xmpp::registry::ConnectionEntry::new_for_binding_with_local_io(
@@ -666,15 +781,11 @@ where
         conn.blocklist_interested,
         std::sync::atomic::Ordering::Relaxed,
     );
-    let Some(owner) = state
-        .deps
-        .protocol
-        .connection_registry
-        .register_socket_entry(jid.clone(), entry)
-    else {
+    let Some(owner) = binding_publisher(state).publish(&jid, entry) else {
         conn.retire_binding_ref();
         return RegistrationAfterFrame::SessionInitializationFailed;
     };
+    let _ = conn.bindings.install_binding(&published_binding);
     conn.registry_owner = Some(owner);
     if let Some(entry) = state
         .deps
@@ -739,57 +850,15 @@ where
         }
     }
 
-    // ADR-0017 Phase 1 completion: registration into the actor tree is
-    // authoritative and fail-closed. We share the SAME `Arc`-backed
-    // `ConnectionEntry` we just registered (obtained owner-gated via
-    // `entry_if_owner`, now carrying the presence/stream-id set above) so the
-    // actor sees live presence/carbons updates without per-site mirroring. If
-    // the `UserActor` cannot confirm the resource, roll the DashMap
-    // registration back (owner-gated, so a racing replacement is left intact)
-    // and fail the bind: a lagging register is a *silent false-negative* — a
+    // If the account's owner cannot confirm the resource, the publication is
+    // rolled back (owner-gated, so a racing replacement is left intact) and
+    // the bind fails: a lagging register is a *silent false-negative* — a
     // bare-JID selection that misses this live resource looks like a complete
-    // set and can never fall back — so the two views must never disagree in the
-    // miss-a-resource direction. The client simply reconnects. See
+    // set and can never fall back — so the two views must never disagree in
+    // the miss-a-resource direction. The client simply reconnects. See
     // docs/adrs/0017-phase1-completion-authoritative-registration.md.
-    //
-    // The `None` arm (our slot was already superseded by a racing
-    // reconnect on the same resource) preserves prior behaviour: the
-    // replacement owns the slot and performs its own authoritative register,
-    // so there is nothing for this session to mirror.
-    if let Some(entry) = state
-        .deps
-        .protocol
-        .connection_registry
-        .entry_if_owner(&jid, &owner)
+    if let Some(registration_outcome) = binding_publisher(state).confirm(&jid, owner, resumed).await
     {
-        let mirror_outcome = if resumed {
-            retry_resumed_registration_busy(|| {
-                crate::server::dual_registration::mirror_register_outcome(
-                    &state.deps.protocol.user_registry,
-                    jid.clone(),
-                    entry.clone(),
-                )
-            })
-            .await
-        } else {
-            crate::server::dual_registration::mirror_register_outcome(
-                &state.deps.protocol.user_registry,
-                jid.clone(),
-                entry.clone(),
-            )
-            .await
-        };
-        let registration_outcome = match mirror_outcome {
-            MirrorRegisterOutcome::ForeignOwner => {
-                #[cfg(test)]
-                if let Ok((entered, release)) = FOREIGN_OWNER_GATE.try_with(Clone::clone) {
-                    entered.notify_one();
-                    release.notified().await;
-                }
-                register_remote_clustered_resource(state, &jid, entry, owner).await
-            }
-            outcome => outcome,
-        };
         if !registration_authoritative(permit, shutdown) {
             rollback_registered_connection(state, &jid, &owner, conn).await;
             return RegistrationAfterFrame::AuthorityRevoked;
@@ -798,24 +867,7 @@ where
             bind_guard.complete_actor_retirements_after_registration();
         } else {
             conn.retire_binding_ref();
-            // Rollback also clears the presence_states published above.
-            state
-                .deps
-                .protocol
-                .connection_registry
-                .unregister_if_owner(&jid, &owner);
-            // kameo's reply_timeout does not cancel an already-enqueued
-            // handler, so a register that *timed out* may still land in the
-            // actor tree after this rollback. Reap it with an owner-gated
-            // unregister: the `UserRegistryActor` mailbox is FIFO, so this is
-            // ordered after the register ask and prunes the phantom if it ran
-            // late; owner-gating leaves a racing replacement untouched.
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                &jid,
-                Some(owner),
-            )
-            .await;
+            binding_publisher(state).retire(&jid, owner).await;
             conn.registry_owner = None;
             // This was the server-silent path from #1454: the rollback ran
             // and the client got a stream error with no server-side trace.

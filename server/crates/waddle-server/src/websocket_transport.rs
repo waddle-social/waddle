@@ -48,7 +48,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{
     ConnectionRef, NodeIdentityStamp, NodeLeaseIdentity, SharedNodeIdentity,
 };
-use waddle_xmpp::registry::{ActorOutboundCustody, ActorOutboundId};
+use waddle_xmpp::registry::{ActorOutboundCustody, ActorOutboundId, ActorOutboundStage};
 
 pub use crate::server::routes::websocket::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, CustodianSummary, InboundTerminal,
@@ -83,6 +83,41 @@ pub enum OutputError<E> {
     WrongConnection,
     #[error("frame is not valid in the current transport phase")]
     InvalidFrame,
+}
+
+/// The custody stage that a frame's local write progress is evidence for.
+///
+/// The progress comes from the pump's receipt for the exact frame bytes it
+/// was given, so the evidence is about those bytes and nothing is serialized
+/// again to produce it. No stage says the peer handled the frame: `Flushed`
+/// is a completed local flush, `AttemptedUncertain` means the sink's
+/// `start_send` began and the frame may or may not have left, and only
+/// `NotAttempted` proves that it did not.
+pub fn attempt_stage(progress: WriteProgress) -> ActorOutboundStage {
+    match progress {
+        WriteProgress::Admitted => ActorOutboundStage::Queued,
+        WriteProgress::Attempted => ActorOutboundStage::Attempting,
+        WriteProgress::Completed => ActorOutboundStage::Flushed,
+        WriteProgress::Uncertain => ActorOutboundStage::AttemptedUncertain,
+        WriteProgress::NotAttempted => ActorOutboundStage::NotAttempted,
+    }
+}
+
+impl<E> OutputError<E> {
+    /// The attempt evidence a failed write leaves behind.
+    ///
+    /// A refusal before queue admission proves the frame was not attempted.
+    /// A transport error or a failed retirement is reported without the
+    /// frame's own receipt, so it cannot prove that and stays uncertain.
+    pub fn attempt_stage(&self) -> ActorOutboundStage {
+        match self {
+            Self::Admission(_) | Self::Closing | Self::WrongConnection | Self::InvalidFrame => {
+                ActorOutboundStage::NotAttempted
+            }
+            Self::Interrupted(progress) => attempt_stage(*progress),
+            Self::Transport(_) | Self::RetirementFailed => ActorOutboundStage::AttemptedUncertain,
+        }
+    }
 }
 
 /// Input preserves all raw WebSocket frames and their original read error.
@@ -883,6 +918,47 @@ pub(crate) struct LiveSocketTransport {
     pub(crate) cleanup: LiveSocketCleanup,
     pub(crate) input: WebSocketInput<axum::Error>,
     pub(crate) output: WebSocketMessageSink<axum::Error>,
+    /// Fires when the pumps stop for any reason. See [`PumpStop`].
+    pub(crate) pump_stop: PumpStop,
+}
+
+/// The owner's view of the first stop of its transport pumps.
+///
+/// The custodian's stop listener fills this in synchronously, before the
+/// pumps observe the cancellation, so an owner that waits on it learns of a
+/// peer close, an I/O failure or a pump that returned on its own without
+/// reading or writing the socket first.
+#[derive(Clone)]
+pub(crate) struct PumpStop {
+    stopped: CancellationToken,
+    reason: Arc<std::sync::OnceLock<StopReason>>,
+}
+
+impl PumpStop {
+    pub(crate) fn install(custodian: &IoCustodianHandle) -> Self {
+        let pump_stop = Self {
+            stopped: CancellationToken::new(),
+            reason: Arc::new(std::sync::OnceLock::new()),
+        };
+        let listener = pump_stop.clone();
+        custodian.set_stop_listener(Arc::new(move |reason| {
+            let _ = listener.reason.set(reason);
+            listener.stopped.cancel();
+        }));
+        pump_stop
+    }
+
+    /// Wait for the pumps to stop and return the first reason. Abandoning the
+    /// wait loses nothing: a stop stays observable.
+    pub(crate) async fn stopped(&self) -> StopReason {
+        self.stopped.cancelled().await;
+        self.reason().unwrap_or(StopReason::Requested)
+    }
+
+    /// The first stop reason, once the pumps have stopped.
+    pub(crate) fn reason(&self) -> Option<StopReason> {
+        self.reason.get().copied()
+    }
 }
 
 /// The owner's half of the inventory slot. Dropping it reports that the owner
@@ -961,6 +1037,7 @@ impl LegacySocketAdmission {
                     observer: custodian.observer(),
                     cleanup,
                     input,
+                    pump_stop: PumpStop::install(&custodian),
                     output: output.into_message_sink(),
                 })
             }
@@ -1760,6 +1837,11 @@ impl WebSocketWriteReceipt {
     /// Wait for a final local write outcome.
     pub async fn wait_for_terminal(&self) -> WriteProgress {
         self.receipt.wait_for_terminal().await
+    }
+
+    /// The custody stage this receipt is currently evidence for.
+    pub fn attempt_stage(&self) -> ActorOutboundStage {
+        attempt_stage(self.progress())
     }
 }
 

@@ -6,7 +6,7 @@ use super::super::super::send::InterruptibleSink;
 use super::super::super::timers::TransportTimers;
 use super::{
     bind_fresh_test_connection, create_test_session, create_test_websocket_state,
-    finish_test_socket_cleanup, mpsc, publish_stream_id_and_presence, Arc, FullJid, OutboundStanza,
+    finish_test_socket_cleanup, publish_stream_id_and_presence, Arc, FullJid, OutboundStanza,
     RegistrationAfterFrame, Stanza,
 };
 use crate::clustering::relay::{
@@ -149,7 +149,8 @@ where
             .unwrap()
             .into(),
     );
-    let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let (_handoff_tx, mut handoff_rx) =
+        crate::server::routes::interpret::ordered_relay_handoff_channel();
     let mut pending = Vec::new();
     let (socket_io, _) = LocalSocketIo::new(sink, reader);
     let (_, reply) = tokio::time::timeout(Duration::from_secs(1), async {
@@ -162,6 +163,7 @@ where
                     permit: &permit,
                     shutdown: &shutdown,
                 },
+                crate::server::routes::websocket::connection::RetirementCause::PeerClose,
                 false,
                 ConnectionShutdownChannels {
                     outbound_rx: &mut outbound_rx,

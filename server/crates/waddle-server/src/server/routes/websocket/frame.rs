@@ -31,7 +31,6 @@ use crate::ingress::IngressPrincipal;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
 use crate::server::routes::interpret::effects::{ClientRoomOrigin, IngressPlan};
-use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 #[cfg(feature = "clustering")]
 use crate::server::routes::interpret::OrderedRelayHandoffHandle;
 use crate::server::routes::interpret::OrderedRelayInboundSequence;
@@ -615,8 +614,9 @@ async fn handle_xmpp_frame_impl(
     }
 
     let WsConnState {
-        connection_ref,
+        connection_ref: _,
         binding_ref,
+        bindings,
         #[cfg(test)]
         resume_binding_attempts,
         phase,
@@ -661,8 +661,8 @@ async fn handle_xmpp_frame_impl(
     // Both transport and dormant owner inputs share the same typed SM dispatch.
     if let ClassifiedInboundInput::StreamManagement(sm) = input.input {
         let ctx = SmCtx {
-            connection_ref,
             binding_ref,
+            bindings,
             #[cfg(test)]
             resume_binding_attempts,
             phase,
@@ -1347,7 +1347,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     bound_jid: Option<&jid::FullJid>,
     registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
-    handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
+    handoff_tx: Option<&crate::server::routes::interpret::OrderedRelayHandoffSender>,
 ) -> Option<OrderedRelayRouteOrigin> {
     let sender_entity = bound_jid.map(|jid| {
         waddle_xmpp::ownership::Entity::new(
@@ -1371,9 +1371,8 @@ async fn ordered_relay_origin_for_inbound_stanza(
                 sender_entity,
                 inbound_sequence: inbound_sequence.map(|sequence| sequence.0).unwrap_or(0),
                 handoff: if sm_state.enabled {
-                    inbound_sequence.and_then(|sequence| {
-                        handoff_tx.map(|tx| OrderedRelayHandoffHandle::new(sequence, tx.clone()))
-                    })
+                    inbound_sequence
+                        .and_then(|sequence| reserve_ordered_relay_handoff(sequence, handoff_tx))
                 } else {
                     None
                 },
@@ -1389,8 +1388,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
             ),
             sender_entity,
             inbound_sequence: inbound_sequence.0,
-            handoff: handoff_tx
-                .map(|tx| OrderedRelayHandoffHandle::new(inbound_sequence, tx.clone())),
+            handoff: reserve_ordered_relay_handoff(inbound_sequence, handoff_tx),
         });
     }
     Some(OrderedRelayRouteOrigin {
@@ -1401,6 +1399,36 @@ async fn ordered_relay_origin_for_inbound_stanza(
     })
 }
 
+/// Reserve this stanza's deferred handoff. A refusal is not an error: the
+/// stanza is routed without a handoff, so its handler waits for the relay
+/// itself and the connection reads no further frame until it returns.
+#[cfg(feature = "clustering")]
+fn reserve_ordered_relay_handoff(
+    inbound_sequence: OrderedRelayInboundSequence,
+    handoff_tx: Option<&crate::server::routes::interpret::OrderedRelayHandoffSender>,
+) -> Option<OrderedRelayHandoffHandle> {
+    use crate::server::routes::interpret::OrderedRelayHandoffRefusal;
+    use waddle_xmpp::telemetry::attributes::{ActorLane, MailboxRejection};
+    match OrderedRelayHandoffHandle::reserve(inbound_sequence, handoff_tx?) {
+        Ok(handoff) => Some(handoff),
+        Err(refusal) => {
+            waddle_xmpp::telemetry::authority::record_actor_mailbox_rejected(
+                ActorLane::Data,
+                match refusal {
+                    OrderedRelayHandoffRefusal::Full => MailboxRejection::Full,
+                    OrderedRelayHandoffRefusal::Closed => MailboxRejection::Closed,
+                },
+            );
+            debug!(
+                inbound_sequence = inbound_sequence.0,
+                %refusal,
+                "Ordered-relay handoff refused; routing the stanza inline"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(not(feature = "clustering"))]
 async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
@@ -1408,7 +1436,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     bound_jid: Option<&jid::FullJid>,
     registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
-    handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
+    handoff_tx: Option<&crate::server::routes::interpret::OrderedRelayHandoffSender>,
 ) -> Option<OrderedRelayRouteOrigin> {
     let _ = (
         state,
