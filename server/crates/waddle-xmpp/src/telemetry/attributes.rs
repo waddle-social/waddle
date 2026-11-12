@@ -48,6 +48,22 @@ mod tests {
     }
 }
 
+mod authority;
+pub use authority::ActorLane;
+pub use authority::ActorRetirementCause;
+pub use authority::ActorTurnEvent;
+pub use authority::DestroyCompletionOutcome;
+pub use authority::IngressEntryAuthorityKind;
+pub use authority::IngressEntryOutcome;
+pub use authority::IoExitCause;
+pub use authority::IoPump;
+pub use authority::KeypairLeaseOutcome;
+pub use authority::MailboxRejection;
+pub use authority::RelayOutcome;
+pub use authority::RemoteDispatchOutcome;
+pub use authority::RestrictedStartupStage;
+pub use authority::RestrictedStore;
+pub use authority::SmEnableOutcome;
 mod implementation;
 pub use implementation::AdminOp;
 pub use implementation::AuthErrorCode;

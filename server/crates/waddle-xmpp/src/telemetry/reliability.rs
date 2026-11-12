@@ -366,6 +366,7 @@ reliability_counters! {
 /// tick" alert must keep its absent series.
 pub fn register_reliability_counters() {
     register_table_counters();
+    super::authority::register_authority_counters();
     super::remote_owner::add_mirror_attempt(0, super::attributes::RemoteOwnerMirrorOutcome::Failed);
     for path in SmEvictionPath::ALL {
         add_sm_unacked_evicted(0, path);

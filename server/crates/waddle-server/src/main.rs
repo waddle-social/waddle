@@ -4,6 +4,8 @@ use waddle_ecdysis::InheritedListeners;
 use waddle_server::config;
 use waddle_server::config::ServerConfig;
 use waddle_server::{db, server, telemetry};
+use waddle_xmpp::telemetry::attributes::RestrictedStartupStage;
+use waddle_xmpp::telemetry::authority::record_restricted_startup_refusal;
 
 /// Tokio's default 2 MiB worker stack is no longer enough for the deepest
 /// protocol futures (a debug/ci-test-profile session-initiate rewrite
@@ -83,17 +85,35 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                 let release_git_sha = std::env::var("WADDLE_GIT_SHA").map_err(|_| {
                     db::runtime_startup::RuntimeStartupError::ReleaseIdentityMissing
                 })?;
-                let identity = db::runtime_startup::RuntimeStartupIdentity::from_json(
+                let identity = match db::runtime_startup::RuntimeStartupIdentity::from_json(
                     &document,
                     &lineage_config,
                     &release_git_sha,
-                )?;
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return Err(refused_restricted_start(
+                            RestrictedStartupStage::Handoff,
+                            error,
+                        )
+                        .await);
+                    }
+                };
                 let limits = db::bootstrap::RuntimePoolLimits {
                     main_connections: db_runtime.pool_size,
                     ingress_connections: server_config.ingress.pool_size,
                     acquire_timeout: db_runtime.acquire_timeout,
                 };
-                let preparation = identity.preflight(&db_runtime.database_url, limits).await?;
+                let preparation = match identity.preflight(&db_runtime.database_url, limits).await {
+                    Ok(preparation) => preparation,
+                    Err(error) => {
+                        return Err(refused_restricted_start(
+                            RestrictedStartupStage::Preflight,
+                            error,
+                        )
+                        .await);
+                    }
+                };
                 info!(
                     transition_id = %preparation.transition_id(),
                     "Restricted runtime pinned read-only preflight passed"
@@ -109,9 +129,19 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                         acquire_timeout: db_runtime.acquire_timeout,
                     },
                 );
-                let pool = identity
+                let pool = match identity
                     .attach_serving(preparation, &db_runtime.database_url, limits, control_plane)
-                    .await?;
+                    .await
+                {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        return Err(refused_restricted_start(
+                            RestrictedStartupStage::ServingPool,
+                            error,
+                        )
+                        .await);
+                    }
+                };
                 info!("Restricted runtime attached its attested serving pool");
                 (pool, None, None)
             }
@@ -157,7 +187,8 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
         };
 
     // Start the server
-    let metrics_flush = server::start_with_config_and_owner_outbox(
+    let restricted = std::env::var_os("WADDLE_DB_RUNTIME_ATTESTATION").is_some();
+    let started = server::start_with_config_and_owner_outbox(
         db_pool,
         xmpp_config,
         server_config,
@@ -166,9 +197,29 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
         owner_outbox,
         inherited,
     )
-    .await?;
+    .await;
+    let metrics_flush = match started {
+        Ok(metrics_flush) => metrics_flush,
+        // Under the restricted role a failed store attachment ends the
+        // start here: there is no owner startup to fall back to.
+        Err(error) if restricted => {
+            return Err(refused_restricted_start(RestrictedStartupStage::Startup, error).await);
+        }
+        Err(error) => return Err(error),
+    };
 
     telemetry::shutdown(metrics_flush);
 
     Ok(())
+}
+
+/// Count a start under the restricted database role that refused to serve,
+/// and export the count before the process exits with `error`.
+async fn refused_restricted_start(
+    stage: RestrictedStartupStage,
+    error: impl Into<anyhow::Error>,
+) -> anyhow::Error {
+    record_restricted_startup_refusal(stage);
+    telemetry::shutdown(telemetry::flush_metrics_before_exit().await);
+    error.into()
 }

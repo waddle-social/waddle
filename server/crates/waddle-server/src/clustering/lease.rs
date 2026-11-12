@@ -27,6 +27,8 @@ use libp2p::PeerId;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
+use waddle_xmpp::telemetry::attributes::KeypairLeaseOutcome;
+use waddle_xmpp::telemetry::authority::record_keypair_lease;
 
 #[cfg(all(test, feature = "test-support"))]
 #[path = "lease_runtime_attach_tests.rs"]
@@ -590,9 +592,11 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
                 .try_acquire_slot(identity, slot_index, lease_ttl)
                 .await?
             {
+                record_keypair_lease(KeypairLeaseOutcome::Acquired);
                 return Ok(LeasedSlot { slot_index });
             }
         }
+        record_keypair_lease(KeypairLeaseOutcome::Exhausted);
         Err(LeaseError::NoFreeSlot { pool_size })
     }
 
@@ -658,6 +662,7 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
             .await?
         };
         if affected == 0 {
+            record_keypair_lease(KeypairLeaseOutcome::FencingLost);
             return Err(LeaseError::FencingLoss {
                 slot_index: slot.slot_index,
             });

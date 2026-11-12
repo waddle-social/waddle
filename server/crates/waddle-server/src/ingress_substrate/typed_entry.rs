@@ -40,6 +40,8 @@ use super::{
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_uow::{DbRetryClass, RelationGuardCapability};
+use waddle_xmpp::telemetry::attributes::{IngressEntryAuthorityKind, IngressEntryOutcome};
+use waddle_xmpp::telemetry::authority::record_ingress_entry;
 
 /// How the entry obtains its transaction from the admission lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +255,37 @@ impl<'a> IngressEntryTransaction<'a> {
 /// that preparation takes the epoch relation prelock before the physical
 /// attestor runs, so no application lock or write can precede either.
 pub(crate) async fn begin_ingress_entry<'a>(
+    db: &'a Database,
+    request: IngressEntryRequest<'_>,
+) -> Result<IngressEntryTransaction<'a>, IngressEntryError> {
+    let authority = match request.authority {
+        IngressEntryAuthority::Unattested => IngressEntryAuthorityKind::Unattested,
+        IngressEntryAuthority::InstalledGuard(_) => IngressEntryAuthorityKind::InstalledGuard,
+        IngressEntryAuthority::RelationGuard(_) => IngressEntryAuthorityKind::RelationGuard,
+    };
+    let requested = std::time::Instant::now();
+    let entered = enter_ingress_transaction(db, request).await;
+    let outcome = match &entered {
+        Ok(_) => IngressEntryOutcome::Entered,
+        Err(IngressEntryError::AcquisitionTimeout) => IngressEntryOutcome::AcquisitionTimeout,
+        Err(IngressEntryError::Database(_)) => IngressEntryOutcome::Failed,
+        Err(IngressEntryError::Preparation(IngressSubstrateError::Timeout)) => {
+            IngressEntryOutcome::PreparationTimeout
+        }
+        Err(IngressEntryError::PreparationDatabase(_) | IngressEntryError::Preparation(_)) => {
+            IngressEntryOutcome::PreparationFailed
+        }
+        Err(IngressEntryError::EpochUnsupported { .. }) => IngressEntryOutcome::EpochUnsupported,
+        Err(IngressEntryError::BoundsUnproven | IngressEntryError::EpochProofMissing) => {
+            IngressEntryOutcome::Refused
+        }
+    };
+    record_ingress_entry(authority, outcome, requested.elapsed());
+    entered
+}
+
+/// The entry itself; [`begin_ingress_entry`] records its outcome.
+async fn enter_ingress_transaction<'a>(
     db: &'a Database,
     request: IngressEntryRequest<'_>,
 ) -> Result<IngressEntryTransaction<'a>, IngressEntryError> {
