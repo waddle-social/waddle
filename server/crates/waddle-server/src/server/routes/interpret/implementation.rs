@@ -65,8 +65,13 @@ pub(crate) async fn broadcast_room_system_message(
 /// that genuinely require `.await` (registry lookups, actor calls, MAM
 /// storage). The currently-supported variants are all synchronous, so this
 /// function will return immediately for the ping/session flow.
+///
+/// The interpreter's future is boxed. Every stanza handler awaits it, and an
+/// unoptimized build keeps a by-value copy of an awaited future in the poll
+/// frame of each caller above it, so leaving it inline multiplies its size
+/// through the whole handler chain's stack.
 pub async fn interpret(events: Vec<OutboundEvent>, deps: &Deps<'_>) -> InterpretOutcome {
-    interpret_with_depth(events, deps, 0).await
+    Box::pin(interpret_with_depth(events, deps, 0)).await
 }
 
 /// Hard cap on the [`run_headless_recipient_pass`] recursion. The

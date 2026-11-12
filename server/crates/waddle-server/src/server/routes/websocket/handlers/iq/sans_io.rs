@@ -56,14 +56,17 @@ pub(super) async fn handle_sans_io_iq(
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
-    handle_sans_io_iq_with_relay_override(
+    // Boxed for the same reason as `interpret`: the IQ dispatcher and the
+    // frame handler above it would each carry this future by value in their
+    // poll frames.
+    Box::pin(handle_sans_io_iq_with_relay_override(
         ctx,
         state,
         authenticated_session,
         phase,
         conn_state,
         None,
-    )
+    ))
     .await
 }
 
