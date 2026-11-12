@@ -563,18 +563,32 @@ impl OrderedRelayDeliveryBridge {
             outbound.original_receipt_at = context.received_at.or(msg.frame.received_at);
             outbound.ingress_append =
                 Some(obligation.clone().into_relayed_for(msg.frame.jid.clone()));
+            // A copy of a sealed room message is written only while the
+            // room's occupancy still seats this connection; the guarded
+            // acceptance proves that against the room actor when this node
+            // runs it and against durable occupancy otherwise.
+            let proof = crate::ingress::live_delivery::RoomChildProof {
+                registry: Some(&state.deps.protocol.room_registry),
+                endpoint: entry.occupancy_session(),
+            };
+            let connection_registry = Arc::clone(&services.connection_registry);
+            let target = msg.frame.jid.clone();
+            let owner = registration.owner;
             return remote_frame_outcome(
                 state
                     .deps
                     .protocol
                     .ingress
-                    .accept_live_delivery(&context, &msg.frame.jid, &msg.frame.stanza.0, || {
-                        services.connection_registry.try_send_outbound_if_owner(
-                            &msg.frame.jid,
-                            &registration.owner,
-                            outbound,
-                        )
-                    })
+                    .accept_live_delivery_guarded(
+                        &context,
+                        &msg.frame.jid,
+                        &msg.frame.stanza.0,
+                        proof,
+                        move || {
+                            connection_registry
+                                .try_send_outbound_if_owner(&target, &owner, outbound)
+                        },
+                    )
                     .await,
             );
         }

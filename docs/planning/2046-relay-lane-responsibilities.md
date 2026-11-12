@@ -70,21 +70,36 @@ an owner transfer does, and what must hold before the relay path is deleted.
   obligations as soon as its commit has executed
   (`deliver_owner_obligations`), and the ingress maintenance pass repeats
   that for anything still owed after a minute.
-- **Copies after an owner attempt that did not execute.** A copy for a
-  resource hosted by another node, the sender's reflection included, is
-  delivered only by the owner's live execution of its commit, over the
-  relay's full-JID path. Recovery of a sealed manifest hands a copy only to
-  a resource hosted by the recovering node, and only where that node also
-  runs the room's actor under the occupancy incarnation the manifest was
-  sealed with (`room_manifest_replay`). So when the owner's attempt ends
-  between its commit and its execution (the process is killed, or the
-  attempt outlasts the six-second receiver budget), the origin still reads
-  the acceptance and counts the stanza, the occupants hosted by the owner
-  receive their copies from recovery, and the sender and every other
-  occupant on another node receive no live copy: the message reaches them
-  from the archive only. `owner_sigkill_after_commit_delivers_the_frozen_reflection_once`
-  and `membership_change_between_acceptance_and_ack` in
-  `tests/xep0045_xep0198_remote_acceptance.rs` fail for this reason.
+- **Copies.** Every copy is a child of the sealed manifest and has one
+  durable send attempt (`ingress_send_attempts`, keyed by message, receipt
+  and recipient). The node that hosts the target claims that attempt before
+  it writes to the socket, so a copy is written once whichever node offers
+  it and however often. The owner's live execution and its recovery
+  (`deliver_owner_obligations`) send a copy for a resource on another node
+  over the room's ordered channel with the copy's canonical obligation
+  (`append_sealed_remote` in `S/ingress/execute_relay_copy.rs`); the hosting
+  node's answer is the child's outcome and the owner records it. When the
+  owner ends between its commit and its execution, each node's ingress
+  maintenance pass delivers the children whose targets it hosts and records
+  them, without the owner.
+- **Proof of the frozen occupancy.** On the node that runs the actor the
+  manifest was sealed by, that actor checks the child's occupancy watermark
+  in the turn that writes the copy. The incarnation and the watermarks exist
+  only in that actor, so any other node proves the child against the room's
+  durable occupancy (`room_manifest_replay`): the copy is written to a
+  connection while `ingress_room_occupants` seats the target under that
+  connection's generation. A seat held by another generation, or no seat,
+  leaves the copy undelivered as for a target that is not connected. Once
+  the room's claim has left the incarnation that sealed the manifest, a
+  child whose target has no seat is settled as departed
+  (`OccupancyDeparted`); while that claim stands the owner's actor decides.
+  The manifest does not record the generation that held the seat when it
+  was sealed, so a resource that left and joined the room again on the same
+  connection before a recovery pass receives the copy.
+- **Not covered.** A target whose only session is a detached
+  stream-management session on a node without the sealing actor is not
+  appended to; its copy stays owed until the session resumes or its seat is
+  removed.
 - **Lost hint.** The owner's poller scans its backlog every second. A pass
   works its lanes two at a time and waits for both, so one lane held for
   its receiver budget delays every other lane of the node by that long.

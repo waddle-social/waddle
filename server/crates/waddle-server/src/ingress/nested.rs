@@ -333,7 +333,10 @@ async fn consume_host_frames(
                 &context,
                 target,
                 stanza,
-                Some(&continuation.state.deps.protocol.room_registry),
+                super::live_delivery::RoomChildProof {
+                    registry: Some(&continuation.state.deps.protocol.room_registry),
+                    endpoint: None,
+                },
                 move || owned_consumer.consume(&owned_target, &owned_stanza),
             )
             .await;
