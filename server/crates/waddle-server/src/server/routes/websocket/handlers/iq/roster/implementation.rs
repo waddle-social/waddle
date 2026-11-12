@@ -356,17 +356,12 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn try_remo
     item: &RosterItem,
     version: &RosterVersion,
 ) -> bool {
-    let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    else {
+    let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
         return false;
     };
-    bridge
-        .try_fanout_remote_user_roster_push(source_jid, user_jid, item, version)
+    addressing
+        .account(user_jid)
+        .push_roster(source_jid, item, version)
         .await
 }
 

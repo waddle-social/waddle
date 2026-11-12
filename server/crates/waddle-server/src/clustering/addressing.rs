@@ -28,17 +28,23 @@
 //! [`ClusteringHandles::addressing`] returns `None` on a node without the
 //! relay substrate, where every target is local.
 
+use std::future::Future;
 use std::sync::Arc;
 
+use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::roster::{RosterItem, RosterVersion};
 use waddle_xmpp::Stanza;
 
 use super::ordered_relay::{MucProxyOrigin, OrderedRelayMucProxyKind};
 use super::route_bridge::{
     MucProxyRouteDecision, OrderedRelayDeliveryBridge, OrderedRelayMucProxyOutcome,
+    RemoteCarbonFanout,
 };
 use super::ClusteringHandles;
-use crate::ingress::identity::IngressRelayAdmission;
-use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use crate::ingress::identity::{IngressAppendObligationRef, IngressRelayAdmission};
+use crate::server::routes::interpret::{
+    FullJidDeliveryOutcome, OrderedRelayRouteOrigin, RecipientInventory,
+};
 
 impl ClusteringHandles {
     /// The addressing boundary of this node, when it has a relay substrate.
@@ -57,6 +63,14 @@ pub(crate) struct Addressing<'a> {
 }
 
 impl<'a> Addressing<'a> {
+    /// Address an account by its bare JID.
+    pub(crate) fn account(self, account: &'a jid::BareJid) -> AccountAddress<'a> {
+        AccountAddress {
+            bridge: self.bridge,
+            account,
+        }
+    }
+
     /// Address a room by its bare JID.
     pub(crate) fn room(self, room: &'a jid::BareJid) -> RoomAddress<'a> {
         RoomAddress {
@@ -135,5 +149,93 @@ impl RoomAddress<'_> {
                 command.admission,
             )
             .await
+    }
+}
+
+/// An account, addressed by its bare JID. The account's owner is whichever
+/// node holds its `UserActor` claim when the operation is sent.
+#[derive(Clone, Copy)]
+pub(crate) struct AccountAddress<'a> {
+    bridge: &'a Arc<OrderedRelayDeliveryBridge>,
+    account: &'a jid::BareJid,
+}
+
+impl<'a> AccountAddress<'a> {
+    /// Deliver a stanza addressed to the bare JID to the account's owner,
+    /// which applies its own resource selection.
+    ///
+    /// `Some` is the result of a relay attempt and is final. `None` means no
+    /// relay was attempted and the caller keeps its local bare-JID path.
+    pub(crate) fn deliver(
+        self,
+        stanza: &'a Stanza,
+        origin: &'a OrderedRelayRouteOrigin,
+    ) -> impl Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a {
+        self.bridge
+            .try_deliver_bare_jid_remote(self.account, stanza, origin)
+    }
+
+    /// Ask the account's owner to fan a carbon copy out to the account's
+    /// other resources. `source` is the resource the copied message was sent
+    /// from or delivered to; `exclude` lists resources that must not receive
+    /// a copy.
+    ///
+    /// `None` means the owner is this node or `source` is not registered
+    /// with a remote owner, and the caller runs the local fan-out.
+    pub(crate) async fn fan_out_carbons(
+        &self,
+        source: &jid::FullJid,
+        message: &xmpp_parsers::message::Message,
+        kind: CarbonKind,
+        exclude: Vec<jid::FullJid>,
+        ingress_append: Option<&IngressAppendObligationRef>,
+    ) -> Option<RemoteCarbonFanout> {
+        self.bridge
+            .try_fanout_remote_user_carbons(
+                source,
+                self.account,
+                message,
+                kind,
+                exclude,
+                ingress_append,
+            )
+            .await
+    }
+
+    /// Ask the account's owner to push a roster change to the account's
+    /// interested resources. Returns whether a remote owner took the push;
+    /// `false` leaves the push to the caller's local path.
+    pub(crate) async fn push_roster(
+        &self,
+        source: &jid::FullJid,
+        item: &RosterItem,
+        version: &RosterVersion,
+    ) -> bool {
+        self.bridge
+            .try_fanout_remote_user_roster_push(source, self.account, item, version)
+            .await
+    }
+
+    /// Ask the account's owner to push a block-list change to the account's
+    /// interested resources. Returns whether a remote owner took the push;
+    /// `false` leaves the push to the caller's local path.
+    pub(crate) async fn push_blocklist(
+        &self,
+        source: &jid::FullJid,
+        blocked: bool,
+        jids: &[jid::Jid],
+    ) -> bool {
+        self.bridge
+            .try_fanout_remote_user_blocklist_push(source, self.account, blocked, jids)
+            .await
+    }
+
+    /// The account owner's view of the account's deliverable resources.
+    ///
+    /// `Ok(None)` means the owner is this node and the caller reads its own
+    /// registry. `Err` means a remote owner exists but did not answer; the
+    /// caller must not substitute its local view.
+    pub(crate) async fn recipient_inventory(&self) -> Result<Option<RecipientInventory>, ()> {
+        self.bridge.recipient_inventory_remote(self.account).await
     }
 }

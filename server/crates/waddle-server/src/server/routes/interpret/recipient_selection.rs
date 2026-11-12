@@ -125,15 +125,11 @@ pub(super) async fn recipient_inventory(
     bare: &BareJid,
 ) -> Result<RecipientInventory, ()> {
     #[cfg(feature = "clustering")]
-    if let Some(bridge) = deps.web_socket_state.and_then(|state| {
-        state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-    }) {
-        if let Some(inventory) = bridge.recipient_inventory_remote(bare).await? {
+    if let Some(addressing) = deps
+        .web_socket_state
+        .and_then(|state| state.deps.app_state.clustering_claims.addressing())
+    {
+        if let Some(inventory) = addressing.account(bare).recipient_inventory().await? {
             return Ok(inventory);
         }
     }

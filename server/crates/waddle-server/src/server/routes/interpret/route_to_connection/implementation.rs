@@ -1648,15 +1648,8 @@ pub(in crate::server::routes::interpret) fn deliver_bare_jid_via_ordered_relay<'
         {
             let origin = deps.ordered_relay_origin.as_ref()?;
             let state = deps.web_socket_state?;
-            let bridge = state
-                .deps
-                .app_state
-                .clustering_claims
-                .ordered_relay_delivery_bridge
-                .as_ref()?;
-            bridge
-                .try_deliver_bare_jid_remote(target, stanza, origin)
-                .await
+            let addressing = state.deps.app_state.clustering_claims.addressing()?;
+            addressing.account(target).deliver(stanza, origin).await
         }
         #[cfg(not(feature = "clustering"))]
         {
