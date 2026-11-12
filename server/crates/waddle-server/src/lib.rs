@@ -1,5 +1,8 @@
 #![recursion_limit = "256"]
 
+/// Durable account-resource rows: one fenced row per full JID and the
+/// committed outcome of each operation identity.
+pub mod account_bindings;
 pub mod admin;
 pub mod auth;
 pub mod call_teardown_outbox;

@@ -9,10 +9,10 @@
 //! speaks for a resource's current binding, and whether the resource's
 //! one-time presentations have happened.
 //!
-//! The type performs no I/O and holds no handles. It is not consulted by
-//! routing: the connection registry and `UserActor` remain the routing
-//! authority. Selection here follows the rules `UserActor` implements, so a
-//! caller can compare the two.
+//! The type performs no I/O and holds no handles. The account coordinator
+//! service owns one instance per bare JID and serializes access to it.
+//! Selection here follows the rules `UserActor` implements, so the two
+//! agree on the same resources.
 //!
 //! Only a binding in [`AccountResourceBindingState::Active`] is a
 //! destination. A prepared or published binding is recorded but not
@@ -26,8 +26,8 @@ use jid::FullJid;
 
 use super::account_resource_transition::{
     AccountResourceBindingState, AccountResourceExecuteError, AccountResourceExecution,
-    AccountResourceMutation, AccountResourceOperation, AccountResourceSlot,
-    AccountResourceSnapshot, AccountResourceTransitionError,
+    AccountResourceMutation, AccountResourceOperation, AccountResourceOperationOutcome,
+    AccountResourceSlot, AccountResourceSnapshot, AccountResourceTransitionError,
 };
 use super::joint_identity::SmSessionKey;
 use super::{BindingRef, UserClaimIdentity};
@@ -86,10 +86,11 @@ pub enum Presentation {
     PendingSubscriptions,
 }
 
+/// Which one-time presentations a resource has received.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct PresentationFlags {
-    offline_messages: bool,
-    pending_subscriptions: bool,
+pub struct PresentationFlags {
+    pub offline_messages: bool,
+    pub pending_subscriptions: bool,
 }
 
 /// The resources of one account under one claim identity.
@@ -118,6 +119,79 @@ impl AccountResources {
         &self.claim_identity
     }
 
+    /// Install a slot rebuilt from its durable facts, with the one-time
+    /// presentations already recorded for its current binding. An existing
+    /// slot for the same full JID is replaced, which is how the owner of
+    /// this state adopts what a store committed.
+    pub fn restore_slot(
+        &mut self,
+        slot: AccountResourceSlot,
+        presented: PresentationFlags,
+    ) -> Result<(), AccountResourcesError> {
+        let full_jid = slot.full_jid().clone();
+        if &full_jid.to_bare() != self.claim_identity.bare_jid() {
+            return Err(AccountResourcesError::AccountMismatch);
+        }
+        if !self.slots.contains_key(&full_jid) && self.slots.len() >= self.max_resources.get() {
+            return Err(AccountResourcesError::ResourceLimit);
+        }
+        if let Some(key) = self.presentation_key(&full_jid) {
+            self.presentations.retain(|(held, _)| held != &key);
+        }
+        self.slots.insert(full_jid.clone(), slot);
+        if presented != PresentationFlags::default() {
+            if let Some(key) = self.presentation_key(&full_jid) {
+                self.presentations.push((key, presented));
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the slot of a resource that has no current binding, so the
+    /// account can take another resource in its place. Returns whether a
+    /// slot was dropped; a slot that holds a binding is kept.
+    pub fn forget_free_slot(&mut self, full_jid: &FullJid) -> bool {
+        match self.slots.get(full_jid) {
+            Some(slot) if slot.binding_ref().is_none() => {
+                self.slots.remove(full_jid);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The resources whose slot holds no current binding.
+    pub fn free_slots(&self) -> Vec<FullJid> {
+        self.slots
+            .iter()
+            .filter(|(_, slot)| slot.binding_ref().is_none())
+            .map(|(jid, _)| jid.clone())
+            .collect()
+    }
+
+    /// The number of slots the account holds, bound or free.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Every slot of the account, ordered by full JID.
+    pub fn slots(&self) -> impl Iterator<Item = &AccountResourceSlot> {
+        self.slots.values()
+    }
+
+    /// The one-time presentations recorded for the resource's current
+    /// binding or session.
+    pub fn presentation_flags(&self, full_jid: &FullJid) -> PresentationFlags {
+        self.presentation_key(full_jid)
+            .and_then(|key| {
+                self.presentations
+                    .iter()
+                    .find(|(held, _)| held == &key)
+                    .map(|(_, flags)| *flags)
+            })
+            .unwrap_or_default()
+    }
+
     /// The slot of one resource, when the account has ever bound it.
     pub fn slot(&self, full_jid: &FullJid) -> Option<&AccountResourceSlot> {
         self.slots.get(full_jid)
@@ -129,7 +203,10 @@ impl AccountResources {
     /// resource is refused without creating one. The slot journals the
     /// operation, so repeating it with the same identity returns the
     /// recorded outcome. A resource whose retirement completes loses its
-    /// presentation record, so its next binding is presented afresh.
+    /// presentation record, so its next binding is presented afresh. A
+    /// snapshot update that gives the binding a stream-management session
+    /// moves the record to the session, so enabling stream management after
+    /// a presentation does not present again.
     pub fn execute(
         &mut self,
         full_jid: &FullJid,
@@ -158,6 +235,10 @@ impl AccountResources {
             operation.mutation,
             AccountResourceMutation::CompleteRetirement { .. }
         );
+        let updates_snapshot = matches!(
+            operation.mutation,
+            AccountResourceMutation::UpdateSnapshot { .. }
+        );
         let key_before = self.presentation_key(full_jid);
         let slot = self
             .slots
@@ -166,9 +247,24 @@ impl AccountResources {
         let execution = slot
             .execute(operation)
             .map_err(AccountResourcesError::Slot)?;
+        let committed = matches!(
+            execution,
+            AccountResourceExecution::Applied(AccountResourceOperationOutcome::Committed { .. })
+        );
         if completes_retirement && self.binding(full_jid).is_none() {
             if let Some(key) = key_before {
                 self.presentations.retain(|(held, _)| held != &key);
+            }
+        } else if committed && updates_snapshot {
+            let key_after = self.presentation_key(full_jid);
+            if let (Some(before), Some(after)) = (key_before, key_after) {
+                if before != after {
+                    for (held, _) in &mut self.presentations {
+                        if held == &before {
+                            *held = after.clone();
+                        }
+                    }
+                }
             }
         }
         Ok(execution)
@@ -246,6 +342,22 @@ impl AccountResources {
                 priority: snapshot.presence_priority,
                 carbons_enabled: snapshot.carbons_enabled,
             })
+            .collect()
+    }
+
+    /// Every resource with an active binding that wants roster pushes.
+    pub fn roster_interested_resources(&self) -> Vec<FullJid> {
+        self.active()
+            .filter(|(_, snapshot)| snapshot.roster_interested)
+            .map(|(jid, _)| jid.clone())
+            .collect()
+    }
+
+    /// Every resource with an active binding that wants block-list pushes.
+    pub fn blocklist_interested_resources(&self) -> Vec<FullJid> {
+        self.active()
+            .filter(|(_, snapshot)| snapshot.blocklist_interested)
+            .map(|(jid, _)| jid.clone())
             .collect()
     }
 

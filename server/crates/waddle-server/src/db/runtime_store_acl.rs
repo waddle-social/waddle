@@ -84,6 +84,24 @@ const DURABLE_SM_RELATIONS: &[Relation] = &[
         delete: true,
     },
 ];
+/// The account binding store inserts, row-locks and updates resource rows
+/// and deletes the row of a resource that holds no binding. It inserts and
+/// prunes operation outcomes and never updates one: an outcome is written
+/// once.
+const ACCOUNT_BINDING_RELATIONS: &[Relation] = &[
+    Relation {
+        name: "account_resource_bindings",
+        insert: true,
+        update: true,
+        delete: true,
+    },
+    Relation {
+        name: "account_resource_operations",
+        insert: true,
+        update: false,
+        delete: true,
+    },
+];
 const PENDING_RELATIONS: &[Relation] = &[
     Relation {
         name: "pending_delivery",
@@ -142,6 +160,13 @@ pub(crate) async fn verify_durable_sm(
     verify(tx, schema, DURABLE_SM_RELATIONS, false).await
 }
 
+pub(crate) async fn verify_account_bindings(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    verify(tx, schema, ACCOUNT_BINDING_RELATIONS, false).await
+}
+
 pub(crate) async fn verify_pending(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -186,6 +211,13 @@ pub(crate) async fn unexpected_durable_sm_executable_schema(
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
     unexpected_executable_schema(tx, schema, DURABLE_SM_RELATIONS).await
+}
+
+pub(crate) async fn unexpected_account_binding_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, ACCOUNT_BINDING_RELATIONS).await
 }
 
 pub(crate) async fn unexpected_pending_executable_schema(

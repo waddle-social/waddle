@@ -29,6 +29,7 @@ use waddle_xmpp::pending_delivery::storage::PendingStorageError;
 use waddle_xmpp::stream_management::persistence::SmPersistenceError;
 use waddle_xmpp::XmppError;
 
+use crate::account_bindings::bootstrap_account_binding_owner_schema;
 use crate::call_teardown_outbox::{CallTeardownOutboxError, CallTeardownOutboxStore};
 #[cfg(feature = "clustering")]
 pub use crate::clustering::allowlist::AllowlistRemoval;
@@ -200,6 +201,8 @@ pub enum RestrictedRuntimeOwnerError {
     StreamManagement(#[source] SmPersistenceError),
     #[error("durable stream management owner preparation failed")]
     DurableStreamManagement(#[source] DatabaseError),
+    #[error("account binding owner preparation failed")]
+    AccountBindings(#[source] DatabaseError),
     #[error("PubSub owner preparation failed")]
     PubSub(#[source] XmppError),
     #[error("space store owner preparation failed")]
@@ -363,6 +366,11 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // updated and purged; operation outcomes are inserted and pruned.
     ("sm_durable_sessions", READ_WRITE),
     ("sm_durable_operations", READ_INSERT_DELETE),
+    // Account resource rows are inserted, row-locked, updated and deleted
+    // when a free resource is forgotten; operation outcomes are inserted and
+    // pruned.
+    ("account_resource_bindings", READ_WRITE),
+    ("account_resource_operations", READ_INSERT_DELETE),
     ("pending_delivery", READ_WRITE),
     ("pending_delivery_sm_promotions", READ_INSERT_DELETE),
     // PubSub and its projections.
@@ -675,6 +683,9 @@ pub async fn prepare_restricted_runtime_owner(
     bootstrap_durable_sm_owner_schema(owner)
         .await
         .map_err(RestrictedRuntimeOwnerError::DurableStreamManagement)?;
+    bootstrap_account_binding_owner_schema(owner)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::AccountBindings)?;
     DatabasePubSubStorage::initialize_owner(owner.clone(), &identity)
         .await
         .map_err(RestrictedRuntimeOwnerError::PubSub)?;
