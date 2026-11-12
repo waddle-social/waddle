@@ -346,6 +346,86 @@ pub async fn wait_for_readiness(server: &TestServer, want_ready: bool, deadline:
     }
 }
 
+/// Wait until `node_id`'s node lease no longer counts as live.
+///
+/// A node that was SIGKILLed keeps a live `clustering_nodes` row until its
+/// last heartbeat is older than the node-lease TTL this harness configures.
+/// A replacement started inside that window is a second live row beside the
+/// dead one, and a survivor that has not dialled the replacement yet then
+/// sees two live nodes and no reachable peer, which is the isolation rule
+/// under which it fences itself and closes its client sessions. Scenarios
+/// that replace a killed node and expect the survivor to keep serving wait
+/// here before they start the replacement.
+pub async fn wait_for_node_lease_lapse(db: &Database, node_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let conn = db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT count(*) FROM clustering_nodes WHERE node_id = ? AND NOT expired \
+                 AND NOT draining AND heartbeat >= now() - interval '1200 milliseconds'",
+                waddle_server::db_params![node_id.to_owned()],
+            )
+            .await
+            .expect("node lease query");
+        let live = rows
+            .next()
+            .await
+            .expect("node lease row")
+            .expect("one row")
+            .get::<i64>(0)
+            .expect("live count");
+        if live == 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node {node_id} still holds a live node lease"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until `second` can register a resource of an account whose claim
+/// `first` holds, which it does through `first`'s relay: the two nodes are
+/// then connected. A node reports ready before the mesh has formed, and
+/// until it has, neither node knows the resources the other hosts.
+pub async fn wait_for_cross_node_registration(first: &TestServer, second: &TestServer) {
+    let holder = WsXmppClient::connect_and_auth(
+        &first.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("mesh-probe-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("mesh probe binds on the first node");
+    let resource = format!("mesh-probe-{}", uuid::Uuid::new_v4());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match WsXmppClient::connect_and_auth(
+            &second.ws_url(),
+            "localhost",
+            CLUSTER_PEER_USERNAME,
+            CLUSTER_PEER_PASSWORD,
+            &resource,
+        )
+        .await
+        {
+            Ok(probe) => {
+                probe.close().await.expect("close the remote mesh probe");
+                break;
+            }
+            Err(error) => assert!(
+                Instant::now() < deadline,
+                "the nodes did not connect: {error}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    holder.close().await.expect("close the local mesh probe");
+}
+
 pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
     client
         .send(&String::from(&muc_join_presence(&room.to_string(), nick)))

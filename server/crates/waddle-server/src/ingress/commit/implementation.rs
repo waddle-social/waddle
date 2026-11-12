@@ -807,8 +807,16 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     }
     // The owner's decision joins the manifest, its child keys and the
     // rejection evidence in this one transaction.
+    //
+    // The room refuses a stanza (a sender that is not an occupant, a visitor
+    // in a moderated room) by planning nothing but its error reply. Such a
+    // plan carries no rejection class, and it is still the owner's refusal:
+    // the origin answers its sender from the rejection child and never
+    // receives a reflection.
     if let Some(acceptance) = owner_acceptance.as_mut() {
-        let outcome = if rejection.is_none() {
+        let refused =
+            rejection.is_some() || super::super::rejection::is_recorded_rejection(&plan.intents);
+        let outcome = if !refused {
             super::super::commit_mailbox::assert_sender_seated(
                 uow, &mut tx, acceptance, submission,
             )

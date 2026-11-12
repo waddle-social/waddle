@@ -24,7 +24,8 @@ use std::time::Duration;
 use cluster_support::{
     cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
     open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
-    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    wait_for_node_lease_lapse, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
+    CLUSTER_PEER_USERNAME,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
@@ -36,6 +37,7 @@ use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType};
 const DOMAIN: &str = "localhost";
 const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
 const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
+const ORPHAN_REAPER_INTERVAL_ENV: &str = "WADDLE_CLUSTERING_ORPHAN_REAPER_INTERVAL_MS";
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
@@ -110,9 +112,16 @@ async fn activate_mailbox_epoch(db: &Database) {
     }
 }
 
-async fn scalar(db: &Database, sql: &str) -> i64 {
+/// The one value `sql` yields for `room`, its only parameter.
+///
+/// The ingress relations are shared by every scenario of the database and
+/// cannot be emptied between them, so each query names the scenario's room.
+async fn scalar(db: &Database, room: &jid::BareJid, sql: &str) -> i64 {
     let conn = db.guard().await.expect("database guard");
-    let mut rows = conn.query(sql, ()).await.expect("scalar query");
+    let mut rows = conn
+        .query(sql, waddle_server::db_params![room.to_string()])
+        .await
+        .expect("scalar query");
     rows.next()
         .await
         .expect("scalar row")
@@ -121,11 +130,17 @@ async fn scalar(db: &Database, sql: &str) -> i64 {
         .expect("scalar value")
 }
 
-/// Wait until `sql` yields `expected`.
-async fn wait_for_scalar(db: &Database, sql: &str, expected: i64, budget: Duration) {
+/// Wait until `sql` yields `expected` for `room`.
+async fn wait_for_scalar(
+    db: &Database,
+    room: &jid::BareJid,
+    sql: &str,
+    expected: i64,
+    budget: Duration,
+) {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        let value = scalar(db, sql).await;
+        let value = scalar(db, room, sql).await;
         if value == expected {
             return;
         }
@@ -195,6 +210,8 @@ struct Scenario {
     port_a: u16,
     server_a: TestServer,
     server_b: Option<TestServer>,
+    /// Node id of the running owner, or of the one stopped last.
+    node_b: String,
     seams: OwnerSeams,
     room: jid::BareJid,
     witness: Option<WsXmppClient>,
@@ -221,7 +238,13 @@ impl Scenario {
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
         let seam_directory = seams.directory();
-        let mut envs_a = vec![(ACCEPTANCE_ENV, origin_acceptance)];
+        // The origin's orphan reaper is slowed so that a replacement owner,
+        // not the origin, takes a killed owner's room claim: every scenario
+        // here is about an owner that is remote from the requester.
+        let mut envs_a = vec![
+            (ACCEPTANCE_ENV, origin_acceptance),
+            (ORPHAN_REAPER_INTERVAL_ENV, "600000"),
+        ];
         envs_a.extend_from_slice(extra);
         let mut envs_b = vec![
             (SEAM_DIRECTORY_ENV, seam_directory.as_str()),
@@ -275,6 +298,7 @@ impl Scenario {
             port_a,
             server_a,
             server_b: Some(server_b),
+            node_b,
             seams,
             room,
             witness: Some(witness),
@@ -301,10 +325,23 @@ impl Scenario {
 
     /// SIGKILL the owner and start its replacement, a new incarnation.
     async fn replace_owner(&mut self) {
+        self.stop_owner().await;
+        self.start_owner().await;
+    }
+
+    /// SIGKILL the owner and wait until its node lease has lapsed, so the
+    /// origin node keeps serving when a replacement appears.
+    async fn stop_owner(&mut self) {
         drop(self.witness.take());
         drop(self.server_b.take());
+        wait_for_node_lease_lapse(&self.db, &self.node_b).await;
+    }
+
+    /// Start a new owner incarnation after [`Self::stop_owner`] and wait
+    /// until its orphan reaper has taken the room's claim.
+    async fn start_owner(&mut self) {
         let port_b = free_tcp_port();
-        let (server_b, _, _) = spawn_cluster_server_with_envs(
+        let (server_b, node_b, _) = spawn_cluster_server_with_envs(
             &self.postgres_url,
             &self.pool.pool_env,
             port_b,
@@ -316,21 +353,42 @@ impl Scenario {
         )
         .await;
         wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
+        let claims = PostgresClaimStore::new(self.db.clone());
+        let room = Entity::new(EntityType::RoomActor, self.room.to_string());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let claim = claims
+                .current_claim(&room)
+                .await
+                .expect("room claim lookup");
+            if claim.is_some_and(|claim| claim.owner.node_id == node_b) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the replacement owner must take the room's claim"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         self.server_b = Some(server_b);
+        self.node_b = node_b;
     }
 }
 
-const REQUESTS: &str = "SELECT count(*) FROM ingress_room_requests";
+const REQUESTS: &str = "SELECT count(*) FROM ingress_room_requests WHERE room_jid = ?";
+const JOINS: &str =
+    "SELECT count(*) FROM ingress_room_requests WHERE room_jid = ? AND request_kind = 1";
 const SETTLED_JOINS: &str = "SELECT count(*) FROM ingress_room_requests \
-     WHERE request_kind = 1 AND owner_decision = 1 AND settled_at IS NOT NULL";
-const CONSUMED_JOIN_ENTRIES: &str =
-    "SELECT count(*) FROM ingress_mailbox_entries WHERE operation_kind = 2 AND disposition = 3";
+     WHERE room_jid = ? AND request_kind = 1 AND owner_decision = 1 AND settled_at IS NOT NULL";
+const CONSUMED_JOIN_ENTRIES: &str = "SELECT count(*) FROM ingress_mailbox_entries e \
+     JOIN ingress_room_requests r ON r.request_key = e.request_key \
+     WHERE r.room_jid = ? AND e.operation_kind = 2 AND e.disposition = 3";
 /// Occupancy rows of resources bound on the origin node. The witness is
 /// connected to the owner and has a row of its own.
-const OCCUPANTS: &str =
-    "SELECT count(*) FROM ingress_room_occupants WHERE occupant_jid NOT LIKE 'admin@%'";
-const WITNESS_OCCUPANTS: &str =
-    "SELECT count(*) FROM ingress_room_occupants WHERE occupant_jid LIKE 'admin@%'";
+const OCCUPANTS: &str = "SELECT count(*) FROM ingress_room_occupants \
+     WHERE room_jid = ? AND occupant_jid NOT LIKE 'admin@%'";
+const WITNESS_OCCUPANTS: &str = "SELECT count(*) FROM ingress_room_occupants \
+     WHERE room_jid = ? AND occupant_jid LIKE 'admin@%'";
 const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 
 fn occupant_presence(room: &jid::BareJid, nick: &str, kind: Option<&str>, status: &str) -> Element {
@@ -448,13 +506,17 @@ async fn join_response_is_handed_over_once_in_section_7_2_order() {
             .any(|frame| is_self_presence(frame, &scenario.occupant("joiner"))),
         "the response is handed over once: {later:?}"
     );
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1);
-    assert_eq!(scalar(&scenario.db, SETTLED_JOINS).await, 1);
-    assert_eq!(scalar(&scenario.db, CONSUMED_JOIN_ENTRIES).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, REQUESTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, SETTLED_JOINS).await, 1);
+    assert_eq!(
+        scalar(&scenario.db, &scenario.room, CONSUMED_JOIN_ENTRIES).await,
+        1
+    );
     assert_eq!(
         scalar(
             &scenario.db,
-            "SELECT count(*) FROM ingress_room_occupants WHERE nick = 'joiner' \
+            &scenario.room,
+            "SELECT count(*) FROM ingress_room_occupants WHERE room_jid = ? AND nick = 'joiner' \
              AND join_request IS NOT NULL AND presence IS NOT NULL"
         )
         .await,
@@ -464,7 +526,9 @@ async fn join_response_is_handed_over_once_in_section_7_2_order() {
     assert_eq!(
         scalar(
             &scenario.db,
-            "SELECT (max(position) + 1 - count(*))::bigint FROM ingress_room_responses"
+            &scenario.room,
+            "SELECT (max(s.position) + 1 - count(*))::bigint FROM ingress_room_responses s \
+             JOIN ingress_room_requests r ON r.request_key = s.request_key WHERE r.room_jid = ?"
         )
         .await,
         0
@@ -492,10 +556,10 @@ async fn groupchat_is_refused_before_the_senders_join_and_accepted_after() {
             .any(|frame| frame.attr("id") == Some("before-join") && is_error(frame)),
         "a sender without occupancy is refused: {refused:?}"
     );
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 0);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 0);
 
     join_fanout_room(&mut sender, &scenario.room, "sender").await;
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
     sender
         .send(&String::from(&fanout_message(
             &scenario.room,
@@ -539,7 +603,8 @@ async fn join_committed_while_the_owner_is_down_is_decided_by_its_replacement() 
     assert_eq!(
         scalar(
             &scenario.db,
-            "SELECT count(*) FROM ingress_room_requests WHERE owner_decision = 0"
+            &scenario.room,
+            "SELECT count(*) FROM ingress_room_requests WHERE room_jid = ? AND owner_decision = 0"
         )
         .await,
         1,
@@ -563,9 +628,13 @@ async fn join_committed_while_the_owner_is_down_is_decided_by_its_replacement() 
             .count(),
         1
     );
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1, "decided once");
-    assert_eq!(scalar(&scenario.db, SETTLED_JOINS).await, 1);
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(
+        scalar(&scenario.db, &scenario.room, REQUESTS).await,
+        1,
+        "decided once"
+    );
+    assert_eq!(scalar(&scenario.db, &scenario.room, SETTLED_JOINS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
 }
 
 /// An owner killed after its decision committed has already frozen the
@@ -584,8 +653,7 @@ async fn owner_killed_after_commit_hands_the_frozen_response_over_once() {
         .seams
         .wait_for("held after-commit -", Duration::from_secs(10))
         .await;
-    drop(scenario.witness.take());
-    drop(scenario.server_b.take());
+    scenario.stop_owner().await;
     scenario.seams.release(HOLD_AFTER_COMMIT);
 
     let frames = tokio::time::timeout(
@@ -603,16 +671,23 @@ async fn owner_killed_after_commit_hands_the_frozen_response_over_once() {
             .count(),
         1
     );
-    wait_for_scalar(&scenario.db, SETTLED_JOINS, 1, Duration::from_secs(10)).await;
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.room,
+        SETTLED_JOINS,
+        1,
+        Duration::from_secs(10),
+    )
+    .await;
 
-    scenario.replace_owner().await;
+    scenario.start_owner().await;
     let later = drain(&mut joiner, Duration::from_secs(5)).await;
     assert!(
         !later.iter().any(|frame| is_self_presence(frame, &own)),
         "the replacement owner does not answer a decided join again: {later:?}"
     );
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1);
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, REQUESTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
 }
 
 /// After the room's claim moves to a new owner incarnation, an occupant that
@@ -625,7 +700,7 @@ async fn owner_transfer_recovers_occupancy_and_refuses_unrecorded_senders() {
     let mut scenario = Scenario::start().await;
     let mut seated = scenario.origin_client("seated").await;
     join_fanout_room(&mut seated, &scenario.room, "seated").await;
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
     scenario.replace_owner().await;
 
     seated
@@ -686,9 +761,13 @@ async fn decision_for_an_ended_connection_is_not_handed_to_its_successor() {
         .await;
     drop(first);
     scenario.seams.release(HOLD_BEFORE_COMMIT);
+    // The ended connection's leave is a request of its own, so the first
+    // join is named by its kind.
     wait_for_scalar(
         &scenario.db,
-        "SELECT count(*) FROM ingress_room_requests WHERE owner_decision <> 0",
+        &scenario.room,
+        "SELECT count(*) FROM ingress_room_requests \
+         WHERE room_jid = ? AND request_kind = 1 AND owner_decision <> 0",
         1,
         Duration::from_secs(30),
     )
@@ -718,14 +797,16 @@ async fn decision_for_an_ended_connection_is_not_handed_to_its_successor() {
         1,
         "only the second connection's own response is delivered: {frames:?}"
     );
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 2);
+    assert_eq!(scalar(&scenario.db, &scenario.room, JOINS).await, 2);
     // The occupancy row belongs to the later connection's join.
     assert_eq!(
         scalar(
             &scenario.db,
-            "SELECT count(*) FROM ingress_room_occupants o JOIN ingress_room_requests r \
+            &scenario.room,
+            "WITH requests AS (SELECT * FROM ingress_room_requests WHERE room_jid = ?) \
+             SELECT count(*) FROM ingress_room_occupants o JOIN requests r \
              ON r.request_key = o.join_request \
-             WHERE r.created_at = (SELECT max(created_at) FROM ingress_room_requests)"
+             WHERE r.created_at = (SELECT max(created_at) FROM requests)"
         )
         .await,
         1
@@ -738,13 +819,17 @@ async fn decision_for_an_ended_connection_is_not_handed_to_its_successor() {
 #[tokio::test]
 async fn occupant_connected_to_the_owner_is_recovered_by_its_successor() {
     let mut scenario = Scenario::start().await;
-    assert_eq!(scalar(&scenario.db, WITNESS_OCCUPANTS).await, 1);
+    assert_eq!(
+        scalar(&scenario.db, &scenario.room, WITNESS_OCCUPANTS).await,
+        1
+    );
     assert_eq!(
         scalar(
             &scenario.db,
+            &scenario.room,
             "SELECT count(*) FROM ingress_room_occupants o JOIN xmpp_occupancy_authority a \
              ON a.full_jid = o.occupant_jid AND a.generation::text = o.occupancy_generation \
-             WHERE o.occupant_jid LIKE 'admin@%'"
+             WHERE o.room_jid = ? AND o.occupant_jid LIKE 'admin@%'"
         )
         .await,
         1,
@@ -781,14 +866,21 @@ async fn kicked_occupant_is_not_seated_by_a_successor() {
     let mut scenario = Scenario::start().await;
     let mut kicked = scenario.origin_client("kicked").await;
     join_fanout_room(&mut kicked, &scenario.room, "kicked").await;
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
 
     let witness = scenario.witness.as_mut().expect("witness");
     witness
         .send(&String::from(&kick_iq(&scenario.room, "kicked", "kick-1")))
         .await
         .expect("send kick");
-    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.room,
+        OCCUPANTS,
+        0,
+        Duration::from_secs(20),
+    )
+    .await;
     let _ = drain(&mut kicked, Duration::from_secs(2)).await;
     scenario.replace_owner().await;
 
@@ -807,7 +899,7 @@ async fn kicked_occupant_is_not_seated_by_a_successor() {
             .any(|frame| frame.attr("id") == Some("after-kick") && is_error(frame)),
         "a kicked occupant is not recovered: {refused:?}"
     );
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 0);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 0);
 }
 
 /// An owner that carries room requests through the mailbox refuses a join
@@ -828,8 +920,8 @@ async fn relayed_join_is_refused_by_an_owner_at_the_mailbox_epoch() {
             .any(|frame| is_self_presence(frame, &scenario.occupant("relayed"))),
         "a relayed join is not accepted at the mailbox epoch: {frames:?}"
     );
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 0);
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 0);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 0);
+    assert_eq!(scalar(&scenario.db, &scenario.room, REQUESTS).await, 0);
 }
 
 /// A presence update and a leave of a resource on the origin node reach the
@@ -865,13 +957,14 @@ async fn presence_update_and_leave_cross_nodes_as_room_requests() {
         .any(|frame| is_presence_from(frame, &own)));
     wait_for_scalar(
         &scenario.db,
+        &scenario.room,
         "SELECT count(*) FROM ingress_room_requests \
-         WHERE request_kind = 2 AND owner_decision = 1 AND settled_at IS NOT NULL",
+         WHERE room_jid = ? AND request_kind = 2 AND owner_decision = 1 AND settled_at IS NOT NULL",
         1,
         Duration::from_secs(20),
     )
     .await;
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
 
     occupant
         .send(&String::from(&occupant_presence(
@@ -897,11 +990,19 @@ async fn presence_update_and_leave_cross_nodes_as_room_requests() {
                 && frame.attr("from") == Some(own.to_string().as_str())),
         "the leaving resource receives its own unavailable presence: {left:?}"
     );
-    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
     wait_for_scalar(
         &scenario.db,
+        &scenario.room,
+        OCCUPANTS,
+        0,
+        Duration::from_secs(20),
+    )
+    .await;
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.room,
         "SELECT count(*) FROM ingress_room_requests \
-         WHERE request_kind = 3 AND owner_decision = 1 AND settled_at IS NOT NULL",
+         WHERE room_jid = ? AND request_kind = 3 AND owner_decision = 1 AND settled_at IS NOT NULL",
         1,
         Duration::from_secs(20),
     )
@@ -994,8 +1095,9 @@ async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
     );
     wait_for_scalar(
         &scenario.db,
+        &scenario.room,
         "SELECT count(*) FROM ingress_room_requests \
-         WHERE request_kind = 4 AND owner_decision = 1 AND settled_at IS NOT NULL",
+         WHERE room_jid = ? AND request_kind = 4 AND owner_decision = 1 AND settled_at IS NOT NULL",
         2,
         Duration::from_secs(20),
     )
@@ -1004,7 +1106,10 @@ async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
     assert_eq!(
         scalar(
             &scenario.db,
-            "SELECT count(DISTINCT lane_id) FROM ingress_mailbox_entries WHERE operation_kind = 5"
+            &scenario.room,
+            "SELECT count(DISTINCT e.lane_id) FROM ingress_mailbox_entries e \
+             JOIN ingress_room_requests r ON r.request_key = e.request_key \
+             WHERE r.room_jid = ? AND e.operation_kind = 5"
         )
         .await,
         1
@@ -1012,8 +1117,11 @@ async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
     assert_eq!(
         scalar(
             &scenario.db,
-            "SELECT count(*) FROM ingress_mailbox_entries m WHERE m.operation_kind = 5 \
-             AND m.lane_id IN (SELECT lane_id FROM ingress_mailbox_entries WHERE operation_kind = 2)"
+            &scenario.room,
+            "WITH entries AS (SELECT e.lane_id, e.operation_kind FROM ingress_mailbox_entries e \
+             JOIN ingress_room_requests r ON r.request_key = e.request_key WHERE r.room_jid = ?) \
+             SELECT count(*) FROM entries m WHERE m.operation_kind = 5 \
+             AND m.lane_id IN (SELECT lane_id FROM entries WHERE operation_kind = 2)"
         )
         .await,
         0
@@ -1023,26 +1131,32 @@ async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
 /// A row whose connection generation the occupancy authority no longer
 /// holds for the full JID is not seated by the owner's successor, and the
 /// successor removes it from the table when it seats the room.
+///
+/// The connection ends while no owner is running: with an owner, the leave
+/// its origin commits at connection end would remove the row first.
 #[tokio::test]
 async fn row_of_a_superseded_connection_is_not_seated_and_is_removed() {
     let mut scenario = Scenario::start().await;
     let mut first = scenario.origin_client("rebound").await;
     join_fanout_room(&mut first, &scenario.room, "rebound").await;
-    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 1);
+    scenario.stop_owner().await;
     // A later connection binds the same resource and does not join. The
     // row keeps the earlier connection's generation.
     drop(first);
     let mut second = scenario.origin_client("rebound").await;
     wait_for_scalar(
         &scenario.db,
+        &scenario.room,
         "SELECT count(*) FROM ingress_room_occupants o JOIN xmpp_occupancy_authority a \
          ON a.full_jid = o.occupant_jid \
-         WHERE o.occupant_jid NOT LIKE 'admin@%' AND a.generation <> o.occupancy_generation",
+         WHERE o.room_jid = ? AND o.occupant_jid NOT LIKE 'admin@%' \
+         AND a.generation <> o.occupancy_generation",
         1,
         Duration::from_secs(20),
     )
     .await;
-    scenario.replace_owner().await;
+    scenario.start_owner().await;
 
     second
         .send(&String::from(&fanout_message(
@@ -1059,5 +1173,12 @@ async fn row_of_a_superseded_connection_is_not_seated_and_is_removed() {
             .any(|frame| frame.attr("id") == Some("not-rejoined") && is_error(frame)),
         "the later connection is not an occupant: {refused:?}"
     );
-    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.room,
+        OCCUPANTS,
+        0,
+        Duration::from_secs(20),
+    )
+    .await;
 }

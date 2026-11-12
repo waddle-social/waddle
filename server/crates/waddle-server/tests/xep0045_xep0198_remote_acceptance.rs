@@ -32,13 +32,14 @@ use std::time::Duration;
 use cluster_support::{
     cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
     open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
-    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    wait_for_node_lease_lapse, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
+    CLUSTER_PEER_USERNAME,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
 use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::db::Database;
-use waddle_ws_test_support::{TestServer, WsXmppClient};
+use waddle_ws_test_support::{raw_ws, TestServer, WsXmppClient};
 use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType};
 use waddle_xmpp::stream_management::SM_NS;
 
@@ -182,8 +183,19 @@ impl SmClient {
         let deadline = tokio::time::Instant::now() + budget;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let frame = match self.socket.recv_timeout(remaining).await {
-                Ok(frame) => frame,
+            let frame = match self.socket.recv_raw_timeout(remaining).await {
+                Ok(Some(raw_ws::Message::Text(frame))) => frame.to_string(),
+                // The server's RFC 7395 keepalive pings an idle socket. The
+                // socket answers it; it is not a frame of the stream.
+                Ok(Some(raw_ws::Message::Ping(_) | raw_ws::Message::Pong(_))) => continue,
+                Ok(Some(other)) => {
+                    self.failure = Some(format!("unexpected message type: {other:?}"));
+                    return None;
+                }
+                Ok(None) => {
+                    self.failure = Some("WebSocket stream ended".to_owned());
+                    return None;
+                }
                 Err(error) if error.starts_with("Timeout waiting") => return None,
                 Err(error) => {
                     self.failure = Some(error);
@@ -233,7 +245,10 @@ impl SmClient {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let Some(frame) = self.next(remaining).await else {
-                panic!("no {what} within {budget:?}; received {frames:?}");
+                panic!(
+                    "no {what} within {budget:?} (socket failure: {:?}); received {frames:?}",
+                    self.failure
+                );
             };
             let done = wanted(&frame);
             frames.push(frame);
@@ -349,6 +364,9 @@ struct Scenario {
     port_b: u16,
     server_a: Option<TestServer>,
     server_b: Option<TestServer>,
+    /// Node ids of the two nodes the scenario started with.
+    node_a: String,
+    node_b: String,
     seams: OwnerSeams,
     room: jid::BareJid,
     sender: SmClient,
@@ -374,7 +392,7 @@ impl Scenario {
         let seams = OwnerSeams::new();
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
-        let (server_a, _node_a, _) = spawn_cluster_server_with_envs(
+        let (server_a, node_a, _) = spawn_cluster_server_with_envs(
             &postgres_url,
             &pool.pool_env,
             port_a,
@@ -449,6 +467,8 @@ impl Scenario {
             port_b,
             server_a: Some(server_a),
             server_b: Some(server_b),
+            node_a,
+            node_b,
             seams,
             room,
             sender,
@@ -746,6 +766,7 @@ async fn owner_sigkill_after_commit_delivers_the_frozen_reflection_once() {
     assert_eq!(archived.len(), 1, "the owner accepted once: {archived:?}");
     // Dropping the handle SIGKILLs the owner before any copy is delivered.
     drop(scenario.server_b.take());
+    wait_for_node_lease_lapse(&scenario.db, &scenario.node_b).await;
     scenario.seams.release(HOLD_AFTER_COMMIT);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -866,6 +887,7 @@ async fn origin_sigkill_after_owner_commit() {
 
     // Dropping the handle SIGKILLs the process.
     drop(scenario.server_a.take());
+    wait_for_node_lease_lapse(&scenario.db, &scenario.node_a).await;
     scenario.seams.release(HOLD_AFTER_COMMIT);
     scenario
         .seams
@@ -975,6 +997,9 @@ struct OwnerKilledBeforeCommit {
     h: Option<u32>,
     /// Whether the sender was sent an error for the stanza.
     refused: bool,
+    /// Room stanza ids of each reflection of the stanza the sender received.
+    reflections: Vec<Vec<String>>,
+    /// Read after `h`, so a decision `h` covers is visible here.
     archived: Vec<String>,
 }
 
@@ -991,6 +1016,7 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
         .await;
     // Dropping the handle SIGKILLs the process.
     drop(scenario.server_b.take());
+    wait_for_node_lease_lapse(&scenario.db, &scenario.node_b).await;
     scenario.seams.release(HOLD_BEFORE_COMMIT);
 
     let port_b = free_tcp_port();
@@ -1017,10 +1043,6 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
         scenario.sender.failure, None,
         "the sender's stream on the origin stays up"
     );
-    assert!(
-        !frames.iter().any(|frame| is_groupchat(frame, "owner-kill")),
-        "no reflection without an archived acceptance: {frames:?}"
-    );
     assert_eq!(
         scenario.seams.events(),
         ["held before-commit owner-kill"],
@@ -1029,27 +1051,54 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
     OwnerKilledBeforeCommit {
         h,
         refused: frames.iter().any(|frame| is_error(frame, "owner-kill")),
+        reflections: frames
+            .iter()
+            .filter(|frame| is_groupchat(frame, "owner-kill"))
+            .map(|frame| room_stanza_ids(frame, &scenario.room))
+            .collect(),
         archived: archived_ids(&scenario.db, &scenario.room, &body).await,
     }
 }
 
 /// The owner process is killed before it commits a groupchat message and is
-/// replaced. Nothing was accepted, so nothing is archived, and the sender's
-/// handled count may cover the stanza only if the sender was also sent the
-/// error that refuses it; otherwise the stanza is still pending.
+/// replaced. The killed owner decided nothing. The entry stays pending in
+/// the mailbox, and the node that takes the room's claim decides it once
+/// from canonical rows, if it does so within the observation: the message
+/// is archived at most once, a reflection exists only as the copy of that
+/// one archived acceptance, an acceptance and a refusal exclude each other,
+/// and the sender's handled count covers the stanza only together with a
+/// decision. Without one the stanza is still pending and uncounted.
 #[tokio::test]
 async fn owner_sigkill_before_commit() {
     let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
     let observed = observe_owner_killed_before_commit(&mut scenario).await;
-    assert_eq!(
-        observed.archived,
-        Vec::<String>::new(),
-        "an owner killed before its commit accepted nothing"
+    assert!(
+        observed.archived.len() <= 1,
+        "the stanza is accepted at most once: {:?}",
+        observed.archived
     );
-    assert_eq!(
+    assert!(
+        observed.reflections.len() <= 1
+            && observed
+                .reflections
+                .iter()
+                .all(|ids| *ids == observed.archived),
+        "a reflection is the copy of the one archived acceptance: {:?} against {:?}",
+        observed.reflections,
+        observed.archived
+    );
+    assert!(
+        !(observed.refused && !observed.archived.is_empty()),
+        "the successor either accepts or refuses the stanza"
+    );
+    let decided = observed.refused || !observed.archived.is_empty();
+    assert!(
+        observed.h == Some(0) || (observed.h == Some(1) && decided),
+        "h covers the stanza only together with its owner's decision: h {:?}, refused {}, \
+         archived {:?}",
         observed.h,
-        Some(u32::from(observed.refused)),
-        "h covers the stanza only together with its refusal"
+        observed.refused,
+        observed.archived
     );
 }
 
@@ -1110,11 +1159,19 @@ async fn membership_change_between_acceptance_and_ack() {
     );
 
     let server_a = scenario.server_a.as_ref().expect("origin node");
+    // Every node seeds the shared `admin` account with its own generated
+    // password when it starts, so the stored credential is the one of the
+    // node that started last: the owner.
+    let admin_password = scenario
+        .server_b
+        .as_ref()
+        .expect("owner node")
+        .fixed_account_password();
     let mut latecomer = WsXmppClient::connect_and_auth(
         &server_a.ws_url(),
         DOMAIN,
         "admin",
-        server_a.fixed_account_password(),
+        admin_password,
         &format!("latecomer-{}", uuid::Uuid::new_v4()),
     )
     .await
@@ -1148,8 +1205,9 @@ async fn membership_change_between_acceptance_and_ack() {
     );
 }
 
-/// The newest mailbox entry: its disposition as stored and the node
-/// incarnation its lane records as target.
+/// The newest room-acceptance entry: its disposition as stored and the node
+/// incarnation its lane records as target. Joins, presence and leaves append
+/// entries of other kinds on lanes of their own.
 async fn newest_mailbox_entry(db: &Database) -> Option<(i64, String, String)> {
     let conn = db.guard().await.expect("mailbox guard");
     let mut rows = conn
@@ -1157,6 +1215,7 @@ async fn newest_mailbox_entry(db: &Database) -> Option<(i64, String, String)> {
             "SELECT e.disposition::bigint, l.target_node_id, l.target_node_epoch \
              FROM ingress_mailbox_entries e \
              JOIN ingress_mailbox_lanes l ON l.lane_id = e.lane_id \
+             WHERE e.operation_kind = 1 \
              ORDER BY e.appended_at DESC LIMIT 1",
             (),
         )
@@ -1215,6 +1274,7 @@ async fn owner_transfer_before_commit_is_decided_once_by_the_successor() {
     // Dropping the handle SIGKILLs the owner. Its replacement is a new
     // incarnation; rejoining the room there makes it take the room's claim.
     drop(scenario.server_b.take());
+    wait_for_node_lease_lapse(&scenario.db, &scenario.node_b).await;
     scenario.seams.release(HOLD_BEFORE_COMMIT);
     let port_b = free_tcp_port();
     let (server_b, _, _) = spawn_cluster_server_with_envs(

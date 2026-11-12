@@ -224,6 +224,60 @@ async fn owner_rejection_records_its_child_and_decides_the_entry() {
     fixture.close().await;
 }
 
+/// A room refuses a stanza of a sender it has not seated by planning only
+/// the XEP-0045 §7.4 error reply, with no rejection class. The owner's
+/// commit records that plan as its refusal: the entry and the message are
+/// decided as rejected and the error is stored as the rejection child the
+/// origin answers its sender from. A replay keeps the decision.
+#[tokio::test]
+async fn owner_plan_with_only_an_error_reply_is_the_owners_refusal() {
+    let Some((fixture, room_fence)) = mailbox_fixture("mailbox_room_refusal").await else {
+        return;
+    };
+    let origin = origin_groupchat(&fixture, "mailbox-room-refusal", "not an occupant");
+    let key = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit")
+        .message_key
+        .expect("canonical message");
+
+    let mut owner = owner_groupchat(&origin, key, &room_fence);
+    let error = waddle_xmpp::ingress::FrozenStanzaError::new(
+        waddle_xmpp::ingress::FrozenStanzaErrorType::Cancel,
+        waddle_xmpp::StanzaErrorCondition::NotAcceptable,
+    );
+    let mut reply = owner.plan.sanitized_message.clone();
+    reply.to = Some(owner.sender.clone().into());
+    reply.from = Some(room().into());
+    reply.type_ = xmpp_parsers::message::MessageType::Error;
+    reply.payloads.push(error.to_xmpp().into());
+    owner.plan.error_reply = Some(waddle_xmpp::Stanza::Message(reply));
+    owner.plan.intents = vec![IngressEffectIntent::ErrorReply {
+        recipient: owner.sender.clone(),
+        error,
+    }];
+    assert!(owner.plan.rejection.is_none());
+    commit_submission(&fixture.uow, &owner, 5)
+        .await
+        .expect("owner refusal commits");
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::OwnerRejected), Some(2)),
+        "the room's refusal is the owner's decision"
+    );
+    assert_eq!(fixture.count("ingress_owner_rejections").await, 1);
+
+    commit_submission(&fixture.uow, &owner, 5)
+        .await
+        .expect("owner replay");
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::OwnerRejected), Some(2))
+    );
+    assert_eq!(fixture.count("ingress_owner_rejections").await, 1);
+    fixture.close().await;
+}
+
 /// The cutover boundary is the protocol epoch each commit locks. Below the
 /// mailbox epoch a clustered commit dispatches through the relay and writes
 /// no lane, whatever the selector. After the activation the relay selector
