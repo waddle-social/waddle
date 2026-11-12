@@ -844,13 +844,9 @@ async fn relay_muji_to_room_owner(
         return unrelayable(false, &deny);
     }
 
-    let bridge = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref();
-    let (Some(bridge), Some(origin)) = (bridge, conn_state.ordered_relay_origin.as_ref()) else {
+    let addressing = state.deps.app_state.clustering_claims.addressing();
+    let (Some(addressing), Some(origin)) = (addressing, conn_state.ordered_relay_origin.as_ref())
+    else {
         // No relay substrate (clustering disabled at runtime): local
         // absence is definitive, exactly the pre-#1445 semantics.
         refund_terminate_charge();
@@ -871,15 +867,15 @@ async fn relay_muji_to_room_owner(
         | xmpp_parsers::iq::Iq::Error { from, .. } => *from = stamped_from,
     }
     let stanza = waddle_xmpp::Stanza::Iq(Box::new(relayed));
-    match bridge
-        .try_proxy_muc_remote_decision(
-            room_jid,
-            &stanza,
-            OrderedRelayMucProxyKind::MujiJingleIq,
-            MucProxyOrigin::Connection(*conn_state.occupancy_session),
+    match addressing
+        .room(room_jid)
+        .command(crate::clustering::addressing::RoomCommand {
+            stanza: &stanza,
+            kind: OrderedRelayMucProxyKind::MujiJingleIq,
+            sender: MucProxyOrigin::Connection(*conn_state.occupancy_session),
             origin,
-            None,
-        )
+            admission: None,
+        })
         .await
     {
         MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {

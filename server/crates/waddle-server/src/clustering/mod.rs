@@ -24,6 +24,11 @@ pub(crate) mod acceptance_seams;
 /// Peer-allowlist store. Public: the multi-process cluster harness
 /// provisions the control-plane schema through the same `ensure_schema`
 /// path production uses, never a diverging inline DDL copy.
+/// Typed addressing boundary for rooms, accounts and connections: handlers
+/// state a target and an operation, and the local-or-remote route is chosen
+/// behind it. `pub(crate)`: every caller is a handler in this crate.
+#[cfg(feature = "clustering")]
+pub(crate) mod addressing;
 #[cfg(feature = "clustering")]
 pub mod allowlist;
 #[cfg(feature = "clustering")]

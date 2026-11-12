@@ -72,25 +72,19 @@ impl RoomMessageRoute<'_> {
         let Some(origin) = deps.ordered_relay_origin.as_ref() else {
             return ImmediateRoomRoute::Local;
         };
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return ImmediateRoomRoute::Local;
         };
         ImmediateRoomRoute::Decision(
-            bridge
-                .try_proxy_muc_remote_decision(
-                    self.room,
-                    &Stanza::Message(self.message.clone()),
-                    OrderedRelayMucProxyKind::GroupchatMessage,
-                    MucProxyOrigin::Server,
+            addressing
+                .room(self.room)
+                .command(crate::clustering::addressing::RoomCommand {
+                    stanza: &Stanza::Message(self.message.clone()),
+                    kind: OrderedRelayMucProxyKind::GroupchatMessage,
+                    sender: MucProxyOrigin::Server,
                     origin,
-                    None,
-                )
+                    admission: None,
+                })
                 .await,
         )
     }
