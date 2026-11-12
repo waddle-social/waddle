@@ -1617,7 +1617,9 @@ fn validate_peer_order(peer_ids: &[PeerId]) -> Result<(), ()> {
     Ok(())
 }
 
-fn configured_peer_order(entries: &[String]) -> Result<Vec<PeerId>, LeaseAttachError> {
+/// The PeerIds of a configured keypair pool, in pool order: the order the
+/// runtime attachment compares with the enrollment.
+pub(crate) fn configured_peer_order(entries: &[String]) -> Result<Vec<PeerId>, LeaseAttachError> {
     if entries.is_empty() {
         return Err(LeaseAttachError::InvalidConfiguredKeypairPool);
     }

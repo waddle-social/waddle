@@ -35,6 +35,9 @@ pub mod notification_activity;
 pub mod notification_outbox;
 pub mod notification_settings_projection;
 pub mod occupancy_authority;
+/// Operator subcommands of the server binary that prepare a PostgreSQL
+/// database for the restricted runtime role.
+pub mod owner_cli;
 pub mod pending_delivery;
 pub mod pep_feed_bridge;
 pub mod permissions;

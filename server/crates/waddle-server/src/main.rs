@@ -12,6 +12,13 @@ use waddle_server::{db, server, telemetry};
 /// merge). 8 MiB matches the platform main-thread default and keeps
 /// headroom; the real long-term fix is boxing the fattest handler futures.
 fn main() -> Result<()> {
+    // Any argument selects an operator subcommand, which runs to completion
+    // on its own runtime and exits. It is dispatched before listener
+    // adoption: a subcommand owns no sockets and reads no serving
+    // configuration. Without arguments the server starts.
+    if std::env::args_os().len() > 1 {
+        std::process::exit(waddle_server::owner_cli::run_from_args());
+    }
     // SAFETY: This is the first startup operation, before runtime/telemetry
     // threads or other descriptor owners exist. The launcher exclusively
     // transfers the LISTEN_FDS descriptors at exec; this call adopts them once.

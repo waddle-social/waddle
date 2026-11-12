@@ -17,6 +17,8 @@
 #[cfg(feature = "clustering")]
 #[path = "restricted_runtime_startup/clustered.rs"]
 mod clustered;
+#[path = "restricted_runtime_startup/owner_entrypoint.rs"]
+mod owner_entrypoint;
 #[path = "restricted_runtime_support/mod.rs"]
 mod support;
 
