@@ -113,6 +113,111 @@ classes = {
 }
 
 
+# Class and read/write of every production method. A method that reads and
+# writes is listed as a write. The scan fails when a method is missing here
+# or listed here and gone from the source, so a new method cannot enter the
+# inventory unclassified.
+method_classes = {
+    "Registry": {
+        "new": ("I", "W"), "set_sm_stream_id": ("I", "W"),
+        "set_occupancy_session_if_owner": ("I", "W"), "occupancy_session_of": ("I", "R"),
+        "set_sm_stream_id_if_owner": ("I", "W"), "sm_stream_owner": ("I", "R"),
+        "pending_subscription_count": ("I", "R"), "presence_state_count": ("I", "R"),
+        "last_activity_count": ("I", "R"), "local_sm_stream": ("I", "R"),
+        "try_lock_bind": ("T", "W"), "probe_socket_lifecycle": ("T", "R"),
+        "lock_bind": ("T", "W"), "prune_completed_bind": ("T", "W"),
+        "queue_pending_subscription_stanza": ("A", "W"),
+        "remove_pending_subscribe": ("A", "W"),
+        "drain_pending_subscription_stanzas": ("A", "W"),
+        "pending_subscription_stanzas": ("A", "R"), "register": ("I", "W"),
+        "register_with_carbons": ("I", "W"), "register_with_stream_state": ("I", "W"),
+        "register_entry": ("I", "W"), "register_entry_if_owner_or_absent": ("I", "W"),
+        "unregister": ("I", "W"), "is_owned_by": ("I", "R"),
+        "unregister_if_owner": ("I", "W"), "unregister_if_sm_stream_id": ("I", "W"),
+        "entry_if_owner": ("I", "R"), "is_connected": ("I", "R"),
+        "is_locally_hosted": ("I", "R"), "entry": ("I", "R"),
+        "connection_count": ("I", "R"), "mark_roster_interested": ("A", "W"),
+        "is_roster_interested": ("A", "R"),
+        "roster_interested_resources_for_user": ("A", "R"),
+        "mark_blocklist_interested": ("A", "W"), "is_blocklist_interested": ("A", "R"),
+        "blocklist_interested_resources_for_user": ("A", "R"),
+        "send_to_many": ("T", "W"), "list_connections": ("I", "R"),
+        "active_sm_stream_ids": ("I", "R"), "other_resources_for_user": ("A", "R"),
+        "other_carbon_resources_for_user": ("A", "R"), "is_carbons_enabled": ("A", "R"),
+        "set_carbons_enabled": ("A", "W"), "update_presence": ("A", "W"),
+        "update_presence_if_owner": ("A", "W"),
+        "update_presence_state_if_owner": ("A", "W"),
+        "update_presence_state": ("A", "W"), "presence_state": ("A", "R"),
+        "clear_presence_state": ("A", "W"), "clear_presence_state_if_owner": ("A", "W"),
+        "record_last_activity": ("A", "W"), "last_activity": ("A", "R"),
+        "clear_last_activity": ("A", "W"), "server_uptime_seconds": ("T", "R"),
+        "available_resources_for_user": ("A", "R"), "cleanup_stale": ("I", "W"),
+        "reserve_pending_flush": ("T", "W"), "try_reserve_pending_flush": ("T", "W"),
+        "send_reserved_pending_flush": ("T", "W"),
+        "send_to_with_write_acceptance": ("T", "W"), "send_to": ("T", "W"),
+        "send_to_if_owner": ("T", "W"), "send_pending_flush": ("T", "W"),
+        "send_pending_flush_if_owner": ("T", "W"), "try_send_to": ("T", "W"),
+        "try_send_outbound_to_locally_hosted": ("T", "W"),
+        "try_send_outbound_if_owner": ("T", "W"),
+        "capture_owned_enqueue_if_owner": ("T", "W"),
+        "remove_if_sender_closed": ("I", "W"), "remove_if_sender_closed_owner": ("I", "W"),
+        "activate_provisional_if_confirmed": ("A/T", "W"),
+        "local_binding_permit_if_owner": ("T", "R"),
+        "local_sm_enable_binding_permit_if_owner": ("T", "R"),
+        "mark_blocklist_interested_if_owner": ("A", "W"),
+        "mark_roster_interested_if_owner": ("A", "W"),
+        "publish_provisional_if_expected": ("I/T", "W"),
+        "register_socket_entry": ("I", "W"), "remove_closed_owner_entry": ("I", "W"),
+        "remove_retired_presence": ("A", "W"), "remove_sm_stream_owner": ("I", "W"),
+        "retire_provisional_if_exact": ("I/T", "W"),
+        "set_carbons_enabled_if_owner": ("A", "W"), "try_send_to_matching": ("T", "W"),
+    },
+    "Entry": {
+        "activate_binding": ("T", "W"), "actor_custody": ("T", "R"),
+        "binding_id": ("A", "R"), "binding_ref": ("A", "R"),
+        "claim_offline_flush": ("A", "W"), "claim_pending_subscribes_flush": ("A", "W"),
+        "commit_pending_flush": ("T", "W"), "connection_ref": ("A", "R"),
+        "force_detach_sender": ("T", "R"),
+        "into_socket_outbound_endpoint_if_empty": ("T", "W"),
+        "into_socket_outbound_endpoint_if_receiver_empty": ("T", "W"),
+        "is_carbons_enabled": ("A", "R"), "is_locally_hosted": ("I", "R"),
+        "is_presence_available": ("A", "R"), "is_provisional": ("T", "R"),
+        "local_io_relinquishment": ("T", "R"), "new": ("T", "W"),
+        "new_actor_provisional_for_binding": ("T", "W"), "new_entry": ("T", "W"),
+        "new_for_binding": ("T", "W"), "new_for_binding_with_local_io": ("T", "W"),
+        "new_for_connection": ("T", "W"), "new_provisional_for_binding": ("T", "W"),
+        "occupancy_session": ("I", "R"), "presence_priority": ("A", "R"),
+        "remote_hosted": ("O", "W"), "remote_hosted_for_connection": ("O", "W"),
+        "reset_offline_flush": ("A", "W"), "resume_control": ("T", "R"),
+        "same_exact_local_binding": ("I", "R"), "seal_actor_binding_if_any": ("T", "W"),
+        "seal_binding": ("T", "W"), "seal_binding_for_failed_resume": ("T", "W"),
+        "set_sm_stream_id": ("I", "W"), "sm_stream_id": ("I", "R"),
+        "take_force_detach_rx": ("T", "W"),
+        "try_acquire_terminal_ordering_retry": ("T", "W"),
+        "try_force_detach_and_interrupt": ("T", "W"),
+        "try_force_detach_and_interrupt_after_offer": ("T", "W"),
+        "try_force_detach_and_revoke": ("T", "W"),
+        "try_force_detach_and_revoke_after_reserve": ("T", "W"),
+        "try_force_detach_for_jid": ("T", "W"), "try_force_detach_raw": ("T", "W"),
+        "try_send_archive_ordered": ("T", "W"),
+        "try_send_archive_ordered_with_refusal": ("T", "W"),
+        "wire_resume_control": ("T", "W"),
+    },
+}
+
+# What follows a field access when the line changes the field. Textual: a
+# `&mut` borrow taken on another line, or a write through a destructured
+# binding, is not seen.
+write_like = re.compile(
+    r"\s*(?:=(?!=)|[-+|&]=|\.\s*(?:store|insert|remove|push|push_back|take|set|clear|swap|"
+    r"replace|extend|retain|drain|pop_front|pop_back|pop|fetch_add|fetch_sub|fetch_or|"
+    r"fetch_and|get_or_insert_with|get_or_insert|entry|send|try_send|lock|write)\s*\()"
+)
+
+GENERATED_START = "<!-- generated by 2046-current-caller-scan.py: start -->"
+GENERATED_END = "<!-- generated by 2046-current-caller-scan.py: end -->"
+
+
 def line_at(code, pos):
     return code.count("\n", 0, pos) + 1
 
@@ -165,7 +270,134 @@ def methods(ty):
                     and name != "observe_next_pending_bind"
                 ):
                     result[name] = (str(path), line)
+    category = "Registry" if ty == "ConnectionRegistry" else "Entry"
+    known = method_classes[category]
+    unclassified = set(result) - set(known)
+    missing = set(known) - set(result)
+    if unclassified or missing:
+        raise ValueError(
+            f"{ty} methods: unclassified={sorted(unclassified)}, missing={sorted(missing)}"
+        )
     return result
+
+
+def short(path):
+    for prefix, name in (
+        ("server/crates/waddle-server/src/server/routes/websocket/", "ws/"),
+        ("server/crates/waddle-server/src/server/routes/interpret/", "interpret/"),
+        ("server/crates/waddle-server/src/clustering/", "clustering/"),
+        ("server/crates/waddle-server/src/server/", "server/"),
+        ("server/crates/waddle-server/src/", "srv/"),
+        ("server/crates/waddle-xmpp/src/", "xmpp/"),
+    ):
+        if path.startswith(prefix):
+            return name + path[len(prefix) :]
+    return path
+
+
+def sites(group):
+    """Every site, grouped by file: `ws/frame.rs:10,12`."""
+    return (
+        "; ".join(
+            f"`{short(path)}:{','.join(str(line) for line in sorted(lines))}`"
+            for path, lines in sorted(group.items())
+        )
+        or "none"
+    )
+
+
+def total(group):
+    return sum(len(lines) for lines in group.values())
+
+
+def write_inventory(path, commit, members, funcs, results, writes, named):
+    """Replace the generated block of the caller inventory with current tables."""
+    target = pathlib.Path(path)
+    text = target.read_text()
+    start = text.index(GENERATED_START)
+    end = text.index(GENERATED_END)
+    registry_module = xm + "connection_registry"
+    out = [
+        GENERATED_START,
+        "",
+        f"Generated at `{commit}` by `docs/planning/2046-current-caller-scan.py --inventory`.",
+        "Sites are source lines that match textually outside test code, written",
+        "`file:line,line`. \"Write-like\" counts the sites where the field is assigned,",
+        "borrowed mutably on the same expression, or has a mutating method called on it.",
+        "",
+    ]
+    titles = {
+        "Registry": ("1", "ConnectionRegistry"),
+        "Entry": ("2", "ConnectionEntry"),
+        "Socket": ("3", "WsConnState"),
+    }
+    for category in ("Registry", "Entry", "Socket"):
+        number, ty = titles[category]
+        declared = structfiles[category][0]
+        out += [
+            f"## {number}. `{ty}` (`{short(str(declared))}`)",
+            "",
+            f"### {number}.1 Fields",
+            "",
+            "| Field | Class | Declared | Sites | Write-like | Files | Every site |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for name, (decl_path, line) in members[category].items():
+            group = results[(category + " field", name)]
+            out.append(
+                f"| `{name}` | {classes[category][name]} | `{short(decl_path)}:{line}` | "
+                f"{total(group)} | {total(writes[(category + ' field', name)])} | "
+                f"{len(group)} | {sites(group)} |"
+            )
+        out.append("")
+        if category not in funcs:
+            continue
+        out += [
+            f"### {number}.2 Methods",
+            "",
+            "\"Outside\" counts call sites outside `xmpp/registry/connection_registry*`;",
+            "\"inside\" counts those within it. A receiver of another type with the same",
+            "method name is counted.",
+            "",
+            "| Method | Class | R/W | Declared | Outside | Inside | Every site outside |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for name, (decl_path, line) in sorted(funcs[category].items()):
+            group = results[(category + " method", name)]
+            outside = {
+                p: lines for p, lines in group.items() if not p.startswith(registry_module)
+            }
+            inside = total(group) - total(outside)
+            klass, access = method_classes[category][name]
+            out.append(
+                f"| `{name}` | {klass} | {access} | `{short(decl_path)}:{line}` | "
+                f"{total(outside)} | {inside} | {sites(outside)} |"
+            )
+        out.append("")
+    family_classes = {
+        "Dual registration": ("4", "O"),
+        "User and resource mirrors": ("5", "A/I/O"),
+        "Remote resource relay": ("6", "T/O"),
+        "Room dispatch": ("7", "A/T"),
+    }
+    out += [
+        "## Current sites of sections 4 to 7",
+        "",
+        "Every production line that names one of the identifiers each section is",
+        "about, definitions included. The analysis in sections 4 to 7 below was",
+        "written against an earlier commit; its line numbers are not current, these",
+        "are.",
+        "",
+        "| Section | Family | Class | Sites | Files | Every site |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for family, (number, klass) in family_classes.items():
+        group = results[("named", family)]
+        out.append(
+            f"| {number} | {family} | {klass} | {total(group)} | {len(group)} | {sites(group)} |"
+        )
+    out.append("")
+    target.write_text(text[:start] + "\n".join(out) + text[end:])
 
 
 def main():
@@ -175,6 +407,10 @@ def main():
     )
     parser.add_argument(
         "--output", default="docs/planning/2046-current-caller-candidates.md"
+    )
+    parser.add_argument(
+        "--inventory",
+        help="rewrite the generated sections of this caller inventory in place",
     )
     args = parser.parse_args()
 
@@ -205,9 +441,10 @@ def main():
         for k, v in members.items()
     }
     results = collections.defaultdict(lambda: collections.defaultdict(set))
+    writes = collections.defaultdict(lambda: collections.defaultdict(set))
     named = {
         "Dual registration": re.compile(
-            r"\b(?:mirror_register_outcome|mirror_unregister)\s*\("
+            r"\b(?:mirror_register|mirror_register_outcome|mirror_unregister)\s*\("
         ),
         "User and resource mirrors": re.compile(
             r"\b(?:UserRegistryActor|UserActor|RegisterUserResource(?:IfOwnerOrAbsent)?|"
@@ -264,6 +501,11 @@ def main():
                 line = line_at(code, match.start(1))
                 if classify(pathstr, line) == "prod":
                     results[(k + " field", name)][pathstr].add(line)
+                    borrowed = code[max(0, match.start() - 160) : match.start()]
+                    if write_like.match(code, match.end()) or re.search(
+                        r"&mut\s+[\w.]*$", borrowed
+                    ):
+                        writes[(k + " field", name)][pathstr].add(line)
 
     output_directory = pathlib.Path(args.output).absolute().parent
 
@@ -289,9 +531,14 @@ def main():
             links.append(f"{len(pairs)-len(shown)} more (use `--all`)")
         return ", ".join(links) or "—"
 
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "--short=9", "HEAD"], text=True
+    ).strip()
+    if args.inventory:
+        write_inventory(args.inventory, commit, members, funcs, results, writes, named)
     snapshot = relative_link("docs/planning/2046-current-inventory-wiring.md")
     out = [
-        "# Textual candidate index for #2046 at `b2597ee`",
+        f"# Textual candidate index for #2046 at `{commit}`",
         "",
         "This is a deliberately overinclusive navigation index, not a type-resolved production call graph. Names can collide across types, conditionally compiled items can be included, and aliases, macros, destructured field borrows and trait dispatch can be missed. Counts count matching source lines, not semantic operations. Up to eight candidates are shown per row by default; use `--all` for all matching locations. "
         f"See [the snapshot]({snapshot}) for method, classes and limits.",

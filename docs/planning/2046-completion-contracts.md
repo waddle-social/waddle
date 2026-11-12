@@ -234,11 +234,10 @@ proposed owner is stated.
 | `UserRegistryActor` | `users[].resources`, `pending_unregisters` | Deleted |
 | `dual_registration` | `mirror_register_outcome`, `mirror_unregister` | Deleted |
 
-[`2046-caller-inventory.md`](2046-caller-inventory.md) sections 2 and 3 have
-drifted from source: `sender` is now `endpoint`, the ownership token is
-`LocalConnectionBindingId`, six `WsConnState` fields are missing, and the line
-numbers are stale. This table is the reference for field ownership; the
-inventory remains the reference for call sites.
+[`2046-caller-inventory.md`](2046-caller-inventory.md) sections 1 to 3 are
+generated from the source and give every field, method and call site with
+its class at the commit they name. This table is the reference for field
+ownership after M3; the inventory is the reference for call sites.
 
 ## M1 gaps: serve under the runtime role
 
