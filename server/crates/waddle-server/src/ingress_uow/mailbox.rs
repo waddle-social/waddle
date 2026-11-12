@@ -18,12 +18,13 @@
 use thiserror::Error;
 use uuid::Uuid;
 use waddle_xmpp::ingress::mailbox::{
-    MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxConsumptionCursor, MailboxCursorError,
-    MailboxDispositionChange, MailboxDispositionError, MailboxEntryDisposition, MailboxEntryEvent,
-    MailboxLaneCodecError, MailboxLaneDigest, MailboxLaneDigestCollision, MailboxLaneEncoding,
-    MailboxLaneFence, MailboxLaneIdentity, MailboxLaneKey, MailboxLaneSequence,
-    MailboxLaneSequenceError, MailboxOperationKey, MailboxOperationParent, MailboxOwnerDecision,
-    MailboxPendingLoad, RoomRequestKey, RoomRequestKind, StaleMailboxLaneFence,
+    DirectRequestKey, MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxConsumptionCursor,
+    MailboxCursorError, MailboxDispositionChange, MailboxDispositionError, MailboxEntryDisposition,
+    MailboxEntryEvent, MailboxLaneCodecError, MailboxLaneDigest, MailboxLaneDigestCollision,
+    MailboxLaneEncoding, MailboxLaneFence, MailboxLaneIdentity, MailboxLaneKey,
+    MailboxLaneSequence, MailboxLaneSequenceError, MailboxOperationKey, MailboxOperationParent,
+    MailboxOwnerDecision, MailboxPendingLoad, RoomRequestKey, RoomRequestKind,
+    StaleMailboxLaneFence,
 };
 use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
@@ -237,13 +238,14 @@ const LANE_COLUMNS: &str = "lane_id::text, digest_version::int, digest, encoding
     target_node_id, target_node_epoch";
 const ENTRY_COLUMNS: &str = "lane_id::text, sequence::text, operation_kind::int, \
     message_key::text, disposition::int, attempt_count, dead_letter_reason::int, \
-    request_key::text";
+    request_key::text, direct_key::text";
 
 const OPERATION_ROOM_ACCEPTANCE: i32 = 1;
 const OPERATION_ROOM_JOIN: i32 = 2;
 const OPERATION_ROOM_PRESENCE: i32 = 3;
 const OPERATION_ROOM_LEAVE: i32 = 4;
 const OPERATION_ROOM_IQ: i32 = 5;
+const OPERATION_DIRECT: i32 = 6;
 
 fn operation_kind(operation: &MailboxOperationKey) -> i32 {
     match operation {
@@ -252,6 +254,7 @@ fn operation_kind(operation: &MailboxOperationKey) -> i32 {
         MailboxOperationKey::RoomPresence(_) => OPERATION_ROOM_PRESENCE,
         MailboxOperationKey::RoomLeave(_) => OPERATION_ROOM_LEAVE,
         MailboxOperationKey::RoomIq(_) => OPERATION_ROOM_IQ,
+        MailboxOperationKey::Direct(_) => OPERATION_DIRECT,
     }
 }
 
@@ -261,6 +264,7 @@ fn parent_column(operation: &MailboxOperationKey) -> (&'static str, String) {
     match operation.parent() {
         MailboxOperationParent::Message(key) => ("message_key", key.to_storage().to_string()),
         MailboxOperationParent::Request(key) => ("request_key", key.to_storage().to_string()),
+        MailboxOperationParent::Direct(key) => ("direct_key", key.to_storage().to_string()),
     }
 }
 
@@ -320,29 +324,33 @@ fn decode_entry(row: &crate::db::Row) -> Result<StoredMailboxEntry, IngressUowEr
     let attempts: i32 = row.get(5)?;
     let dead_letter: Option<i32> = row.get(6)?;
     let request_key: Option<String> = row.get(7)?;
+    let direct_key: Option<String> = row.get(8)?;
     let parse = |value: String| {
         value
             .parse::<Uuid>()
             .map_err(|_| MailboxError::InvalidStored)
     };
     let request_kind = match kind {
-        OPERATION_ROOM_ACCEPTANCE => None,
+        OPERATION_ROOM_ACCEPTANCE | OPERATION_DIRECT => None,
         OPERATION_ROOM_JOIN => Some(RoomRequestKind::Join),
         OPERATION_ROOM_PRESENCE => Some(RoomRequestKind::Presence),
         OPERATION_ROOM_LEAVE => Some(RoomRequestKind::Leave),
         OPERATION_ROOM_IQ => Some(RoomRequestKind::Iq),
         _ => return Err(MailboxError::InvalidStored.into()),
     };
-    // The operation kind decides which parent the entry has; a row with the
-    // other parent, both or neither is malformed.
-    let operation = match (request_kind, message_key, request_key) {
-        (None, Some(message_key), None) => {
+    // The operation kind decides which parent the entry has; a row with
+    // another parent, several or none is malformed.
+    let operation = match (kind, request_kind, message_key, request_key, direct_key) {
+        (OPERATION_ROOM_ACCEPTANCE, None, Some(message_key), None, None) => {
             MailboxOperationKey::RoomAcceptance(MessageKey::from_storage(parse(message_key)?))
         }
-        (Some(request_kind), None, Some(request_key)) => MailboxOperationKey::for_request(
+        (_, Some(request_kind), None, Some(request_key), None) => MailboxOperationKey::for_request(
             request_kind,
             RoomRequestKey::from_storage(parse(request_key)?),
         ),
+        (OPERATION_DIRECT, None, None, None, Some(direct_key)) => {
+            MailboxOperationKey::Direct(DirectRequestKey::from_storage(parse(direct_key)?))
+        }
         _ => return Err(MailboxError::InvalidStored.into()),
     };
     Ok(StoredMailboxEntry {
@@ -728,6 +736,13 @@ impl MailboxRepository {
             MailboxOperationParent::Request(key) => {
                 RoomRequestRepository::lock_parent(transaction, key).await
             }
+            #[cfg(feature = "clustering")]
+            MailboxOperationParent::Direct(key) => {
+                super::DirectRequestRepository::lock_parent(transaction, key).await
+            }
+            // Direct requests exist only with clustering.
+            #[cfg(not(feature = "clustering"))]
+            MailboxOperationParent::Direct(_) => Ok(false),
         }
     }
 

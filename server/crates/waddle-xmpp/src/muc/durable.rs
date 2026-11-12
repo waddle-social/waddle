@@ -20,14 +20,12 @@
 //! element 1's "Postgres-only for multi-replica" — clustering, and
 //! therefore this durability layer, is gated on the Postgres backend).
 //!
-//! **Scope note (deviation, recorded in the phase plan)**: occupant-roster
-//! durability (real JID/nick/occupant-id) is NOT part of this trait. Its
-//! sole consumer — a surviving node synthesizing XEP-0045 unavailable
-//! presence for occupants it did not itself observe joining — needs
-//! cross-node presence fan-out (ADR-0017 element 11), which this phase's
-//! Non-goals exclude. Landing occupant-roster schema now with no reader
-//! would be schema-only churn; deferred to the slice that wires that
-//! cross-node consumer.
+//! **Occupancy.** The occupant roster lives in actor memory and is not part
+//! of the snapshot this trait restores. The actor reports every seat it
+//! grants or removes through [`MucDurableStore::record_room_occupancy`]; a
+//! store with a bound [`RoomOccupancyLedger`] writes them to the room's
+//! durable occupancy record, from which a node that takes the room's claim
+//! seats the same occupants. A store without one keeps no record.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -72,4 +70,8 @@ pub use implementation::RoomCommitError;
 pub use implementation::RoomCommitFuture;
 pub use implementation::RoomCommitOutcome;
 pub use implementation::RoomDurableMutation;
+pub use implementation::RoomOccupancyChange;
+pub use implementation::RoomOccupancyLedger;
+pub use implementation::RoomOccupancyRecord;
+pub use implementation::RoomOccupancySeat;
 pub use implementation::WaddleId;

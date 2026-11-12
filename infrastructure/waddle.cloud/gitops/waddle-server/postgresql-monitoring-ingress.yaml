@@ -369,3 +369,25 @@ data:
         - oldest_unsettled_age_seconds:
             usage: GAUGE
             description: Age in seconds of the oldest room request that is not settled, or zero.
+
+    waddle_ingress_direct_requests:
+      target_databases: ["waddle"]
+      query: |
+        -- Always emits one row.
+        SELECT
+          count(*) FILTER (WHERE owner_decision = 0) AS undecided_requests,
+          count(*) FILTER (WHERE owner_decision <> 0 AND settled_at IS NULL) AS unsettled_decisions,
+          coalesce(extract(epoch FROM now() - min(created_at)
+            FILTER (WHERE settled_at IS NULL)), 0) AS oldest_unsettled_age_seconds
+        FROM ingress_direct_requests
+      primary: true
+      metrics:
+        - undecided_requests:
+            usage: GAUGE
+            description: Direct requests the recipient's account owner has not decided.
+        - unsettled_decisions:
+            usage: GAUGE
+            description: Decided direct requests whose origin has not consumed the decision.
+        - oldest_unsettled_age_seconds:
+            usage: GAUGE
+            description: Age in seconds of the oldest direct request that is not settled, or zero.

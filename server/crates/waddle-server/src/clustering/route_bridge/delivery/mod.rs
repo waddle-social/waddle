@@ -29,6 +29,7 @@ use crate::ingress::execute::RelayFrameReceiptCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffHandle;
 
 pub(super) mod channels;
+pub(super) mod direct;
 pub(super) mod ingress_append;
 pub(super) mod local;
 pub(super) mod muc;
@@ -40,6 +41,7 @@ pub(super) mod remote_route_helpers;
 pub(super) mod remote_socket;
 pub(super) mod telemetry;
 
+pub(super) use direct::decide_direct;
 pub(super) use local::*;
 pub(crate) use muc::reserved::RelayFrameCompletion;
 pub(super) use muc::reserved::{

@@ -513,6 +513,24 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         #[cfg(feature = "test-support")]
         let relayed_groupchat =
             crate::clustering::acceptance_seams::relayed_groupchat(&msg.envelope);
+        // A join, occupant presence or Muji IQ is a room request in the
+        // durable mailbox once this node carries them there. One that still
+        // arrives on the relay is refused before its sequence is reserved,
+        // so nothing ran and the sender rolls the sequence back.
+        if delivery_bridge
+            .refuses_relayed_room_kind(&msg.envelope)
+            .await
+        {
+            let reply = OrderedRelayReply::Nack(OrderedRelayNack {
+                channel: msg.envelope.channel.clone(),
+                sequence: msg.envelope.sequence,
+                reason: OrderedRelayNackReason::UnsupportedEnvelope,
+            });
+            return spawn_in_dispatch_span(ctx, span, async move {
+                record_ordered_relay_reply(&reply);
+                reply
+            });
+        }
         // The reservation must stay inline (mailbox-ordered); only the
         // delegated delivery moves onto the instrumented reply task.
         let reservation = receiver.lock().await.reserve(msg.envelope);

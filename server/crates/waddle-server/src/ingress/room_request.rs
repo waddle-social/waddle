@@ -112,8 +112,8 @@ pub enum RoomOccupancyChange {
     /// The decision leaves occupancy as it is: a refusal, a stale request or
     /// an IQ.
     Unchanged,
-    /// An accepted join seats the requester, replacing any earlier row of
-    /// the full JID.
+    /// An accepted join completes the row the room actor recorded for the
+    /// requester with the join request and the broadcast presence.
     Seat {
         nick: String,
         role: Role,
@@ -438,7 +438,18 @@ impl IngressAuthority {
         }))
     }
 
-    /// This node's undecided joins and seated rooms.
+    /// Whether this node has seated `room`'s durable occupancy under the
+    /// claim `epoch`.
+    pub fn room_occupancy_seated(&self, room: &BareJid, epoch: ClaimEpoch) -> bool {
+        self.uow.room_occupancy_seated(room, epoch)
+    }
+
+    /// Record that `room`'s durable occupancy was seated under `epoch`.
+    pub fn mark_room_occupancy_seated(&self, room: BareJid, epoch: ClaimEpoch) {
+        self.uow.mark_room_occupancy_seated(room, epoch);
+    }
+
+    /// This node's undecided joins.
     pub fn open_room_requests(&self) -> &OpenRoomRequests {
         &self.open_room_requests
     }
@@ -541,6 +552,140 @@ impl IngressAuthority {
     }
 }
 
+/// A seat the room actor granted or removed, for the room's durable
+/// occupancy.
+#[derive(Debug, Clone)]
+pub enum RoomSeatChange {
+    Seat {
+        occupant: FullJid,
+        nick: String,
+        role: Role,
+        affiliation: Affiliation,
+        generation: OccupancySessionGeneration,
+    },
+    Unseat {
+        occupant: FullJid,
+    },
+}
+
+impl IngressAuthority {
+    /// Write seats the room actor of `room` granted or removed, as the
+    /// room's owner at `epoch`.
+    ///
+    /// One ingress transaction asserts the room claim and applies the
+    /// changes in order. This is the nearest the actor's own durable commit
+    /// has to a shared transaction: that commit runs on the room store's
+    /// connection, which cannot write an epoch-guarded ingress relation, so
+    /// the actor writes a seat here before the join's projection commits
+    /// and a removal after it applied one. `false` when this deployment
+    /// keeps no durable occupancy (the mailbox is not selected, or the
+    /// protocol epoch is below the mailbox epoch) and nothing was written.
+    pub async fn record_room_seats(
+        &self,
+        room: &BareJid,
+        owner: &NodeIdentity,
+        epoch: ClaimEpoch,
+        changes: Vec<RoomSeatChange>,
+    ) -> Result<bool, IngressUowError> {
+        if !self.uow.mailbox_acceptance_enabled() {
+            return Ok(false);
+        }
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        if !self.uow.mailbox_acceptance_active(&tx) {
+            return Ok(false);
+        }
+        let _room_claim = ClaimRepository::assert_room_claim(&mut tx, room, owner, epoch).await?;
+        for change in changes {
+            match change {
+                RoomSeatChange::Seat {
+                    occupant,
+                    nick,
+                    role,
+                    affiliation,
+                    generation,
+                } => {
+                    RoomOccupantRepository::record_seat(
+                        &mut tx,
+                        &RoomOccupantRecord {
+                            room: room.clone(),
+                            occupant,
+                            nick,
+                            role,
+                            affiliation,
+                            generation,
+                            join_request: None,
+                            presence: None,
+                            room_epoch: epoch,
+                        },
+                    )
+                    .await?;
+                }
+                RoomSeatChange::Unseat { occupant } => {
+                    RoomOccupantRepository::remove(&mut tx, room, &occupant, None).await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+}
+
+/// The room store's writer of durable occupancy: the ingress authority,
+/// which owns the epoch-guarded relation.
+pub struct IngressOccupancyLedger {
+    authority: Arc<IngressAuthority>,
+}
+
+impl IngressOccupancyLedger {
+    pub fn new(authority: Arc<IngressAuthority>) -> Self {
+        Self { authority }
+    }
+}
+
+impl waddle_xmpp::muc::durable::RoomOccupancyLedger for IngressOccupancyLedger {
+    fn record<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        changes: Vec<waddle_xmpp::muc::durable::RoomOccupancyChange>,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, waddle_xmpp::muc::durable::RoomOccupancyRecord>
+    {
+        use waddle_xmpp::muc::durable::{RoomOccupancyChange as Change, RoomOccupancyRecord};
+        Box::pin(async move {
+            let changes = changes
+                .into_iter()
+                .map(|change| match change {
+                    Change::Seat(seat) => RoomSeatChange::Seat {
+                        occupant: seat.occupant,
+                        nick: seat.nick,
+                        role: seat.role,
+                        affiliation: seat.affiliation,
+                        generation: seat.session,
+                    },
+                    Change::Unseat { occupant } => RoomSeatChange::Unseat { occupant },
+                })
+                .collect();
+            match self
+                .authority
+                .record_room_seats(room_jid, &fence.owner, fence.epoch, changes)
+                .await
+            {
+                Ok(true) => Ok(RoomOccupancyRecord::Written),
+                Ok(false) => Ok(RoomOccupancyRecord::Inactive),
+                Err(error) => {
+                    tracing::warn!(%error, room = %room_jid, "room occupancy not recorded");
+                    Err(waddle_xmpp::XmppError::internal(
+                        "room occupancy record is unavailable",
+                    ))
+                }
+            }
+        })
+    }
+}
+
 async fn apply_occupancy(
     tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
     request: &StoredRoomRequest,
@@ -566,7 +711,7 @@ async fn apply_occupancy(
             affiliation,
             presence,
         } => {
-            RoomOccupantRepository::seat(
+            RoomOccupantRepository::confirm_join(
                 tx,
                 &record(nick, role, affiliation, presence, Some(request.key)),
             )
@@ -598,12 +743,10 @@ async fn apply_occupancy(
 }
 
 /// The room requests this node's connections have committed and not yet
-/// seen decided, and the rooms whose durable occupancy this node has seated
-/// under its current claim.
+/// seen decided.
 #[derive(Debug, Default)]
 pub struct OpenRoomRequests {
     undecided_joins: std::sync::Mutex<std::collections::HashMap<RoomRequestKey, UndecidedJoin>>,
-    seeded_rooms: std::sync::Mutex<std::collections::HashMap<BareJid, ClaimEpoch>>,
 }
 
 #[derive(Debug)]
@@ -669,23 +812,5 @@ impl OpenRoomRequests {
             .any(|join| {
                 join.room == *room && join.occupant == *occupant && join.generation == generation
             })
-    }
-
-    /// Whether this node has seated `room`'s durable occupancy under the
-    /// claim `epoch`.
-    pub fn room_seeded(&self, room: &BareJid, epoch: ClaimEpoch) -> bool {
-        self.seeded_rooms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(room)
-            .is_some_and(|seeded| *seeded == epoch)
-    }
-
-    /// Record that `room`'s durable occupancy was seated under `epoch`.
-    pub fn mark_room_seeded(&self, room: BareJid, epoch: ClaimEpoch) {
-        self.seeded_rooms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(room, epoch);
     }
 }

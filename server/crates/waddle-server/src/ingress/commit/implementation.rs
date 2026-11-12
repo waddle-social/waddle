@@ -809,6 +809,10 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     // rejection evidence in this one transaction.
     if let Some(acceptance) = owner_acceptance.as_mut() {
         let outcome = if rejection.is_none() {
+            super::super::commit_mailbox::assert_sender_seated(
+                uow, &mut tx, acceptance, submission,
+            )
+            .await?;
             super::super::commit_mailbox::OwnerOutcome::Accepted
         } else {
             super::super::commit_mailbox::OwnerOutcome::Rejected {

@@ -27,25 +27,71 @@ Where the code differs from the decisions below:
 - **Decision immutability.** `owner_decision` moves once because the
   repository's update is conditional on the undecided value and the origin's
   settlement is conditional on a decision; no trigger enforces it.
-- **Join before message, owner side.** The owner's groupchat commit does not
-  read `ingress_room_occupants`. It relies on the room actor, which is seated
-  from those rows before any entry of the room is decided.
+- **Join before message, owner side.** The owner's groupchat commit reads
+  `ingress_room_occupants` in its transaction once this node has seated the
+  room under the claim it asserts, and only when its plan accepts the
+  message. A sender without a row fails the commit with `SenderNotSeated`:
+  no decision is recorded, the worker asks the room actor to report its
+  roster again and the entry is retried under the ordinary retry budget. A
+  sender the actor refuses is answered from the actor's refusal as before.
 - **Order of the owner's work.** The owner runs its handler against the room
   actor, which changes actor state and fans presence out, and then commits
   the decision transaction. A failure between the two is retried from the
   lane head: the handler runs again and the first recorded decision and
   response are kept.
-- **Local joins.** A join accepted for a resource connected to the owner
-  itself writes no occupancy row. Such an occupant is not recovered by a
-  successor.
-- **Stale rows.** The leave at connection end has a typed entry point,
-  `IngressAuthority::commit_room_leave_at_connection_end`, and no caller yet.
-  The owner's own removals (kick, ban, ghost sweep) do not delete the row.
+- **Who writes occupancy.** The room actor is the writer of membership. It
+  records a seat before the join's projection commits and reports the
+  difference between its roster and what it last recorded after every
+  message that can change occupancy (join, leave, kick, ban, affiliation
+  and members-only removals, configuration changes, the ghost sweep's
+  leave, a destroy). Each write is one ingress transaction that asserts the
+  room claim (`IngressAuthority::record_room_seats`). It is not the
+  transaction of the actor's own durable commit: that commit runs on the
+  room store's connection, which cannot write an epoch-guarded ingress
+  relation. A join whose seat cannot be recorded is refused; a removal
+  whose write fails is repeated by the next report. This covers a resource
+  connected to the owner itself.
+- **What the decision transaction writes.** For a join it completes the row
+  the actor recorded (`join_request`, the broadcast presence, role and
+  affiliation) and writes nothing when that row is gone or belongs to
+  another generation, so an occupant removed between the handler and the
+  decision is not seated again.
+- **Destroy.** The actor empties the room's rows when it is sealed for a
+  destroy, while the claim is still held, and reports its roster again if
+  the destroy is undone.
+- **Leave at connection end.** `IngressAuthority::commit_room_leave_at_connection_end`
+  has no caller in this tree. A receiver at the mailbox epoch refuses
+  `OccupantPresence` on the relay, so until the connection's cleanup calls
+  it, an occupant whose connection ends without a leave stays seated until
+  the ghost sweep removes it.
+- **Relay kinds on a receiver.** A node that carries room requests through
+  the mailbox answers `JoinPresence`, `OccupantPresence` and `MujiJingleIq`
+  on the ordered relay with the unsupported-envelope refusal, before the
+  envelope's sequence is reserved.
+- **Seating at claim takeover.** A recovered occupant is seated through a
+  join projection (`SeedRecoveredOccupants`), not written into the roster
+  directly. The projection commits under the room claim and proves, in the
+  room store's transaction, that the row's connection generation is still
+  the one `xmpp_occupancy_authority` holds for the full JID. A generation
+  is an opaque identifier, so "older" means "not the current one". The
+  occupant gets its affiliation from the room's restored affiliation list,
+  the remote-occupant flags a join derives from the server's domain, a new
+  watermark and a new occupancy order; its recorded role is kept while the
+  recorded affiliation still holds. A row that is not seated (stale
+  generation, nick held by another account, or a room this actor created)
+  is deleted by the report that ends the same actor call, in one ingress
+  transaction under the room claim; that is the seeding write, since the
+  projection itself commits on the room store's connection. A projection
+  that fails for another reason ends the seeding without deleting
+  anything, and the room's lanes stay unadopted until a later pass. An
+  affiliation the channel resolver granted is not durable and is not
+  restored.
 - **Source binding.** A request records the authenticated principal
   reference and no stream-management occurrence.
-- **Unconsumed decisions.** `count_unsettled_decisions` and the
-  `waddle_ingress_room_requests` monitoring query report them; no sweep logs
-  them.
+- **Unconsumed decisions.** The mailbox poller counts decided requests no
+  origin consumed after the consumption grace on every sweep, publishes the
+  count as `ingress.mailbox.room_requests.unconsumed_decisions` and logs
+  one line when it is not zero. It consumes nothing.
 
 ## Decisions
 

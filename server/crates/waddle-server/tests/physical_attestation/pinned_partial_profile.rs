@@ -38,7 +38,7 @@ pub(super) async fn pins(
     helper: &str,
     migrator: &str,
 ) -> anyhow::Result<PinnedPartialProfilePinsV1> {
-    let mut ingress = [0; 18];
+    let mut ingress = [0; 19];
     for (slot, name) in ingress
         .iter_mut()
         .zip(PinnedPartialProfilePinsV1::ingress_relation_names())

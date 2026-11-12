@@ -637,6 +637,19 @@ pub fn increment_mailbox_delivery(outcome: MailboxDeliveryOutcome) {
     add_mailbox_delivery(1, outcome);
 }
 
+/// A successful count of room requests whose owner decided and whose
+/// origin has not consumed the decision after the consumption grace. Record
+/// every successful count, including zero; on a failed count record
+/// nothing, so the previous value stands.
+pub fn record_room_request_unconsumed_decisions(count: u64) {
+    crate::gauge_record!(
+        "ingress.mailbox.room_requests.unconsumed_decisions",
+        "{request}",
+        "Decided room requests no origin has consumed after the consumption grace.",
+        count,
+    );
+}
+
 /// One mailbox wake-up hint was sent. A lost hint is repaired by the peer's
 /// poll interval, so this counter is context for delivery latency and is not
 /// registered at zero.

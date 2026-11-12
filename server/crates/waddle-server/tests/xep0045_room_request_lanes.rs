@@ -203,6 +203,13 @@ struct Scenario {
 
 impl Scenario {
     async fn start() -> Self {
+        Self::start_with("mailbox", &[]).await
+    }
+
+    /// Start with the origin node's remote room acceptance selector and
+    /// extra environment for both nodes. The owner always selects the
+    /// mailbox.
+    async fn start_with(origin_acceptance: &str, extra: &[(&str, &str)]) -> Self {
         let postgres_url = waddle_ws_test_support::require_test_postgres_url()
             .expect("the room request suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
         let serial = cluster_e2e_serial_lock().lock().await;
@@ -213,12 +220,20 @@ impl Scenario {
         let seams = OwnerSeams::new();
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
+        let seam_directory = seams.directory();
+        let mut envs_a = vec![(ACCEPTANCE_ENV, origin_acceptance)];
+        envs_a.extend_from_slice(extra);
+        let mut envs_b = vec![
+            (SEAM_DIRECTORY_ENV, seam_directory.as_str()),
+            (ACCEPTANCE_ENV, "mailbox"),
+        ];
+        envs_b.extend_from_slice(extra);
         let (server_a, _, _) = spawn_cluster_server_with_envs(
             &postgres_url,
             &pool.pool_env,
             port_a,
             &[port_b],
-            &[(ACCEPTANCE_ENV, "mailbox")],
+            &envs_a,
         )
         .await;
         let (server_b, node_b, _) = spawn_cluster_server_with_envs(
@@ -226,10 +241,7 @@ impl Scenario {
             &pool.pool_env,
             port_b,
             &[port_a],
-            &[
-                (SEAM_DIRECTORY_ENV, &seams.directory()),
-                (ACCEPTANCE_ENV, "mailbox"),
-            ],
+            &envs_b,
         )
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
@@ -313,7 +325,89 @@ const SETTLED_JOINS: &str = "SELECT count(*) FROM ingress_room_requests \
      WHERE request_kind = 1 AND owner_decision = 1 AND settled_at IS NOT NULL";
 const CONSUMED_JOIN_ENTRIES: &str =
     "SELECT count(*) FROM ingress_mailbox_entries WHERE operation_kind = 2 AND disposition = 3";
-const OCCUPANTS: &str = "SELECT count(*) FROM ingress_room_occupants";
+/// Occupancy rows of resources bound on the origin node. The witness is
+/// connected to the owner and has a row of its own.
+const OCCUPANTS: &str =
+    "SELECT count(*) FROM ingress_room_occupants WHERE occupant_jid NOT LIKE 'admin@%'";
+const WITNESS_OCCUPANTS: &str =
+    "SELECT count(*) FROM ingress_room_occupants WHERE occupant_jid LIKE 'admin@%'";
+const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+
+fn occupant_presence(room: &jid::BareJid, nick: &str, kind: Option<&str>, status: &str) -> Element {
+    let mut presence = Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(xml_ncname!("to").to_owned(), format!("{room}/{nick}"));
+    if let Some(kind) = kind {
+        presence = presence.attr(xml_ncname!("type").to_owned(), kind);
+    }
+    presence
+        .append(
+            Element::builder("status", waddle_xmpp::ns::JABBER_CLIENT)
+                .append(status)
+                .build(),
+        )
+        .build()
+}
+
+fn kick_iq(room: &jid::BareJid, nick: &str, id: &str) -> Element {
+    Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(xml_ncname!("type").to_owned(), "set")
+        .attr(xml_ncname!("id").to_owned(), id)
+        .attr(xml_ncname!("to").to_owned(), room.to_string())
+        .append(
+            Element::builder("query", NS_MUC_ADMIN)
+                .append(
+                    Element::builder("item", NS_MUC_ADMIN)
+                        .attr(xml_ncname!("nick").to_owned(), nick)
+                        .attr(xml_ncname!("role").to_owned(), "none")
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn muji_iq(room: &jid::BareJid, action: &str, sid: &str) -> Element {
+    use waddle_xmpp::xep::xep0166::NS_JINGLE;
+    use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
+    use waddle_xmpp::xep::xep0272::NS_MUJI;
+    use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
+    let mut jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(xml_ncname!("action").to_owned(), action)
+        .attr(xml_ncname!("sid").to_owned(), sid);
+    if action == "session-initiate" {
+        let payload_type = Element::builder("payload-type", NS_JINGLE_RTP)
+            .attr(xml_ncname!("id").to_owned(), "111")
+            .attr(xml_ncname!("name").to_owned(), "opus")
+            .attr(xml_ncname!("clockrate").to_owned(), "48000")
+            .attr(xml_ncname!("channels").to_owned(), "2")
+            .build();
+        let description = Element::builder("description", NS_JINGLE_RTP)
+            .attr(xml_ncname!("media").to_owned(), "audio")
+            .append(payload_type)
+            .build();
+        jingle = jingle.append(
+            Element::builder("content", NS_JINGLE)
+                .attr(xml_ncname!("creator").to_owned(), "initiator")
+                .attr(xml_ncname!("name").to_owned(), "audio")
+                .append(description)
+                .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
+                .build(),
+        );
+    }
+    let jingle = jingle
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .attr(xml_ncname!("room").to_owned(), room.to_string())
+                .build(),
+        )
+        .build();
+    Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(xml_ncname!("type").to_owned(), "set")
+        .attr(xml_ncname!("id").to_owned(), format!("{action}-{sid}"))
+        .attr(xml_ncname!("to").to_owned(), "calls.localhost")
+        .append(jingle)
+        .build()
+}
 
 /// XEP-0045 §7.2: the joining resource receives the other occupants'
 /// presence, then its self-presence with status 110, then the subject. The
@@ -636,4 +730,334 @@ async fn decision_for_an_ended_connection_is_not_handed_to_its_successor() {
         .await,
         1
     );
+}
+
+/// A resource connected to the room's owner has an occupancy row of its
+/// own, so the owner's successor seats it and a later joiner is told about
+/// it. The row names the connection generation that joined.
+#[tokio::test]
+async fn occupant_connected_to_the_owner_is_recovered_by_its_successor() {
+    let mut scenario = Scenario::start().await;
+    assert_eq!(scalar(&scenario.db, WITNESS_OCCUPANTS).await, 1);
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT count(*) FROM ingress_room_occupants o JOIN xmpp_occupancy_authority a \
+             ON a.full_jid = o.occupant_jid AND a.generation::text = o.occupancy_generation \
+             WHERE o.occupant_jid LIKE 'admin@%'"
+        )
+        .await,
+        1,
+        "the row carries the generation the occupancy authority holds for the resource"
+    );
+    scenario.replace_owner().await;
+
+    let mut joiner = scenario.origin_client("after-transfer").await;
+    joiner
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send join");
+    let frames = parse(
+        &tokio::time::timeout(
+            Duration::from_secs(60),
+            joiner.recv_until(|frame| frame.contains("<subject")),
+        )
+        .await
+        .expect("the successor decides the join")
+        .expect("join replies"),
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| is_presence_from(frame, &scenario.occupant("witness"))),
+        "the successor seats the occupant that was connected to its predecessor: {frames:?}"
+    );
+}
+
+/// An occupant the owner kicked loses its occupancy row with the kick, so
+/// the owner's successor does not seat it again.
+#[tokio::test]
+async fn kicked_occupant_is_not_seated_by_a_successor() {
+    let mut scenario = Scenario::start().await;
+    let mut kicked = scenario.origin_client("kicked").await;
+    join_fanout_room(&mut kicked, &scenario.room, "kicked").await;
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+
+    let witness = scenario.witness.as_mut().expect("witness");
+    witness
+        .send(&String::from(&kick_iq(&scenario.room, "kicked", "kick-1")))
+        .await
+        .expect("send kick");
+    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
+    let _ = drain(&mut kicked, Duration::from_secs(2)).await;
+    scenario.replace_owner().await;
+
+    kicked
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "after-kick",
+            Some("after the kick"),
+        )))
+        .await
+        .expect("send after kick");
+    let refused = drain(&mut kicked, Duration::from_secs(30)).await;
+    assert!(
+        refused
+            .iter()
+            .any(|frame| frame.attr("id") == Some("after-kick") && is_error(frame)),
+        "a kicked occupant is not recovered: {refused:?}"
+    );
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 0);
+}
+
+/// An owner that carries room requests through the mailbox refuses a join
+/// that still arrives on the ordered relay: nothing is seated and no
+/// request exists.
+#[tokio::test]
+async fn relayed_join_is_refused_by_an_owner_at_the_mailbox_epoch() {
+    let scenario = Scenario::start_with("relay", &[]).await;
+    let mut joiner = scenario.origin_client("relayed").await;
+    joiner
+        .send(&String::from(&join_presence(&scenario.room, "relayed")))
+        .await
+        .expect("send join");
+    let frames = drain(&mut joiner, Duration::from_secs(10)).await;
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| is_self_presence(frame, &scenario.occupant("relayed"))),
+        "a relayed join is not accepted at the mailbox epoch: {frames:?}"
+    );
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 0);
+    assert_eq!(scalar(&scenario.db, REQUESTS).await, 0);
+}
+
+/// A presence update and a leave of a resource on the origin node reach the
+/// owner as room requests: the other occupants see each, the occupancy row
+/// follows, and the leaving resource receives its own unavailable presence.
+#[tokio::test]
+async fn presence_update_and_leave_cross_nodes_as_room_requests() {
+    let mut scenario = Scenario::start().await;
+    let mut occupant = scenario.origin_client("updates").await;
+    join_fanout_room(&mut occupant, &scenario.room, "updates").await;
+    let own = scenario.occupant("updates");
+    let witness = scenario.witness.as_mut().expect("witness");
+    let _ = drain(witness, Duration::from_secs(1)).await;
+
+    occupant
+        .send(&String::from(&occupant_presence(
+            &scenario.room,
+            "updates",
+            None,
+            "stepped out",
+        )))
+        .await
+        .expect("send presence update");
+    let seen = tokio::time::timeout(
+        Duration::from_secs(20),
+        witness.recv_until(|frame| frame.contains("stepped out")),
+    )
+    .await
+    .expect("the owner fans the update out")
+    .expect("update frames");
+    assert!(parse(&seen)
+        .iter()
+        .any(|frame| is_presence_from(frame, &own)));
+    wait_for_scalar(
+        &scenario.db,
+        "SELECT count(*) FROM ingress_room_requests \
+         WHERE request_kind = 2 AND owner_decision = 1 AND settled_at IS NOT NULL",
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+
+    occupant
+        .send(&String::from(&occupant_presence(
+            &scenario.room,
+            "updates",
+            Some("unavailable"),
+            "gone",
+        )))
+        .await
+        .expect("send leave");
+    let left = parse(
+        &tokio::time::timeout(
+            Duration::from_secs(20),
+            occupant.recv_until(|frame| frame.contains("unavailable")),
+        )
+        .await
+        .expect("the leave is answered")
+        .expect("leave frames"),
+    );
+    assert!(
+        left.iter()
+            .any(|frame| frame.attr("type") == Some("unavailable")
+                && frame.attr("from") == Some(own.to_string().as_str())),
+        "the leaving resource receives its own unavailable presence: {left:?}"
+    );
+    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
+    wait_for_scalar(
+        &scenario.db,
+        "SELECT count(*) FROM ingress_room_requests \
+         WHERE request_kind = 3 AND owner_decision = 1 AND settled_at IS NOT NULL",
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    let departed = tokio::time::timeout(
+        Duration::from_secs(20),
+        witness.recv_until(|frame| frame.contains("unavailable")),
+    )
+    .await
+    .expect("the owner fans the leave out")
+    .expect("leave fan-out");
+    assert!(parse(&departed)
+        .iter()
+        .any(|frame| is_presence_from(frame, &own)
+            || frame.attr("from") == Some(own.to_string().as_str())));
+}
+
+/// A Muji `session-initiate` and `session-terminate` of a resource on the
+/// origin node are decided by the room owner as requests on the room's Muji
+/// lane, and the requester receives the IQ result and the `session-accept`.
+#[tokio::test]
+async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
+    let livekit = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&livekit)
+        .await;
+    let livekit_ws_url = livekit.uri().replacen("http://", "ws://", 1);
+    let scenario = Scenario::start_with(
+        "mailbox",
+        &[
+            ("LIVEKIT_API_KEY", "APItestkeyrequests"),
+            (
+                "LIVEKIT_API_SECRET",
+                "test-secret-with-at-least-32-bytes-of-payload",
+            ),
+            ("LIVEKIT_WS_URL", &livekit_ws_url),
+            ("LIVEKIT_TURN_HOST", "turn.example.test"),
+            (
+                "LIVEKIT_TURN_SHARED_SECRET",
+                "turn-shared-secret-value-also-long-enough",
+            ),
+            (
+                "LIVEKIT_WEBHOOK_SECRET",
+                "test-webhook-secret-with-at-least-32-bytes",
+            ),
+        ],
+    )
+    .await;
+    let mut caller = scenario.origin_client("caller").await;
+    join_fanout_room(&mut caller, &scenario.room, "caller").await;
+
+    caller
+        .send(&String::from(&muji_iq(
+            &scenario.room,
+            "session-initiate",
+            "call-1",
+        )))
+        .await
+        .expect("send session-initiate");
+    let accepted = tokio::time::timeout(
+        Duration::from_secs(30),
+        caller.recv_until(|frame| frame.contains("session-accept")),
+    )
+    .await
+    .expect("the owner answers the initiate")
+    .expect("initiate replies");
+    assert!(
+        !parse(&accepted).iter().any(is_error),
+        "a seated occupant's initiate is accepted: {accepted:?}"
+    );
+    caller
+        .send(&String::from(&muji_iq(
+            &scenario.room,
+            "session-terminate",
+            "call-1",
+        )))
+        .await
+        .expect("send session-terminate");
+    let terminated = tokio::time::timeout(
+        Duration::from_secs(30),
+        caller.recv_until(|frame| frame.contains("session-terminate-call-1")),
+    )
+    .await
+    .expect("the owner answers the terminate")
+    .expect("terminate replies");
+    assert!(
+        !parse(&terminated).iter().any(is_error),
+        "a hangup does not fail: {terminated:?}"
+    );
+    wait_for_scalar(
+        &scenario.db,
+        "SELECT count(*) FROM ingress_room_requests \
+         WHERE request_kind = 4 AND owner_decision = 1 AND settled_at IS NOT NULL",
+        2,
+        Duration::from_secs(20),
+    )
+    .await;
+    // Both requests sit on one lane, and it is not the join's lane.
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT count(DISTINCT lane_id) FROM ingress_mailbox_entries WHERE operation_kind = 5"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT count(*) FROM ingress_mailbox_entries m WHERE m.operation_kind = 5 \
+             AND m.lane_id IN (SELECT lane_id FROM ingress_mailbox_entries WHERE operation_kind = 2)"
+        )
+        .await,
+        0
+    );
+}
+
+/// A row whose connection generation the occupancy authority no longer
+/// holds for the full JID is not seated by the owner's successor, and the
+/// successor removes it from the table when it seats the room.
+#[tokio::test]
+async fn row_of_a_superseded_connection_is_not_seated_and_is_removed() {
+    let mut scenario = Scenario::start().await;
+    let mut first = scenario.origin_client("rebound").await;
+    join_fanout_room(&mut first, &scenario.room, "rebound").await;
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    // A later connection binds the same resource and does not join. The
+    // row keeps the earlier connection's generation.
+    drop(first);
+    let mut second = scenario.origin_client("rebound").await;
+    wait_for_scalar(
+        &scenario.db,
+        "SELECT count(*) FROM ingress_room_occupants o JOIN xmpp_occupancy_authority a \
+         ON a.full_jid = o.occupant_jid \
+         WHERE o.occupant_jid NOT LIKE 'admin@%' AND a.generation <> o.occupancy_generation",
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    scenario.replace_owner().await;
+
+    second
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "not-rejoined",
+            Some("without a join"),
+        )))
+        .await
+        .expect("send without a join");
+    let refused = drain(&mut second, Duration::from_secs(30)).await;
+    assert!(
+        refused
+            .iter()
+            .any(|frame| frame.attr("id") == Some("not-rejoined") && is_error(frame)),
+        "the later connection is not an occupant: {refused:?}"
+    );
+    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
 }

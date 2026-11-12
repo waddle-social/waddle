@@ -21,6 +21,8 @@ mod commit_mailbox;
 mod commit_room;
 mod commit_stream;
 pub mod decision;
+#[cfg(feature = "clustering")]
+pub mod direct_request;
 mod durable;
 pub mod mailbox_worker;
 pub mod origin_gate;

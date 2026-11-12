@@ -1756,6 +1756,15 @@ SELECT 1;
 "#;
 pub const V1032_INGRESS_ROOM_REQUESTS_POSTGRES: &str = include_str!("room_requests_postgres.sql");
 
+/// Direct requests for the mailbox: stanzas handed to the node that owns
+/// the recipient's account. Written only by clustered PostgreSQL
+/// deployments, so SQLite records the version alone.
+pub const V1033_INGRESS_DIRECT_REQUESTS: &str = r#"
+SELECT 1;
+"#;
+pub const V1033_INGRESS_DIRECT_REQUESTS_POSTGRES: &str =
+    include_str!("direct_requests_postgres.sql");
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1954,6 +1963,12 @@ pub fn all() -> Vec<Migration> {
             description: "Create room requests, durable occupancy and frozen responses".to_string(),
             sql_sqlite: V1032_INGRESS_ROOM_REQUESTS,
             sql_postgres: V1032_INGRESS_ROOM_REQUESTS_POSTGRES,
+        },
+        Migration {
+            version: 1033,
+            description: "Create direct requests for the mailbox".to_string(),
+            sql_sqlite: V1033_INGRESS_DIRECT_REQUESTS,
+            sql_postgres: V1033_INGRESS_DIRECT_REQUESTS_POSTGRES,
         },
     ]
 }

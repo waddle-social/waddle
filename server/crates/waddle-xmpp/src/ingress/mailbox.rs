@@ -10,13 +10,14 @@
 //! - a gap-free, nonwrapping lane sequence and its exclusive consumption
 //!   cursor;
 //! - the owner-independent operation key of a remote room acceptance and of
-//!   a room request (join, presence update, leave, IQ);
+//!   a room request (join, presence update, leave, IQ) and of a direct
+//!   delivery to a user;
 //! - the closed disposition state machine of a mailbox entry;
 //! - a pure admission check for pending-entry caps.
 
 use std::fmt;
 
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -684,6 +685,54 @@ impl fmt::Debug for RoomRequestKey {
     }
 }
 
+/// Identity of one direct request: a stanza handed to the node that owns
+/// the recipient's account, addressed to a bare or a full JID.
+///
+/// A copy that an ingress transaction owns derives its key from the
+/// canonical message, the copy's receipt identity and the recipient, so
+/// every attempt and every recovery of that copy is the same request. Any
+/// other stanza mints its key before the first attempt.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DirectRequestKey(Uuid);
+
+impl DirectRequestKey {
+    /// Mint the key of a request that no canonical message owns.
+    pub fn mint() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// The key of the copy of `message` identified by `receipt` and sent to
+    /// `recipient`.
+    pub fn for_copy(message: MessageKey, receipt: &[u8], recipient: &Jid) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"waddle.ingress.direct_request.v1");
+        hash.update(message.to_storage().as_bytes());
+        hash.update((receipt.len() as u64).to_be_bytes());
+        hash.update(receipt);
+        hash.update(recipient.to_string().as_bytes());
+        let digest = hash.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+
+    pub fn from_storage(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn to_storage(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for DirectRequestKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DirectRequestKey(..)")
+    }
+}
+
 /// What a room request asks of the room owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoomRequestKind {
@@ -694,12 +743,13 @@ pub enum RoomRequestKind {
 }
 
 /// The durable parent a mailbox entry refers to. An entry stores no payload:
-/// a room acceptance reads its canonical message and every other operation
-/// reads its room request.
+/// a room acceptance reads its canonical message, a room operation reads its
+/// room request and a direct delivery reads its direct request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MailboxOperationParent {
     Message(MessageKey),
     Request(RoomRequestKey),
+    Direct(DirectRequestKey),
 }
 
 /// Identity of the operation a mailbox entry carries, known before any commit
@@ -721,6 +771,9 @@ pub enum MailboxOperationKey {
     RoomLeave(RoomRequestKey),
     /// The room owner's answer to one relayed IQ.
     RoomIq(RoomRequestKey),
+    /// Delivery of one stanza to a user by the node that owns the
+    /// recipient's account.
+    Direct(DirectRequestKey),
 }
 
 impl MailboxOperationKey {
@@ -742,15 +795,28 @@ impl MailboxOperationKey {
             | Self::RoomPresence(request)
             | Self::RoomLeave(request)
             | Self::RoomIq(request) => MailboxOperationParent::Request(*request),
+            Self::Direct(request) => MailboxOperationParent::Direct(*request),
         }
     }
 
     /// The canonical message of a room acceptance; `None` for an operation
-    /// whose parent is a room request.
+    /// whose parent is a request.
     pub fn message_key(&self) -> Option<MessageKey> {
         match self.parent() {
             MailboxOperationParent::Message(message_key) => Some(message_key),
-            MailboxOperationParent::Request(_) => None,
+            MailboxOperationParent::Request(_) | MailboxOperationParent::Direct(_) => None,
+        }
+    }
+
+    /// The direct request of a delivery to a user; `None` otherwise.
+    pub fn direct(&self) -> Option<DirectRequestKey> {
+        match self {
+            Self::Direct(request) => Some(*request),
+            Self::RoomAcceptance(_)
+            | Self::RoomJoin(_)
+            | Self::RoomPresence(_)
+            | Self::RoomLeave(_)
+            | Self::RoomIq(_) => None,
         }
     }
 
@@ -758,7 +824,7 @@ impl MailboxOperationKey {
     /// kind; `None` for a room acceptance.
     pub fn request(&self) -> Option<(RoomRequestKind, RoomRequestKey)> {
         match self {
-            Self::RoomAcceptance(_) => None,
+            Self::RoomAcceptance(_) | Self::Direct(_) => None,
             Self::RoomJoin(request) => Some((RoomRequestKind::Join, *request)),
             Self::RoomPresence(request) => Some((RoomRequestKind::Presence, *request)),
             Self::RoomLeave(request) => Some((RoomRequestKind::Leave, *request)),

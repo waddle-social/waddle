@@ -47,7 +47,8 @@ DECLARE
         'ingress_send_attempts', 'ingress_effect_descendants',
         'ingress_owner_rejections', 'ingress_mailbox_lanes',
         'ingress_mailbox_entries', 'ingress_room_requests',
-        'ingress_room_responses', 'ingress_room_occupants'
+        'ingress_room_responses', 'ingress_room_occupants',
+        'ingress_direct_requests'
     ];
     helper_tables TEXT[] := ARRAY[
         'dnd_projection', 'dnd_projection_source_version',
@@ -188,7 +189,8 @@ BEGIN
         'ingress_send_attempts', 'ingress_effect_descendants',
         'ingress_owner_rejections', 'ingress_mailbox_lanes',
         'ingress_mailbox_entries', 'ingress_room_requests',
-        'ingress_room_responses', 'ingress_room_occupants'
+        'ingress_room_responses', 'ingress_room_occupants',
+        'ingress_direct_requests'
     ] LOOP
         EXECUTE pg_catalog.format('REVOKE ALL ON TABLE %I.%I FROM PUBLIC, %I', '__SCHEMA_LITERAL__', table_name, '__R_LITERAL__');
         EXECUTE pg_catalog.format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I', '__SCHEMA_LITERAL__', table_name, '__A_LITERAL__');
@@ -307,7 +309,8 @@ BEGIN
                'ingress_send_attempts', 'ingress_effect_descendants',
                'ingress_owner_rejections', 'ingress_mailbox_lanes',
                'ingress_mailbox_entries', 'ingress_room_requests',
-        'ingress_room_responses', 'ingress_room_occupants'])
+        'ingress_room_responses', 'ingress_room_occupants',
+        'ingress_direct_requests'])
              AND NOT pg_catalog.has_table_privilege(r, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
              AND NOT pg_catalog.has_any_column_privilege(r, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')
              AND pg_catalog.has_table_privilege(a, c.oid, 'SELECT')
@@ -315,7 +318,7 @@ BEGIN
              AND pg_catalog.has_table_privilege(a, c.oid, 'UPDATE')
              AND pg_catalog.has_table_privilege(a, c.oid, 'DELETE')
              AND NOT pg_catalog.has_table_privilege(a, c.oid, 'TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')
-             AND NOT pg_catalog.has_table_privilege(a, c.oid, 'UPDATE WITH GRANT OPTION')) <> 18
+             AND NOT pg_catalog.has_table_privilege(a, c.oid, 'UPDATE WITH GRANT OPTION')) <> 19
        OR (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
            WHERE n.nspname = '__SCHEMA_LITERAL__' AND c.relname = ANY(ARRAY[

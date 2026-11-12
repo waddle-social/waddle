@@ -120,6 +120,9 @@ pub enum IngressUowError {
     Mailbox(#[from] super::MailboxError),
     #[error(transparent)]
     RoomRequest(#[from] super::RoomRequestError),
+    #[cfg(feature = "clustering")]
+    #[error(transparent)]
+    DirectRequest(#[from] super::DirectRequestError),
 }
 
 impl IngressUowError {

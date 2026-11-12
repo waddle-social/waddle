@@ -739,376 +739,386 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         msg: ApplyAdminItems,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if msg.items.iter().any(|item| {
-            item.affiliation.is_some()
-                && item
-                    .jid
-                    .as_ref()
-                    .is_some_and(|jid| self.invite_rollback_pending(jid))
-        }) {
-            return Err(AdminApplyError::InviteRollbackPending);
-        }
-        if is_role_change_query(&msg.items) {
-            self.gate_mutation().await?;
+        let reply: Self::Reply = async {
+            if msg.items.iter().any(|item| {
+                item.affiliation.is_some()
+                    && item
+                        .jid
+                        .as_ref()
+                        .is_some_and(|jid| self.invite_rollback_pending(jid))
+            }) {
+                return Err(AdminApplyError::InviteRollbackPending);
+            }
+            if is_role_change_query(&msg.items) {
+                self.gate_mutation().await?;
+                let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
+                let mut removed_by_moderation: Vec<FullJid> = Vec::new();
+                let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
+                let mut occupants_to_kick: Vec<String> = Vec::new();
+                for item in &msg.items {
+                    let Some(target_nick) = item.nick.as_ref() else {
+                        continue;
+                    };
+                    let Some(new_role) = item.role else {
+                        continue;
+                    };
+                    let target_occupant = self
+                        .room
+                        .occupant(target_nick)
+                        .ok_or_else(|| AdminApplyError::OccupantNotFound(target_nick.clone()))?;
+                    authorize_role_change(
+                        msg.sender_affiliation,
+                        msg.sender_role,
+                        target_occupant.affiliation,
+                        target_occupant.role,
+                        new_role,
+                    )?;
+                }
+                for item in &msg.items {
+                    let Some(target_nick) = item.nick.clone() else {
+                        continue;
+                    };
+                    let Some(new_role) = item.role else {
+                        continue;
+                    };
+                    let target_occupant =
+                        self.room.occupant(&target_nick).cloned().ok_or_else(|| {
+                            AdminApplyError::OccupantNotFound(target_nick.clone())
+                        })?;
+                    authorize_role_change(
+                        msg.sender_affiliation,
+                        msg.sender_role,
+                        target_occupant.affiliation,
+                        target_occupant.role,
+                        new_role,
+                    )?;
+                    let from_room_jid = self
+                        .room
+                        .room_jid
+                        .with_resource_str(&target_nick)
+                        .expect("nick was previously accepted as resource");
+                    let target_bare = target_occupant.real_jid.to_bare();
+                    let target_sessions = self.room.occupant_sessions(&target_nick);
+                    if new_role == Role::None {
+                        for recipient in all_room_sessions(&self.room) {
+                            let target_identity = OccupantIdentity {
+                                bare_jid: &target_bare,
+                                real_jid: visible_real_jid_for_recipient(
+                                    &self.room,
+                                    &recipient,
+                                    &target_occupant.real_jid,
+                                ),
+                                secret: &self.occupant_id_secret,
+                                hats: &self.server_hats,
+                            };
+                            let is_self = target_sessions.iter().any(|jid| jid == &recipient);
+                            let presence = build_kick_presence(
+                                &from_room_jid,
+                                &recipient,
+                                target_occupant.affiliation,
+                                MucPresenceStatus::new(is_self, false),
+                                item.reason.as_deref(),
+                                Some(&msg.sender_jid.to_bare()),
+                                &target_identity,
+                            );
+                            presence_updates.push((recipient, presence));
+                        }
+                        removed_by_moderation.extend(target_sessions.iter().cloned());
+                        occupants_to_kick.push(target_nick);
+                    } else {
+                        if let Some(occ) = self.room.occupants.get_mut(&target_nick) {
+                            occ.role = new_role;
+                        }
+                        let new_voice = new_role.voice(self.room.moderation());
+                        if target_occupant.role.voice(self.room.moderation()) != new_voice {
+                            voice_changes.extend(
+                                target_sessions
+                                    .iter()
+                                    .map(|session| (session.clone(), new_voice)),
+                            );
+                        }
+                        for recipient in all_room_sessions(&self.room) {
+                            let target_identity = OccupantIdentity {
+                                bare_jid: &target_bare,
+                                real_jid: visible_real_jid_for_recipient(
+                                    &self.room,
+                                    &recipient,
+                                    &target_occupant.real_jid,
+                                ),
+                                secret: &self.occupant_id_secret,
+                                hats: &self.server_hats,
+                            };
+                            let is_self = target_sessions.iter().any(|jid| jid == &recipient);
+                            let presence = build_role_change_presence(
+                                &from_room_jid,
+                                &recipient,
+                                target_occupant.affiliation,
+                                new_role,
+                                MucPresenceStatus::new(is_self, false),
+                                &target_identity,
+                            );
+                            presence_updates.push((recipient, presence));
+                        }
+                    }
+                }
+                for nick in occupants_to_kick {
+                    self.room.remove_occupant(&nick);
+                }
+                return Ok(AdminItemsApplied {
+                    presence_updates,
+                    removed_by_moderation,
+                    voice_changes,
+                    outbox_reservation: None,
+                });
+            }
+
+            let current_affiliations: BTreeMap<BareJid, Affiliation> = self
+                .room
+                .all_affiliations()
+                .into_iter()
+                .map(|entry| (entry.jid, entry.affiliation))
+                .collect();
+            let mut final_affiliations = current_affiliations.clone();
+            let mut touched_jids = Vec::new();
+            let current_owner_count = self.room.jids_by_affiliation(Affiliation::Owner).len();
+            // Pre-validation simulates the mutation loop step by step
+            // against an evolving affiliation map. It must reject
+            // every set the loop below would reject — the loop
+            // mutates the room (bans remove occupants) as it goes, so
+            // a mid-loop error would leave a partially-applied batch
+            // whose removals and 301 presences are silently dropped
+            // (#935 review). Erroring here keeps the set atomic.
+            for item in &msg.items {
+                let Some(target_jid) = item.jid.as_ref() else {
+                    continue;
+                };
+                let Some(new_affiliation) = item.affiliation else {
+                    continue;
+                };
+                if !touched_jids.contains(target_jid) {
+                    touched_jids.push(target_jid.clone());
+                }
+                let target_current_affiliation = final_affiliations
+                    .get(target_jid)
+                    .copied()
+                    .unwrap_or(Affiliation::None);
+                let can_modify = match new_affiliation {
+                    Affiliation::Owner | Affiliation::Admin => {
+                        msg.sender_affiliation == Affiliation::Owner
+                    }
+                    Affiliation::Member | Affiliation::None | Affiliation::Outcast
+                        if target_current_affiliation == Affiliation::Admin =>
+                    {
+                        msg.sender_affiliation == Affiliation::Owner
+                    }
+                    Affiliation::Member | Affiliation::None | Affiliation::Outcast => matches!(
+                        msg.sender_affiliation,
+                        Affiliation::Owner | Affiliation::Admin
+                    ),
+                };
+                if !can_modify {
+                    return Err(AdminApplyError::PermissionDenied(format!(
+                        "You don't have permission to set {} affiliation",
+                        crate::muc::admin::affiliation_to_str(new_affiliation)
+                    )));
+                }
+                if msg.sender_affiliation == Affiliation::Admin
+                    && target_current_affiliation == Affiliation::Owner
+                    && new_affiliation != Affiliation::Owner
+                {
+                    return Err(AdminApplyError::CannotAdminModifyOwner);
+                }
+                if new_affiliation != Affiliation::Owner
+                    && target_current_affiliation == Affiliation::Owner
+                {
+                    let sole_owner = final_affiliations
+                        .iter()
+                        .filter(|(_, affiliation)| **affiliation == Affiliation::Owner)
+                        .all(|(jid, _)| jid == target_jid);
+                    if sole_owner {
+                        return Err(AdminApplyError::CannotRemoveLastOwner);
+                    }
+                }
+                if new_affiliation == Affiliation::None {
+                    final_affiliations.remove(target_jid);
+                } else {
+                    final_affiliations.insert(target_jid.clone(), new_affiliation);
+                }
+            }
+            if current_owner_count > 0
+                && !final_affiliations
+                    .values()
+                    .any(|affiliation| *affiliation == Affiliation::Owner)
+            {
+                return Err(AdminApplyError::CannotRemoveLastOwner);
+            }
+
+            let durable_delta: Vec<DurableAffiliationEntry> = touched_jids
+                .iter()
+                .filter_map(|jid| {
+                    let current = current_affiliations
+                        .get(jid)
+                        .copied()
+                        .unwrap_or(Affiliation::None);
+                    let final_affiliation = final_affiliations
+                        .get(jid)
+                        .copied()
+                        .unwrap_or(Affiliation::None);
+                    (current != final_affiliation)
+                        .then(|| durable_affiliation_entry(jid.clone(), final_affiliation))
+                })
+                .collect();
+
+            let mut staged_room = self.room.clone();
+            let actor = msg.sender_jid.to_bare();
             let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
             let mut removed_by_moderation: Vec<FullJid> = Vec::new();
             let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
-            let mut occupants_to_kick: Vec<String> = Vec::new();
+            let mut durable_updates = Vec::new();
+            let mut invalidated_jids = Vec::new();
+            let mut changed_affiliations = Vec::new();
+            let mut requested_affiliations = Vec::new();
             for item in &msg.items {
-                let Some(target_nick) = item.nick.as_ref() else {
+                let Some(target_jid) = item.jid.clone() else {
                     continue;
                 };
-                let Some(new_role) = item.role else {
+                let Some(new_affiliation) = item.affiliation else {
                     continue;
                 };
-                let target_occupant = self
-                    .room
-                    .occupant(target_nick)
-                    .ok_or_else(|| AdminApplyError::OccupantNotFound(target_nick.clone()))?;
-                authorize_role_change(
-                    msg.sender_affiliation,
-                    msg.sender_role,
-                    target_occupant.affiliation,
-                    target_occupant.role,
-                    new_role,
+                invalidated_jids.push(target_jid.clone());
+                requested_affiliations.push((target_jid.clone(), new_affiliation));
+                let target_current_affiliation = staged_room.affiliation(&target_jid);
+                let AppliedAdminMutation {
+                    applied,
+                    durable_updates: applied_durable_updates,
+                } = apply_affiliation_change_with_effects(
+                    &mut staged_room,
+                    &self.occupant_id_secret,
+                    &self.server_hats,
+                    target_jid.clone(),
+                    new_affiliation,
+                    Some(&actor),
+                    item.reason.as_deref(),
                 )?;
-            }
-            for item in &msg.items {
-                let Some(target_nick) = item.nick.clone() else {
-                    continue;
-                };
-                let Some(new_role) = item.role else {
-                    continue;
-                };
-                let target_occupant = self
-                    .room
-                    .occupant(&target_nick)
-                    .cloned()
-                    .ok_or_else(|| AdminApplyError::OccupantNotFound(target_nick.clone()))?;
-                authorize_role_change(
-                    msg.sender_affiliation,
-                    msg.sender_role,
-                    target_occupant.affiliation,
-                    target_occupant.role,
-                    new_role,
-                )?;
-                let from_room_jid = self
-                    .room
-                    .room_jid
-                    .with_resource_str(&target_nick)
-                    .expect("nick was previously accepted as resource");
-                let target_bare = target_occupant.real_jid.to_bare();
-                let target_sessions = self.room.occupant_sessions(&target_nick);
-                if new_role == Role::None {
-                    for recipient in all_room_sessions(&self.room) {
-                        let target_identity = OccupantIdentity {
-                            bare_jid: &target_bare,
-                            real_jid: visible_real_jid_for_recipient(
-                                &self.room,
-                                &recipient,
-                                &target_occupant.real_jid,
-                            ),
-                            secret: &self.occupant_id_secret,
-                            hats: &self.server_hats,
-                        };
-                        let is_self = target_sessions.iter().any(|jid| jid == &recipient);
-                        let presence = build_kick_presence(
-                            &from_room_jid,
-                            &recipient,
-                            target_occupant.affiliation,
-                            MucPresenceStatus::new(is_self, false),
-                            item.reason.as_deref(),
-                            Some(&msg.sender_jid.to_bare()),
-                            &target_identity,
-                        );
-                        presence_updates.push((recipient, presence));
-                    }
-                    removed_by_moderation.extend(target_sessions.iter().cloned());
-                    occupants_to_kick.push(target_nick);
-                } else {
-                    if let Some(occ) = self.room.occupants.get_mut(&target_nick) {
-                        occ.role = new_role;
-                    }
-                    let new_voice = new_role.voice(self.room.moderation());
-                    if target_occupant.role.voice(self.room.moderation()) != new_voice {
-                        voice_changes.extend(
-                            target_sessions
-                                .iter()
-                                .map(|session| (session.clone(), new_voice)),
-                        );
-                    }
-                    for recipient in all_room_sessions(&self.room) {
-                        let target_identity = OccupantIdentity {
-                            bare_jid: &target_bare,
-                            real_jid: visible_real_jid_for_recipient(
-                                &self.room,
-                                &recipient,
-                                &target_occupant.real_jid,
-                            ),
-                            secret: &self.occupant_id_secret,
-                            hats: &self.server_hats,
-                        };
-                        let is_self = target_sessions.iter().any(|jid| jid == &recipient);
-                        let presence = build_role_change_presence(
-                            &from_room_jid,
-                            &recipient,
-                            target_occupant.affiliation,
-                            new_role,
-                            MucPresenceStatus::new(is_self, false),
-                            &target_identity,
-                        );
-                        presence_updates.push((recipient, presence));
-                    }
+                if target_current_affiliation != new_affiliation {
+                    changed_affiliations.push((target_jid.clone(), new_affiliation));
                 }
+                presence_updates.extend(applied.presence_updates);
+                removed_by_moderation.extend(applied.removed_by_moderation);
+                voice_changes.extend(applied.voice_changes);
+                durable_updates.extend(applied_durable_updates);
             }
-            for nick in occupants_to_kick {
-                self.room.remove_occupant(&nick);
+
+            let admin_mutation_id = (!durable_delta.is_empty()).then_some(msg.attempt);
+            let outbox_reservation = if durable_delta.is_empty() {
+                self.gate_pre_mutation_ownership()
+                    .await
+                    .map_err(super::RoomMutationError::from)?;
+                None
+            } else {
+                let previous_coordinates = self.durable_coordinates;
+                let commit = self
+                    .commit_durable(
+                        RoomDurableMutation::AffiliationBatch(durable_delta),
+                        admin_effects_for_applied(
+                            self.room.room_jid.clone(),
+                            durable_updates,
+                            removed_by_moderation.clone(),
+                            &voice_changes,
+                        )
+                        .with_admin_mutation_id(
+                            admin_mutation_id.expect("non-empty durable delta"),
+                        ),
+                    )
+                    .await;
+                let (_, reservation) = match commit {
+                    Ok(committed) => committed,
+                    Err(error) => {
+                        if matches!(error, super::DurablePersistError::CommitOutcomeUnknown) {
+                            self.pending_admin_projection =
+                                previous_coordinates.map(|coordinates| {
+                                    let changed_roles = staged_room
+                                        .occupants
+                                        .iter()
+                                        .filter(|(nick, occupant)| {
+                                            self.room.occupant(nick).is_some_and(|previous| {
+                                                previous.role != occupant.role
+                                            })
+                                        })
+                                        .flat_map(|(nick, occupant)| {
+                                            staged_room
+                                                .occupant_sessions(nick)
+                                                .into_iter()
+                                                .map(|session| (session, occupant.role))
+                                        })
+                                        .collect();
+                                    super::PendingAdminProjection {
+                                        attempt: admin_mutation_id
+                                            .expect("non-empty durable delta"),
+                                        previous_coordinates: coordinates,
+                                        expected_affiliations: touched_jids
+                                            .iter()
+                                            // A no-op request owns no removal presence.
+                                            // Retain its session for the pending leave
+                                            // that revoked its membership earlier.
+                                            .filter(|jid| {
+                                                changed_affiliations
+                                                    .iter()
+                                                    .any(|(changed, _)| changed == *jid)
+                                            })
+                                            .map(|jid| (jid.clone(), staged_room.affiliation(jid)))
+                                            .collect(),
+                                        removed_sessions: removed_by_moderation.clone(),
+                                        changed_roles,
+                                        moderated: staged_room.config.moderated,
+                                    }
+                                });
+                        }
+                        return Err(error.into());
+                    }
+                };
+                reservation
+            };
+
+            let mut needs_rehydration = false;
+            for jid in invalidated_jids {
+                self.invalidate_invite_grant(&jid);
             }
-            return Ok(AdminItemsApplied {
+            for (jid, affiliation) in requested_affiliations {
+                needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
+            }
+            for (jid, _) in changed_affiliations {
+                self.advance_member_admission_revision(&jid);
+            }
+            self.room = staged_room;
+            if let Some(attempt) = admin_mutation_id {
+                if let Some(coordinates) = self.durable_coordinates {
+                    self.record_admin_mutation_resolution(
+                        super::AdminMutationResolution::Committed {
+                            attempt,
+                            coordinates,
+                        },
+                    );
+                }
+                self.delete_admin_receipt_after_projection(attempt);
+            }
+            if needs_rehydration {
+                // R1: converge the durable-recipient mirror to the durable
+                // channel∪space truth after any removal to `None` — a
+                // space-entitled member must not lose fan-out (see
+                // `RoomActor::refresh_durable_recipients_from_source`).
+                self.refresh_durable_recipients_from_source().await;
+            }
+            Ok(AdminItemsApplied {
                 presence_updates,
                 removed_by_moderation,
                 voice_changes,
-                outbox_reservation: None,
-            });
-        }
-
-        let current_affiliations: BTreeMap<BareJid, Affiliation> = self
-            .room
-            .all_affiliations()
-            .into_iter()
-            .map(|entry| (entry.jid, entry.affiliation))
-            .collect();
-        let mut final_affiliations = current_affiliations.clone();
-        let mut touched_jids = Vec::new();
-        let current_owner_count = self.room.jids_by_affiliation(Affiliation::Owner).len();
-        // Pre-validation simulates the mutation loop step by step
-        // against an evolving affiliation map. It must reject
-        // every set the loop below would reject — the loop
-        // mutates the room (bans remove occupants) as it goes, so
-        // a mid-loop error would leave a partially-applied batch
-        // whose removals and 301 presences are silently dropped
-        // (#935 review). Erroring here keeps the set atomic.
-        for item in &msg.items {
-            let Some(target_jid) = item.jid.as_ref() else {
-                continue;
-            };
-            let Some(new_affiliation) = item.affiliation else {
-                continue;
-            };
-            if !touched_jids.contains(target_jid) {
-                touched_jids.push(target_jid.clone());
-            }
-            let target_current_affiliation = final_affiliations
-                .get(target_jid)
-                .copied()
-                .unwrap_or(Affiliation::None);
-            let can_modify = match new_affiliation {
-                Affiliation::Owner | Affiliation::Admin => {
-                    msg.sender_affiliation == Affiliation::Owner
-                }
-                Affiliation::Member | Affiliation::None | Affiliation::Outcast
-                    if target_current_affiliation == Affiliation::Admin =>
-                {
-                    msg.sender_affiliation == Affiliation::Owner
-                }
-                Affiliation::Member | Affiliation::None | Affiliation::Outcast => matches!(
-                    msg.sender_affiliation,
-                    Affiliation::Owner | Affiliation::Admin
-                ),
-            };
-            if !can_modify {
-                return Err(AdminApplyError::PermissionDenied(format!(
-                    "You don't have permission to set {} affiliation",
-                    crate::muc::admin::affiliation_to_str(new_affiliation)
-                )));
-            }
-            if msg.sender_affiliation == Affiliation::Admin
-                && target_current_affiliation == Affiliation::Owner
-                && new_affiliation != Affiliation::Owner
-            {
-                return Err(AdminApplyError::CannotAdminModifyOwner);
-            }
-            if new_affiliation != Affiliation::Owner
-                && target_current_affiliation == Affiliation::Owner
-            {
-                let sole_owner = final_affiliations
-                    .iter()
-                    .filter(|(_, affiliation)| **affiliation == Affiliation::Owner)
-                    .all(|(jid, _)| jid == target_jid);
-                if sole_owner {
-                    return Err(AdminApplyError::CannotRemoveLastOwner);
-                }
-            }
-            if new_affiliation == Affiliation::None {
-                final_affiliations.remove(target_jid);
-            } else {
-                final_affiliations.insert(target_jid.clone(), new_affiliation);
-            }
-        }
-        if current_owner_count > 0
-            && !final_affiliations
-                .values()
-                .any(|affiliation| *affiliation == Affiliation::Owner)
-        {
-            return Err(AdminApplyError::CannotRemoveLastOwner);
-        }
-
-        let durable_delta: Vec<DurableAffiliationEntry> = touched_jids
-            .iter()
-            .filter_map(|jid| {
-                let current = current_affiliations
-                    .get(jid)
-                    .copied()
-                    .unwrap_or(Affiliation::None);
-                let final_affiliation = final_affiliations
-                    .get(jid)
-                    .copied()
-                    .unwrap_or(Affiliation::None);
-                (current != final_affiliation)
-                    .then(|| durable_affiliation_entry(jid.clone(), final_affiliation))
+                outbox_reservation,
             })
-            .collect();
-
-        let mut staged_room = self.room.clone();
-        let actor = msg.sender_jid.to_bare();
-        let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
-        let mut removed_by_moderation: Vec<FullJid> = Vec::new();
-        let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
-        let mut durable_updates = Vec::new();
-        let mut invalidated_jids = Vec::new();
-        let mut changed_affiliations = Vec::new();
-        let mut requested_affiliations = Vec::new();
-        for item in &msg.items {
-            let Some(target_jid) = item.jid.clone() else {
-                continue;
-            };
-            let Some(new_affiliation) = item.affiliation else {
-                continue;
-            };
-            invalidated_jids.push(target_jid.clone());
-            requested_affiliations.push((target_jid.clone(), new_affiliation));
-            let target_current_affiliation = staged_room.affiliation(&target_jid);
-            let AppliedAdminMutation {
-                applied,
-                durable_updates: applied_durable_updates,
-            } = apply_affiliation_change_with_effects(
-                &mut staged_room,
-                &self.occupant_id_secret,
-                &self.server_hats,
-                target_jid.clone(),
-                new_affiliation,
-                Some(&actor),
-                item.reason.as_deref(),
-            )?;
-            if target_current_affiliation != new_affiliation {
-                changed_affiliations.push((target_jid.clone(), new_affiliation));
-            }
-            presence_updates.extend(applied.presence_updates);
-            removed_by_moderation.extend(applied.removed_by_moderation);
-            voice_changes.extend(applied.voice_changes);
-            durable_updates.extend(applied_durable_updates);
         }
-
-        let admin_mutation_id = (!durable_delta.is_empty()).then_some(msg.attempt);
-        let outbox_reservation = if durable_delta.is_empty() {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(super::RoomMutationError::from)?;
-            None
-        } else {
-            let previous_coordinates = self.durable_coordinates;
-            let commit = self
-                .commit_durable(
-                    RoomDurableMutation::AffiliationBatch(durable_delta),
-                    admin_effects_for_applied(
-                        self.room.room_jid.clone(),
-                        durable_updates,
-                        removed_by_moderation.clone(),
-                        &voice_changes,
-                    )
-                    .with_admin_mutation_id(admin_mutation_id.expect("non-empty durable delta")),
-                )
-                .await;
-            let (_, reservation) = match commit {
-                Ok(committed) => committed,
-                Err(error) => {
-                    if matches!(error, super::DurablePersistError::CommitOutcomeUnknown) {
-                        self.pending_admin_projection = previous_coordinates.map(|coordinates| {
-                            let changed_roles = staged_room
-                                .occupants
-                                .iter()
-                                .filter(|(nick, occupant)| {
-                                    self.room
-                                        .occupant(nick)
-                                        .is_some_and(|previous| previous.role != occupant.role)
-                                })
-                                .flat_map(|(nick, occupant)| {
-                                    staged_room
-                                        .occupant_sessions(nick)
-                                        .into_iter()
-                                        .map(|session| (session, occupant.role))
-                                })
-                                .collect();
-                            super::PendingAdminProjection {
-                                attempt: admin_mutation_id.expect("non-empty durable delta"),
-                                previous_coordinates: coordinates,
-                                expected_affiliations: touched_jids
-                                    .iter()
-                                    // A no-op request owns no removal presence.
-                                    // Retain its session for the pending leave
-                                    // that revoked its membership earlier.
-                                    .filter(|jid| {
-                                        changed_affiliations
-                                            .iter()
-                                            .any(|(changed, _)| changed == *jid)
-                                    })
-                                    .map(|jid| (jid.clone(), staged_room.affiliation(jid)))
-                                    .collect(),
-                                removed_sessions: removed_by_moderation.clone(),
-                                changed_roles,
-                                moderated: staged_room.config.moderated,
-                            }
-                        });
-                    }
-                    return Err(error.into());
-                }
-            };
-            reservation
-        };
-
-        let mut needs_rehydration = false;
-        for jid in invalidated_jids {
-            self.invalidate_invite_grant(&jid);
-        }
-        for (jid, affiliation) in requested_affiliations {
-            needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
-        }
-        for (jid, _) in changed_affiliations {
-            self.advance_member_admission_revision(&jid);
-        }
-        self.room = staged_room;
-        if let Some(attempt) = admin_mutation_id {
-            if let Some(coordinates) = self.durable_coordinates {
-                self.record_admin_mutation_resolution(super::AdminMutationResolution::Committed {
-                    attempt,
-                    coordinates,
-                });
-            }
-            self.delete_admin_receipt_after_projection(attempt);
-        }
-        if needs_rehydration {
-            // R1: converge the durable-recipient mirror to the durable
-            // channel∪space truth after any removal to `None` — a
-            // space-entitled member must not lose fan-out (see
-            // `RoomActor::refresh_durable_recipients_from_source`).
-            self.refresh_durable_recipients_from_source().await;
-        }
-        Ok(AdminItemsApplied {
-            presence_updates,
-            removed_by_moderation,
-            voice_changes,
-            outbox_reservation,
-        })
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -1126,56 +1136,62 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         msg: ApplyAffiliationChange,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.invite_rollback_pending(&msg.jid) {
-            return Err(AdminApplyError::InviteRollbackPending);
+        let reply: Self::Reply = async {
+            if self.invite_rollback_pending(&msg.jid) {
+                return Err(AdminApplyError::InviteRollbackPending);
+            }
+            let previous_affiliation = self.room.affiliation(&msg.jid);
+            let mut staged_room = self.room.clone();
+            let AppliedAdminMutation {
+                mut applied,
+                durable_updates,
+            } = apply_affiliation_change_with_effects(
+                &mut staged_room,
+                &self.occupant_id_secret,
+                &self.server_hats,
+                msg.jid.clone(),
+                msg.affiliation,
+                msg.actor.as_ref(),
+                None,
+            )?;
+            let outbox_reservation = if previous_affiliation != msg.affiliation {
+                let (_, reservation) = self
+                    .commit_durable(
+                        RoomDurableMutation::Affiliation(durable_affiliation_entry(
+                            msg.jid.clone(),
+                            msg.affiliation,
+                        )),
+                        admin_effects_for_applied(
+                            self.room.room_jid.clone(),
+                            durable_updates,
+                            applied.removed_by_moderation.clone(),
+                            &applied.voice_changes,
+                        ),
+                    )
+                    .await?;
+                reservation
+            } else {
+                self.gate_pre_mutation_ownership()
+                    .await
+                    .map_err(super::RoomMutationError::from)?;
+                None
+            };
+            self.invalidate_invite_grant(&msg.jid);
+            let needs_rehydration =
+                self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
+            if previous_affiliation != msg.affiliation {
+                self.advance_member_admission_revision(&msg.jid);
+            }
+            self.room = staged_room;
+            if needs_rehydration {
+                self.refresh_durable_recipients_from_source().await;
+            }
+            applied.outbox_reservation = outbox_reservation;
+            Ok(applied)
         }
-        let previous_affiliation = self.room.affiliation(&msg.jid);
-        let mut staged_room = self.room.clone();
-        let AppliedAdminMutation {
-            mut applied,
-            durable_updates,
-        } = apply_affiliation_change_with_effects(
-            &mut staged_room,
-            &self.occupant_id_secret,
-            &self.server_hats,
-            msg.jid.clone(),
-            msg.affiliation,
-            msg.actor.as_ref(),
-            None,
-        )?;
-        let outbox_reservation = if previous_affiliation != msg.affiliation {
-            let (_, reservation) = self
-                .commit_durable(
-                    RoomDurableMutation::Affiliation(durable_affiliation_entry(
-                        msg.jid.clone(),
-                        msg.affiliation,
-                    )),
-                    admin_effects_for_applied(
-                        self.room.room_jid.clone(),
-                        durable_updates,
-                        applied.removed_by_moderation.clone(),
-                        &applied.voice_changes,
-                    ),
-                )
-                .await?;
-            reservation
-        } else {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(super::RoomMutationError::from)?;
-            None
-        };
-        self.invalidate_invite_grant(&msg.jid);
-        let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
-        if previous_affiliation != msg.affiliation {
-            self.advance_member_admission_revision(&msg.jid);
-        }
-        self.room = staged_room;
-        if needs_rehydration {
-            self.refresh_durable_recipients_from_source().await;
-        }
-        applied.outbox_reservation = outbox_reservation;
-        Ok(applied)
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -1189,14 +1205,19 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if !self.effectful_work_is_permitted().await {
-            return Err(super::RoomMutationError::OwnershipUnavailable);
+        let reply: Self::Reply = async {
+            if !self.effectful_work_is_permitted().await {
+                return Err(super::RoomMutationError::OwnershipUnavailable);
+            }
+            Ok(enforce_members_only_from_room(
+                &mut self.room,
+                &self.occupant_id_secret,
+                &self.server_hats,
+            ))
         }
-        Ok(enforce_members_only_from_room(
-            &mut self.room,
-            &self.occupant_id_secret,
-            &self.server_hats,
-        ))
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -1214,152 +1235,159 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         msg: EnforceMembersOnlyAffiliations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let EnforceMembersOnlyAffiliations {
-            affiliations,
-            fallback_reservation,
-            config_status_codes,
-        } = msg;
-        let affiliations: BTreeMap<BareJid, Affiliation> = affiliations.into_iter().collect();
-        let occupied_jids = occupied_bare_jids(&self.room);
-        if occupied_jids
-            .iter()
-            .any(|jid| self.invite_rollback_pending(jid))
-        {
-            return Err(super::AffiliationMutationError::InviteRollbackPending);
-        }
-        // These `set_affiliation` calls re-derive occupant roles, so an
-        // occupant who is NOT ejected below can still silently lose
-        // voice. Snapshot before the loop so the caller can converge
-        // their live SFU grants.
-        let voices_before: Vec<(FullJid, Voice)> = occupied_jids
-            .iter()
-            .flat_map(|jid| session_voices(&self.room, jid))
-            .collect();
-        let mut staged_room = self.room.clone();
-        let mut changed_affiliations = Vec::new();
-        let mut requested_affiliations = Vec::new();
-        let mut durable_delta = Vec::new();
-        for jid in &occupied_jids {
-            let affiliation = affiliations.get(jid).copied().unwrap_or(Affiliation::None);
-            requested_affiliations.push((jid.clone(), affiliation));
-            if staged_room
-                .set_affiliation(jid.clone(), affiliation)
-                .is_some()
-            {
-                changed_affiliations.push((jid.clone(), affiliation));
-                durable_delta.push(durable_affiliation_entry(jid.clone(), affiliation));
-            }
-        }
-        let mut needs_rehydration = false;
-        for jid in &occupied_jids {
-            self.invalidate_invite_grant(jid);
-        }
-        for (jid, affiliation) in requested_affiliations {
-            needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
-        }
-        for (jid, _) in changed_affiliations {
-            self.advance_member_admission_revision(&jid);
-        }
-        let mut applied = enforce_members_only_from_room(
-            &mut staged_room,
-            &self.occupant_id_secret,
-            &self.server_hats,
-        );
-        // Report voice losses for occupants who survived the
-        // members-only sweep; ejected sessions are carried by
-        // `removed_by_moderation` and must not be double-reported.
-        // Expand per occupant (not per bare JID) so a bare seated under
-        // two nicks is not counted twice.
-        let moderation = staged_room.moderation();
-        let voices_after: Vec<(FullJid, Voice)> = staged_room
-            .occupants
-            .values()
-            .flat_map(|occupant| {
-                let voice = occupant.role.voice(moderation);
-                staged_room
-                    .occupant_sessions(&occupant.nick)
-                    .into_iter()
-                    .map(move |session| (session, voice))
-            })
-            .collect();
-        applied.voice_changes = changed_session_voices(&voices_before, &voices_after)
-            .into_iter()
-            .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
-            .collect();
-        let should_commit = !durable_delta.is_empty() || !config_status_codes.is_empty();
-        let durable_effect_updates = if config_status_codes.is_empty() {
-            Vec::new()
-        } else {
-            occupied_jids
-                .iter()
-                .filter_map(|jid| {
-                    let affiliation = affiliations.get(jid).copied().unwrap_or(Affiliation::None);
-                    (affiliation < Affiliation::Member).then(|| occupants_for_bare(&self.room, jid))
-                })
-                .flatten()
-                .flat_map(|occupant| {
-                    removal_presence_updates(
-                        &self.room,
-                        &self.occupant_id_secret,
-                        &self.server_hats,
-                        &occupant,
-                        STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
-                        AdminPresenceKind::MembersOnlyRemoved,
-                        None,
-                    )
-                })
-                .map(|built| built.durable)
-                .collect()
-        };
-        let effects = if config_status_codes.is_empty() {
-            RoomMutationEffects::none()
-        } else {
-            let (self_updates, remaining_updates) =
-                split_admin_effect_updates(durable_effect_updates);
-            let effects = RoomMutationEffects::members_only_enforcement(
-                self.room.room_jid.clone(),
-                self_updates,
-                remaining_updates,
-                applied.removed_by_moderation.clone(),
-                applied
-                    .voice_changes
-                    .iter()
-                    .cloned()
-                    .map(|(session, voice)| OccupantVoiceChange { session, voice })
-                    .collect(),
+        let reply: Self::Reply = async {
+            let EnforceMembersOnlyAffiliations {
+                affiliations,
+                fallback_reservation,
                 config_status_codes,
-                all_room_sessions(&staged_room),
-            );
-            match fallback_reservation {
-                Some(reservation) => effects.with_superseding_reservation(reservation),
-                None => effects,
+            } = msg;
+            let affiliations: BTreeMap<BareJid, Affiliation> = affiliations.into_iter().collect();
+            let occupied_jids = occupied_bare_jids(&self.room);
+            if occupied_jids
+                .iter()
+                .any(|jid| self.invite_rollback_pending(jid))
+            {
+                return Err(super::AffiliationMutationError::InviteRollbackPending);
             }
-        };
-        let reservation = if !should_commit {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(super::RoomMutationError::from)?;
-            None
-        } else {
-            let (_, reservation) = self
-                .commit_durable(
-                    RoomDurableMutation::MembersOnlyEnforcement {
-                        config: self.room.config.clone(),
-                        affiliations: durable_delta,
-                    },
-                    effects,
-                )
-                .await?;
-            reservation
-        };
-        self.room = staged_room;
-        self.config_durable_coordinates = self.durable_coordinates;
-        if needs_rehydration {
-            // R1: see `RoomActor::refresh_durable_recipients_from_source`.
-            self.refresh_durable_recipients_from_source().await;
+            // These `set_affiliation` calls re-derive occupant roles, so an
+            // occupant who is NOT ejected below can still silently lose
+            // voice. Snapshot before the loop so the caller can converge
+            // their live SFU grants.
+            let voices_before: Vec<(FullJid, Voice)> = occupied_jids
+                .iter()
+                .flat_map(|jid| session_voices(&self.room, jid))
+                .collect();
+            let mut staged_room = self.room.clone();
+            let mut changed_affiliations = Vec::new();
+            let mut requested_affiliations = Vec::new();
+            let mut durable_delta = Vec::new();
+            for jid in &occupied_jids {
+                let affiliation = affiliations.get(jid).copied().unwrap_or(Affiliation::None);
+                requested_affiliations.push((jid.clone(), affiliation));
+                if staged_room
+                    .set_affiliation(jid.clone(), affiliation)
+                    .is_some()
+                {
+                    changed_affiliations.push((jid.clone(), affiliation));
+                    durable_delta.push(durable_affiliation_entry(jid.clone(), affiliation));
+                }
+            }
+            let mut needs_rehydration = false;
+            for jid in &occupied_jids {
+                self.invalidate_invite_grant(jid);
+            }
+            for (jid, affiliation) in requested_affiliations {
+                needs_rehydration |= self.prune_durable_recipient_if_removed(&jid, affiliation);
+            }
+            for (jid, _) in changed_affiliations {
+                self.advance_member_admission_revision(&jid);
+            }
+            let mut applied = enforce_members_only_from_room(
+                &mut staged_room,
+                &self.occupant_id_secret,
+                &self.server_hats,
+            );
+            // Report voice losses for occupants who survived the
+            // members-only sweep; ejected sessions are carried by
+            // `removed_by_moderation` and must not be double-reported.
+            // Expand per occupant (not per bare JID) so a bare seated under
+            // two nicks is not counted twice.
+            let moderation = staged_room.moderation();
+            let voices_after: Vec<(FullJid, Voice)> = staged_room
+                .occupants
+                .values()
+                .flat_map(|occupant| {
+                    let voice = occupant.role.voice(moderation);
+                    staged_room
+                        .occupant_sessions(&occupant.nick)
+                        .into_iter()
+                        .map(move |session| (session, voice))
+                })
+                .collect();
+            applied.voice_changes = changed_session_voices(&voices_before, &voices_after)
+                .into_iter()
+                .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
+                .collect();
+            let should_commit = !durable_delta.is_empty() || !config_status_codes.is_empty();
+            let durable_effect_updates = if config_status_codes.is_empty() {
+                Vec::new()
+            } else {
+                occupied_jids
+                    .iter()
+                    .filter_map(|jid| {
+                        let affiliation =
+                            affiliations.get(jid).copied().unwrap_or(Affiliation::None);
+                        (affiliation < Affiliation::Member)
+                            .then(|| occupants_for_bare(&self.room, jid))
+                    })
+                    .flatten()
+                    .flat_map(|occupant| {
+                        removal_presence_updates(
+                            &self.room,
+                            &self.occupant_id_secret,
+                            &self.server_hats,
+                            &occupant,
+                            STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
+                            AdminPresenceKind::MembersOnlyRemoved,
+                            None,
+                        )
+                    })
+                    .map(|built| built.durable)
+                    .collect()
+            };
+            let effects = if config_status_codes.is_empty() {
+                RoomMutationEffects::none()
+            } else {
+                let (self_updates, remaining_updates) =
+                    split_admin_effect_updates(durable_effect_updates);
+                let effects = RoomMutationEffects::members_only_enforcement(
+                    self.room.room_jid.clone(),
+                    self_updates,
+                    remaining_updates,
+                    applied.removed_by_moderation.clone(),
+                    applied
+                        .voice_changes
+                        .iter()
+                        .cloned()
+                        .map(|(session, voice)| OccupantVoiceChange { session, voice })
+                        .collect(),
+                    config_status_codes,
+                    all_room_sessions(&staged_room),
+                );
+                match fallback_reservation {
+                    Some(reservation) => effects.with_superseding_reservation(reservation),
+                    None => effects,
+                }
+            };
+            let reservation = if !should_commit {
+                self.gate_pre_mutation_ownership()
+                    .await
+                    .map_err(super::RoomMutationError::from)?;
+                None
+            } else {
+                let (_, reservation) = self
+                    .commit_durable(
+                        RoomDurableMutation::MembersOnlyEnforcement {
+                            config: self.room.config.clone(),
+                            affiliations: durable_delta,
+                        },
+                        effects,
+                    )
+                    .await?;
+                reservation
+            };
+            self.room = staged_room;
+            self.config_durable_coordinates = self.durable_coordinates;
+            if needs_rehydration {
+                // R1: see `RoomActor::refresh_durable_recipients_from_source`.
+                self.refresh_durable_recipients_from_source().await;
+            }
+            applied.outbox_reservation = reservation;
+            Ok(applied)
         }
-        applied.outbox_reservation = reservation;
-        Ok(applied)
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 

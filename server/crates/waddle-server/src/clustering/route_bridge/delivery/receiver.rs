@@ -480,7 +480,16 @@ pub(in super::super) enum RelayPayloadTarget<'a> {
 pub(in super::super) fn relay_payload_target(
     envelope: &RemoteStanzaEnvelope,
 ) -> Result<RelayPayloadTarget<'_>, OrderedRelayNackReason> {
-    let (recipient, stanza) = match &envelope.payload {
+    payload_target(&envelope.payload, &envelope.channel.recipient)
+}
+
+/// The delivery a payload asks for when it travels to `channel_recipient`.
+/// A payload that names another recipient than its channel is refused.
+pub(in super::super) fn payload_target<'a>(
+    payload: &'a OrderedRelayPayload,
+    channel_recipient: &'a OrderedRelayRecipient,
+) -> Result<RelayPayloadTarget<'a>, OrderedRelayNackReason> {
+    let (recipient, stanza) = match payload {
         OrderedRelayPayload::ProcessedDirectMessage {
             recipient, stanza, ..
         }
@@ -511,7 +520,7 @@ pub(in super::super) fn relay_payload_target(
             ))
         }
     }?;
-    match &envelope.channel.recipient {
+    match channel_recipient {
         OrderedRelayRecipient::FullJid(full) if recipient == &jid::Jid::from(full.clone()) => {
             Ok(RelayPayloadTarget::Full(full, stanza))
         }

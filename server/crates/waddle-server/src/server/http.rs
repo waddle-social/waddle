@@ -1703,6 +1703,15 @@ async fn create_websocket_state(
                 .protocol
                 .ingress
                 .bind_mailbox_hints(Arc::clone(bridge) as Arc<_>);
+            // Room actors record the seats they grant and remove through
+            // the ingress authority, so a successor owner recovers them.
+            if let Some(store) = state.clustering_claims.muc_durable_store.as_ref() {
+                store.bind_occupancy_ledger(Arc::new(
+                    crate::ingress::room_request::IngressOccupancyLedger::new(Arc::clone(
+                        &websocket_state.deps.protocol.ingress,
+                    )),
+                ));
+            }
             crate::clustering::route_bridge::spawn_mailbox_poller(Arc::clone(bridge));
         } else {
             warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");

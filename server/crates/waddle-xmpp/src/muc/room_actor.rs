@@ -36,6 +36,7 @@ mod admin_handlers;
 mod live_roster_restore;
 mod mediated_invites;
 mod occupancy_handlers;
+mod occupancy_record;
 mod snapshot_handlers;
 #[cfg(test)]
 mod tests;
@@ -58,9 +59,10 @@ pub use occupancy_handlers::{
     InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId,
     LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome,
     OccupancyOrder, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
-    RecoveredOccupant, ResolverAffiliationSyncOutcome, SeedRecoveredOccupants,
+    RecoveredOccupant, RecoveredSeating, ResolverAffiliationSyncOutcome, SeedRecoveredOccupants,
     SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
+pub use occupancy_record::ReportOccupancy;
 pub use waddle_xmpp_core::OccupancySessionGeneration;
 
 /// Test-only observation of projection state at a seam: `pre_commit` fires
@@ -146,6 +148,7 @@ pub use implementation::PendingAdminProjection;
 pub use implementation::PresenceUpdateOutcome;
 pub(super) use implementation::ProjectionGate;
 pub use implementation::ProjectionRefusal;
+use implementation::RecoveredJoinRefusal;
 pub use implementation::RestoreDurableRoomState;
 pub use implementation::RestoreLiveRoster;
 pub(super) use implementation::RetainedDeparture;
