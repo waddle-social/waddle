@@ -209,9 +209,25 @@ and present only when it returns `true`.
   (`registry` by default, `coordinator`; any other value fails startup).
   The coordinator is selectable only together with the durable
   stream-management authority, because a binding's session reference
-  points at the durable session relation. When it is selected, the
-  recipient inventory, bare-JID target selection and the roster and
-  block-list push sets are read from the coordinator.
+  points at the durable session relation.
+
+When the coordinator is selected, these reads come from it: the recipient
+inventory; bare-JID target selection; the carbon planner's and the carbon
+fan-out's per-target policy; presence probes, including the probed
+resource's show, status, priority and payloads; presence fan-out to a
+subscriber's or a user's available resources; subscription delivery and its
+roster pushes; last activity; entity-capability and PubSub fan-out targets;
+MUC invite delivery; offline-delivery and inbox-update targets; and the
+roster and block-list push sets. A read the coordinator cannot answer is an
+error at the recipient inventory and an empty set with a warning elsewhere.
+
+These reads stay on the registry in both modes: the connection cleanup and
+registration paths, the cluster route bridge's registration snapshots and
+its owner-side receiver, pending-delivery flush and recovery, the
+stream-management promotion paths, the extension host's presence query, and
+the admin channel command. They read a connection entry together with its
+outbound endpoint, or belong to code that writes the registry, and move
+with the switch of the writers.
 
 No connection sends the binding messages yet, so a selected coordinator
 has no bindings and reads as an account without resources.
@@ -275,9 +291,10 @@ releases first, the session row is deleted last.**
 - **Over the slot bound.** Rows that hold a binding are always loaded,
   even beyond the account's slot bound. Such an account serves its stored
   bindings and refuses a bind of any new resource until enough retire.
-- **Presence payloads.** A row stores the selection metadata, not the
-  presence extension payloads. They live in the coordinator's memory and
-  are empty after a reload until the resource updates its snapshot.
+- **Presence payloads.** A row stores the presence extension payloads of
+  its snapshot as one XML document, within the snapshot's bounds on their
+  number and size, so a coordinator that reloads an account still answers
+  a probe with what the resource announced.
 - **Presentation marks.** A presentation mark whose commit outcome is
   unknown resolves to "already presented" when it is repeated.
 

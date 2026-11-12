@@ -869,3 +869,72 @@ async fn sqlite_checks_the_session_reference_at_commit() {
         vec![jid]
     );
 }
+
+#[tokio::test]
+async fn sqlite_stores_the_presence_payloads_a_probe_answer_relays() {
+    use minidom::Element;
+
+    const CAPS_NS: &str = "http://jabber.org/protocol/caps";
+    let fixture = Fixture::sqlite("account-bindings-presence-payloads").await;
+    let store = fixture.store();
+    let authority = super::support::claim(1);
+    let jid = resource("caps");
+    let claim = claim(1);
+    let (binding, active) = activate(store, &jid, &claim, INITIAL).await;
+    let snapshot = AccountResourceSnapshot {
+        presence_payloads: vec![
+            Element::builder("c", CAPS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("ver").to_owned(),
+                    "q07IKJEyjvHSyhy//CH0CxmKi8w=",
+                )
+                .build(),
+            Element::builder("idle", "urn:xmpp:idle:1").build(),
+        ],
+        ..presence(true, 1, false)
+    };
+    commit(store, &jid, update(&claim, active, &binding, snapshot)).await;
+    let stored = store
+        .load(&jid)
+        .await
+        .expect("load")
+        .and_then(|stored| stored.image.binding)
+        .expect("a current binding")
+        .snapshot
+        .presence_payloads;
+    assert_eq!(stored.len(), 2);
+    assert!(stored[0].is("c", CAPS_NS));
+    assert_eq!(stored[0].attr("ver"), Some("q07IKJEyjvHSyhy//CH0CxmKi8w="));
+    assert!(stored[1].is("idle", "urn:xmpp:idle:1"));
+
+    // A later update without payloads clears the stored document.
+    let revision = store
+        .load(&jid)
+        .await
+        .expect("load")
+        .expect("the resource row")
+        .image
+        .revision;
+    commit(
+        store,
+        &jid,
+        update(&claim, revision, &binding, presence(true, 1, false)),
+    )
+    .await;
+    let cleared = store
+        .load(&jid)
+        .await
+        .expect("load")
+        .and_then(|stored| stored.image.binding)
+        .expect("a current binding");
+    assert!(cleared.snapshot.presence_payloads.is_empty());
+    assert!(store
+        .mark_presented(
+            &authority,
+            &jid,
+            &binding,
+            waddle_xmpp::ownership::account_coordinator::Presentation::OfflineMessages
+        )
+        .await
+        .is_ok());
+}

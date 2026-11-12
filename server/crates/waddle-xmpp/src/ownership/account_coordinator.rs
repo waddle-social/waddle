@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use jid::FullJid;
+use minidom::Element;
+use xmpp_parsers::presence::Show;
 
 use super::account_resource_transition::{
     AccountResourceBindingState, AccountResourceExecuteError, AccountResourceExecution,
@@ -66,6 +68,19 @@ pub struct AccountResourceRouting {
     pub available: bool,
     pub priority: i8,
     pub carbons_enabled: bool,
+}
+
+/// The presence a resource last announced, as a probe answer or a
+/// re-broadcast needs it. `payloads` are the extension children of that
+/// presence (entity capabilities, idle time and the like), relayed
+/// verbatim; the snapshot bounds their number and size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountResourcePresence {
+    pub jid: FullJid,
+    pub show: Option<Show>,
+    pub status: Option<String>,
+    pub priority: i8,
+    pub payloads: Vec<Element>,
 }
 
 /// What a resource's one-time presentations are keyed by. A resume mints a
@@ -358,6 +373,21 @@ impl AccountResources {
                 available: snapshot.presence_available,
                 priority: snapshot.presence_priority,
                 carbons_enabled: snapshot.carbons_enabled,
+            })
+            .collect()
+    }
+
+    /// The announced presence of every presence-available resource,
+    /// ordered by full JID.
+    pub fn presence_states(&self) -> Vec<AccountResourcePresence> {
+        self.active()
+            .filter(|(_, snapshot)| snapshot.presence_available)
+            .map(|(jid, snapshot)| AccountResourcePresence {
+                jid: jid.clone(),
+                show: snapshot.presence_show.clone(),
+                status: snapshot.presence_status.clone(),
+                priority: snapshot.presence_priority,
+                payloads: snapshot.presence_payloads.clone(),
             })
             .collect()
     }

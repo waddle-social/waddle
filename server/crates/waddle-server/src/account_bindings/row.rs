@@ -1,6 +1,7 @@
 //! The stored resource row and its codec.
 
 use jid::FullJid;
+use minidom::Element;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
@@ -22,9 +23,9 @@ use crate::db::{Row, Value};
 /// One resource row: the slot's durable image and the one-time
 /// presentations recorded for its current binding.
 ///
-/// Presence extension payloads are not stored. A slot rebuilt from a row
-/// has the availability, show, status, priority and interest flags of its
-/// snapshot and no payloads.
+/// The snapshot's presence extension payloads are stored as one XML
+/// document whose root wraps them, so a slot rebuilt from a row answers a
+/// presence probe with the payloads the resource announced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredResource {
     pub image: AccountResourceSlotImage,
@@ -33,7 +34,7 @@ pub struct StoredResource {
 
 /// Every column a write sets, in parameter order. `full_jid` is the key and
 /// is bound last by both the insert and the update.
-const WRITTEN: [&str; 29] = [
+const WRITTEN: [&str; 30] = [
     "bare_jid",
     "claim_identity",
     "revision",
@@ -63,6 +64,7 @@ const WRITTEN: [&str; 29] = [
     "offline_flushed",
     "subscriptions_flushed",
     "updated_at_ms",
+    "presence_payloads",
 ];
 
 /// The columns [`decode`] reads, in order.
@@ -72,7 +74,7 @@ pub(super) const SELECTED: &str = "full_jid, claim_identity, revision, install_g
     presence_show, presence_status, presence_priority, carbons_enabled, roster_interested, \
     blocklist_interested, sm_session_id, sm_generation, snapshot_revision, detach_custody, \
     retiring_from, retirement_source_revision, retirement_custody, offline_flushed, \
-    subscriptions_flushed";
+    subscriptions_flushed, presence_payloads";
 
 pub(super) fn insert_sql() -> String {
     let columns = WRITTEN.join(", ");
@@ -87,6 +89,35 @@ pub(super) fn update_sql() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("UPDATE account_resource_bindings SET {assignments} WHERE full_jid = ?")
+}
+
+/// Namespace and name of the stored document that wraps a snapshot's
+/// presence payloads. It exists only in the `presence_payloads` column.
+const PAYLOADS_NS: &str = "urn:waddle:account-resource:presence-payloads:0";
+const PAYLOADS_ROOT: &str = "payloads";
+
+/// Serialize the payloads for the column; no document for no payloads.
+fn encode_payloads(payloads: &[Element]) -> Option<String> {
+    if payloads.is_empty() {
+        return None;
+    }
+    let document = Element::builder(PAYLOADS_ROOT, PAYLOADS_NS)
+        .append_all(payloads.iter().cloned())
+        .build();
+    Some(String::from(&document))
+}
+
+fn decode_payloads(stored: Option<String>) -> Result<Vec<Element>, AccountBindingStoreError> {
+    let Some(stored) = stored else {
+        return Ok(Vec::new());
+    };
+    let document = stored
+        .parse::<Element>()
+        .map_err(|_| corrupt("presence_payloads"))?;
+    if !document.is(PAYLOADS_ROOT, PAYLOADS_NS) {
+        return Err(corrupt("presence_payloads"));
+    }
+    Ok(document.children().cloned().collect())
 }
 
 fn corrupt(field: &'static str) -> AccountBindingStoreError {
@@ -252,6 +283,7 @@ pub(super) fn write_params(
         i64::from(stored.presented.offline_messages),
         i64::from(stored.presented.pending_subscriptions),
         now_ms,
+        encode_payloads(&snapshot.presence_payloads),
         image.full_jid.to_string(),
     ])
 }
@@ -334,7 +366,7 @@ pub(super) fn decode(row: &Row) -> Result<(StoredResource, u64), AccountBindingS
                     .transpose()?,
                 presence_status: row.get(14)?,
                 presence_priority: priority,
-                presence_payloads: Vec::new(),
+                presence_payloads: decode_payloads(row.get(28)?)?,
                 carbons_enabled: row.get::<i64>(16)? != 0,
                 roster_interested: row.get::<i64>(17)? != 0,
                 blocklist_interested: row.get::<i64>(18)? != 0,

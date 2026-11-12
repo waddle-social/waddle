@@ -82,6 +82,7 @@ const BINDINGS: &[Column] = &[
     column("presence_show", "integer", false),
     column("presence_status", "text", false),
     column("presence_priority", "integer", true),
+    column("presence_payloads", "text", false),
     column("carbons_enabled", "integer", true),
     column("roster_interested", "integer", true),
     column("blocklist_interested", "integer", true),

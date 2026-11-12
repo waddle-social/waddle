@@ -33,12 +33,11 @@ pub(super) async fn deliver_peer_to_live(
     if !deps.effects.is_planning() {
         return deliver_peer_to_live_only(deps.user_registry, target, stanza).await;
     }
-    let resources = match deps.user_registry {
-        Some(registry) => {
-            waddle_xmpp::registry::get_resources_for_user(registry, &target.to_bare()).await
-        }
-        None => Vec::new(),
-    };
+    let resources = crate::server::routes::interpret::recipient_selection::live_resources(
+        deps,
+        &target.to_bare(),
+    )
+    .await;
     if !resources.contains(target) {
         return FullJidDeliveryOutcome::Unavailable;
     }
@@ -228,12 +227,11 @@ pub(super) async fn deliver_full(
         );
         return FullJidDeliveryOutcome::Delivered;
     }
-    let resources = match deps.user_registry {
-        Some(registry) => {
-            waddle_xmpp::registry::get_resources_for_user(registry, &target.to_bare()).await
-        }
-        None => Vec::new(),
-    };
+    let resources = crate::server::routes::interpret::recipient_selection::live_resources(
+        deps,
+        &target.to_bare(),
+    )
+    .await;
     if resources.contains(target) {
         record(
             deps,

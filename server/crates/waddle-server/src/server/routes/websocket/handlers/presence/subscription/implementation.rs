@@ -274,7 +274,7 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_sub
             .await;
 
     if !routed_remote_after_local_update {
-        let resources = subscription_presence_recipients(state, &request);
+        let resources = subscription_presence_recipients(state, &request).await;
         let mut delivered = 0usize;
         let mut delivered_resources = Vec::new();
         if resources.is_empty() && request.subscription_type == SubscriptionType::Subscribe {

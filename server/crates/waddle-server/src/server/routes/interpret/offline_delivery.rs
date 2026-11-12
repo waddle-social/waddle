@@ -180,12 +180,9 @@ pub(crate) async fn bounce_offline_quota(
     let mut delivered = false;
     let resources = match sender_jid.clone().try_into_full() {
         Ok(full) => vec![full],
-        Err(bare) => match deps.user_registry {
-            Some(user_registry) => {
-                waddle_xmpp::registry::get_resources_for_user(user_registry, &bare).await
-            }
-            None => Vec::new(),
-        },
+        Err(bare) => {
+            crate::server::routes::interpret::recipient_selection::live_resources(deps, &bare).await
+        }
     };
     for full in resources {
         match super::deliver_direct_to_full_with_registered_remote(deps, &full, &bounce_stanza)

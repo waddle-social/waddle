@@ -170,11 +170,11 @@ async fn deliver_to_user_resources(
     already_delivered: &mut HashSet<FullJid>,
     metrics: &mut FanOutMetrics,
 ) {
-    let resources: Vec<FullJid> = state
-        .deps
-        .protocol
-        .connection_registry
-        .available_resources_for_user(target)
+    let resources: Vec<FullJid> =
+        crate::server::routes::websocket::handlers::account_reads::available_resources(
+            state, target,
+        )
+        .await
         .into_iter()
         .map(|(jid, _priority)| jid)
         .collect();

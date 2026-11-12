@@ -810,11 +810,9 @@ pub(super) async fn deliver_muc_user_message(
     deps: &Deps<'_>,
 ) -> Result<(), MucUserDeliveryError> {
     use crate::server::routes::interpret::effects::invite::MucUserRoute;
-    let mut resources = waddle_xmpp::registry::get_resources_for_user(
-        &state.deps.protocol.user_registry,
-        recipient,
-    )
-    .await;
+    let mut resources =
+        crate::server::routes::websocket::handlers::account_reads::resources(state, recipient)
+            .await;
     resources.sort();
     resources.dedup();
     let fallback = PendingRow {

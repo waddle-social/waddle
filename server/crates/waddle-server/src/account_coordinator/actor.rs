@@ -708,6 +708,7 @@ impl AccountCoordinatorActor {
             available: resources.available_resources(),
             routable: resources.routable_resources(),
             routing: resources.routing_snapshot(),
+            presence: resources.presence_states(),
             roster_interested: resources.roster_interested_resources(),
             blocklist_interested: resources.blocklist_interested_resources(),
         })

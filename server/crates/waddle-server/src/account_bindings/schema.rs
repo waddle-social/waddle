@@ -1,6 +1,6 @@
 //! Owner-side DDL for the account resource relations.
 
-use crate::db::{Database, DatabaseError};
+use crate::db::{Database, DatabaseDriver, DatabaseError};
 use crate::sm_authority::bootstrap_durable_sm_owner_schema;
 
 /// Create the account resource relations if they are absent. This runs in
@@ -36,6 +36,7 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), DatabaseError> 
                 presence_show INTEGER,
                 presence_status TEXT,
                 presence_priority INTEGER NOT NULL,
+                presence_payloads TEXT,
                 carbons_enabled INTEGER NOT NULL,
                 roster_interested INTEGER NOT NULL,
                 blocklist_interested INTEGER NOT NULL,
@@ -80,6 +81,41 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), DatabaseError> 
     let connection = db.guard().await?;
     for statement in statements {
         connection.execute(&statement, ()).await?;
+    }
+    // A relation created before `presence_payloads` existed gains the
+    // column here. SQLite has no conditional column addition, so its
+    // column list is read first.
+    match db.driver() {
+        DatabaseDriver::Postgres => {
+            connection
+                .execute(
+                    "ALTER TABLE account_resource_bindings \
+                     ADD COLUMN IF NOT EXISTS presence_payloads TEXT",
+                    (),
+                )
+                .await?;
+        }
+        DatabaseDriver::Sqlite => {
+            let present = {
+                let mut rows = connection
+                    .query(
+                        "SELECT 1 FROM pragma_table_info('account_resource_bindings') \
+                         WHERE name = 'presence_payloads'",
+                        (),
+                    )
+                    .await?;
+                rows.next().await?.is_some()
+            };
+            if !present {
+                connection
+                    .execute(
+                        "ALTER TABLE account_resource_bindings \
+                         ADD COLUMN presence_payloads TEXT",
+                        (),
+                    )
+                    .await?;
+            }
+        }
     }
     Ok(())
 }

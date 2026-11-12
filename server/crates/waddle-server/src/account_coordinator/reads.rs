@@ -7,6 +7,7 @@
 //! the registry is not written in that mode.
 
 use jid::{BareJid, FullJid};
+use waddle_xmpp::ownership::account_coordinator::AccountResourcePresence;
 use waddle_xmpp::registry::user_actor::ResourceRoutingState;
 
 use super::error::AccountCoordinatorError;
@@ -58,6 +59,62 @@ impl AccountAuthoritySelection {
             view.routing
                 .into_iter()
                 .filter(|resource| !(resource.available && resource.priority < 0))
+                .map(|resource| resource.jid)
+                .collect()
+        }))
+    }
+
+    /// Every active resource, with no presence filter.
+    pub(crate) async fn resources(
+        &self,
+        account: &BareJid,
+    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
+        Some(
+            self.coordinator_view(account)
+                .await?
+                .map(|view| view.resources),
+        )
+    }
+
+    /// Every presence-available resource with its priority.
+    pub(crate) async fn available_resources(
+        &self,
+        account: &BareJid,
+    ) -> Option<Result<Vec<(FullJid, i8)>, AccountCoordinatorError>> {
+        Some(
+            self.coordinator_view(account)
+                .await?
+                .map(|view| view.available),
+        )
+    }
+
+    /// The presence an available resource last announced. `Ok(None)` means
+    /// the resource is not available.
+    pub(crate) async fn presence(
+        &self,
+        resource: &FullJid,
+    ) -> Option<Result<Option<AccountResourcePresence>, AccountCoordinatorError>> {
+        Some(
+            self.coordinator_view(&resource.to_bare())
+                .await?
+                .map(|view| {
+                    view.presence
+                        .into_iter()
+                        .find(|presence| &presence.jid == resource)
+                }),
+        )
+    }
+
+    /// The active resources with carbons enabled, other than `exclude`.
+    pub(crate) async fn carbon_resources(
+        &self,
+        account: &BareJid,
+        exclude: &[FullJid],
+    ) -> Option<Result<Vec<FullJid>, AccountCoordinatorError>> {
+        Some(self.coordinator_view(account).await?.map(|view| {
+            view.routing
+                .into_iter()
+                .filter(|resource| resource.carbons_enabled && !exclude.contains(&resource.jid))
                 .map(|resource| resource.jid)
                 .collect()
         }))

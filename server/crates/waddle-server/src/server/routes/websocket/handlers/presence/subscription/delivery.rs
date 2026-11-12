@@ -50,11 +50,9 @@ pub(super) async fn send_existing_subscription_ack(
         status,
         payloads,
     ));
-    let live_resources = waddle_xmpp::registry::get_resources_for_user(
-        &state.deps.protocol.user_registry,
-        requester,
-    )
-    .await;
+    let live_resources =
+        crate::server::routes::websocket::handlers::account_reads::resources(state, requester)
+            .await;
     if try_route_presence_to_bare_remote(state, requester, &stanza, ordered_relay_origin).await {
         return;
     }
@@ -347,14 +345,12 @@ async fn available_live_and_detached_resources_for_user(
     state: &WebSocketState,
     user: &BareJid,
 ) -> Vec<FullJid> {
-    let mut resources: Vec<FullJid> = state
-        .deps
-        .protocol
-        .connection_registry
-        .available_resources_for_user(user)
-        .into_iter()
-        .map(|(jid, _)| jid)
-        .collect();
+    let mut resources: Vec<FullJid> =
+        crate::server::routes::websocket::handlers::account_reads::available_resources(state, user)
+            .await
+            .into_iter()
+            .map(|(jid, _)| jid)
+            .collect();
     match state
         .deps
         .protocol
@@ -380,11 +376,9 @@ async fn presence_state_for_available_resource(
     state: &WebSocketState,
     resource: &FullJid,
 ) -> Option<PresenceStateSnapshot> {
-    if let Some(state) = state
-        .deps
-        .protocol
-        .connection_registry
-        .presence_state(resource)
+    if let Some(state) =
+        crate::server::routes::websocket::handlers::account_reads::presence_state(state, resource)
+            .await
     {
         return Some(PresenceStateSnapshot {
             show: state.show.as_deref().and_then(show_from_name),
@@ -435,14 +429,12 @@ async fn send_stanza_to_available_user_resources_and_detached_available(
         return;
     }
 
-    let live_resources: Vec<FullJid> = state
-        .deps
-        .protocol
-        .connection_registry
-        .available_resources_for_user(user)
-        .into_iter()
-        .map(|(jid, _)| jid)
-        .collect();
+    let live_resources: Vec<FullJid> =
+        crate::server::routes::websocket::handlers::account_reads::available_resources(state, user)
+            .await
+            .into_iter()
+            .map(|(jid, _)| jid)
+            .collect();
     let mut delivered_resources = Vec::new();
     for resource in &live_resources {
         if state
@@ -465,14 +457,12 @@ async fn send_stanza_to_available_user_resources_and_detached_available(
     )
     .await;
     delivered_resources.extend(recorded_resources);
-    for resource in state
-        .deps
-        .protocol
-        .connection_registry
-        .available_resources_for_user(user)
-        .into_iter()
-        .map(|(jid, _)| jid)
-        .filter(|resource| !delivered_resources.contains(resource))
+    for resource in
+        crate::server::routes::websocket::handlers::account_reads::available_resources(state, user)
+            .await
+            .into_iter()
+            .map(|(jid, _)| jid)
+            .filter(|resource| !delivered_resources.contains(resource))
     {
         let _ = state
             .deps
@@ -687,25 +677,29 @@ pub(super) async fn record_subscription_stanza_for_detached_resources_excluding(
     recorded
 }
 
-pub(super) fn subscription_presence_recipients(
+pub(super) async fn subscription_presence_recipients(
     state: &WebSocketState,
     request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
 ) -> Vec<FullJid> {
     match request.subscription_type {
-        SubscriptionType::Subscribe => state
-            .deps
-            .protocol
-            .connection_registry
-            .available_resources_for_user(&request.to)
+        SubscriptionType::Subscribe => {
+            crate::server::routes::websocket::handlers::account_reads::available_resources(
+                state,
+                &request.to,
+            )
+            .await
             .into_iter()
             .map(|(jid, _)| jid)
-            .collect(),
+            .collect()
+        }
         SubscriptionType::Subscribed
         | SubscriptionType::Unsubscribe
-        | SubscriptionType::Unsubscribed => state
-            .deps
-            .protocol
-            .connection_registry
-            .roster_interested_resources_for_user(&request.to),
+        | SubscriptionType::Unsubscribed => {
+            crate::server::routes::websocket::handlers::account_reads::roster_interested(
+                state,
+                &request.to,
+            )
+            .await
+        }
     }
 }

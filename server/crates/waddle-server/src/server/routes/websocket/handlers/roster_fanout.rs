@@ -224,31 +224,6 @@ async fn attempt_resource(
     }
 }
 
-/// The connected resources of `user` that want roster pushes, read from the
-/// selected account authority. When the coordinator is selected and does
-/// not answer, no live resource is pushed to in this pass; the registry is
-/// not written in that mode and is not read instead.
-async fn roster_interested_resources(state: &WebSocketState, user: &BareJid) -> Vec<FullJid> {
-    match state
-        .deps
-        .app_state
-        .account_authority()
-        .roster_interested(user)
-        .await
-    {
-        Some(Ok(resources)) => resources,
-        Some(Err(error)) => {
-            warn!(%error, "account coordinator did not answer the roster-interest read");
-            Vec::new()
-        }
-        None => state
-            .deps
-            .protocol
-            .connection_registry
-            .roster_interested_resources_for_user(user),
-    }
-}
-
 pub(crate) async fn send_roster_push_to_resources(
     state: &WebSocketState,
     user: &BareJid,
@@ -258,7 +233,7 @@ pub(crate) async fn send_roster_push_to_resources(
 ) {
     let registry = &state.deps.protocol.connection_registry;
     let included = |resource: &FullJid| excluded != Some(resource);
-    let live = roster_interested_resources(state, user).await;
+    let live = super::account_reads::roster_interested(state, user).await;
     let live_set: BTreeSet<_> = live.iter().cloned().collect();
     let mut pushes = BTreeMap::new();
     // Finished means no further attempt in this pass, not confirmed acceptance.
@@ -327,7 +302,7 @@ pub(crate) async fn send_roster_push_to_resources(
     }
     // Pick up connections published during handoff. Pure futures stay owned by
     // this fanout; cancellation drops them rather than spawning recipient tasks.
-    let fallback: BTreeSet<_> = roster_interested_resources(state, user)
+    let fallback: BTreeSet<_> = super::account_reads::roster_interested(state, user)
         .await
         .into_iter()
         .chain(rejected.iter().cloned())

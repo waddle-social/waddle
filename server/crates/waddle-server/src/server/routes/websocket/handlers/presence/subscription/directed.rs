@@ -49,11 +49,9 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_dir
         return;
     }
 
-    for resource in waddle_xmpp::registry::get_resources_for_user(
-        &state.deps.protocol.user_registry,
-        &target_bare,
-    )
-    .await
+    for resource in
+        crate::server::routes::websocket::handlers::account_reads::resources(state, &target_bare)
+            .await
     {
         let _ = state
             .deps

@@ -220,9 +220,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 // so events still reach them via the per-resource SM
                 // stash even when the user has no live socket at publish
                 // time.
-                let mut all = waddle_xmpp::registry::get_resources_for_user(
-                    &state.deps.protocol.user_registry,
-                    bare,
+                let mut all = crate::server::routes::websocket::handlers::account_reads::resources(
+                    state, bare,
                 )
                 .await;
                 match state

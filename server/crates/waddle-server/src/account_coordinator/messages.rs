@@ -2,7 +2,7 @@
 
 use jid::FullJid;
 use waddle_xmpp::ownership::account_coordinator::{
-    AccountResourceRouting, BindingFenceError, Presentation,
+    AccountResourcePresence, AccountResourceRouting, BindingFenceError, Presentation,
 };
 use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceBindingState, AccountResourceExecution, AccountResourceOperation,
@@ -44,7 +44,7 @@ pub struct SlotStatus {
 /// One coherent read of an account's resources. Every list is ordered by
 /// full JID and all are taken in one coordinator turn, so destination
 /// selection and carbon policy agree.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AccountView {
     /// Every resource with an active binding, with no presence filter.
     pub resources: Vec<FullJid>,
@@ -54,6 +54,8 @@ pub struct AccountView {
     pub routable: Vec<FullJid>,
     /// Availability, priority and carbons for every active resource.
     pub routing: Vec<AccountResourceRouting>,
+    /// The announced presence of every presence-available resource.
+    pub presence: Vec<AccountResourcePresence>,
     /// Active resources that want roster pushes.
     pub roster_interested: Vec<FullJid>,
     /// Active resources that want block-list pushes.

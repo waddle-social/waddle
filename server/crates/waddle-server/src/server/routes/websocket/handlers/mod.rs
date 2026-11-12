@@ -3,4 +3,5 @@ pub mod message;
 pub mod presence;
 pub mod pubsub_fanout;
 
+pub(crate) mod account_reads;
 pub(crate) mod roster_fanout;
