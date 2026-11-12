@@ -485,6 +485,9 @@ struct TurnGates {
     send_window_pause_deadline: Option<tokio::time::Instant>,
     /// Deferred inbound frames are queued ahead of the socket.
     deferred_pending: bool,
+    /// When a durable stream-management operation with an unknown commit
+    /// outcome is next settled.
+    durable_sm_settlement_due: Option<tokio::time::Instant>,
 }
 
 /// What the live owner shares with, or borrows from, the rest of the
@@ -553,6 +556,9 @@ enum LoopEvent {
     OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
     TimerExpired(TimerId),
     SendWindowPauseDeadline,
+    /// A durable stream-management operation whose commit outcome is unknown
+    /// is due another settlement attempt.
+    DurableSmSettlement,
 }
 
 impl LoopEvent {
@@ -571,7 +577,9 @@ impl LoopEvent {
                 ActorTurnEvent::InboundFrame
             }
             Self::Outbound(_) => ActorTurnEvent::OutboundDelivery,
-            Self::TimerExpired(_) | Self::SendWindowPauseDeadline => ActorTurnEvent::Timer,
+            Self::TimerExpired(_) | Self::SendWindowPauseDeadline | Self::DurableSmSettlement => {
+                ActorTurnEvent::Timer
+            }
         }
     }
 }
@@ -1030,6 +1038,7 @@ impl LiveSocketState {
             send_window_paused,
             send_window_pause_deadline,
             deferred_pending,
+            durable_sm_settlement_due: conn.durable_sm.settlement_due(),
         };
         // The wait prefers client input to its timers. A frame the socket
         // already holds must therefore be ready before the wait is polled,
@@ -1066,6 +1075,7 @@ impl LiveSocketState {
             send_window_paused,
             send_window_pause_deadline,
             deferred_pending,
+            durable_sm_settlement_due,
         } = self.turn;
         let Some(socket_halves) = self.socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
@@ -1117,6 +1127,17 @@ impl LiveSocketState {
             }
 
             command = commands, if commands_offered => return TurnEvent::Command(command),
+
+            // An enable or resume whose commit outcome is unknown owes the
+            // client its reply. The attempt is spaced by its own backoff, and
+            // sits ahead of the data sources so a busy client cannot keep its
+            // own stream-management outcome waiting.
+            _ = async {
+                match durable_sm_settlement_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => LoopEvent::DurableSmSettlement,
 
             // A bounded drain-deferred inbound chunk is due.
             _ = std::future::ready(()), if deferred_pending => LoopEvent::DeferredInbound,
@@ -1555,6 +1576,46 @@ impl LiveSocketState {
                      closing into detach-for-resume"
                 );
                 return ControlFlow::Break(Retire::settled(RetirementCause::PeerUnresponsive));
+            }
+
+            LoopEvent::DurableSmSettlement => {
+                // The resolution is idempotent under its operation id, so the
+                // control sources may end it early; the next turn then
+                // retires the connection for the control event itself.
+                let settlement = tokio::select! {
+                    biased;
+                    _ = pump_stop.stopped() => return ControlFlow::Continue(()),
+                    _ = admission.identity_revoked() => return ControlFlow::Continue(()),
+                    _ = admission_permit.revoked() => return ControlFlow::Continue(()),
+                    _ = shutdown_token.cancelled() => return ControlFlow::Continue(()),
+                    settlement = super::stream_management::settle_unresolved_enable(
+                        state.as_ref(),
+                        &mut conn.durable_sm,
+                        &mut conn.pending_sm_enable_commit,
+                    ) => settlement,
+                };
+                let reply = match settlement {
+                    super::stream_management::EnableSettlement::Pending => {
+                        return ControlFlow::Continue(());
+                    }
+                    super::stream_management::EnableSettlement::Enabled(reply)
+                    | super::stream_management::EnableSettlement::Failed(reply) => reply,
+                };
+                if !matches!(
+                    send_ws_message_with_authority(
+                        &mut ws_sender,
+                        Message::Text(reply.into_serialized_xml().into()),
+                        "Failed to send settled SM enable reply",
+                        Some((admission_permit, shutdown_token)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
+                    return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
+                }
+                // `<enabled/>` is on the wire: the projection starts counting
+                // exactly as it does after an enable answered in its own turn.
+                conn.publish_pending_sm_enable(state.as_ref());
             }
         }
         ControlFlow::Continue(())
@@ -2875,8 +2936,11 @@ where
 async fn cleanup_frame_authority_revocation(_state: &WebSocketState, conn: &mut WsConnState) {
     // `<enable/>` has not reached its wire commit point yet. Dropping this
     // typed guard inventories exact claim release; a stale generation must
-    // never send `<enabled/>`.
-    drop(conn.pending_sm_enable_commit.take());
+    // never send `<enabled/>`. A session the durable authority already
+    // committed for that reply is closed, since no client can name it.
+    if conn.pending_sm_enable_commit.take().is_some() {
+        super::stream_management::close_unannounced_session(&mut conn.durable_sm).await;
+    }
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         conn.pending_resume_h = None;
         drop(conn.pending_resume_claim.take());

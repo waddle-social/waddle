@@ -645,6 +645,7 @@ async fn handle_xmpp_frame_impl(
         pre_final_principal_recheck_test_hook,
         suppress_sm_record_next_batch,
         pending_sm_enable_commit,
+        durable_sm,
         state_machine,
         registry_owner,
         resume_endpoint_handoff_blocked,
@@ -688,6 +689,7 @@ async fn handle_xmpp_frame_impl(
             roster_interested,
             blocklist_interested,
             pending_sm_enable_commit,
+            durable_sm,
         };
         return match await_control_stage(
             admission,

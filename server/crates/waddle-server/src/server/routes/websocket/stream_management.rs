@@ -215,6 +215,11 @@ mod ingress_checkpoint_tests {
             &mut sm,
             &phase,
             &mut pending,
+            implementation::SmEnableOwner {
+                durable_sm: &mut DurableSmLink::default(),
+                binding: None,
+                session: None,
+            },
         )
         .await;
         let enabled = frames
@@ -279,7 +284,11 @@ mod ingress_checkpoint_tests {
     }
 }
 
+mod durable;
 mod implementation;
+pub(super) use durable::{
+    close_unannounced_session, settle_unresolved_enable, DurableSmLink, EnableSettlement,
+};
 #[cfg(test)]
 pub(super) use implementation::apply_sm_ack;
 pub(super) use implementation::apply_sm_ack_with_fence;

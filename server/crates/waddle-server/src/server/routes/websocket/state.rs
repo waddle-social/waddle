@@ -1864,6 +1864,9 @@ pub(super) struct WsConnState {
     /// remains guarded and SM stays locally disabled; dropping the
     /// connection or failing the write terminalizes the exact claim.
     pub(super) pending_sm_enable_commit: Option<super::stream_management::SmEnableCommit>,
+    /// The connection's handle on the durable stream-management authority.
+    /// `Unbound` whenever the selector is `legacy`.
+    pub(super) durable_sm: super::stream_management::DurableSmLink,
     /// Inbound text frames pulled off the socket by the mid-batch ack
     /// drain (issue #1089) that were NOT `<a/>` acks. The batch writer
     /// may only consume acks out of order; everything else must reach
@@ -2007,6 +2010,7 @@ impl WsConnState {
             live_resume_control,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
+            durable_sm: super::stream_management::DurableSmLink::default(),
             deferred_inbound: VecDeque::new(),
             sm_recovery_required: false,
             terminal_sm_recovery: StreamManagementState::new(),
