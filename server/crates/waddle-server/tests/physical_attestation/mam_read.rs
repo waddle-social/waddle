@@ -16,7 +16,9 @@ use waddle_xmpp_core::mam::ArchivedMessage;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 #[cfg(feature = "clustering")]
-use waddle_server::clustering::claims::initialize_fresh_claims_owner;
+use waddle_server::clustering::allowlist::{prepare_peer_allowlist_owner, AllowlistRemoval};
+#[cfg(feature = "clustering")]
+use waddle_server::clustering::claims::{initialize_fresh_claims_owner, prepare_claims_owner};
 #[cfg(feature = "clustering")]
 use waddle_xmpp::muc::RoomClaimFenceContext;
 #[cfg(feature = "clustering")]
@@ -505,6 +507,19 @@ async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_gra
         initialize_fresh_claims_owner(&owner_database, &identity)
             .await
             .expect("prepare exact claim schema");
+        // The claim capability the MAM selection attaches covers the node,
+        // steal-intent, reaper-cursor and allowlist relations as well.
+        prepare_claims_owner(&owner_database, &identity)
+            .await
+            .expect("complete the claim authority relations");
+        prepare_peer_allowlist_owner(
+            &owner_database,
+            &identity,
+            &[libp2p::PeerId::random()],
+            AllowlistRemoval::Refuse,
+        )
+        .await
+        .expect("prepare the peer allowlist");
         drop(owner_database);
     }
 
@@ -539,6 +554,22 @@ async fn database_mam_storage_uses_one_attested_main_slot_and_rejects_unsafe_gra
         ),
         format!(
             "GRANT SELECT, INSERT, UPDATE ON {}.xmpp_occupancy_authority TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON {}.clustering_nodes TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.clustering_steal_intents TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON {}.clustering_orphan_reaper_cursors TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT ON {}.clustering_peer_allowlist TO {}",
             fixture.target, fixture.runtime
         ),
         format!(
