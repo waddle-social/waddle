@@ -1037,6 +1037,28 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     ctx: SmCtx<'_>,
     finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
+    // Under the durable selector every resumable session belongs to the
+    // durable authority, so every `<resume/>` is its decision.
+    if let Some(store) = super::durable::selected_store(state) {
+        return match super::durable::resume(store, resume, state, ctx).await {
+            // The reply is decided when the endpoint is published, or when
+            // an unknown commit outcome is settled.
+            super::durable::DurableResumeStep::Staged => Vec::new(),
+            super::durable::DurableResumeStep::Failed(terminal) => {
+                observe::observe_sm_resume(&terminal);
+                match terminal.outcome() {
+                    observe::SmResumeOutcome::ShutdownAbandoned => {
+                        observe::observe_sm_resume_finalized(
+                            observe::SmResumeOutcome::ShutdownAbandoned,
+                            None,
+                        );
+                    }
+                    outcome => *finalized_resume_outcome = Some(outcome),
+                }
+                terminal.into_frames()
+            }
+        };
+    }
     let terminal = handle_sm_resume_terminal(resume, state, ctx).await;
     observe::observe_sm_resume(&terminal);
     // Terminal results are recorded only once the frame carrying them is

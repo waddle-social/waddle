@@ -90,7 +90,8 @@ mod registration;
 
 pub(super) use observe::observe_sm_resume_finalized;
 pub(super) use registration::{
-    finalize_sm_after_registry_registration, reject_unregistered_resume, SmRegistrationFinalization,
+    abandon_unpublished_resume, finalize_sm_after_registry_registration,
+    reject_unregistered_resume, SmRegistrationFinalization,
 };
 
 #[cfg(test)]
@@ -287,8 +288,9 @@ mod ingress_checkpoint_tests {
 mod durable;
 mod implementation;
 pub(super) use durable::{
-    close_unannounced_session, settle_unresolved_enable, CustodyFrame, CustodyRefusal,
-    DurableSmLink, EnableSettlement, LiveCustody,
+    close_unannounced_session, release_unresolved_resume, settle_unresolved_enable,
+    settle_unresolved_resume, CustodyFrame, CustodyRefusal, DurableResumeSettlement, DurableSmLink,
+    EnableSettlement, LiveCustody,
 };
 #[cfg(test)]
 pub(super) use implementation::apply_sm_ack;

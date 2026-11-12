@@ -104,6 +104,18 @@ async fn complete_pending_resume_claim(
     outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
     failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
 ) -> SmFinalizationReport {
+    if conn.durable_sm.is_hydrating() {
+        return complete_durable_resume(
+            state,
+            conn,
+            jid,
+            owner,
+            &stream_id,
+            outbound_receiver,
+            failed_resume_wakeups,
+        )
+        .await;
+    }
     if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
         .await
         .is_err()
@@ -324,6 +336,107 @@ async fn complete_pending_resume_claim(
     }
 }
 
+/// Complete a resume the durable authority committed, now that its endpoint
+/// is registered.
+///
+/// The authority publishes the session as live and returns the frames
+/// admitted while it hydrated. `<resumed/>` is built from the commit's
+/// witness, and the caller writes it, then the replay, then that tail, before
+/// any live frame. If the completion fails the session is returned to
+/// detached, the registration is rolled back, and the client is told the
+/// resume failed.
+async fn complete_durable_resume(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    stream_id: &str,
+    outbound_receiver: Option<&waddle_xmpp::registry::SocketOutboundReceiver>,
+    failed_resume_wakeups: &mut DeferredPendingFlushWakeups,
+) -> SmFinalizationReport {
+    conn.pending_resume_h = None;
+    match conn.durable_sm.complete_hydration(&mut conn.sm_state).await {
+        Ok(super::durable::DurableResumed {
+            resumed,
+            replay_after_h,
+        }) => SmFinalizationReport {
+            finalization: SmRegistrationFinalization::ReplaceWithResumed {
+                resumed,
+                replay_after_h,
+            },
+            resume_outcome: Some(super::observe::SmResumeOutcome::Resumed),
+        },
+        Err(failure) => {
+            warn!(stream_id, jid = %jid, ?failure, "durable SM resume was not published");
+            let handled = conn.sm_state.inbound_count();
+            let known = conn.durable_sm.abandon_hydration().await;
+            reset_resume_attempt(
+                state,
+                conn,
+                jid,
+                Some(owner),
+                Some(stream_id),
+                outbound_receiver,
+                failed_resume_wakeups,
+            )
+            .await;
+            if !known {
+                // Whether this binding still owns the session is unknown, so
+                // the client may not bind afresh on this stream.
+                conn.phase = ConnectionPhase::closing(Some(jid.clone()));
+            }
+            let (condition, outcome) = match failure {
+                super::durable::HydrationFailure::Superseded => {
+                    ("item-not-found", super::observe::SmResumeOutcome::NotFound)
+                }
+                super::durable::HydrationFailure::NotHydrating
+                | super::durable::HydrationFailure::Unavailable => (
+                    "internal-server-error",
+                    super::observe::SmResumeOutcome::Storage,
+                ),
+            };
+            SmFinalizationReport {
+                finalization: SmRegistrationFinalization::ReplaceWithFailed(
+                    SmFailed::resume_failed(condition, handled),
+                ),
+                resume_outcome: Some(outcome),
+            }
+        }
+    }
+}
+
+/// Undo a committed durable resume whose endpoint was not published: the
+/// session returns to detached and the connection to its authenticated,
+/// unbound state. Returns whether there was such a resume; a connection that
+/// staged none is left untouched.
+pub(in crate::server::routes::websocket) async fn abandon_unpublished_resume(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+) -> bool {
+    if !conn.durable_sm.is_hydrating() {
+        return false;
+    }
+    let known = conn.durable_sm.abandon_hydration().await;
+    conn.pending_resume_stream_id = None;
+    conn.pending_resume_h = None;
+    if let Some(jid) = conn.phase.bound_jid().cloned() {
+        reset_resume_attempt(
+            state,
+            conn,
+            &jid,
+            None,
+            None,
+            None,
+            &mut DeferredPendingFlushWakeups::default(),
+        )
+        .await;
+        if !known {
+            conn.phase = ConnectionPhase::closing(None);
+        }
+    }
+    true
+}
+
 /// A known detached stream can outlive its bind authority across a Recreate
 /// cutover. Fail resumption on the SM layer so the authenticated client can
 /// bind afresh and retry its unhandled outbound tail on this same socket.
@@ -333,6 +446,9 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     jid: &FullJid,
 ) -> SmRegistrationFinalization {
     let handled = conn.sm_state.inbound_count();
+    // A resume the durable authority committed is returned to detached; the
+    // session stays resumable for the rest of its window.
+    conn.durable_sm.abandon_hydration().await;
     if let Some(claim) = conn.pending_resume_claim.take() {
         claim.release().await;
     }

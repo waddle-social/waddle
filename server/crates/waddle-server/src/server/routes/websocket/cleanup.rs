@@ -833,6 +833,12 @@ async fn cleanup_connection_shutdown_inner(
     force_detach_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
 ) -> ConnectionShutdownOutcome {
     let force_detach = force_detach_origin.is_some();
+    // A durable resume that committed but never published its endpoint is
+    // returned to the authority first: the session stays detached and
+    // resumable, and this connection is cleaned up as one that never bound.
+    // A resume whose outcome is still unknown is settled before that.
+    super::stream_management::release_unresolved_resume(state, &mut conn.durable_sm).await;
+    super::stream_management::abandon_unpublished_resume(state, conn).await;
     // Registry ownership protects the replacement's route, not the departing
     // occupancy. Every terminal path still owes its generation-scoped sweep.
     if superseded && !conn.sm_recovery_required {

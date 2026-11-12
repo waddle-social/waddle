@@ -341,3 +341,40 @@ async fn answering_a_request_reports_the_handled_count_to_the_authority() {
     })
     .await;
 }
+
+fn resume(previd: &str, h: u32) -> Element {
+    sm("resume")
+        .attr(nc!("previd"), previd)
+        .attr(nc!("h"), h.to_string())
+        .build()
+}
+
+#[tokio::test]
+async fn a_resume_token_that_names_no_session_fails_and_leaves_the_client_free_to_bind() {
+    let fixture = fixture(&[]).await;
+    let mut alice = authenticate(&fixture.server, 0).await;
+
+    // Neither a value that is not a token nor a well-formed token nobody was
+    // issued names a session.
+    for previd in [
+        "8a1c5d6e-0000-4000-8000-000000000000",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
+        send_element(&mut alice, resume(previd, 0)).await;
+        let failed = recv_sm(&mut alice, "failed").await;
+        assert!(failed
+            .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+    }
+
+    assert_eq!(
+        alice
+            .bind("phone")
+            .await
+            .expect("fresh bind after rejection"),
+        "alice@localhost/phone"
+    );
+    assert!(sessions(&fixture.pool, "alice@localhost/phone")
+        .await
+        .is_empty());
+}
