@@ -352,3 +352,113 @@ pub(super) async fn update(
     }
     Ok(())
 }
+
+/// Load the session a resume token digest names, optionally locking it.
+pub(super) async fn load_by_token(
+    tx: &mut Transaction<'_>,
+    digest: &SmResumeTokenDigest,
+    lock: bool,
+) -> Result<Option<DurableSessionRecord>, DurableSmError> {
+    let lock = if lock { for_update(tx.driver()) } else { "" };
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT {COLUMNS} FROM sm_durable_sessions WHERE resume_token_sha256 = ?{lock}"
+            ),
+            crate::db_params![digest_column(digest)],
+        )
+        .await?;
+    rows.next().await?.as_ref().map(decode).transpose()
+}
+
+/// Lock every session of one bound resource, in session-key order so two
+/// transactions take the row locks in the same order.
+pub(super) async fn load_resource_for_update(
+    tx: &mut Transaction<'_>,
+    resource: &FullJid,
+) -> Result<Vec<DurableSessionRecord>, DurableSmError> {
+    let lock = for_update(tx.driver());
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT {COLUMNS} FROM sm_durable_sessions WHERE full_jid = ? \
+                 ORDER BY session_id{lock}"
+            ),
+            crate::db_params![resource.to_string()],
+        )
+        .await?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next().await? {
+        sessions.push(decode(&row)?);
+    }
+    Ok(sessions)
+}
+
+/// Move every `Live` or `TransferHydrating` session to `Detached`, keeping
+/// an existing detach time.
+pub(super) async fn detach_all_owned(
+    tx: &mut Transaction<'_>,
+    now: DateTime<Utc>,
+) -> Result<u64, DurableSmError> {
+    let now_ms = now.timestamp_millis();
+    Ok(tx
+        .execute(
+            "UPDATE sm_durable_sessions SET state = 2, \
+             detached_at_ms = COALESCE(detached_at_ms, ?), updated_at_ms = ? \
+             WHERE state IN (1, 3)",
+            crate::db_params![now_ms, now_ms],
+        )
+        .await?)
+}
+
+/// Detached sessions whose resume window has elapsed, oldest first.
+pub(super) async fn due_for_expiry(
+    tx: &mut Transaction<'_>,
+    now: DateTime<Utc>,
+    limit: u32,
+) -> Result<Vec<SmSessionKey>, DurableSmError> {
+    let mut rows = tx
+        .query(
+            "SELECT session_id FROM sm_durable_sessions \
+             WHERE state = 2 AND detached_at_ms IS NOT NULL \
+               AND detached_at_ms + max_resume_secs * 1000 <= ? \
+             ORDER BY detached_at_ms LIMIT ?",
+            crate::db_params![now.timestamp_millis(), i64::from(limit)],
+        )
+        .await?;
+    let mut due = Vec::new();
+    while let Some(row) = rows.next().await? {
+        due.push(SmSessionKey::from_uuid(uuid(
+            &row.get::<String>(0)?,
+            "session_id",
+        )?));
+    }
+    Ok(due)
+}
+
+pub(super) async fn delete_operations(
+    tx: &mut Transaction<'_>,
+    session: SmSessionKey,
+) -> Result<(), DurableSmError> {
+    tx.execute(
+        "DELETE FROM sm_durable_operations WHERE session_id = ?",
+        crate::db_params![session.as_uuid().to_string()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Delete terminal rows that retain no frames and were last updated before
+/// `before`.
+pub(super) async fn purge_released_terminal(
+    tx: &mut Transaction<'_>,
+    before: DateTime<Utc>,
+) -> Result<u64, DurableSmError> {
+    Ok(tx
+        .execute(
+            "DELETE FROM sm_durable_sessions \
+             WHERE state = 4 AND outbound_acked = outbound_appended AND updated_at_ms < ?",
+            crate::db_params![before.timestamp_millis()],
+        )
+        .await?)
+}

@@ -1,19 +1,70 @@
-//! Transaction-scoped access to `sm_unacked` rows.
+//! Transaction-scoped access to `sm_sessions` and `sm_unacked` rows.
 //!
-//! The durable session authority stores a session's retained frames in this
-//! relation, inside the transaction that holds its session row lock. Every function here runs on
+//! The durable session authority stores a detached session's resource
+//! snapshot and its retained frames in these relations, inside the
+//! transaction that holds its session row lock. Every function here runs on
 //! the caller's transaction and uses the portable store's row encoding, so a
 //! row written by either writer decodes the same way.
 
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::stream_management::persistence::{PersistedUnackedStanza, SmPersistenceError};
+use waddle_xmpp::stream_management::persistence::{
+    PersistedSession, PersistedUnackedStanza, SmPersistenceError,
+};
 
-use super::codec::{bounded_provenance_projection, decode_unacked};
+use super::atomic_store::{upsert_session_row, PreparedSnapshot};
+use super::codec::{bounded_provenance_projection, decode_session, decode_unacked};
 use super::implementation::append_unacked_in_transaction;
 use crate::db::{DatabaseDriver, Transaction};
 
 fn storage(error: crate::db::DatabaseError) -> SmPersistenceError {
     SmPersistenceError::Other(error.to_string())
+}
+
+/// Write the session row for `session` with its principal reference.
+pub(crate) async fn store_resource_snapshot(
+    tx: &mut Transaction<'_>,
+    principal: &AuthenticatedPrincipalRef,
+    session: &PersistedSession,
+) -> Result<(), SmPersistenceError> {
+    let prepared = PreparedSnapshot::new(Some(principal), session, &[])?;
+    upsert_session_row(tx, &prepared).await
+}
+
+pub(crate) async fn load_resource_snapshot(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+) -> Result<Option<PersistedSession>, SmPersistenceError> {
+    let mut rows = tx
+        .query(
+            "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, \
+                    outbound_count, last_acked, max_resume_secs, detached_at_ms, \
+                    max_resume_duration_ms, carbons_enabled, roster_interested, \
+                    blocklist_interested, presence_available, presence_show, \
+                    presence_status, presence_priority, replay_gap_through, \
+                    presence_payloads \
+             FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(storage)?;
+    match rows.next().await.map_err(storage)? {
+        Some(row) => decode_session(&row).map(Some),
+        None => Ok(None),
+    }
+}
+
+pub(crate) async fn delete_resource_snapshot(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+) -> Result<(), SmPersistenceError> {
+    tx.execute(
+        "DELETE FROM sm_sessions WHERE stream_id = ?",
+        crate::db_params![stream_id.as_str().to_string()],
+    )
+    .await
+    .map_err(storage)?;
+    Ok(())
 }
 
 /// Insert one retained frame under its stored sequence.
@@ -71,6 +122,19 @@ pub(crate) async fn delete_unacked_through(
         )
     };
     tx.execute(sql, params).await.map_err(storage)?;
+    Ok(())
+}
+
+pub(crate) async fn delete_all_unacked(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+) -> Result<(), SmPersistenceError> {
+    tx.execute(
+        "DELETE FROM sm_unacked WHERE stream_id = ?",
+        crate::db_params![stream_id.as_str().to_string()],
+    )
+    .await
+    .map_err(storage)?;
     Ok(())
 }
 

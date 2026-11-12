@@ -14,8 +14,10 @@
 mod custody;
 mod enable;
 mod error;
+mod lifecycle;
 mod operations;
 mod record;
+mod resume;
 mod schema;
 mod selection;
 mod store;
@@ -28,7 +30,12 @@ pub use enable::{
     EnableError, EnableOperation, EnableRejection, EnableRequest, EnableResolution, EnabledCommit,
 };
 pub use error::DurableSmError;
+pub use lifecycle::{DetachSnapshot, LifecycleError, LifecycleRejection, TerminalSession};
 pub use record::{DurableSessionRecord, RecordedClaim};
+pub use resume::{
+    FreshBindPermit, HydrationTail, ResumeCandidate, ResumeError, ResumeOperation, ResumeRejection,
+    ResumeRejectionReason, ResumeRequest, ResumeResolution, ResumedCommit,
+};
 pub use schema::bootstrap_schema_owner as bootstrap_durable_sm_owner_schema;
 pub use selection::{DurableSmMode, DurableSmSelection, InvalidDurableSmMode, DURABLE_SM_MODE_ENV};
 pub use store::DurableSmStore;
