@@ -2060,6 +2060,7 @@ pub(crate) enum PreparedIngressRelation {
     RoomRequests,
     RoomResponses,
     RoomOccupants,
+    #[cfg(feature = "clustering")]
     DirectRequests,
 }
 
@@ -2095,6 +2096,7 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::RoomRequests => "ingress_room_requests",
         PreparedIngressRelation::RoomResponses => "ingress_room_responses",
         PreparedIngressRelation::RoomOccupants => "ingress_room_occupants",
+        #[cfg(feature = "clustering")]
         PreparedIngressRelation::DirectRequests => "ingress_direct_requests",
     };
     match prepared {
