@@ -53,6 +53,9 @@ pub mod room_policy;
 pub mod server;
 /// The one enclosing graceful-shutdown deadline every stage derives from.
 pub mod shutdown_deadline;
+/// Durable XEP-0198 session authority: lifecycle, owner fence, counters and
+/// retained frames. Serving paths reach it only through its typed selector.
+pub mod sm_authority;
 /// Unselected PostgreSQL custody candidate; no release transport calls this API.
 #[cfg(all(feature = "test-support", feature = "clustering"))]
 pub mod sm_custody;

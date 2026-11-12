@@ -65,6 +65,13 @@ pub(crate) async fn verify_runtime_postgres_schema(
 ) -> Result<(), SmRuntimeAttachError> {
     runtime_attach::verify(db, true).await
 }
+/// Verify the durable session authority's owner-prepared relations, the
+/// portable relations it also writes, and the runtime's privileges on both.
+pub(crate) async fn verify_durable_runtime_postgres_schema(
+    db: &crate::db::Database,
+) -> Result<(), SmRuntimeAttachError> {
+    runtime_attach::verify_durable(db).await
+}
 pub use schema::bootstrap_schema_owner as bootstrap_portable_sm_owner_schema;
 
 use codec::{

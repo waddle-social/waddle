@@ -67,6 +67,23 @@ const SM_RELATIONS: &[Relation] = &[
         delete: true,
     },
 ];
+/// The durable session authority locks and updates its session rows, deletes
+/// purged tombstones, and inserts and prunes operation outcomes. It never
+/// updates an operation row: an outcome is written once.
+const DURABLE_SM_RELATIONS: &[Relation] = &[
+    Relation {
+        name: "sm_durable_sessions",
+        insert: true,
+        update: true,
+        delete: true,
+    },
+    Relation {
+        name: "sm_durable_operations",
+        insert: true,
+        update: false,
+        delete: true,
+    },
+];
 const PENDING_RELATIONS: &[Relation] = &[
     Relation {
         name: "pending_delivery",
@@ -118,6 +135,13 @@ pub(crate) async fn verify_sm(
     verify(tx, schema, SM_RELATIONS, false).await
 }
 
+pub(crate) async fn verify_durable_sm(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    verify(tx, schema, DURABLE_SM_RELATIONS, false).await
+}
+
 pub(crate) async fn verify_pending(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -155,6 +179,13 @@ pub(crate) async fn unexpected_sm_executable_schema(
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
     unexpected_executable_schema(tx, schema, SM_RELATIONS).await
+}
+
+pub(crate) async fn unexpected_durable_sm_executable_schema(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<Option<&'static str>, DatabaseError> {
+    unexpected_executable_schema(tx, schema, DURABLE_SM_RELATIONS).await
 }
 
 pub(crate) async fn unexpected_pending_executable_schema(

@@ -2056,6 +2056,17 @@ async fn create_sm_session_registry(
     )
     .await?;
     state.register_lineage_alias(DurableStore::Sm, DurableStore::Global);
+    // The durable session authority shares the ingress database with the
+    // portable relations it writes. The legacy mode opens no store.
+    let durable_sm = crate::sm_authority::DurableSmSelection::open(
+        crate::sm_authority::DurableSmMode::from_env()?,
+        global_db,
+        server_config.clustering.enabled,
+    )
+    .await?;
+    if !state.publish_durable_sm(durable_sm) {
+        warn!("a stream-management authority was already selected; keeping the first selection");
+    }
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),

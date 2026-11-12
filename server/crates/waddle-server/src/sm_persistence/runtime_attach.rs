@@ -33,6 +33,8 @@ pub enum SmRuntimeAttachError {
     InvalidPrimaryKey { table: &'static str },
     #[error("SM ingress disposition constraint is missing or invalid")]
     InvalidDispositionConstraint,
+    #[error("SM relation {table} is missing a CHECK constraint or has an invalid one")]
+    InvalidCheckConstraint { table: &'static str },
     #[error("SM index {index} is missing or has an invalid definition")]
     InvalidIndex { index: &'static str },
     #[error("SM runtime role or privileges are unsafe at {component}")]
@@ -170,8 +172,149 @@ const INDEXES: &[Index] = &[
     Index { table: "sm_ingress_appends", name: "idx_sm_ingress_appends_pending", unique: false, definition: "USING btree (disposition, appended_at_ms)" },
 ];
 
+/// A validated CHECK constraint, as `pg_get_constraintdef` prints it.
+struct Check {
+    table: &'static str,
+    definition: &'static str,
+}
+
+/// Which runtime ACL contract a profile's relations are checked against.
+#[derive(Clone, Copy)]
+enum AclFamily {
+    Portable,
+    Durable,
+}
+
+/// One store's relations, indexes, constraints and ACL contract.
+struct Profile {
+    tables: &'static [Table],
+    indexes: &'static [Index],
+    checks: &'static [Check],
+    acl: AclFamily,
+}
+
+const PORTABLE: Profile = Profile {
+    tables: TABLES,
+    indexes: INDEXES,
+    checks: &[Check {
+        table: "sm_ingress_appends",
+        definition: "CHECK ((disposition = ANY (ARRAY[0, 1, 2, 3])))",
+    }],
+    acl: AclFamily::Portable,
+};
+
+// The profile is derived from `crate::sm_authority`'s owner initializer.
+const DURABLE_SESSIONS: &[Column] = &[
+    column("session_id", "text", true, None),
+    column("resume_token_sha256", "text", true, None),
+    column("full_jid", "text", true, None),
+    column("state", "integer", true, None),
+    column("terminal_reason", "integer", false, None),
+    column("generation", "bigint", true, None),
+    column("binding", "text", true, None),
+    column("bare_jid", "text", true, None),
+    column("auth_context_id", "text", true, None),
+    column("auth_context_version", "bigint", true, None),
+    column("principal_auth_epoch", "bigint", true, None),
+    column("owner_node_id", "text", false, None),
+    column("owner_node_epoch", "text", false, None),
+    column("claim_epoch", "bigint", false, None),
+    column("inbound_handled", "bigint", true, None),
+    column("outbound_acked", "bigint", true, None),
+    column("outbound_exposure_ceiling", "bigint", true, None),
+    column("outbound_appended", "bigint", true, None),
+    column("outbound_unacked_bytes", "bigint", true, None),
+    column("max_resume_secs", "bigint", true, None),
+    column("detached_at_ms", "bigint", false, None),
+    column("enable_operation", "text", true, None),
+    column("last_operation", "text", true, None),
+    column("updated_at_ms", "bigint", true, None),
+];
+const DURABLE_OPERATIONS: &[Column] = &[
+    column("operation_id", "text", true, None),
+    column("session_id", "text", true, None),
+    column("kind", "integer", true, None),
+    column("outcome", "integer", true, None),
+    column("generation", "bigint", true, None),
+    column("ordinal", "bigint", false, None),
+    column("recorded_at_ms", "bigint", true, None),
+];
+
+/// The durable session authority's own relations. It also writes
+/// `sm_sessions` and `sm_unacked`, which the portable profile covers.
+const DURABLE: Profile = Profile {
+    tables: &[
+        Table {
+            name: "sm_durable_sessions",
+            columns: DURABLE_SESSIONS,
+            primary_key: &["session_id"],
+        },
+        Table {
+            name: "sm_durable_operations",
+            columns: DURABLE_OPERATIONS,
+            primary_key: &["operation_id"],
+        },
+    ],
+    indexes: &[
+        Index {
+            table: "sm_durable_sessions",
+            name: "idx_sm_durable_sessions_token",
+            unique: true,
+            definition: "USING btree (resume_token_sha256)",
+        },
+        Index {
+            table: "sm_durable_sessions",
+            name: "idx_sm_durable_sessions_detached",
+            unique: false,
+            definition: "USING btree (state, detached_at_ms)",
+        },
+        Index {
+            table: "sm_durable_sessions",
+            name: "idx_sm_durable_sessions_resource",
+            unique: false,
+            definition: "USING btree (full_jid)",
+        },
+        Index {
+            table: "sm_durable_operations",
+            name: "idx_sm_durable_operations_session",
+            unique: false,
+            definition: "USING btree (session_id, kind, ordinal)",
+        },
+    ],
+    checks: &[
+        Check {
+            table: "sm_durable_sessions",
+            definition: "CHECK ((state = ANY (ARRAY[1, 2, 3, 4])))",
+        },
+        Check {
+            table: "sm_durable_operations",
+            definition: "CHECK ((kind = ANY (ARRAY[1, 2, 3])))",
+        },
+        Check {
+            table: "sm_durable_operations",
+            definition: "CHECK ((outcome = ANY (ARRAY[1, 2])))",
+        },
+    ],
+    acl: AclFamily::Durable,
+};
+
 pub(super) async fn verify(
     db: &Database,
+    require_runtime_writes: bool,
+) -> Result<(), SmRuntimeAttachError> {
+    verify_profile(db, &PORTABLE, require_runtime_writes).await
+}
+
+/// Verify the durable session authority's relations and the runtime role's
+/// exact privileges on them, together with the portable relations it writes.
+pub(super) async fn verify_durable(db: &Database) -> Result<(), SmRuntimeAttachError> {
+    verify_profile(db, &PORTABLE, true).await?;
+    verify_profile(db, &DURABLE, true).await
+}
+
+async fn verify_profile(
+    db: &Database,
+    profile: &Profile,
     require_runtime_writes: bool,
 ) -> Result<(), SmRuntimeAttachError> {
     if db.driver() != DatabaseDriver::Postgres {
@@ -217,7 +360,7 @@ pub(super) async fn verify(
     // can otherwise commit DDL after physical attestation pins the RR snapshot
     // but before a table is locked, leaving pg_catalog reads stale. LOCK and
     // the SHOW/SET LOCAL timeout setup do not establish an RR snapshot.
-    for table in TABLES {
+    for table in profile.tables {
         tx.execute(
             &format!(
                 "LOCK TABLE {quoted}.\"{}\" IN ACCESS SHARE MODE",
@@ -248,7 +391,7 @@ pub(super) async fn verify(
     }
     // Check SELECT access on each locked relation before inspecting its
     // columns and constraints.
-    for table in TABLES {
+    for table in profile.tables {
         tx.query(
             &format!("SELECT 1 FROM {quoted}.\"{}\" WHERE false", table.name),
             (),
@@ -259,23 +402,32 @@ pub(super) async fn verify(
             source,
         })?;
     }
-    for table in TABLES {
+    for table in profile.tables {
         verify_table(&mut tx, schema, &quoted, table).await?;
     }
-    verify_disposition(&mut tx, schema).await?;
-    verify_indexes(&mut tx, schema).await?;
-    let unexpected_schema = if require_runtime_writes {
-        crate::db::runtime_store_acl::unexpected_sm_executable_schema(&mut tx, schema).await?
-    } else {
-        None
+    verify_checks(&mut tx, schema, profile.checks).await?;
+    verify_indexes(&mut tx, schema, profile.indexes).await?;
+    let unexpected_schema = match (require_runtime_writes, profile.acl) {
+        (false, _) => None,
+        (true, AclFamily::Portable) => {
+            crate::db::runtime_store_acl::unexpected_sm_executable_schema(&mut tx, schema).await?
+        }
+        (true, AclFamily::Durable) => {
+            crate::db::runtime_store_acl::unexpected_durable_sm_executable_schema(&mut tx, schema)
+                .await?
+        }
     };
     if let Some(component) = unexpected_schema {
         return Err(SmRuntimeAttachError::UnexpectedExecutableSchema { component });
     }
-    let privilege_failure = if require_runtime_writes {
-        crate::db::runtime_store_acl::verify_sm(&mut tx, schema).await?
-    } else {
-        None
+    let privilege_failure = match (require_runtime_writes, profile.acl) {
+        (false, _) => None,
+        (true, AclFamily::Portable) => {
+            crate::db::runtime_store_acl::verify_sm(&mut tx, schema).await?
+        }
+        (true, AclFamily::Durable) => {
+            crate::db::runtime_store_acl::verify_durable_sm(&mut tx, schema).await?
+        }
     };
     if let Some(component) = privilege_failure {
         return Err(SmRuntimeAttachError::UnsafeRuntimePrivileges { component });
@@ -384,19 +536,26 @@ async fn verify_table(
     Ok(())
 }
 
-async fn verify_disposition(
+async fn verify_checks(
     tx: &mut Transaction<'_>,
     schema: &str,
+    checks: &[Check],
 ) -> Result<(), SmRuntimeAttachError> {
-    let mut rows = tx.query(
-        "SELECT 1 FROM pg_catalog.pg_constraint c \
-         JOIN pg_catalog.pg_class t ON t.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
-         WHERE n.nspname = ? AND t.relname = 'sm_ingress_appends' AND c.contype = 'c' AND c.convalidated \
-           AND pg_catalog.pg_get_constraintdef(c.oid) = 'CHECK ((disposition = ANY (ARRAY[0, 1, 2, 3])))'",
-        crate::db_params![schema],
-    ).await?;
-    if rows.next().await?.is_none() {
-        return Err(SmRuntimeAttachError::InvalidDispositionConstraint);
+    for check in checks {
+        let mut rows = tx.query(
+            "SELECT 1 FROM pg_catalog.pg_constraint c \
+             JOIN pg_catalog.pg_class t ON t.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = ? AND t.relname = ? AND c.contype = 'c' AND c.convalidated \
+               AND pg_catalog.pg_get_constraintdef(c.oid) = ?",
+            crate::db_params![schema, check.table, check.definition],
+        ).await?;
+        if rows.next().await?.is_none() {
+            return Err(if check.table == "sm_ingress_appends" {
+                SmRuntimeAttachError::InvalidDispositionConstraint
+            } else {
+                SmRuntimeAttachError::InvalidCheckConstraint { table: check.table }
+            });
+        }
     }
     Ok(())
 }
@@ -404,8 +563,9 @@ async fn verify_disposition(
 async fn verify_indexes(
     tx: &mut Transaction<'_>,
     schema: &str,
+    indexes: &[Index],
 ) -> Result<(), SmRuntimeAttachError> {
-    for index in INDEXES {
+    for index in indexes {
         let mut rows = tx.query(
             "SELECT x.indisunique, pg_catalog.pg_get_indexdef(x.indexrelid) \
              FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid \
