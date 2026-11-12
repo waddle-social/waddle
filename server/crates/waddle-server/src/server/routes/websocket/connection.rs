@@ -53,6 +53,8 @@ use waddle_xmpp::stream_management::SmRequest;
 
 mod binding;
 mod binding_messages;
+#[cfg(test)]
+mod binding_publisher_tests;
 mod coordinator_publisher;
 mod live_actor;
 mod retirement;
