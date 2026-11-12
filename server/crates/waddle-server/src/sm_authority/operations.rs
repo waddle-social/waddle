@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use waddle_xmpp::ownership::{SessionGeneration, SmSessionKey};
-use waddle_xmpp::stream_management::durable::SmOperationId;
+use waddle_xmpp::stream_management::durable::{SmOperationId, SmOrdinal};
 
 use super::error::DurableSmError;
 use crate::db::Transaction;
@@ -56,6 +56,8 @@ pub(super) struct OperationRow {
     /// The generation the operation committed, or the generation it was
     /// abandoned against.
     pub(super) generation: SessionGeneration,
+    /// The ordinal a committed admission stored its frame under.
+    pub(super) ordinal: Option<SmOrdinal>,
 }
 
 /// Record a committed operation in the transaction that carries its effects.
@@ -77,6 +79,53 @@ pub(super) async fn record_committed(
             kind.to_storage(),
             generation_column(generation),
             now.timestamp_millis(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record a committed admission with the ordinal its frame was stored under.
+pub(super) async fn record_admission(
+    tx: &mut Transaction<'_>,
+    operation: SmOperationId,
+    session: SmSessionKey,
+    generation: SessionGeneration,
+    ordinal: SmOrdinal,
+    now: DateTime<Utc>,
+) -> Result<(), DurableSmError> {
+    tx.execute(
+        "INSERT INTO sm_durable_operations \
+         (operation_id, session_id, kind, outcome, generation, ordinal, recorded_at_ms) \
+         VALUES (?, ?, ?, 1, ?, ?, ?)",
+        crate::db_params![
+            operation.as_uuid().to_string(),
+            session.as_uuid().to_string(),
+            OperationKind::Admission.to_storage(),
+            generation_column(generation),
+            // Ordinals are at most `i64::MAX`.
+            ordinal.value() as i64,
+            now.timestamp_millis(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Delete the admission outcomes of frames the peer acknowledged. A frame
+/// that left the window can no longer be offered again under its operation.
+pub(super) async fn prune_admissions_through(
+    tx: &mut Transaction<'_>,
+    session: SmSessionKey,
+    through: SmOrdinal,
+) -> Result<(), DurableSmError> {
+    tx.execute(
+        "DELETE FROM sm_durable_operations \
+         WHERE session_id = ? AND kind = ? AND ordinal <= ?",
+        crate::db_params![
+            session.as_uuid().to_string(),
+            OperationKind::Admission.to_storage(),
+            through.value() as i64,
         ],
     )
     .await?;
@@ -121,7 +170,7 @@ pub(super) async fn find(
 ) -> Result<Option<OperationRow>, DurableSmError> {
     let mut rows = tx
         .query(
-            "SELECT session_id, kind, outcome, generation FROM sm_durable_operations \
+            "SELECT session_id, kind, outcome, generation, ordinal FROM sm_durable_operations \
              WHERE operation_id = ?",
             crate::db_params![operation.as_uuid().to_string()],
         )
@@ -153,6 +202,16 @@ pub(super) async fn find(
         kind: OperationKind::from_storage(row.get(1)?)?,
         outcome,
         generation,
+        ordinal: row
+            .get::<Option<i64>>(4)?
+            .map(|value| {
+                u64::try_from(value).ok().and_then(SmOrdinal::new).ok_or(
+                    DurableSmError::CorruptRecord {
+                        field: "operation ordinal",
+                    },
+                )
+            })
+            .transpose()?,
     }))
 }
 

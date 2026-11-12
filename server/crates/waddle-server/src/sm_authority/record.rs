@@ -17,7 +17,7 @@ use waddle_xmpp::stream_management::durable::{
 use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 use super::error::DurableSmError;
-use crate::db::{Row, Transaction, Value};
+use crate::db::{DatabaseDriver, Row, Transaction, Value};
 
 pub(super) const COLUMNS: &str = "session_id, full_jid, state, terminal_reason, generation, \
     binding, bare_jid, auth_context_id, auth_context_version, principal_auth_epoch, \
@@ -301,4 +301,54 @@ pub(super) async fn token_exists(
         )
         .await?;
     Ok(rows.next().await?.is_some())
+}
+
+/// Row lock suffix: PostgreSQL locks the selected row; SQLite's immediate
+/// transaction already excludes every other writer.
+fn for_update(driver: DatabaseDriver) -> &'static str {
+    match driver {
+        DatabaseDriver::Postgres => " FOR UPDATE",
+        DatabaseDriver::Sqlite => "",
+    }
+}
+
+/// Load a session and lock its row for the rest of the transaction.
+pub(super) async fn load_for_update(
+    tx: &mut Transaction<'_>,
+    session: SmSessionKey,
+) -> Result<Option<DurableSessionRecord>, DurableSmError> {
+    let lock = for_update(tx.driver());
+    let mut rows = tx
+        .query(
+            &format!("SELECT {COLUMNS} FROM sm_durable_sessions WHERE session_id = ?{lock}"),
+            crate::db_params![session.as_uuid().to_string()],
+        )
+        .await?;
+    rows.next().await?.as_ref().map(decode).transpose()
+}
+
+/// Write every mutable column of a locked session row.
+pub(super) async fn update(
+    tx: &mut Transaction<'_>,
+    stored: &DurableSessionRecord,
+    now: DateTime<Utc>,
+) -> Result<(), DurableSmError> {
+    let mut params = mutable_params(stored, now)?;
+    params.push(Value::from(stored.session.as_uuid().to_string()));
+    let changed = tx
+        .execute(
+            "UPDATE sm_durable_sessions SET state = ?, terminal_reason = ?, generation = ?, \
+             binding = ?, bare_jid = ?, auth_context_id = ?, auth_context_version = ?, \
+             principal_auth_epoch = ?, owner_node_id = ?, owner_node_epoch = ?, \
+             claim_epoch = ?, inbound_handled = ?, outbound_acked = ?, \
+             outbound_exposure_ceiling = ?, outbound_appended = ?, outbound_unacked_bytes = ?, \
+             max_resume_secs = ?, detached_at_ms = ?, last_operation = ?, updated_at_ms = ? \
+             WHERE session_id = ?",
+            params,
+        )
+        .await?;
+    if changed != 1 {
+        return Err(corrupt("session row"));
+    }
+    Ok(())
 }

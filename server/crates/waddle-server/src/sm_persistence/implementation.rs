@@ -918,8 +918,8 @@ pub async fn open_for_cluster_mode_with_lineage(
 
 /// Persist a replay frame inside a caller-owned transaction. Kept beside the
 /// existing autocommit writer so both paths share the same serialization, SQL,
-/// and parameters; used only by the dark recipient-route candidate.
-#[cfg(feature = "test-support")]
+/// and parameters. The durable session authority and the dark recipient-route
+/// candidate append through it.
 pub(crate) async fn append_unacked_in_transaction(
     tx: &mut crate::db::Transaction<'_>,
     stanza: &PersistedUnackedStanza,

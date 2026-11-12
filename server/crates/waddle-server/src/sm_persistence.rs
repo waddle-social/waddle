@@ -38,6 +38,9 @@ mod atomic_store;
 /// `sm_sessions`/`sm_unacked` schema, instead of forking a second copy
 /// that could silently drift from this one.
 pub(crate) mod codec;
+/// Row access for the durable session authority (`crate::sm_authority`),
+/// which commits these relations in its own transactions.
+pub(crate) mod durable_rows;
 mod incremental;
 pub(crate) mod ingress_append;
 mod joined_sessions;

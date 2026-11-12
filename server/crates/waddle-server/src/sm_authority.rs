@@ -11,6 +11,7 @@
 //! `sm_unacked` rows, both keyed by the session key and written only inside
 //! the transaction that holds the authority row lock.
 
+mod custody;
 mod enable;
 mod error;
 mod operations;
@@ -19,6 +20,10 @@ mod schema;
 mod selection;
 mod store;
 
+pub use custody::{
+    AckSettlement, AdmissionAuthority, AdmissionError, AdmissionFrame, AdmissionRejection,
+    AdmissionRequest, CommittedObligation, OwnerError, OwnerRejection, RetainedFrame,
+};
 pub use enable::{
     EnableError, EnableOperation, EnableRejection, EnableRequest, EnableResolution, EnabledCommit,
 };
