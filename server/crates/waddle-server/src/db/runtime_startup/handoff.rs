@@ -290,8 +290,8 @@ fn seal(
 }
 
 const PINNED_OBJECTS: [&str; 14] = [
-    "the database",
-    "the application schema",
+    "the database's owner role",
+    "the application schema's owner role",
     "the runtime login",
     "the attestor installer login",
     "the attestor definer role",

@@ -22,6 +22,7 @@ mod connection;
 mod emit_handoff;
 mod error;
 mod install_attestor;
+mod output;
 mod owner_phase;
 
 use clap::Parser;

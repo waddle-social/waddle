@@ -6,19 +6,23 @@
 //! Every subcommand's output is checked for the secrets it was given.
 
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
+use sqlx::postgres::{PgConnectOptions, PgPool};
+use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 use waddle_server::db::runtime_startup::database_identity_from_json;
 use waddle_ws_test_support::{require_test_postgres_url, TestServer, WsXmppClient};
 
-use super::support::{cutover_record, probe, Roles, SocketEndpoint, TRUSTED_SCHEMA};
+use super::support::{cutover_record, drop_fixture, probe, Roles, SocketEndpoint, TRUSTED_SCHEMA};
 use super::{
     execute, owner_phase_stable_entries, relation_exists, Prepared, Provisioned, DOMAIN,
     RELEASE_GIT_SHA, SCHEMA, SESSION_KEY,
 };
 
 const SUCCESS: i32 = 0;
+const FAILED: i32 = 1;
 const USAGE: i32 = 2;
 #[cfg(feature = "clustering")]
 const PENDING: i32 = 3;
@@ -132,10 +136,15 @@ impl Operator {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         };
-        for secret in &self.secrets {
+        let urls = extra
+            .iter()
+            .filter(|(key, _)| key.ends_with("_URL"))
+            .map(|(_, value)| *value)
+            .chain([database_url]);
+        for secret in self.secrets.iter().map(String::as_str).chain(urls) {
             assert!(
                 !finished.stdout.contains(secret) && !finished.stderr.contains(secret),
-                "{args:?} printed a secret"
+                "{args:?} printed a secret or a connection URL"
             );
         }
         finished
@@ -197,6 +206,108 @@ fn runtime_url(endpoint: &SocketEndpoint, database: &str, runtime: &str, schema:
         endpoint.directory.path().display(),
         endpoint.port,
     )
+}
+
+/// The one-time provisioning the planning document gives for a database a
+/// single login owns.
+const PROVISIONING: &str = include_str!("../../sql/restricted_runtime_provisioning.sql");
+
+/// Run the provisioning procedure exactly as written, as a superuser on one
+/// session, with its parameters taken from `roles` and then `overrides`.
+async fn provision(
+    superuser: &PgConnectOptions,
+    schema: &str,
+    roles: &Roles,
+    overrides: &[(&str, &str)],
+) -> Result<(), sqlx::Error> {
+    let mut session = PgConnection::connect_with(superuser).await?;
+    let parameters = [
+        ("waddle.schema", schema),
+        ("waddle.old_login", roles.old_runtime.as_str()),
+        ("waddle.database_owner", roles.database_owner.as_str()),
+        ("waddle.schema_owner", roles.schema_owner.as_str()),
+        ("waddle.migrator_login", roles.migrator.as_str()),
+        ("waddle.runtime_login", roles.runtime.as_str()),
+        ("waddle.attestor_installer_login", roles.installer.as_str()),
+        ("waddle.attestor_definer_role", roles.definer.as_str()),
+        ("waddle.attestor_schema", TRUSTED_SCHEMA),
+    ];
+    for (setting, value) in parameters.iter().chain(overrides) {
+        sqlx::query("SELECT pg_catalog.set_config($1, $2, false)")
+            .bind(setting)
+            .bind(value)
+            .execute(&mut session)
+            .await?;
+    }
+    let outcome = sqlx::raw_sql(PROVISIONING).execute(&mut session).await;
+    // A refused run leaves its transaction open; closing the session ends it.
+    session.close().await?;
+    outcome.map(|_| ())
+}
+
+/// Everything the provisioning procedure can change, as a superuser reads
+/// it: the attributes, password presence, memberships and settings of
+/// `role_names`, the database's owner and ACL, every schema with its owner
+/// and ACL, every relation and routine outside the system schemas with its
+/// owner and ACL, the ACL of `pg_control_system()` and all default
+/// privileges.
+async fn provisioning_snapshot(superuser: &PgConnectOptions, role_names: &[&str]) -> Vec<String> {
+    let mut session = PgConnection::connect_with(superuser)
+        .await
+        .expect("superuser session");
+    let role_names: Vec<String> = role_names.iter().map(|name| (*name).to_owned()).collect();
+    let entries = sqlx::query_scalar(
+        "SELECT entry FROM ( \
+           SELECT pg_catalog.format('role %s super=%s inherit=%s createrole=%s createdb=%s \
+                    login=%s replication=%s bypassrls=%s password=%s', rolname, rolsuper, \
+                    rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, \
+                    rolbypassrls, rolpassword IS NOT NULL) AS entry \
+             FROM pg_catalog.pg_authid WHERE rolname = ANY($1) \
+           UNION ALL \
+           SELECT pg_catalog.format('member %s of %s admin=%s inherit=%s set=%s', \
+                    pg_catalog.pg_get_userbyid(member), pg_catalog.pg_get_userbyid(roleid), \
+                    admin_option, inherit_option, set_option) \
+             FROM pg_catalog.pg_auth_members \
+            WHERE pg_catalog.pg_get_userbyid(member) = ANY($1) \
+               OR pg_catalog.pg_get_userbyid(roleid) = ANY($1) \
+           UNION ALL \
+           SELECT pg_catalog.format('setting %s %s', pg_catalog.pg_get_userbyid(setrole), setconfig) \
+             FROM pg_catalog.pg_db_role_setting \
+            WHERE setrole <> 0 AND pg_catalog.pg_get_userbyid(setrole) = ANY($1) \
+           UNION ALL \
+           SELECT pg_catalog.format('database %s %s', pg_catalog.pg_get_userbyid(datdba), datacl) \
+             FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database() \
+           UNION ALL \
+           SELECT pg_catalog.format('schema %s %s %s', nspname, \
+                    pg_catalog.pg_get_userbyid(nspowner), nspacl) \
+             FROM pg_catalog.pg_namespace \
+            WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
+           UNION ALL \
+           SELECT pg_catalog.format('relation %s.%s %s %s', n.nspname, c.relname, \
+                    pg_catalog.pg_get_userbyid(c.relowner), c.relacl) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+            WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' \
+           UNION ALL \
+           SELECT pg_catalog.format('routine %s.%s %s %s', n.nspname, p.proname, \
+                    pg_catalog.pg_get_userbyid(p.proowner), p.proacl) \
+             FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+            WHERE (n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema') \
+               OR p.oid = 'pg_catalog.pg_control_system()'::pg_catalog.regprocedure \
+           UNION ALL \
+           SELECT pg_catalog.format('default_acl %s %s %s %s', \
+                    pg_catalog.pg_get_userbyid(defaclrole), defaclnamespace, defaclobjtype, \
+                    defaclacl) \
+             FROM pg_catalog.pg_default_acl \
+         ) entries ORDER BY entry",
+    )
+    .bind(&role_names)
+    .fetch_all(&mut session)
+    .await
+    .expect("provisioning snapshot");
+    session.close().await.expect("close the superuser session");
+    entries
 }
 
 fn assert_exit(finished: &Finished, expected: i32, context: &str) {
@@ -261,18 +372,46 @@ async fn subcommands_prepare_a_database_the_restricted_server_serves() {
     let enroll = [("WADDLE_DB_LINEAGE_ACTION", "enroll")];
 
     // The parser answers before any connection is made.
-    let help = operator.run("unused", &["--help"], &[]).await;
+    let help = operator
+        .run("postgres://nowhere.invalid/none", &["--help"], &[])
+        .await;
     assert_exit(&help, SUCCESS, "--help");
     for subcommand in ["owner-phase", "install-attestor", "emit-handoff"] {
         assert!(help.stdout.contains(subcommand), "{}", help.stdout);
     }
-    let unknown = operator.run("unused", &["serve"], &[]).await;
+    let unknown = operator
+        .run("postgres://nowhere.invalid/none", &["serve"], &[])
+        .await;
     assert_exit(&unknown, USAGE, "an unknown subcommand");
     // A URL for another login is refused before it is used.
     let wrong_login = operator
         .run(&operator.installer_url(), &["owner-phase"], &enroll)
         .await;
     assert_exit(&wrong_login, USAGE, "owner-phase as the installer login");
+    // The subcommand sets the session's role, search path and name. A URL
+    // or an environment that would set them is refused before connecting.
+    for key in ["options", "options[role]", "application_name"] {
+        let mut smuggling = url::Url::parse(&operator.migrator_url()).expect("migrator URL");
+        smuggling
+            .query_pairs_mut()
+            .append_pair(key, "smuggled_value");
+        let refused = operator
+            .run(smuggling.as_str(), &["owner-phase"], &enroll)
+            .await;
+        assert_exit(&refused, USAGE, key);
+        assert!(
+            refused.stderr.contains("must not set"),
+            "{}",
+            refused.stderr
+        );
+    }
+    for variable in ["PGOPTIONS", "PGAPPNAME"] {
+        let refused = operator
+            .owner_phase(&[], &[enroll[0], (variable, "-c role=postgres")])
+            .await;
+        assert_exit(&refused, USAGE, variable);
+        assert!(refused.stderr.contains(variable), "{}", refused.stderr);
+    }
     assert!(!relation_exists(&provisioned.admin, "_lineage").await);
 
     let first = operator
@@ -295,6 +434,40 @@ async fn subcommands_prepare_a_database_the_restricted_server_serves() {
     );
 
     let operation_id = Uuid::new_v4();
+    let operation_text = operation_id.to_string();
+    let install_arguments = [
+        "install-attestor",
+        "--identity",
+        identity_arg,
+        "--operation-id",
+        operation_text.as_str(),
+    ];
+    for key in ["options", "options[search_path]", "application_name"] {
+        let mut smuggling = url::Url::parse(&operator.installer_url()).expect("installer URL");
+        smuggling
+            .query_pairs_mut()
+            .append_pair(key, "smuggled_value");
+        let refused = operator
+            .run(smuggling.as_str(), &install_arguments, &[])
+            .await;
+        assert_exit(&refused, USAGE, key);
+        assert!(
+            refused.stderr.contains("must not set"),
+            "{}",
+            refused.stderr
+        );
+    }
+    for variable in ["PGOPTIONS", "PGAPPNAME"] {
+        let refused = operator
+            .run(
+                &operator.installer_url(),
+                &install_arguments,
+                &[(variable, "-c search_path=elsewhere")],
+            )
+            .await;
+        assert_exit(&refused, USAGE, variable);
+        assert!(refused.stderr.contains(variable), "{}", refused.stderr);
+    }
     for attempt in ["first", "repeated"] {
         let installed = operator
             .install_attestor(&identity_path, operation_id)
@@ -498,6 +671,486 @@ async fn subcommands_prepare_a_database_the_restricted_server_serves() {
     prepared.cleanup().await;
 }
 
+/// The provisioning procedure never alters a role that already exists. It
+/// refuses, before its first change, a privileged or system role, a role
+/// whose shape differs from the one it would create, repeated parameters,
+/// default privileges and a connected old login. Logins that were created
+/// beforehand with a password and the right shape are accepted, and a
+/// second run changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provisioning_refuses_what_it_would_rewrite_and_repeats_without_change() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let cluster = PgPool::connect(&url).await.expect("cluster administrator");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let database = format!("provisioning_db_{suffix}");
+    let roles = Roles {
+        database_owner: format!("provisioning_dbowner_{suffix}"),
+        schema_owner: format!("provisioning_owner_{suffix}"),
+        migrator: format!("provisioning_migrator_{suffix}"),
+        runtime: format!("provisioning_runtime_{suffix}"),
+        old_runtime: format!("provisioning_app_{suffix}"),
+        installer: format!("provisioning_installer_{suffix}"),
+        definer: format!("provisioning_definer_{suffix}"),
+    };
+    let superuser_role = format!("provisioning_admin_{suffix}");
+    let replication_role = format!("provisioning_replica_{suffix}");
+    for statement in [
+        format!("CREATE ROLE {} LOGIN", roles.old_runtime),
+        format!("CREATE DATABASE {database} OWNER {}", roles.old_runtime),
+        format!("CREATE ROLE {superuser_role} SUPERUSER LOGIN"),
+        format!("CREATE ROLE {replication_role} REPLICATION LOGIN"),
+        // A login someone created with defaults: it inherits, carries a
+        // setting and is a member of the old login.
+        format!(
+            "CREATE ROLE {} LOGIN PASSWORD 'runtime-credential'",
+            roles.runtime
+        ),
+        format!("ALTER ROLE {} SET work_mem = '8MB'", roles.runtime),
+        format!("GRANT {} TO {}", roles.old_runtime, roles.runtime),
+    ] {
+        execute(&cluster, &statement).await;
+    }
+    let superuser = PgConnectOptions::from_str(&url)
+        .expect("PostgreSQL test URL")
+        .database(&database);
+    let old_login = superuser.clone().username(&roles.old_runtime);
+    let mut application = PgConnection::connect_with(&old_login)
+        .await
+        .expect("old login connects");
+    sqlx::query("CREATE TABLE public.carried (id integer PRIMARY KEY)")
+        .execute(&mut application)
+        .await
+        .expect("the old login creates a relation in public");
+    let mut watched: Vec<&str> = roles.all().map(String::as_str).to_vec();
+    watched.extend([superuser_role.as_str(), replication_role.as_str()]);
+    let untouched = provisioning_snapshot(&superuser, &watched).await;
+
+    // The old login is still connected.
+    let refusal = |outcome: Result<(), sqlx::Error>| {
+        outcome.expect_err("provisioning must refuse").to_string()
+    };
+    let connected = refusal(provision(&superuser, "public", &roles, &[]).await);
+    assert!(connected.contains("still has backends"), "{connected}");
+    application.close().await.expect("old login disconnects");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while sqlx::query_scalar::<_, i64>(
+        "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE usename = $1",
+    )
+    .bind(&roles.old_runtime)
+    .fetch_one(&cluster)
+    .await
+    .expect("count the old login's sessions")
+        > 0
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the old login's session did not end"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    for (overrides, expected) in [
+        (
+            vec![("waddle.database_owner", superuser_role.as_str())],
+            "SUPERUSER, REPLICATION or BYPASSRLS",
+        ),
+        (
+            vec![("waddle.database_owner", replication_role.as_str())],
+            "SUPERUSER, REPLICATION or BYPASSRLS",
+        ),
+        (
+            vec![("waddle.database_owner", "pg_monitor")],
+            "is a system role",
+        ),
+        (
+            vec![("waddle.schema_owner", "postgres")],
+            "is a system role",
+        ),
+        (
+            vec![("waddle.migrator_login", roles.runtime.as_str())],
+            "seven different roles",
+        ),
+        (vec![("waddle.attestor_schema", "public")], "must differ"),
+        // The runtime login that exists has another shape.
+        (vec![], "does not have the shape this procedure creates"),
+    ] {
+        let message = refusal(provision(&superuser, "public", &roles, &overrides).await);
+        assert!(
+            message.contains(expected) && message.contains("nothing was changed"),
+            "{overrides:?}: {message}"
+        );
+        assert_eq!(
+            provisioning_snapshot(&superuser, &watched).await,
+            untouched,
+            "a refused run with {overrides:?} changed something"
+        );
+    }
+    let mismatched = refusal(provision(&superuser, "public", &roles, &[]).await);
+    for difference in [
+        "it is INHERIT",
+        "it has ALTER ROLE ... SET settings",
+        "is a member of",
+    ] {
+        assert!(mismatched.contains(difference), "{mismatched}");
+    }
+
+    // The three logins as an operator creates them beforehand: the target
+    // shape, each with its own password.
+    for statement in [
+        format!("REVOKE {} FROM {}", roles.old_runtime, roles.runtime),
+        format!("ALTER ROLE {} RESET ALL", roles.runtime),
+        format!("ALTER ROLE {} NOINHERIT", roles.runtime),
+        format!(
+            "CREATE ROLE {} LOGIN NOINHERIT PASSWORD 'migrator-credential'",
+            roles.migrator
+        ),
+        format!(
+            "CREATE ROLE {} LOGIN NOINHERIT PASSWORD 'installer-credential'",
+            roles.installer
+        ),
+    ] {
+        execute(&cluster, &statement).await;
+    }
+    let login_lines = |snapshot: &[String]| -> Vec<String> {
+        snapshot
+            .iter()
+            .filter(|entry| {
+                [&roles.migrator, &roles.runtime, &roles.installer]
+                    .iter()
+                    .any(|login| entry.starts_with(&format!("role {login} ")))
+            })
+            .cloned()
+            .collect()
+    };
+    let before = provisioning_snapshot(&superuser, &watched).await;
+
+    // Default privileges stop the procedure, for the old login and for the
+    // application schema alike, and nothing has changed when it stops.
+    let mut session = PgConnection::connect_with(&superuser)
+        .await
+        .expect("superuser session");
+    sqlx::query(&format!(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC",
+        roles.old_runtime
+    ))
+    .execute(&mut session)
+    .await
+    .expect("add a default privilege");
+    let with_default = provisioning_snapshot(&superuser, &watched).await;
+    let stopped = refusal(provision(&superuser, "public", &roles, &[]).await);
+    assert!(
+        stopped.contains("default privileges must be removed first")
+            && stopped.contains(&roles.old_runtime)
+            && stopped.contains("nothing was changed"),
+        "{stopped}"
+    );
+    assert_eq!(
+        provisioning_snapshot(&superuser, &watched).await,
+        with_default
+    );
+    sqlx::query(&format!(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public REVOKE SELECT ON TABLES FROM PUBLIC",
+        roles.old_runtime
+    ))
+    .execute(&mut session)
+    .await
+    .expect("remove the default privilege");
+    session.close().await.expect("close the superuser session");
+    assert_eq!(provisioning_snapshot(&superuser, &watched).await, before);
+
+    provision(&superuser, "public", &roles, &[])
+        .await
+        .expect("provisioning accepts logins that already have the target shape");
+    let provisioned = provisioning_snapshot(&superuser, &watched).await;
+    assert_eq!(
+        login_lines(&provisioned),
+        login_lines(&before),
+        "pre-existing logins must keep their attributes and passwords"
+    );
+    assert_eq!(login_lines(&provisioned).len(), 3);
+    assert!(
+        login_lines(&provisioned)
+            .iter()
+            .all(|entry| entry.ends_with("password=t")),
+        "{provisioned:#?}"
+    );
+    for privileged in [&superuser_role, &replication_role] {
+        let line = |snapshot: &[String]| {
+            snapshot
+                .iter()
+                .find(|entry| entry.starts_with(&format!("role {privileged} ")))
+                .cloned()
+        };
+        assert_eq!(line(&provisioned), line(&untouched));
+    }
+    assert!(
+        provisioned.contains(&format!("relation public.carried {} ", roles.schema_owner)),
+        "the old login's relation must belong to the schema owner: {provisioned:#?}"
+    );
+
+    provision(&superuser, "public", &roles, &[])
+        .await
+        .expect("repeated provisioning");
+    assert_eq!(
+        provisioning_snapshot(&superuser, &watched).await,
+        provisioned,
+        "a repeated provisioning run changed the catalog"
+    );
+
+    let admin = PgPool::connect_with(superuser)
+        .await
+        .expect("database administrator");
+    drop_fixture(cluster.clone(), admin, &database, &roles).await;
+    let cluster = PgPool::connect(&url).await.expect("cluster administrator");
+    for role in [&superuser_role, &replication_role] {
+        execute(&cluster, &format!("DROP ROLE {role}")).await;
+    }
+    cluster.close().await;
+}
+
+/// A PostgreSQL server of this test's own, reachable only through a Unix
+/// socket in a private directory, that authenticates every connection by
+/// password.
+struct PasswordCluster {
+    directory: tempfile::TempDir,
+    server: tokio::process::Child,
+}
+
+const CLUSTER_PASSWORD: &str = "cluster-administrator-password-never-printed";
+
+impl PasswordCluster {
+    /// `None` when the PostgreSQL server programs are not on `PATH`.
+    async fn start() -> Option<Self> {
+        let program = |name: &str| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|directory| directory.join(name))
+                .find(|candidate| candidate.is_file())
+        };
+        let (initdb, postgres) = (program("initdb")?, program("postgres")?);
+        let directory = tempfile::Builder::new()
+            .prefix("wpc")
+            .tempdir()
+            .expect("cluster directory");
+        let data = directory.path().join("data");
+        let password_file = directory.path().join("password");
+        std::fs::write(&password_file, CLUSTER_PASSWORD).expect("password file");
+        let initialized = tokio::process::Command::new(initdb)
+            .arg("--pgdata")
+            .arg(&data)
+            .args(["--username", "postgres", "--auth", "scram-sha-256"])
+            .args(["--encoding", "UTF8", "--no-sync", "--pwfile"])
+            .arg(&password_file)
+            .output()
+            .await
+            .expect("run initdb");
+        assert!(
+            initialized.status.success(),
+            "initdb: {}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        let server = tokio::process::Command::new(postgres)
+            .arg("-D")
+            .arg(&data)
+            .arg("-k")
+            .arg(directory.path())
+            .args(["-c", "listen_addresses=", "-c", "fsync=off"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start postgres");
+        let cluster = Self { directory, server };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match PgConnection::connect(&cluster.url()).await {
+                Ok(session) => {
+                    session.close().await.expect("close the readiness session");
+                    return Some(cluster);
+                }
+                Err(error) => assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the private cluster did not accept connections: {error}"
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn url(&self) -> String {
+        format!(
+            "postgresql:///postgres?host={}&port=5432&user=postgres&password={CLUSTER_PASSWORD}",
+            self.directory.path().display()
+        )
+    }
+
+    async fn stop(mut self) {
+        self.server.kill().await.expect("stop the private cluster");
+    }
+}
+
+/// Under password authentication no subcommand echoes a password or a
+/// connection URL: not when authentication fails, not when the connection
+/// cannot be made, and not when the pinned preflight fails on the runtime
+/// connection it was given.
+///
+/// The shared test server authenticates nothing, so this test starts its
+/// own. It is skipped when `initdb` and `postgres` are not on `PATH`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subcommands_do_not_echo_credentials_under_password_authentication() {
+    let Some(cluster) = PasswordCluster::start().await else {
+        eprintln!("skipped: initdb and postgres are not on PATH");
+        return;
+    };
+    let url = cluster.url();
+    let provisioned = Provisioned::new(&url).await;
+    for (login, password) in [
+        (&provisioned.roles.migrator, MIGRATOR_PASSWORD),
+        (&provisioned.roles.installer, INSTALLER_PASSWORD),
+        (&provisioned.roles.runtime, RUNTIME_PASSWORD),
+    ] {
+        execute(
+            &provisioned.cluster,
+            &format!("ALTER ROLE {login} PASSWORD '{password}'"),
+        )
+        .await;
+    }
+    let deployment = provisioned
+        .plan
+        .lineage
+        .deployment_uuid
+        .expect("fixture deployment identity")
+        .to_string();
+    let mut operator = Operator::new(
+        &url,
+        &provisioned.database,
+        &provisioned.roles,
+        SCHEMA,
+        deployment,
+    );
+    const WRONG_PASSWORD: &str = "wrong-password-never-printed";
+    operator
+        .secrets
+        .extend([CLUSTER_PASSWORD.to_owned(), WRONG_PASSWORD.to_owned()]);
+    let wrong = |login: &str| login_url(&url, &provisioned.database, login, WRONG_PASSWORD);
+    let files = tempfile::tempdir().expect("operator files");
+    let identity_path = files.path().join("identity.json");
+    let identity_arg = identity_path.to_str().expect("identity path");
+    let enroll = [("WADDLE_DB_LINEAGE_ACTION", "enroll")];
+    let owner_phase = ["owner-phase", "--identity-output", identity_arg];
+
+    // Authentication fails.
+    let rejected = operator
+        .run(&wrong(&provisioned.roles.migrator), &owner_phase, &enroll)
+        .await;
+    assert_exit(&rejected, FAILED, "owner-phase with a wrong password");
+    assert!(
+        rejected.stderr.contains("password authentication failed"),
+        "{}",
+        rejected.stderr
+    );
+    // The connection cannot be made at all.
+    let nowhere = format!(
+        "postgresql:///{}?host={}&port=5432&user={}&password={MIGRATOR_PASSWORD}",
+        provisioned.database,
+        files.path().join("no-server-here").display(),
+        provisioned.roles.migrator
+    );
+    let unreachable = operator.run(&nowhere, &owner_phase, &enroll).await;
+    assert_exit(&unreachable, FAILED, "owner-phase without a server");
+
+    let prepared = operator
+        .run(&operator.migrator_url(), &owner_phase, &enroll)
+        .await;
+    assert_exit(&prepared, SUCCESS, "owner-phase with its password");
+
+    let operation_id = Uuid::new_v4();
+    let operation_arg = operation_id.to_string();
+    let install = [
+        "install-attestor",
+        "--identity",
+        identity_arg,
+        "--operation-id",
+        operation_arg.as_str(),
+    ];
+    let rejected = operator
+        .run(&wrong(&provisioned.roles.installer), &install, &[])
+        .await;
+    assert_exit(&rejected, FAILED, "install-attestor with a wrong password");
+    assert_exit(
+        &operator
+            .install_attestor(&identity_path, operation_id)
+            .await,
+        SUCCESS,
+        "install-attestor with its password",
+    );
+
+    let endpoint = SocketEndpoint::for_url(&url).await;
+    let runtime_url = runtime_url(
+        &endpoint,
+        &provisioned.database,
+        &provisioned.roles.runtime,
+        SCHEMA,
+    );
+    let cutover_path = files.path().join("cutover.json");
+    std::fs::write(
+        &cutover_path,
+        cutover_record(
+            &provisioned.admin,
+            &provisioned.roles.old_runtime,
+            &runtime_url,
+        )
+        .await,
+    )
+    .expect("cutover record");
+    let emit = [
+        "emit-handoff",
+        "--release-git-sha",
+        RELEASE_GIT_SHA,
+        "--installation-operation-id",
+        operation_arg.as_str(),
+        "--cutover",
+        cutover_path.to_str().expect("cutover path"),
+    ];
+    let rejected = operator
+        .run(&wrong(&provisioned.roles.migrator), &emit, &[])
+        .await;
+    assert_exit(&rejected, FAILED, "emit-handoff with a wrong password");
+
+    // The preflight is given a runtime URL whose password is wrong, then
+    // the right one.
+    let wrong_runtime = runtime_url.replace(RUNTIME_PASSWORD, WRONG_PASSWORD);
+    let failed_preflight = operator
+        .run(
+            &operator.migrator_url(),
+            &emit,
+            &[("WADDLE_RUNTIME_DATABASE_URL", wrong_runtime.as_str())],
+        )
+        .await;
+    assert_ne!(
+        failed_preflight.code, SUCCESS,
+        "a preflight that cannot authenticate must fail: {}",
+        failed_preflight.stderr
+    );
+    assert!(
+        failed_preflight.stdout.is_empty(),
+        "no handoff is emitted when the preflight fails"
+    );
+    let emitted = operator
+        .run(
+            &operator.migrator_url(),
+            &emit,
+            &[("WADDLE_RUNTIME_DATABASE_URL", runtime_url.as_str())],
+        )
+        .await;
+    assert_exit(&emitted, SUCCESS, "emit-handoff with the pinned preflight");
+
+    drop(endpoint);
+    provisioned.cleanup().await;
+    cluster.stop().await;
+}
+
 #[cfg(feature = "clustering")]
 mod clustered {
     use std::str::FromStr;
@@ -505,7 +1158,6 @@ mod clustered {
 
     use minidom::Element;
     use sqlx::postgres::{PgConnectOptions, PgPool};
-    use sqlx::{Connection, PgConnection};
     use uuid::Uuid;
     use waddle_server::clustering::allowlist::{AllowlistStore, PostgresAllowlistStore};
     use waddle_server::clustering::lease::PostgresKeypairSlotLease;
@@ -516,19 +1168,15 @@ mod clustered {
     use super::super::support::{
         chat_message, collect_until, contains_text, cutover_record, drop_fixture, has_descendant,
         keypair_pool, mam_query, muc_presence, send_element, KeypairPool, Roles, SocketEndpoint,
-        TRUSTED_SCHEMA,
     };
     use super::super::{
         execute, exercise_roster, iq_request, iq_result, relation_exists, Provisioned, DOMAIN,
         NS_ROSTER, RELEASE_GIT_SHA, SCHEMA, SESSION_KEY,
     };
     use super::{
-        assert_exit, assert_serves, login_url, runtime_url, Operator, PENDING, REFUSED, SUCCESS,
+        assert_exit, assert_serves, login_url, provision, provisioning_snapshot, runtime_url,
+        Operator, PENDING, REFUSED, SUCCESS,
     };
-
-    /// The one-time provisioning the planning document gives for a database
-    /// the owner-as-runtime server built.
-    const PROVISIONING: &str = include_str!("../../sql/restricted_runtime_provisioning.sql");
 
     fn clustered_operator(
         url: &str,
@@ -965,39 +1613,22 @@ mod clustered {
         let before = row_digests(&admin_pool, &CARRIED).await;
         admin_pool.close().await;
 
-        // The documented provisioning procedure, exactly as written, as a
-        // superuser on one session. A second run changes nothing.
-        let mut superuser = PgConnection::connect_with(&admin_options)
+        // The documented provisioning procedure, exactly as written. A
+        // second run leaves every role, membership, owner and ACL as the
+        // first left it.
+        let provisioned_roles = roles.all().map(String::as_str);
+        provision(&admin_options, APP_SCHEMA, &roles, &[])
             .await
-            .expect("superuser session");
-        for (setting, value) in [
-            ("waddle.schema", APP_SCHEMA),
-            ("waddle.old_login", roles.old_runtime.as_str()),
-            ("waddle.database_owner", roles.database_owner.as_str()),
-            ("waddle.schema_owner", roles.schema_owner.as_str()),
-            ("waddle.migrator_login", roles.migrator.as_str()),
-            ("waddle.runtime_login", roles.runtime.as_str()),
-            ("waddle.attestor_installer_login", roles.installer.as_str()),
-            ("waddle.attestor_definer_role", roles.definer.as_str()),
-            ("waddle.attestor_schema", TRUSTED_SCHEMA),
-        ] {
-            sqlx::query("SELECT pg_catalog.set_config($1, $2, false)")
-                .bind(setting)
-                .bind(value)
-                .execute(&mut superuser)
-                .await
-                .expect("set a provisioning parameter");
-        }
-        for run in ["first", "second"] {
-            sqlx::raw_sql(PROVISIONING)
-                .execute(&mut superuser)
-                .await
-                .unwrap_or_else(|error| panic!("{run} provisioning run: {error}"));
-        }
-        superuser
-            .close()
+            .expect("provisioning");
+        let provisioned = provisioning_snapshot(&admin_options, &provisioned_roles).await;
+        provision(&admin_options, APP_SCHEMA, &roles, &[])
             .await
-            .expect("close the superuser session");
+            .expect("repeated provisioning");
+        assert_eq!(
+            provisioning_snapshot(&admin_options, &provisioned_roles).await,
+            provisioned,
+            "a repeated provisioning run changed the catalog"
+        );
 
         // The old login keeps its role but owns nothing here and cannot
         // connect; the application schema belongs to the NOLOGIN owner.

@@ -13,6 +13,7 @@ use crate::db::runtime_startup::{
 use super::args::EmitHandoffArgs;
 use super::connection::{open_owner, secret_env};
 use super::error::OwnerCliError;
+use super::output::write_output;
 
 const RUNTIME_DATABASE_URL: &str = "WADDLE_RUNTIME_DATABASE_URL";
 
@@ -81,12 +82,7 @@ pub(super) async fn run(args: EmitHandoffArgs) -> Result<(), OwnerCliError> {
         return Ok(());
     }
     match &args.output {
-        Some(path) => {
-            std::fs::write(path, handoff.document()).map_err(|source| OwnerCliError::Write {
-                path: path.clone(),
-                source,
-            })?;
-        }
+        Some(path) => write_output(path, handoff.document())?,
         None => println!("{}", handoff.document()),
     }
     eprintln!("handoff composed for release {}", args.release_git_sha);

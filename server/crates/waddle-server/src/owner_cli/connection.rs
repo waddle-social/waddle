@@ -34,15 +34,42 @@ pub(super) fn secret_env(name: &str) -> Result<Option<String>, OwnerCliError> {
     }
 }
 
-/// Parse `url` as PostgreSQL connection options and require its login.
+/// Environment variables the PostgreSQL client library applies to every
+/// connection. Set, they would add startup options or rename the session
+/// behind the subcommand's back.
+const AMBIENT_SESSION_SETTINGS: [&str; 2] = ["PGOPTIONS", "PGAPPNAME"];
+
+/// Parse `url` as PostgreSQL connection options for `login`.
+///
+/// The subcommand decides the session's role, search path and name. A URL
+/// that sets startup options (`options` or `options[...]`) or an
+/// `application_name`, and an environment that sets `PGOPTIONS` or
+/// `PGAPPNAME`, are refused: either could put the session under another
+/// role or search path, or make it indistinguishable from another client.
 pub(super) fn connect_options(
     name: &str,
     url: &str,
     login: &PgRoleName,
 ) -> Result<PgConnectOptions, OwnerCliError> {
-    let options = PgConnectOptions::from_str(url).map_err(|_| {
-        OwnerCliError::Configuration(format!("{name} is not a PostgreSQL connection URL"))
-    })?;
+    for variable in AMBIENT_SESSION_SETTINGS {
+        if std::env::var_os(variable).is_some() {
+            return Err(OwnerCliError::Configuration(format!(
+                "{variable} must not be set; the subcommand sets its own session options and name"
+            )));
+        }
+    }
+    let invalid =
+        || OwnerCliError::Configuration(format!("{name} is not a PostgreSQL connection URL"));
+    let parsed = Url::parse(url).map_err(|_| invalid())?;
+    if parsed.query_pairs().any(|(key, _)| {
+        key == "options" || key.starts_with("options[") || key == "application_name"
+    }) {
+        return Err(OwnerCliError::Configuration(format!(
+            "{name} must not set `options`, `options[...]` or `application_name`; the \
+             subcommand sets the role, the search path and its session name"
+        )));
+    }
+    let options = PgConnectOptions::from_str(url).map_err(|_| invalid())?;
     if options.get_username() != login.as_str() {
         return Err(OwnerCliError::Configuration(format!(
             "{name} must connect as the login {}",
@@ -65,15 +92,6 @@ pub(super) async fn open_owner(
     let mut url = Url::parse(&base).map_err(|_| {
         OwnerCliError::Configuration(format!("{DATABASE_URL} is not a PostgreSQL connection URL"))
     })?;
-    if url
-        .query_pairs()
-        .any(|(key, _)| matches!(key.as_ref(), "options" | "application_name"))
-    {
-        return Err(OwnerCliError::Configuration(format!(
-            "{DATABASE_URL} must not set `options` or `application_name`; the subcommand sets \
-             the role, the search path and its session name"
-        )));
-    }
     url.query_pairs_mut()
         .append_pair(
             "options",

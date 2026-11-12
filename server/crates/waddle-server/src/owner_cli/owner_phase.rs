@@ -20,6 +20,7 @@ use super::args::OwnerPhaseArgs;
 use super::args::{AllowlistArg, ClusteringArgs, ExclusiveDatabaseArg, LegacyKeypairSlotsArg};
 use super::connection::open_owner;
 use super::error::OwnerCliError;
+use super::output::write_output;
 
 pub(super) async fn run(args: OwnerPhaseArgs) -> Result<(), OwnerCliError> {
     let lineage = LineageConfig::from_env()
@@ -71,10 +72,7 @@ pub(super) async fn run(args: OwnerPhaseArgs) -> Result<(), OwnerCliError> {
     let identity =
         database_identity_json(evidence.attested_lineage()).map_err(OwnerCliError::Handoff)?;
     if let Some(path) = &args.identity_output {
-        std::fs::write(path, &identity).map_err(|source| OwnerCliError::Write {
-            path: path.clone(),
-            source,
-        })?;
+        write_output(path, &identity)?;
     }
     println!("{identity}");
     eprintln!("owner phase complete: every schema is prepared and the runtime role is granted");

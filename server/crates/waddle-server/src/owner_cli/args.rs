@@ -32,6 +32,9 @@ restricted runtime role (WADDLE_DB_RUNTIME_ATTESTATION). Each connects with
 the login named in WADDLE_DATABASE_URL, runs to completion and exits. They do
 not start the server, bind a socket or export telemetry.
 
+Connection URLs and other secrets are taken from the environment, never as
+arguments, and are never printed. PGOPTIONS and PGAPPNAME must be unset.
+
 Order for one database:
   1. owner-phase       as the migrator login
   2. install-attestor  as the attestor installer login
@@ -39,11 +42,13 @@ Order for one database:
 
 Exit codes:
   0  completed
-  1  the connection or the database returned an error, or an outcome is unknown
+  1  the connection or the database returned an error, a lock stayed contended
+     or timed out, or an outcome is unknown; a rerun may succeed
   2  invalid arguments or environment; nothing was sent to the database
   3  owner-phase only: prepared, keypair-pool generation pending; run it again
      after the printed activation time
-  4  refused: a verifier rejected the database, the plan or the document";
+  4  refused: a verifier rejected the database, the plan or the document; a
+     rerun refuses again until one of them changes";
 
 const OWNER_PHASE_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -66,7 +71,11 @@ Environment (no flag; secret values are never printed):
                                   with (default 30000).
 
 On success the database identity (lineage and physical identity) is printed
-to standard output as JSON; install-attestor takes it as --identity.";
+to standard output as JSON; install-attestor takes it as --identity.
+
+Without clustering the phase does not check that it has the database to
+itself: stop every server before it runs. --identity-output replaces an
+existing file atomically and refuses a symbolic link.";
 
 const INSTALL_ATTESTOR_ENVIRONMENT: &str = "\
 Environment (no flag; secret values are never printed):
@@ -236,7 +245,9 @@ pub(super) struct ClusteringArgs {
     #[arg(long, value_enum, default_value_t = AllowlistArg::Refuse)]
     pub(super) allowlist: AllowlistArg,
     /// Whether the phase requires that no other session is connected to the
-    /// database and no prepared transaction is pending in it
+    /// database and no prepared transaction is pending in it. `not-checked`
+    /// disables the only check that no server or operator session is still
+    /// connected; never use it during a cutover
     #[arg(long, value_enum, default_value_t = ExclusiveDatabaseArg::Required)]
     pub(super) exclusive_database: ExclusiveDatabaseArg,
 }
@@ -264,7 +275,7 @@ pub(super) enum AllowlistArg {
 pub(super) enum ExclusiveDatabaseArg {
     /// Fail while another session or a prepared transaction exists
     Required,
-    /// Do not check; the operator vouches that other sessions are harmless
+    /// Do not check; a connected server can then write while the phase runs
     NotChecked,
 }
 
@@ -318,7 +329,8 @@ pub(super) struct EmitHandoffArgs {
         conflicts_with = "verify"
     )]
     pub(super) cutover: Option<PathBuf>,
-    /// Write the document to this file instead of standard output
+    /// Write the document to this file instead of standard output; an existing
+    /// file is replaced atomically and a symbolic link is refused
     #[arg(long, value_name = "FILE", conflicts_with = "verify")]
     pub(super) output: Option<PathBuf>,
     /// Emit nothing; check that this stored handoff is what the database and
