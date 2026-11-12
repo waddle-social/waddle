@@ -359,15 +359,26 @@ async fn complete_durable_resume(
         Ok(super::durable::DurableResumed {
             resumed,
             replay_after_h,
-        }) => SmFinalizationReport {
-            finalization: SmRegistrationFinalization::ReplaceWithResumed {
-                resumed,
-                replay_after_h,
-            },
-            resume_outcome: Some(super::observe::SmResumeOutcome::Resumed),
-        },
+            inline_results,
+        }) => {
+            // A resume requested inside a SASL2 exchange is reported in its
+            // `<success/>`, which takes the place of `<resumed/>`.
+            if let Some(success) = conn.sasl2_success.as_mut() {
+                success.resumed(inline_results);
+            }
+            SmFinalizationReport {
+                finalization: SmRegistrationFinalization::ReplaceWithResumed {
+                    resumed,
+                    replay_after_h,
+                },
+                resume_outcome: Some(super::observe::SmResumeOutcome::Resumed),
+            }
+        }
         Err(failure) => {
             warn!(stream_id, jid = %jid, ?failure, "durable SM resume was not published");
+            if let Some(success) = conn.sasl2_success.as_mut() {
+                success.resume_not_published();
+            }
             let handled = conn.sm_state.inbound_count();
             let known = conn.durable_sm.abandon_hydration().await;
             reset_resume_attempt(
@@ -417,6 +428,9 @@ pub(in crate::server::routes::websocket) async fn abandon_unpublished_resume(
         return false;
     }
     let known = conn.durable_sm.abandon_hydration().await;
+    if let Some(success) = conn.sasl2_success.as_mut() {
+        success.resume_not_published();
+    }
     conn.pending_resume_stream_id = None;
     conn.pending_resume_h = None;
     if let Some(jid) = conn.phase.bound_jid().cloned() {
@@ -449,6 +463,9 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     // A resume the durable authority committed is returned to detached; the
     // session stays resumable for the rest of its window.
     conn.durable_sm.abandon_hydration().await;
+    if let Some(success) = conn.sasl2_success.as_mut() {
+        success.resume_not_published();
+    }
     if let Some(claim) = conn.pending_resume_claim.take() {
         claim.release().await;
     }

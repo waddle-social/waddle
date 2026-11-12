@@ -1619,11 +1619,24 @@ impl LiveSocketState {
                         // same steps that follow a resume handled in its
                         // own turn.
                         Some(super::stream_management::DurableResumeSettlement::Staged) => {
+                            if let Some(success) = conn.sasl2_success.as_mut() {
+                                success.held_resume_committed();
+                            }
                             ResponseBatch::default()
                         }
-                        Some(super::stream_management::DurableResumeSettlement::Failed(frames)) => {
-                            ResponseBatch::from(frames)
-                        }
+                        Some(super::stream_management::DurableResumeSettlement::Failed {
+                            frames,
+                            inline,
+                        }) => match conn.sasl2_success.as_mut() {
+                            // The exchange reports the failure in its
+                            // `<success/>` and goes on to its bind request.
+                            Some(success) => {
+                                success.held_resume_failed(inline);
+                                conn.pending_finalized_resume_outcome = None;
+                                ResponseBatch::default()
+                            }
+                            None => ResponseBatch::from(frames),
+                        },
                     };
                     if !complete_inbound_turn(
                         responses,
@@ -1662,13 +1675,45 @@ impl LiveSocketState {
                         &mut conn.pending_sm_enable_commit,
                     ) => settlement,
                 };
-                let reply = match settlement {
+                let (reply, commit) = match settlement {
                     super::stream_management::EnableSettlement::Pending => {
                         return ControlFlow::Continue(());
                     }
-                    super::stream_management::EnableSettlement::Enabled(reply)
-                    | super::stream_management::EnableSettlement::Failed(reply) => reply,
+                    super::stream_management::EnableSettlement::Enabled { reply, commit } => {
+                        (reply, Some(commit))
+                    }
+                    super::stream_management::EnableSettlement::Failed(reply) => (reply, None),
                 };
+                if let Some(success) = conn.sasl2_success.as_mut() {
+                    // The enable was made for a Bind 2 resource: its outcome
+                    // completes the exchange's `<success/>`, which is written
+                    // by the steps that follow any turn.
+                    success.held_enable_settled(commit.as_ref());
+                    if !complete_inbound_turn(
+                        ResponseBatch::default(),
+                        domain,
+                        state,
+                        &mut *conn,
+                        RegistrationChannels {
+                            pending_tx: &mut *pending_tx,
+                            outbound_receiver: Some(&*outbound_rx),
+                            force_detach_rx: &mut *force_detach_rx,
+                        },
+                        ConnectionIo {
+                            sender: &mut ws_sender,
+                            receiver: &mut ws_receiver,
+                        },
+                        FrameAuthority {
+                            permit: admission_permit,
+                            shutdown: shutdown_token,
+                        },
+                    )
+                    .await
+                    {
+                        return ControlFlow::Break(handler_exit(conn, HandlerExit::Inbound));
+                    }
+                    return ControlFlow::Continue(());
+                }
                 if !matches!(
                     send_ws_message_with_authority(
                         &mut ws_sender,
@@ -2749,6 +2794,10 @@ where
         permit: admission_permit,
         shutdown: shutdown_token,
     } = authority;
+    // A SASL2 exchange that authenticated with inline requests runs its
+    // resume, or binds its resource, before registration looks at the phase.
+    super::sasl::advance_sasl2_inline(state.as_ref(), conn).await;
+
     // Mirror any phase transition `handle_xmpp_frame` performed (most
     // importantly Ready → Closing on SASL failure / stream error)
     // into the per-connection state machine. Without this, late
@@ -2919,6 +2968,11 @@ where
         conn.pending_finalized_resume_outcome =
             Some(waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal);
     }
+
+    // A staged SASL2 `<success/>` is written once its inline results are
+    // known: after the resume it reports was completed, or after the resource
+    // it reports as bound was registered.
+    super::sasl::finish_sasl2_inline(state.as_ref(), conn, &mut responses).await;
 
     ensure_websocket_stream_close_for_closing_phase(conn, &mut responses.frames);
 

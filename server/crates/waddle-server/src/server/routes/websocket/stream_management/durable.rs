@@ -174,6 +174,8 @@ pub(in crate::server::routes::websocket) struct UnresolvedEnable {
     claim_guard: SmEnableClaimGuard,
     stream_id: SmSessionId,
     max_resume_secs: u32,
+    /// Whether the client asked for a resumable session.
+    resumable: bool,
     retry: SettlementRetry,
 }
 
@@ -204,6 +206,12 @@ pub(in crate::server::routes::websocket) struct HydratingResume {
 pub(in crate::server::routes::websocket) struct DurableResumed {
     pub(in crate::server::routes::websocket) resumed: SmResumed,
     pub(in crate::server::routes::websocket) replay_after_h: u32,
+    /// The same outcome as the inline results of a SASL2 `<success/>`, for
+    /// a resume requested inside the exchange.
+    pub(in crate::server::routes::websocket) inline_results: Result<
+        waddle_xmpp_core::xep0388_inline::Sasl2InlineResults,
+        crate::sm_authority::DurableSmError,
+    >,
 }
 
 /// Why a committed resume did not become live.
@@ -276,7 +284,7 @@ impl DurableSmLink {
 
     /// Release the hold of a resume that is known not to own the session.
     /// The permit is the evidence: an unknown outcome yields none.
-    fn release_resume_hold(&mut self, _known: FreshBindPermit) {
+    fn release_resume_hold(&mut self, _known: &FreshBindPermit) {
         if matches!(self, Self::ResumeUnresolved(_)) {
             *self = Self::Unbound;
         }
@@ -352,6 +360,11 @@ impl DurableSmLink {
         };
         inbound.advance_to(sm_state.inbound_count());
         let resumed = commit.resumed_reply(sm_state.inbound_count());
+        let inline_results =
+            crate::sm_authority::inline_results(crate::sm_authority::InlineSession::Resumed {
+                commit: &commit,
+                h: sm_state.inbound_count(),
+            });
         *self = Self::Owner(Box::new(DurableSmOwner {
             store,
             fence: commit.fence().clone(),
@@ -363,6 +376,7 @@ impl DurableSmLink {
         Ok(DurableResumed {
             resumed,
             replay_after_h: h,
+            inline_results,
         })
     }
 
@@ -909,65 +923,20 @@ pub(super) async fn enable(
         record_sm_enable(SmEnableOutcome::Refused);
         return failed("unexpected-request");
     };
-    let principal = match session.authenticated_principal_ref() {
-        Ok(principal) => principal,
-        Err(error) => {
-            warn!(%error, "SM enable refused: the session has no durable principal reference");
-            record_sm_enable(SmEnableOutcome::Failed);
-            return failed("internal-server-error");
-        }
+    let unresolved = match prepare_enable(state, binding, session, max_resume_secs, true).await {
+        Ok(unresolved) => unresolved,
+        Err(condition) => return failed(condition),
     };
-    let operation = EnableOperation::mint();
-    let stream_id = SmSessionId::new(operation.session().as_uuid().to_string());
-    let registry = &state.deps.protocol.sm_session_registry;
-    let Some(publication) = registry.ensure_session_claim(stream_id.as_str()).await else {
-        warn!(%stream_id, "SM enable rejected because exact claim admission did not complete");
-        record_sm_enable(SmEnableOutcome::Refused);
-        return failed("resource-constraint");
-    };
-    let claim = registry.current_sm_claim_fence(stream_id.as_str());
-    let claim_guard = SmEnableClaimGuard::new(registry.clone(), stream_id.clone(), publication);
-    if state
-        .deps
-        .protocol
-        .ingress
-        .enroll_stream(&stream_id)
-        .await
-        .is_err()
-    {
-        record_sm_enable(SmEnableOutcome::Failed);
-        return failed("resource-constraint");
-    }
     let committed = store
-        .enable(
-            &operation,
-            EnableRequest {
-                binding,
-                principal: &principal,
-                full_jid,
-                max_resume: Duration::from_secs(u64::from(max_resume_secs)),
-                claim: claim.as_ref(),
-                now: chrono::Utc::now(),
-            },
-        )
+        .enable(&unresolved.operation, unresolved.request(full_jid))
         .await;
-    let unresolved = UnresolvedEnable {
-        operation,
-        binding: binding.clone(),
-        principal,
-        claim,
-        claim_guard,
-        stream_id,
-        max_resume_secs,
-        retry: SettlementRetry::first(),
-    };
     match committed {
         Ok(commit) => vec![adopt_committed_enable(
             store,
             link,
             pending_commit,
             unresolved,
-            commit,
+            &commit,
         )],
         Err(EnableError::Rejected(rejection)) => {
             warn!(
@@ -995,6 +964,151 @@ pub(super) async fn enable(
     }
 }
 
+/// Mint an enable operation and acquire what its commit asserts: the
+/// session claim for the minted session key, and the ingress stream enrolled
+/// under it. On refusal returns the `<failed/>` condition; nothing is held.
+async fn prepare_enable(
+    state: &WebSocketState,
+    binding: &BindingRef,
+    session: &Session,
+    max_resume_secs: u32,
+    resumable: bool,
+) -> Result<UnresolvedEnable, &'static str> {
+    let principal = match session.authenticated_principal_ref() {
+        Ok(principal) => principal,
+        Err(error) => {
+            warn!(%error, "SM enable refused: the session has no durable principal reference");
+            record_sm_enable(SmEnableOutcome::Failed);
+            return Err("internal-server-error");
+        }
+    };
+    let operation = EnableOperation::mint();
+    let stream_id = SmSessionId::new(operation.session().as_uuid().to_string());
+    let registry = &state.deps.protocol.sm_session_registry;
+    let Some(publication) = registry.ensure_session_claim(stream_id.as_str()).await else {
+        warn!(%stream_id, "SM enable rejected because exact claim admission did not complete");
+        record_sm_enable(SmEnableOutcome::Refused);
+        return Err("resource-constraint");
+    };
+    let claim = registry.current_sm_claim_fence(stream_id.as_str());
+    let claim_guard = SmEnableClaimGuard::new(registry.clone(), stream_id.clone(), publication);
+    if state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&stream_id)
+        .await
+        .is_err()
+    {
+        record_sm_enable(SmEnableOutcome::Failed);
+        return Err("resource-constraint");
+    }
+    Ok(UnresolvedEnable {
+        operation,
+        binding: binding.clone(),
+        principal,
+        claim,
+        claim_guard,
+        stream_id,
+        max_resume_secs,
+        resumable,
+        retry: SettlementRetry::first(),
+    })
+}
+
+impl UnresolvedEnable {
+    /// What this attempt presents to the authority for `full_jid`.
+    fn request<'a>(&'a self, full_jid: &'a FullJid) -> EnableRequest<'a> {
+        EnableRequest {
+            binding: &self.binding,
+            principal: &self.principal,
+            full_jid,
+            max_resume: Duration::from_secs(u64::from(self.max_resume_secs)),
+            claim: self.claim.as_ref(),
+            now: chrono::Utc::now(),
+        }
+    }
+}
+
+/// Enable stream management for a resource Bind 2 just bound, on the
+/// binding registration published for it. The connection becomes the owner
+/// of a committed session, and its projection starts when the `<success/>`
+/// that reports the session has been written. An unknown commit outcome
+/// leaves the operation on the connection for the live loop to settle.
+pub(in crate::server::routes::websocket) async fn inline_enable(
+    state: &WebSocketState,
+    conn: &mut super::super::state::WsConnState,
+    enable: waddle_xmpp_core::xep0388_inline::SmInlineEnable,
+) -> crate::sm_authority::Bind2EnableOutcome {
+    use crate::sm_authority::Bind2EnableOutcome;
+    use waddle_xmpp_core::xep0388_inline::SmInlineFailed;
+    use xmpp_parsers::stanza_error::DefinedCondition;
+
+    let refused = |condition| {
+        Bind2EnableOutcome::Failed(SmInlineFailed {
+            h: None,
+            condition: Some(condition),
+        })
+    };
+    let Some(store) = selected_store(state).cloned() else {
+        return refused(DefinedCondition::FeatureNotImplemented);
+    };
+    let (Some(binding), Some(session), Some(full_jid)) = (
+        conn.binding_ref.clone(),
+        conn.authenticated_session.as_ref(),
+        conn.phase.bound_jid().cloned(),
+    ) else {
+        record_sm_enable(SmEnableOutcome::Refused);
+        return refused(DefinedCondition::UnexpectedRequest);
+    };
+    if conn.sm_state.enabled
+        || conn.pending_sm_enable_commit.is_some()
+        || !conn.durable_sm.admits_enable()
+    {
+        record_sm_enable(SmEnableOutcome::Refused);
+        return refused(DefinedCondition::UnexpectedRequest);
+    }
+    let granted = crate::sm_authority::granted_resume_window(
+        enable,
+        Duration::from_secs(u64::from(max_resume_secs_from_env())),
+    );
+    let max_resume_secs = u32::try_from(granted.as_secs()).unwrap_or(u32::MAX);
+    let unresolved =
+        match prepare_enable(state, &binding, session, max_resume_secs, enable.resume).await {
+            Ok(unresolved) => unresolved,
+            Err(_) => return refused(DefinedCondition::ResourceConstraint),
+        };
+    let outcome = store
+        .inline_enable(&unresolved.operation, unresolved.request(&full_jid))
+        .await;
+    match &outcome {
+        Bind2EnableOutcome::Enabled(commit) => {
+            // The staged reply frame is not sent: `<success/>` reports the
+            // session inside `<bound/>`.
+            let _ = adopt_committed_enable(
+                store,
+                &mut conn.durable_sm,
+                &mut conn.pending_sm_enable_commit,
+                unresolved,
+                commit,
+            );
+        }
+        Bind2EnableOutcome::Failed(_) => {
+            abandon_enable(state, unresolved).await;
+            record_sm_enable(SmEnableOutcome::Failed);
+        }
+        Bind2EnableOutcome::Unknown(cause) => {
+            warn!(
+                stream_id = %unresolved.stream_id,
+                error = %cause,
+                "durable SM inline enable commit outcome is unknown; holding <success/>"
+            );
+            conn.durable_sm = DurableSmLink::EnableUnresolved(Box::new(unresolved));
+        }
+    }
+    outcome
+}
+
 /// The `<failed/>` condition of a known enable rejection.
 fn rejection_condition(rejection: &EnableRejection) -> &'static str {
     match rejection {
@@ -1016,7 +1130,7 @@ fn adopt_committed_enable(
     link: &mut DurableSmLink,
     pending_commit: &mut Option<SmEnableCommit>,
     enable: UnresolvedEnable,
-    commit: EnabledCommit,
+    commit: &EnabledCommit,
 ) -> ResponseFrame {
     let UnresolvedEnable {
         principal,
@@ -1024,6 +1138,7 @@ fn adopt_committed_enable(
         claim_guard,
         stream_id,
         max_resume_secs,
+        resumable,
         ..
     } = enable;
     let reply = commit.enabled_reply();
@@ -1040,10 +1155,14 @@ fn adopt_committed_enable(
         Some(claim_guard),
         claim,
         stream_id,
-        true,
+        resumable,
         reply.max.unwrap_or(max_resume_secs),
     ));
-    record_sm_enable(SmEnableOutcome::Enabled);
+    record_sm_enable(if resumable {
+        SmEnableOutcome::Enabled
+    } else {
+        SmEnableOutcome::EnabledWithoutResume
+    });
     ResponseFrame::SmEnabled(reply.to_element())
 }
 
@@ -1071,8 +1190,12 @@ pub(in crate::server::routes::websocket) enum EnableSettlement {
     /// Nothing was unresolved, or the outcome is still unknown and another
     /// attempt is scheduled.
     Pending,
-    /// The enable committed; the frame is its `<enabled/>` reply.
-    Enabled(ResponseFrame),
+    /// The enable committed. `reply` is its `<enabled/>` nonza; an enable
+    /// made inside a SASL2 exchange reports `commit` in `<success/>` instead.
+    Enabled {
+        reply: ResponseFrame,
+        commit: EnabledCommit,
+    },
     /// The enable is known not to own a session. The `<failed/>` answers the
     /// client's request.
     Failed(ResponseFrame),
@@ -1115,13 +1238,11 @@ pub(in crate::server::routes::websocket) async fn settle_unresolved_enable(
     };
     let superseded = matches!(resolution, EnableResolution::Superseded);
     match resolution {
-        EnableResolution::Committed(commit) => EnableSettlement::Enabled(adopt_committed_enable(
-            store.clone(),
-            link,
-            pending_commit,
-            *unresolved,
-            commit,
-        )),
+        EnableResolution::Committed(commit) => {
+            let reply =
+                adopt_committed_enable(store.clone(), link, pending_commit, *unresolved, &commit);
+            EnableSettlement::Enabled { reply, commit }
+        }
         EnableResolution::Superseded | EnableResolution::NotCommitted => {
             if superseded {
                 error!(
@@ -1594,7 +1715,7 @@ pub(super) async fn resume(
             info!(%stream_id, error = %rejection, "durable SM resume rejected");
             let terminal =
                 rejection_terminal(stream_id, Some(&candidate.full_jid), resume.h, &rejection);
-            durable_sm.release_resume_hold(rejection.fresh_bind_permit());
+            durable_sm.release_resume_hold(&rejection.fresh_bind_permit());
             if matches!(terminal.outcome(), SmResumeOutcome::HandledTooHigh) {
                 *phase = ConnectionPhase::closing(None);
             }
@@ -1647,31 +1768,7 @@ pub(in crate::server::routes::websocket) async fn settle_unresolved_resume(
     };
     match resolution {
         ResumeResolution::Committed(commit) => {
-            adopt_committed_resume(
-                store,
-                ResumeTargets {
-                    durable_sm: &mut conn.durable_sm,
-                    binding_ref: &mut conn.binding_ref,
-                    phase: &mut conn.phase,
-                    sm_state: &mut conn.sm_state,
-                    sm_ingress_fence: &mut conn.sm_ingress_fence,
-                    occupancy_session: &mut conn.occupancy_session,
-                    carbons_enabled: &mut conn.carbons_enabled,
-                    roster_interested: &mut conn.roster_interested,
-                    blocklist_interested: &mut conn.blocklist_interested,
-                    presence_available: &mut conn.presence_available,
-                    presence_show: &mut conn.presence_show,
-                    presence_status: &mut conn.presence_status,
-                    presence_priority: &mut conn.presence_priority,
-                    presence_payloads: &mut conn.presence_payloads,
-                    pending_subscribes_flushed: &mut conn.pending_subscribes_flushed,
-                    pending_resume_stream_id: &mut conn.pending_resume_stream_id,
-                    pending_resume_h: &mut conn.pending_resume_h,
-                    suppress_sm_record_next_batch: &mut conn.suppress_sm_record_next_batch,
-                },
-                *unresolved,
-                *commit,
-            );
+            adopt_committed_resume(store, resume_targets(conn), *unresolved, *commit);
             Some(DurableResumeSettlement::Staged)
         }
         ResumeResolution::Rejected(rejection) => {
@@ -1685,7 +1782,192 @@ pub(in crate::server::routes::websocket) async fn settle_unresolved_resume(
             }
             super::observe::observe_sm_resume(&terminal);
             conn.pending_finalized_resume_outcome = Some(terminal.outcome());
-            Some(DurableResumeSettlement::Failed(terminal.into_frames()))
+            Some(DurableResumeSettlement::Failed {
+                frames: terminal.into_frames(),
+                inline: crate::sm_authority::InlineResumeFailed::from_rejection(&rejection),
+            })
+        }
+    }
+}
+
+/// The fields of `conn` a committed resume restores.
+fn resume_targets(conn: &mut super::super::state::WsConnState) -> ResumeTargets<'_> {
+    ResumeTargets {
+        durable_sm: &mut conn.durable_sm,
+        binding_ref: &mut conn.binding_ref,
+        phase: &mut conn.phase,
+        sm_state: &mut conn.sm_state,
+        sm_ingress_fence: &mut conn.sm_ingress_fence,
+        occupancy_session: &mut conn.occupancy_session,
+        carbons_enabled: &mut conn.carbons_enabled,
+        roster_interested: &mut conn.roster_interested,
+        blocklist_interested: &mut conn.blocklist_interested,
+        presence_available: &mut conn.presence_available,
+        presence_show: &mut conn.presence_show,
+        presence_status: &mut conn.presence_status,
+        presence_priority: &mut conn.presence_priority,
+        presence_payloads: &mut conn.presence_payloads,
+        pending_subscribes_flushed: &mut conn.pending_subscribes_flushed,
+        pending_resume_stream_id: &mut conn.pending_resume_stream_id,
+        pending_resume_h: &mut conn.pending_resume_h,
+        suppress_sm_record_next_batch: &mut conn.suppress_sm_record_next_batch,
+    }
+}
+
+/// How the resume requested inside a SASL2 exchange went.
+pub(in crate::server::routes::websocket) enum InlineResumeStep {
+    /// The resume committed and the connection is staged for publication.
+    /// The bind request, if any, is skipped.
+    Resumed,
+    /// The commit outcome is unknown. The connection holds, and neither
+    /// `<success/>` nor a bind follows until it is settled.
+    Held,
+    /// The resume is known not to have happened.
+    Failed(crate::sm_authority::InlineResumeFailed),
+}
+
+/// Run the resume an authenticated SASL2 exchange requested inline.
+///
+/// It is the resume of a `<resume/>` nonza, made through the inline entry
+/// points of the authority: the same binding identity per attempt, the same
+/// cleanup request to a local owner, the same claim, ingress checkpoint and
+/// principal standing, and the same hold while the commit outcome is
+/// unknown.
+pub(in crate::server::routes::websocket) async fn inline_resume(
+    state: &WebSocketState,
+    conn: &mut super::super::state::WsConnState,
+    resume: &waddle_xmpp_core::xep0388_inline::SmInlineResume,
+) -> InlineResumeStep {
+    use crate::sm_authority::{InlineResumeFailed, InlineResumeOutcome, InlineResumeRequest};
+
+    // A failure before the authority is asked has no rejection of its own;
+    // it is reported as the authority being unable to decide.
+    let undecided = || InlineResumeStep::Failed(InlineResumeFailed::standing_unavailable());
+    let Some(store) = selected_store(state).cloned() else {
+        return undecided();
+    };
+    let Some(bare_jid) = conn.phase.authenticated_bare_jid().cloned() else {
+        return undecided();
+    };
+    if conn.resume_endpoint_handoff_blocked || !conn.durable_sm.admits_enable() {
+        return undecided();
+    }
+    let Some(Ok(presented)) = conn
+        .authenticated_session
+        .as_ref()
+        .map(Session::authenticated_principal_ref)
+    else {
+        return undecided();
+    };
+    conn.binding_ref = None;
+    let attempt_binding = match conn.bindings.prepare_next() {
+        Ok(prepared) => prepared.attempt.binding_ref,
+        Err(refusal) => {
+            error!(%refusal, "inline resume attempt could not mint a binding identity");
+            return undecided();
+        }
+    };
+    #[cfg(test)]
+    conn.resume_binding_attempts.push(attempt_binding.clone());
+
+    let attempt = match store.begin_inline_resume(resume).await {
+        Ok(attempt) => attempt,
+        Err(failed) => return InlineResumeStep::Failed(failed),
+    };
+    let stream_id = SmSessionId::new(attempt.session().as_uuid().to_string());
+
+    // Cleanup, not the fence: a local owner detaches so its resource
+    // snapshot is stored. The request checks the requester's account itself,
+    // and the authority refuses a principal the session does not belong to.
+    {
+        use crate::clustering::resume_bridge::request_validated_local_resume;
+        let shutdown = state.deps.shutdown.stop_token();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return undecided(),
+            _ = request_validated_local_resume(
+                &state.deps.protocol.connection_registry,
+                &stream_id,
+                &bare_jid,
+                resume.h,
+            ) => {}
+        }
+    }
+
+    let registry = &state.deps.protocol.sm_session_registry;
+    let Some(_claim_publication) = registry.ensure_session_claim(stream_id.as_str()).await else {
+        warn!(%stream_id, "inline durable SM resume refused: the session claim is held elsewhere");
+        return InlineResumeStep::Failed(InlineResumeFailed::claim_unavailable());
+    };
+    let claim = registry.current_sm_claim_fence(stream_id.as_str());
+    let inbound_checkpoint = match state
+        .deps
+        .protocol
+        .ingress
+        .load_resume_checkpoint(&stream_id)
+        .await
+    {
+        Ok(Some(checkpoint)) => checkpoint.to_storage(),
+        Ok(None) | Err(_) => return undecided(),
+    };
+    let resolution = state
+        .deps
+        .auth_state
+        .session_manager
+        .resolve_principal(attempt.stored_principal())
+        .await;
+    let Some(standing) = crate::sm_authority::principal_standing(&resolution) else {
+        return undecided();
+    };
+
+    conn.durable_sm = DurableSmLink::ResumeUnresolved(Box::new(UnresolvedResume {
+        operation: attempt.operation().clone(),
+        binding: attempt_binding,
+        presented,
+        claim,
+        h: resume.h,
+        stream_id: stream_id.clone(),
+        inbound_checkpoint,
+        retry: SettlementRetry::first(),
+    }));
+    let DurableSmLink::ResumeUnresolved(pending) = &conn.durable_sm else {
+        return undecided();
+    };
+    let outcome = store
+        .finish_inline_resume(
+            &attempt,
+            InlineResumeRequest {
+                binding: &pending.binding,
+                presented: &pending.presented,
+                standing,
+                claim: pending.claim.as_ref(),
+                now: chrono::Utc::now(),
+            },
+        )
+        .await;
+    match outcome {
+        InlineResumeOutcome::Resumed(commit) => {
+            let DurableSmLink::ResumeUnresolved(pending) = std::mem::take(&mut conn.durable_sm)
+            else {
+                return undecided();
+            };
+            close_superseded_local_binding(state, &commit, &bare_jid);
+            adopt_committed_resume(store, resume_targets(conn), *pending, *commit);
+            InlineResumeStep::Resumed
+        }
+        InlineResumeOutcome::Failed(failed) => {
+            info!(%stream_id, failed = ?failed.failed(), "inline durable SM resume rejected");
+            conn.durable_sm
+                .release_resume_hold(failed.fresh_bind_permit());
+            InlineResumeStep::Failed(failed)
+        }
+        InlineResumeOutcome::Unknown(cause) => {
+            warn!(
+                %stream_id,
+                error = %cause,
+                "inline durable SM resume commit outcome is unknown; holding <success/>"
+            );
+            InlineResumeStep::Held
         }
     }
 }
@@ -1694,8 +1976,13 @@ pub(in crate::server::routes::websocket) async fn settle_unresolved_resume(
 pub(in crate::server::routes::websocket) enum DurableResumeSettlement {
     /// The resume committed; the connection is staged for publication.
     Staged,
-    /// The resume is known not to have happened; the frames answer it.
-    Failed(Vec<ResponseFrame>),
+    /// The resume is known not to have happened. `frames` answer a
+    /// `<resume/>` nonza; a resume requested inside a SASL2 exchange reports
+    /// `inline` in `<success/>` instead.
+    Failed {
+        frames: Vec<ResponseFrame>,
+        inline: crate::sm_authority::InlineResumeFailed,
+    },
 }
 
 /// At teardown, settle a resume whose outcome is still unknown and return a

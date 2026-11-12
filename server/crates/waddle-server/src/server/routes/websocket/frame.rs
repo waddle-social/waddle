@@ -14,10 +14,9 @@ use super::sasl::{
 use super::state::{authenticated_client_room_origin, InboundFrameTerminal, WsConnState};
 use super::stream_management::{handle_sm_stanza, SmCtx};
 use super::transport_xml::{
-    build_handled_count_too_high_stream_error, build_stream_features_element,
-    build_stream_features_for_phase_element, element_to_xml, sasl2_failure_element,
-    sasl_failure_element, stanza_to_xml, websocket_stream_close_element,
-    websocket_stream_open_element,
+    build_handled_count_too_high_stream_error, build_stream_features_for_phase_element,
+    element_to_xml, sasl2_failure_element, sasl_failure_element, stanza_to_xml,
+    websocket_stream_close_element, websocket_stream_open_element,
 };
 use super::{
     debug, handlers, info, warn, ConnectionPhase, InboundFrame, ParseError, ResolvedPrincipal,
@@ -646,6 +645,8 @@ async fn handle_xmpp_frame_impl(
         suppress_sm_record_next_batch,
         pending_sm_enable_commit,
         durable_sm,
+        sasl2_inline_requests,
+        sasl2_success,
         state_machine,
         registry_owner,
         resume_endpoint_handoff_blocked,
@@ -889,9 +890,7 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::Sasl2Authenticate(request) => {
-            use waddle_xmpp_core::xep0388::{
-                Sasl2FailureCondition, Sasl2Mechanism, Sasl2Success, NS_SASL2,
-            };
+            use waddle_xmpp_core::xep0388::{Sasl2FailureCondition, Sasl2Mechanism, NS_SASL2};
 
             // SASL2 is dark by default. Only an explicitly opted-in test
             // fixture can advertise and dispatch this handshake; operator
@@ -923,16 +922,13 @@ async fn handle_xmpp_frame_impl(
                 )]
                 .into();
             }
-            if request
-                .additional_children()
-                .iter()
-                .any(|child| !child.is("user-agent", NS_SASL2))
-            {
+            let Some(inline_requests) = super::sasl::sasl2_inline_requests(state, &request) else {
                 return vec![sasl2_failure_element(
                     Sasl2FailureCondition::MalformedRequest,
                 )]
                 .into();
-            }
+            };
+            *sasl2_inline_requests = inline_requests;
             let Some(initial_response) = request.initial_response else {
                 return vec![sasl2_failure_element(
                     Sasl2FailureCondition::MalformedRequest,
@@ -1011,13 +1007,12 @@ async fn handle_xmpp_frame_impl(
                     ]
                     .into();
                 };
-                let success = Sasl2Success {
-                    additional_data: None,
-                    authorization_identifier: authorization_identifier.into(),
-                    inline_results: Vec::new(),
-                }
-                .to_element();
-                return vec![success, build_stream_features_element(true)].into();
+                return super::sasl::sasl2_success_responses(
+                    sasl2_success,
+                    std::mem::take(sasl2_inline_requests),
+                    None,
+                    authorization_identifier,
+                );
             }
 
             if phase_was_unauthenticated && phase.is_closing() {
@@ -1030,7 +1025,7 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::Sasl2Response(response) => {
-            use waddle_xmpp_core::xep0388::{Sasl2FailureCondition, Sasl2Success};
+            use waddle_xmpp_core::xep0388::Sasl2FailureCondition;
 
             if !state.sasl2_negotiation_enabled() {
                 return vec![sasl2_failure_element(
@@ -1077,13 +1072,12 @@ async fn handle_xmpp_frame_impl(
                     ]
                     .into();
                 };
-                let success = Sasl2Success {
-                    additional_data: Some(waddle_xmpp_core::xep0388::Sasl2Data::new(server_final)),
-                    authorization_identifier: authorization_identifier.into(),
-                    inline_results: Vec::new(),
-                }
-                .to_element();
-                return vec![success, build_stream_features_element(true)].into();
+                return super::sasl::sasl2_success_responses(
+                    sasl2_success,
+                    std::mem::take(sasl2_inline_requests),
+                    Some(server_final),
+                    authorization_identifier,
+                );
             }
             if phase.is_closing() {
                 *phase = ConnectionPhase::Unauthenticated;

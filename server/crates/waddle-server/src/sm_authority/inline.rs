@@ -97,6 +97,12 @@ impl InlineResumeAttempt {
     pub fn full_jid(&self) -> &FullJid {
         &self.candidate.full_jid
     }
+
+    /// The session the token names. It keys the session's claim and its
+    /// ingress checkpoint.
+    pub fn session(&self) -> waddle_xmpp::ownership::SmSessionKey {
+        self.candidate.session
+    }
 }
 
 /// A resume known not to have happened: the `<failed/>` to report and the
@@ -108,7 +114,8 @@ pub struct InlineResumeFailed {
 }
 
 impl InlineResumeFailed {
-    fn from_rejection(rejection: &ResumeRejection) -> Self {
+    /// The failure a known resume rejection reports.
+    pub fn from_rejection(rejection: &ResumeRejection) -> Self {
         Self {
             failed: SmInlineFailed {
                 h: rejection.handled_floor(),
@@ -123,6 +130,14 @@ impl InlineResumeFailed {
     pub fn standing_unavailable() -> Self {
         Self::from_rejection(&ResumeRejection::new(
             ResumeRejectionReason::PrincipalStandingUnavailable,
+        ))
+    }
+
+    /// This node does not hold, and could not take, the session's claim,
+    /// so the resume transaction was not run.
+    pub fn claim_unavailable() -> Self {
+        Self::from_rejection(&ResumeRejection::new(
+            ResumeRejectionReason::ClaimFenceMissing,
         ))
     }
 
