@@ -60,6 +60,9 @@ mod xep0045_xep0198_remote_cleanup;
 #[path = "xep0045_partial_fanout/mod.rs"]
 mod xep0045_partial_fanout;
 
+#[path = "failure_matrix/mod.rs"]
+mod failure_matrix;
+
 use base64::Engine;
 use cluster_support::{
     cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
