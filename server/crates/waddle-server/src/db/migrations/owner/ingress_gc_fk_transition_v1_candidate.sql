@@ -15,6 +15,7 @@ LOCK TABLE ONLY
     __SCHEMA__.ingress_effect_descendants,
     __SCHEMA__.ingress_effect_intents,
     __SCHEMA__.ingress_effect_receipts,
+    __SCHEMA__.ingress_mailbox_entries,
     __SCHEMA__.ingress_messages,
     __SCHEMA__.ingress_origin_aliases,
     __SCHEMA__.ingress_owner_rejections,
@@ -47,6 +48,7 @@ BEGIN
         ('ingress_send_attempts', 'ingress_send_attempts_message_key_kind_semantic_identity_h_fkey', 'ingress_effect_intents', ARRAY[1,2,3]::smallint[], ARRAY[1,3,4]::smallint[], 'c'::"char", false, true),
         ('ingress_deliveries', 'ingress_deliveries_message_key_fkey', 'ingress_messages', ARRAY[2]::smallint[], ARRAY[1]::smallint[], 'a'::"char", false, true),
         ('ingress_effect_intents', 'ingress_effect_intents_message_key_fkey', 'ingress_messages', ARRAY[1]::smallint[], ARRAY[1]::smallint[], 'c'::"char", false, true),
+        ('ingress_mailbox_entries', 'ingress_mailbox_entries_message_key_fkey', 'ingress_messages', ARRAY[4]::smallint[], ARRAY[1]::smallint[], 'c'::"char", false, true),
         ('ingress_origin_aliases', 'ingress_origin_aliases_message_key_fkey', 'ingress_messages', ARRAY[6]::smallint[], ARRAY[1]::smallint[], 'a'::"char", false, true),
         ('ingress_owner_rejections', 'ingress_owner_rejections_child_message_key_fkey', 'ingress_messages', ARRAY[2]::smallint[], ARRAY[1]::smallint[], 'c'::"char", false, true),
         ('ingress_owner_rejections', 'ingress_owner_rejections_source_message_key_fkey', 'ingress_messages', ARRAY[1]::smallint[], ARRAY[1]::smallint[], 'r'::"char", false, true),
@@ -131,6 +133,13 @@ ALTER TABLE __SCHEMA__.ingress_send_attempts
 ALTER TABLE __SCHEMA__.ingress_effect_intents
     DROP CONSTRAINT ingress_effect_intents_message_key_fkey,
     ADD CONSTRAINT ingress_effect_intents_message_key_fkey FOREIGN KEY (message_key)
+    REFERENCES __SCHEMA__.ingress_messages(message_key) ON DELETE NO ACTION NOT DEFERRABLE;
+-- A mailbox entry stops cascading with its message: the collector deletes
+-- consumed entries explicitly and an entry that is not consumed keeps the
+-- message from being deleted at all.
+ALTER TABLE __SCHEMA__.ingress_mailbox_entries
+    DROP CONSTRAINT ingress_mailbox_entries_message_key_fkey,
+    ADD CONSTRAINT ingress_mailbox_entries_message_key_fkey FOREIGN KEY (message_key)
     REFERENCES __SCHEMA__.ingress_messages(message_key) ON DELETE NO ACTION NOT DEFERRABLE;
 ALTER TABLE __SCHEMA__.ingress_owner_rejections
     DROP CONSTRAINT ingress_owner_rejections_child_message_key_fkey,

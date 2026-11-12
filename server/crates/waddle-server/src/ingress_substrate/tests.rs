@@ -984,11 +984,18 @@ fn gc_monitoring_predicate_matches_collector() {
         predicate(GC_CANDIDATES_SQLITE),
         "both collector dialects use the same pair predicate"
     );
+    // The deployed database holds both the mailbox and pending delivery, so
+    // the monitored predicate carries both retained-child subqueries.
     let mut monitored = postgres;
     for alias in ["m", "child"] {
+        let reference =
+            format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key");
         monitored = monitored.replace(
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key"),
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"),
+            &reference,
+            &format!(
+                "{reference}{}",
+                super::substrate::retained_child_unions(alias, true, true)
+            ),
         );
     }
     let monitoring = std::fs::read_to_string(

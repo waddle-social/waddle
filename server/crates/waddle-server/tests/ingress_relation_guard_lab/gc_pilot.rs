@@ -17,6 +17,9 @@ const PENDING_SM: &str = "00000000-0000-0000-0000-000000000014";
 const PENDING_DELIVERY: &str = "00000000-0000-0000-0000-000000000015";
 const SM_REF: &str = "00000000-0000-0000-0000-000000000016";
 const OWNER_PENDING: &str = "00000000-0000-0000-0000-000000000017";
+const MAILBOX_DECIDED: &str = "00000000-0000-0000-0000-000000000018";
+const MAILBOX_CONSUMED: &str = "00000000-0000-0000-0000-000000000019";
+const MAILBOX_LANE: &str = "00000000-0000-0000-0000-0000000000a1";
 
 fn render(sql: &str, api_owner: &str, runtime: &str) -> String {
     sql.replace("__SCHEMA_PATH__", "\"guarded\"")
@@ -77,6 +80,8 @@ async fn seed(owner: &mut PgConnection) {
         '00000000-0000-0000-0000-000000000014',
         '00000000-0000-0000-0000-000000000015',
         '00000000-0000-0000-0000-000000000016',
+        '00000000-0000-0000-0000-000000000018',
+        '00000000-0000-0000-0000-000000000019',
         '00000000-0000-0000-0000-000000000022',
         '00000000-0000-0000-0000-000000000031']) AS key;
       UPDATE guarded.ingress_messages SET owner_decision=0 WHERE message_key IN
@@ -126,6 +131,12 @@ async fn seed(owner: &mut PgConnection) {
       VALUES ('00000000-0000-0000-0000-000000000014',1,decode(repeat('04',32),'hex'),'resource','stream',1,1,'payload',1,0);
       INSERT INTO guarded.ingress_sm_refs (sm_ingress_id,ingress_ordinal,message_key,wire_h,wire_generation)
       VALUES ('00000000-0000-0000-0000-000000000099',1,'00000000-0000-0000-0000-000000000016',1,0);
+      INSERT INTO guarded.ingress_mailbox_lanes (lane_id,digest_version,digest,encoding_version,encoding,
+        last_sequence,last_dispositioned,origin_epoch,target_epoch,target_node_id,target_node_epoch)
+      VALUES ('00000000-0000-0000-0000-0000000000a1',1,decode(repeat('a1',32),'hex'),1,'\x010101',2,2,1,1,'node','incarnation');
+      INSERT INTO guarded.ingress_mailbox_entries (lane_id,sequence,operation_kind,message_key,disposition)
+      VALUES ('00000000-0000-0000-0000-0000000000a1',1,1,'00000000-0000-0000-0000-000000000018',1),
+             ('00000000-0000-0000-0000-0000000000a1',2,1,'00000000-0000-0000-0000-000000000019',3);
     "#).await;
     commit(owner).await;
 }
@@ -176,7 +187,7 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
     let fks: Vec<(String, String, bool, bool, bool)> = sqlx::query_as(
       "SELECT c.conname::text, c.confdeltype::text, c.condeferrable, c.condeferred, c.convalidated FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class p ON p.oid=c.confrelid WHERE c.contype='f' AND p.relnamespace='guarded'::regnamespace AND p.relname IN ('ingress_messages','ingress_effect_intents') ORDER BY c.conname")
       .fetch_all(&mut admin).await.expect("transitioned FK catalog");
-    assert_eq!(fks.len(), 13);
+    assert_eq!(fks.len(), 14);
     for (name, action, deferrable, deferred, validated) in &fks {
         assert!(*validated && !*deferred, "{name}");
         match name.as_str() {
@@ -310,10 +321,27 @@ async fn quiescent_gc_v1_catalog_roles_retention_and_rollback() {
         PENDING_DELIVERY,
         SM_REF,
         OWNER_PENDING,
+        // The owner decided this entry but its origin has not consumed it.
+        MAILBOX_DECIDED,
         CHILD,
     ] {
         assert_eq!(gc_tx(&mut runtime, key).await, "retained", "{key}");
     }
+    // A consumed entry does not retain its message. The collector removes
+    // the entry with the message and leaves the lane row and its counter.
+    assert_eq!(gc_tx(&mut runtime, MAILBOX_CONSUMED).await, "deleted_one");
+    let mailbox: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM guarded.ingress_mailbox_entries WHERE message_key=$1::uuid), \
+                (SELECT count(*) FROM guarded.ingress_mailbox_entries WHERE message_key=$2::uuid), \
+                (SELECT count(*) FROM guarded.ingress_mailbox_lanes WHERE lane_id=$3::uuid AND last_sequence=2)",
+    )
+    .bind(MAILBOX_CONSUMED)
+    .bind(MAILBOX_DECIDED)
+    .bind(MAILBOX_LANE)
+    .fetch_one(&mut admin)
+    .await
+    .expect("mailbox rows after collection");
+    assert_eq!(mailbox, (0, 1, 1));
     assert_eq!(gc_tx(&mut runtime, NULL_TAIL).await, "adopted");
     let adopted: bool = sqlx::query_scalar("SELECT retention_eligible_at BETWEEN clock_timestamp() - interval '1 minute' AND clock_timestamp() FROM guarded.ingress_messages WHERE message_key=$1::uuid")
         .bind(NULL_TAIL).fetch_one(&mut admin).await.expect("database clock");

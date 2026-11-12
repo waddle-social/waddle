@@ -358,14 +358,26 @@ CNPG eligible/retained-reference counts alongside reclamation totals.
 The collector and CNPG backlog/oldest-age queries share the same candidate
 predicate. A terminal row is a candidate when its retention clock is unset or
 has passed the eight-day cutoff, every intent has its matching receipt, and it
-has no SM custody, pending archive delivery, unsettled descendant, or undecided
-bound remote-room owner result. A mapped rejection child is never a candidate
+has no SM custody, mailbox entry that is not yet consumed, pending archive
+delivery, unsettled descendant, or undecided bound remote-room owner result. A mapped rejection child is never a candidate
 on its own. Its source is a candidate only after the rejected decision is
 latched and the child also satisfies those conditions and its own retention
 clock. A ready pair occupies one candidate slot and contributes two messages to
 the committed deletion count. Blocked pairs are excluded before the scan
 limit, so they cannot starve later candidates. The CNPG eligible gauge counts
 candidate slots, including one per ready pair.
+
+On PostgreSQL a durable mailbox entry (`ingress_mailbox_entries`) retains its
+canonical message until the entry is `Consumed`: the origin may still need the
+owner's decision and the owner's poller still reads the message through the
+entry. The same clause guards the retention clock, the candidate scan and the
+final delete, each read in a fresh READ COMMITTED statement snapshot. A
+consumed entry does not retain the message and is removed with it by the
+foreign-key cascade. The collector locks the canonical message with
+`SKIP LOCKED` and never locks a mailbox lane. A mailbox writer locks its lane,
+then the canonical message, then the entry, so a collector holding the message
+cannot wait on a lane, and an appender that finds the message locked by the
+collector either proceeds after the collector skips it or finds it gone.
 
 An owner rejection starts a fresh full source tail once the source's own
 obligations are settled; the child starts its own tail when its obligations

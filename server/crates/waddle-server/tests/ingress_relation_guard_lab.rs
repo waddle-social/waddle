@@ -16,7 +16,7 @@ const CANDIDATE: &str =
     include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 const DEFINER_API_CANDIDATE: &str =
     include_str!("../src/db/migrations/owner/ingress_definer_api_candidate.sql");
-const TABLES: [&str; 13] = [
+const TABLES: [&str; 15] = [
     "ingress_archive_dispatch",
     "ingress_carbon_receipts",
     "ingress_deliveries",
@@ -24,6 +24,8 @@ const TABLES: [&str; 13] = [
     "ingress_effect_descendants",
     "ingress_effect_intents",
     "ingress_effect_receipts",
+    "ingress_mailbox_entries",
+    "ingress_mailbox_lanes",
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_owner_rejections",

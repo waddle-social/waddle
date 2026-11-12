@@ -40,6 +40,32 @@ Message garbage collection locks the canonical message with `SKIP LOCKED` and
 reaches entries only through the cascade. It never locks a lane, so it cannot
 wait on a lane held by an appender that is waiting for that message.
 
+### Retention
+
+An entry that is not `Consumed` retains its canonical message. On PostgreSQL
+the retention clock (`refresh_retention`), the collector's candidate scan and
+its final delete all treat such an entry like an SM reference
+(`retained_child_unions` in `ingress_substrate/substrate.rs`), and each reads
+it in a fresh READ COMMITTED statement snapshot. The deployed CNPG monitoring
+query carries the same clause, and `gc_monitoring_predicate_matches_collector`
+keeps the two identical. A consumed entry retains nothing and leaves with its
+message through the cascade. Lane rows are not collected.
+
+Lock schedules:
+
+- Appender first: the appender holds its lane and the canonical message. The
+  collector's `SKIP LOCKED` passes over the message and finishes.
+- Collector first: the collector holds the canonical message. The appender
+  holds its lane and waits for the message. The collector needs no lane, so it
+  either skips the message, after which the appender proceeds, or deletes it,
+  after which the appender fails with `MailboxError::ParentMissing` and rolls
+  its lane back.
+
+The unregistered GC pilot (`ingress_gc_fk_transition_v1_candidate.sql`,
+`ingress_gc_api_v1_candidate.sql`) lists the entry foreign key in its FK
+manifest, turns it into `NO ACTION`, refuses a message whose entry is not
+consumed and deletes consumed entries explicitly.
+
 ### Guard, roles and manifest
 
 Both tables are in `EPOCH_GUARDED_TABLES` and in
@@ -62,8 +88,12 @@ full unsigned range and exhaustion, one entry for one operation across lanes
 (sequential and raced), a replan from owner A to owner B that returns the
 first entry and fences A out, head-only owner decisions with an exclusive
 cursor, admission refusal before any write, and refusal of unproven,
-stale-proof and unsupported-epoch writes. The binary runs in nextest's
+stale-proof and unsupported-epoch writes. It also runs the real collector
+against a pending, a decided and a consumed entry, and drives both lock
+schedules with an observed blocked backend. The binary runs in nextest's
 `postgres` group and its tests are in `required-cluster-tests.txt`.
+`tests/ingress_relation_guard_lab/gc_pilot.rs` covers the same retention rule
+in the GC pilot.
 
 ## Ownership and boundaries
 

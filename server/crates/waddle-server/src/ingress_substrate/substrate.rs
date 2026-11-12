@@ -2448,6 +2448,34 @@ pub(in crate::ingress_substrate) async fn expired_candidates(
 /// catalog before mentioning it in SQL. All dedup evidence remains protected,
 /// and the candidate scan omits protected rows, so a
 /// full batch of pending copies cannot starve collectable later messages.
+/// Subqueries appended to a retention statement's SM-reference check: each
+/// names custody that keeps a canonical message, and its child in a rejection
+/// pair, out of collection.
+///
+/// A mailbox entry that is not yet consumed retains its message: the origin
+/// may still need the owner's decision, and the owner's poller still reads
+/// the message through the entry. Terminal entries do not retain it; they
+/// leave with the message through the cascade. A pending-delivery row that an
+/// archive dispatch points at retains its message until the row is gone.
+pub(in crate::ingress_substrate) fn retained_child_unions(
+    alias: &str,
+    has_mailbox: bool,
+    has_pending: bool,
+) -> String {
+    let mut unions = String::new();
+    if has_mailbox {
+        unions.push_str(&format!(
+            " UNION ALL SELECT 1 FROM ingress_mailbox_entries entry WHERE entry.message_key = {alias}.message_key AND entry.disposition < 3"
+        ));
+    }
+    if has_pending {
+        unions.push_str(&format!(
+            " UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"
+        ));
+    }
+    unions
+}
+
 pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
     tx: &mut Transaction<'_>,
     postgres: &'static str,
@@ -2465,14 +2493,33 @@ pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
         )
         .await?;
     let has_pending = rows.next().await?.is_some();
-    if !has_pending {
+    drop(rows);
+    // Mailbox tables exist only on PostgreSQL, from the migration that
+    // introduces them onward.
+    let has_mailbox = if tx.driver() == DatabaseDriver::Postgres {
+        let mut rows = tx
+            .query(
+                "SELECT 1 WHERE to_regclass('ingress_mailbox_entries') IS NOT NULL",
+                (),
+            )
+            .await?;
+        rows.next().await?.is_some()
+    } else {
+        false
+    };
+    if !has_pending && !has_mailbox {
         return Ok(base.to_owned());
     }
     let mut sql = base.to_owned();
     for alias in ["m", "child"] {
+        let reference =
+            format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key");
         sql = sql.replace(
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key"),
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"),
+            &reference,
+            &format!(
+                "{reference}{}",
+                retained_child_unions(alias, has_mailbox, has_pending)
+            ),
         );
     }
     Ok(sql)

@@ -144,9 +144,30 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
     } else {
         String::new()
     };
+    // Mailbox tables exist from the migration that introduces them onward.
+    let mailbox = relation(PreparedIngressRelation::MailboxEntries);
+    let mut rows = tx
+        .query(
+            "SELECT 1 WHERE pg_catalog.to_regclass(?) IS NOT NULL",
+            crate::db_params![mailbox.clone()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let has_mailbox = rows.next().await.map_err(discard_database_error)?.is_some();
+    drop(rows);
+    // An entry that is not yet consumed retains its canonical message.
+    let mailbox_guard = if has_mailbox {
+        format!(
+            "AND NOT EXISTS (SELECT 1 FROM {mailbox} entry \
+             WHERE entry.message_key = m.message_key AND entry.disposition < 3)"
+        )
+    } else {
+        String::new()
+    };
     let sql = format!(
         "UPDATE {} AS m SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL \
          AND NOT EXISTS (SELECT 1 FROM {} r WHERE r.message_key = m.message_key) \
+         {mailbox_guard} \
          AND NOT EXISTS (SELECT 1 FROM {} owner_child WHERE owner_child.source_message_key = m.message_key \
            AND (m.owner_decision IS NULL OR m.owner_decision <> 2)) \
          AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS \

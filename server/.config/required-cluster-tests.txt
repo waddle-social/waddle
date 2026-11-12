@@ -575,3 +575,12 @@ waddle-server::mailbox_core_postgres replan_from_owner_a_to_owner_b_keeps_one_re
 waddle-server::mailbox_core_postgres owner_decides_only_the_lane_head_and_the_cursor_is_exclusive
 waddle-server::mailbox_core_postgres full_lane_and_full_node_refuse_before_any_write
 waddle-server::mailbox_core_postgres guarded_tables_reject_unproven_and_unsupported_epoch_writes
+
+# #1986 mailbox retention: a canonical message with a mailbox entry that is
+# not consumed must survive collection, a consumed entry must leave with its
+# message, and the collector and an appender must not deadlock in either lock
+# schedule. An image that can collect a message an owner still has to accept,
+# or stall the collector behind a lane, must not ship.
+waddle-server::mailbox_core_postgres unconsumed_entry_retains_its_message_and_a_consumed_entry_leaves_with_it
+waddle-server::mailbox_core_postgres collector_skips_a_message_an_appender_holds
+waddle-server::mailbox_core_postgres appender_behind_a_collector_neither_deadlocks_nor_allocates

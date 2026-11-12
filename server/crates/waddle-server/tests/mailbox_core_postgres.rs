@@ -14,6 +14,7 @@ use tokio::sync::Barrier;
 use uuid::Uuid;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::ingress_substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress};
 use waddle_server::ingress_uow::{
     IngressUnitOfWork, IngressUowError, MailboxAppendOutcome, MailboxError, MailboxRepository,
     MailboxTargetFence,
@@ -743,6 +744,73 @@ async fn guarded_tables_reject_unproven_and_unsupported_epoch_writes() {
 }
 
 impl Fixture {
+    /// Make `operation`'s canonical message terminal with a retention clock
+    /// far in the past, so only retained custody keeps it from collection.
+    async fn expire(&self, operation: MailboxOperationKey) {
+        sqlx::query(&format!(
+            "UPDATE {}.ingress_messages SET terminal_at = '2000-01-01', \
+             retention_eligible_at = '2000-01-01' WHERE message_key = $1::uuid",
+            self.schema
+        ))
+        .bind(operation.message_key().to_storage().to_string())
+        .execute(&self.admin)
+        .await
+        .expect("expire canonical message");
+    }
+
+    async fn message_exists(&self, operation: MailboxOperationKey) -> bool {
+        sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT count(*) FROM {}.ingress_messages WHERE message_key = $1::uuid",
+            self.schema
+        ))
+        .bind(operation.message_key().to_storage().to_string())
+        .fetch_one(&self.admin)
+        .await
+        .expect("count canonical message")
+            == 1
+    }
+
+    /// One pass of the real message collector.
+    async fn collect(&self) -> usize {
+        gc_expired_aliases(
+            &self.db,
+            chrono::Utc::now(),
+            AliasGcBudget {
+                deadline: tokio::time::Instant::now() + WAIT,
+                lock_timeout: Duration::from_millis(250),
+                statement_timeout: Duration::from_secs(5),
+                scan_timeout: Duration::from_secs(5),
+                progress: AliasGcProgress::default(),
+            },
+        )
+        .await
+        .expect("collector pass")
+        .deleted_messages
+    }
+
+    /// Wait until one backend is blocked on a lock while locking a canonical
+    /// message.
+    async fn wait_for_blocked_message_lock(&self) {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let blocked: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                       AND query LIKE '%ingress_messages%' AND pid <> pg_backend_pid()",
+                )
+                .fetch_one(&self.admin)
+                .await
+                .expect("observe blocked backend");
+                if blocked > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the appender must block on the held canonical message");
+    }
+
     /// A canonical parent written with a transaction-local epoch proof, for
     /// use once the guard is active.
     async fn message_at_epoch(&self) -> MailboxOperationKey {
@@ -770,4 +838,173 @@ impl Fixture {
         tx.commit().await.expect("commit proven insert");
         MailboxOperationKey::RoomAcceptance(key)
     }
+}
+
+#[tokio::test]
+async fn unconsumed_entry_retains_its_message_and_a_consumed_entry_leaves_with_it() {
+    let Some(fixture) = Fixture::open("retain").await else {
+        return;
+    };
+    let identity = lane("stream-a");
+    let presented = fence(3, 5, "node-a");
+    let operation = fixture.message().await;
+    let appended = append(&fixture.uow, &identity, &presented, operation)
+        .await
+        .expect("append");
+    let lane_id = appended.entry().lane;
+    fixture.expire(operation).await;
+
+    // Pending, then decided but not consumed: the message stays.
+    assert_eq!(fixture.collect().await, 0);
+    assert!(fixture.message_exists(operation).await);
+    let mut owner = fixture.uow.begin().await.expect("begin owner");
+    let mut locked =
+        MailboxRepository::lock_lane_for_target(&mut owner, lane_id, &target(5, "node-a"))
+            .await
+            .expect("owner locks lane");
+    MailboxRepository::decide(
+        &mut owner,
+        &mut locked,
+        operation,
+        MailboxOwnerDecision::Accepted,
+    )
+    .await
+    .expect("owner accepts");
+    owner.commit().await.expect("owner commits");
+    fixture.expire(operation).await;
+    assert_eq!(fixture.collect().await, 0);
+    assert!(fixture.message_exists(operation).await);
+
+    // Consumed: the message is collected, the entry goes with it through the
+    // cascade, and the lane keeps its counter and cursor.
+    let mut origin = fixture.uow.begin().await.expect("begin origin");
+    let locked = MailboxRepository::lock_lane_for_origin(&mut origin, lane_id, ClaimEpoch(3))
+        .await
+        .expect("origin locks lane");
+    MailboxRepository::consume(&mut origin, &locked, operation)
+        .await
+        .expect("origin consumes");
+    origin.commit().await.expect("origin commits");
+    fixture.expire(operation).await;
+    assert_eq!(fixture.collect().await, 1);
+    assert!(!fixture.message_exists(operation).await);
+    assert_eq!(
+        fixture
+            .scalar("SELECT count(*) FROM {schema}.ingress_mailbox_entries")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .scalar(
+                "SELECT count(*) FROM {schema}.ingress_mailbox_lanes \
+                 WHERE last_sequence = 1 AND last_dispositioned = 1"
+            )
+            .await,
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn collector_skips_a_message_an_appender_holds() {
+    let Some(fixture) = Fixture::open("gcskip").await else {
+        return;
+    };
+    // Appender-first schedule: the appender holds its lane and the canonical
+    // message while the collector runs. The collector must finish without
+    // waiting for either and must leave the message.
+    let operation = fixture.message().await;
+    fixture.expire(operation).await;
+    let mut appender = fixture
+        .uow
+        .begin_with_timeouts(WAIT, WAIT)
+        .await
+        .expect("begin appender");
+    let mut locked =
+        MailboxRepository::lock_lane(&mut appender, &lane("stream-a"), &fence(3, 5, "node-a"))
+            .await
+            .expect("appender locks lane");
+    MailboxRepository::append(&mut appender, &mut locked, operation, &LIMITS)
+        .await
+        .expect("appender appends under the canonical lock");
+    let collected = tokio::time::timeout(WAIT, fixture.collect())
+        .await
+        .expect("the collector never waits on an appender");
+    assert_eq!(collected, 0);
+    appender.commit().await.expect("appender commits");
+    assert!(fixture.message_exists(operation).await);
+    // The committed pending entry now retains the message on its own.
+    assert_eq!(fixture.collect().await, 0);
+    assert!(fixture.message_exists(operation).await);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn appender_behind_a_collector_neither_deadlocks_nor_allocates() {
+    let Some(fixture) = Fixture::open("gcfirst").await else {
+        return;
+    };
+    // Collector-first schedule: a connection takes the canonical message the
+    // way the collector does, then the appender locks its lane and waits for
+    // that message. The collector never asks for a lane, so it deletes the
+    // message and commits; the appender then finds no parent.
+    let identity = lane("stream-a");
+    let presented = fence(3, 5, "node-a");
+    let operation = fixture.message().await;
+    fixture.expire(operation).await;
+    let mut collector = fixture.admin.begin().await.expect("begin collector");
+    let held: Option<i32> = sqlx::query_scalar(&format!(
+        "SELECT 1 FROM {}.ingress_messages WHERE message_key = $1::uuid \
+         AND terminal_at IS NOT NULL FOR UPDATE SKIP LOCKED",
+        fixture.schema
+    ))
+    .bind(operation.message_key().to_storage().to_string())
+    .fetch_optional(&mut *collector)
+    .await
+    .expect("collector locks the canonical message");
+    assert_eq!(held, Some(1));
+
+    let appender = {
+        let uow = fixture.uow.clone();
+        let identity = identity.clone();
+        let presented = presented.clone();
+        tokio::spawn(async move { append(&uow, &identity, &presented, operation).await })
+    };
+    fixture.wait_for_blocked_message_lock().await;
+    assert!(!appender.is_finished());
+    sqlx::query(&format!(
+        "DELETE FROM {}.ingress_messages WHERE message_key = $1::uuid",
+        fixture.schema
+    ))
+    .bind(operation.message_key().to_storage().to_string())
+    .execute(&mut *collector)
+    .await
+    .expect("collector deletes without a lane lock");
+    collector.commit().await.expect("collector commits");
+
+    let refused = tokio::time::timeout(WAIT, appender)
+        .await
+        .expect("the appender is released, not deadlocked")
+        .expect("appender task");
+    assert!(matches!(
+        refused,
+        Err(IngressUowError::Mailbox(MailboxError::ParentMissing))
+    ));
+    assert_eq!(
+        fixture
+            .scalar("SELECT count(*) FROM {schema}.ingress_mailbox_entries")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .scalar(
+                "SELECT COALESCE(SUM(last_sequence), 0)::bigint FROM {schema}.ingress_mailbox_lanes"
+            )
+            .await,
+        0,
+        "the refused append rolled its lane back"
+    );
+    fixture.close().await;
 }

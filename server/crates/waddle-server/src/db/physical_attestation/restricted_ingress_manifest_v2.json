@@ -2,7 +2,7 @@
   "version": 2,
   "postgres_major": 17,
   "source_sha256": {
-    "candidate": "b18cdbade61248f9ae12f1c4316a8142c3060177b02a1c2419e35c1338ddabc6",
+    "candidate": "a780f04a93bd562d952a2b1087bb6eb137f9491b74609c52362441534c959a43",
     "relation": "2a66930709b7cd08b6ba4d20da97992f16766d2708739f6d5c54cde82c167a35",
     "waddle": "e48aebec578a3fefa20585ac12243020b0c1c82ff0109b3750f02a63784bb378",
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
@@ -3239,7 +3239,7 @@
       "public_execute": false,
       "source_file": "candidate",
       "source_start": 103625,
-      "source_end": 108018
+      "source_end": 108372
     },
     {
       "name": "waddle_ingress_release_send_attempt",
@@ -3763,8 +3763,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 108810,
-      "source_end": 109959
+      "source_start": 109164,
+      "source_end": 110313
     },
     {
       "name": "waddle_ingress_truncate_guard",
