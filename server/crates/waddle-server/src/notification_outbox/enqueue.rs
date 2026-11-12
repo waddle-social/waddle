@@ -7,6 +7,7 @@ use super::{
 use crate::db::DatabaseDriver;
 use crate::db::Transaction;
 use crate::ingress_substrate::DefinerApiCandidateContext;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_uow::EffectDescendantRepository;
 use crate::ingress_uow::IngressUowError;
 
@@ -148,7 +149,7 @@ impl NotificationOutboxStore {
     /// Reused, already marked pending custody must retain the exact existing
     /// approval and its live jobs, without inserting a new candidate or receipt.
     pub(crate) async fn attach_existing_candidate_lineage_with_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: Option<&DefinerApiCandidateContext<'_>>,
         message_key: waddle_xmpp::ingress::MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,
@@ -222,7 +223,7 @@ impl NotificationOutboxStore {
     /// A settled scheduling relation remains an explicit terminal disposition.
     #[cfg(test)]
     pub(crate) async fn attach_candidate_lineage_in_transaction(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: waddle_xmpp::ingress::MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
@@ -231,7 +232,7 @@ impl NotificationOutboxStore {
     }
 
     pub(crate) async fn attach_candidate_lineage_with_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: Option<&DefinerApiCandidateContext<'_>>,
         message_key: waddle_xmpp::ingress::MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,

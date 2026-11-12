@@ -21,6 +21,13 @@ check finds four kinds of code that could stand in for the entry:
   handle with `.guard()`. Its statements run outside any transaction, so a
   write issued on it could never have passed through the entry.
 
+The scheduler stores outside the ingress modules reach ingress descendants
+only through `EffectDescendantRepository::*_raw`. Those methods must take
+`EnteredTransaction`, the handle only the entry module constructs, so the
+compiler rejects a descendant write on a transaction opened any other way;
+this check fails if a `*_raw` method takes anything else, or if the handle is
+constructed outside the entry.
+
 Each exception is listed in `ingress-typed-entry-allowlist.txt` as
 `<path> <kind> <count>`. A listed file must contain exactly that many
 occurrences of that kind, so a new one in an allowlisted file, or a stale
@@ -45,6 +52,12 @@ SOURCE = Path("crates/waddle-server/src")
 INGRESS_MODULES = ("ingress", "ingress_uow", "ingress_substrate")
 ENTRY = SOURCE / "ingress_substrate/typed_entry.rs"
 ALLOWLIST = Path("scripts/ingress-typed-entry-allowlist.txt")
+RAW_REPOSITORY = SOURCE / "ingress_uow/effect_descendants.rs"
+ENTERED = "EnteredTransaction"
+RAW_METHOD = re.compile(r"\bfn\s+(?P<name>\w+_raw)\s*(?:<[^>]*>)?\s*\(\s*(?P<first>[^,)]*)")
+ENTERED_FIRST = re.compile(rf"^\w+\s*:\s*&mut\s+(?:\w+::)*{ENTERED}\s*<[^>]*>\s*$")
+ENTERED_LITERAL = re.compile(rf"\b{ENTERED}\s*\{{")
+ENTERED_DEFINITION = re.compile(rf"\b(?:struct|impl(?:<[^>]*>)?(?:\s+[\w:]+(?:<[^>]*>)?\s+for)?)\s+$")
 
 ATTEST = "attest"
 BEGIN = "begin"
@@ -131,6 +144,26 @@ def call_lines(source: str) -> list[int]:
     return occurrence_lines(source, ATTEST)
 
 
+def untyped_raw_methods(source: str) -> list[tuple[int, str]]:
+    """`*_raw` methods whose first parameter is not `&mut EnteredTransaction`."""
+    code = code_only(source)
+    return [
+        (code.count("\n", 0, match.start()) + 1, match["name"])
+        for match in RAW_METHOD.finditer(code)
+        if not ENTERED_FIRST.match(" ".join(match["first"].split()))
+    ]
+
+
+def handle_constructions(source: str) -> list[int]:
+    """Lines that build an `EnteredTransaction` with a struct literal."""
+    code = code_only(source)
+    return [
+        code.count("\n", 0, match.start()) + 1
+        for match in ENTERED_LITERAL.finditer(code)
+        if not ENTERED_DEFINITION.search(code, 0, match.start())
+    ]
+
+
 def read_allowlist(path: Path) -> dict[tuple[Path, str], int]:
     allowed: dict[tuple[Path, str], int] = {}
     for number, raw in enumerate(path.read_text().splitlines(), 1):
@@ -181,6 +214,21 @@ def check(server: Path) -> tuple[list[str], int]:
             failures.append(f"{ALLOWLIST}: {entry} is not an ingress source file outside the entry")
         elif kind != ATTEST and is_test_file(entry):
             failures.append(f"{ALLOWLIST}: {entry} is test code, where {kind} is not checked")
+    repository = server / RAW_REPOSITORY
+    if repository.is_file():
+        failures.extend(
+            f"{RAW_REPOSITORY}:{line}: {name} must take `&mut {ENTERED}` first, "
+            f"so it cannot run on a transaction the entry did not open"
+            for line, name in untyped_raw_methods(repository.read_text())
+        )
+    for path in sorted((server / SOURCE).rglob("*.rs")):
+        relative = path.relative_to(server)
+        if relative == ENTRY:
+            continue
+        failures.extend(
+            f"{relative}:{line}: {ENTERED} constructed outside {ENTRY.name}"
+            for line in handle_constructions(path.read_text())
+        )
     for path in files:
         relative = path.relative_to(server)
         if relative == ENTRY:

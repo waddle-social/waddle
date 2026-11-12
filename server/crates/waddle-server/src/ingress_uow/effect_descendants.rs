@@ -19,8 +19,8 @@ use crate::ingress_substrate::{
     supported_protocol_epoch, PreparedAttestedReceiptWriter, PreparedIngressRelation,
 };
 use crate::ingress_substrate::{
-    begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
-    IngressEntryRequest,
+    begin_ingress_entry, begin_unattested_raw_writer, EnteredTransaction, IngressEntryAcquisition,
+    IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -43,13 +43,14 @@ pub enum EffectDeliveryBinding {
 /// attested and its epoch proven before any scheduler lock; such a pool
 /// always carries the ingress foundation. Every other handle probes for the
 /// descendant foundation first, so standalone stores without it remain
-/// usable.
+/// usable. Both paths live in the typed entry module, and the returned
+/// handle is what the raw descendant repository methods require.
 pub(crate) async fn begin_raw_ingress_writer(
     db: &Database,
-) -> Result<Transaction<'_>, IngressUowError> {
+) -> Result<EnteredTransaction<'_>, IngressUowError> {
     match db.attested_pg_writer_capability() {
         Some(capability) => begin_attested_raw_ingress_writer(db, &capability).await,
-        None => begin_raw_ingress_writer_inner(db).await,
+        None => Ok(begin_unattested_raw_writer(db).await?),
     }
 }
 
@@ -60,7 +61,7 @@ pub(crate) async fn begin_raw_ingress_writer(
 async fn begin_attested_raw_ingress_writer<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
-) -> Result<Transaction<'a>, IngressUowError> {
+) -> Result<EnteredTransaction<'a>, IngressUowError> {
     let entry = begin_ingress_entry(
         db,
         IngressEntryRequest {
@@ -82,7 +83,7 @@ async fn begin_attested_raw_ingress_writer<'a>(
 pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
-) -> Result<Transaction<'a>, IngressUowError> {
+) -> Result<EnteredTransaction<'a>, IngressUowError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(IngressUowError::PostgresRequired);
     }
@@ -97,7 +98,7 @@ pub(crate) async fn begin_raw_ingress_writer_with_definer_api_candidate<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
     relation_guard: &RelationGuardCapability,
-) -> Result<(Transaction<'a>, PreparedAttestedReceiptWriter), IngressUowError> {
+) -> Result<(EnteredTransaction<'a>, PreparedAttestedReceiptWriter), IngressUowError> {
     if db.driver() != DatabaseDriver::Postgres {
         return Err(IngressUowError::PostgresRequired);
     }
@@ -115,46 +116,10 @@ pub(crate) async fn begin_raw_ingress_writer_with_definer_api_candidate<'a>(
         },
     )
     .await?;
-    let (tx, prepared) = entry.into_parts();
+    let (transaction, prepared) = entry.into_parts();
     let mut prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
     prepared.enable_definer_api_candidate_for_test();
-    Ok((tx, prepared))
-}
-
-async fn begin_raw_ingress_writer_inner<'a>(
-    db: &'a Database,
-) -> Result<Transaction<'a>, IngressUowError> {
-    let mut tx = db.begin_immediate().await?;
-    if tx.driver() == DatabaseDriver::Postgres {
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-            .await?;
-        // Bound the catalog probe too, without changing standalone stores'
-        // timeout policy after a foundation-free probe.
-        let mut rows = tx
-            .query(
-                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
-                (),
-            )
-            .await?;
-        let row = rows
-            .next()
-            .await?
-            .ok_or(IngressUowError::TransactionBoundsUnproven)?;
-        let lock_timeout: String = row.get(0)?;
-        let statement_timeout: String = row.get(1)?;
-        drop(rows);
-        bound_raw_transaction(&mut tx).await?;
-        if descendant_foundation_exists(&mut tx).await? {
-            install_epoch_proof(&mut tx).await?;
-        } else {
-            tx.execute(
-                "SELECT set_config('lock_timeout', ?, true), set_config('statement_timeout', ?, true)",
-                crate::db_params![lock_timeout, statement_timeout],
-            )
-            .await?;
-        }
-    }
-    Ok(tx)
+    Ok((transaction, prepared))
 }
 
 impl EffectDescendantRepository {
@@ -167,7 +132,7 @@ impl EffectDescendantRepository {
             Some(prepared) if prepared.uses_relation_guard() => {
                 lock_nowait_prepared(tx, prepared, message_key).await
             }
-            _ => Self::lock_nowait_raw(tx, message_key).await,
+            _ => Self::lock_nowait_on(tx, message_key).await,
         }
     }
 
@@ -180,7 +145,7 @@ impl EffectDescendantRepository {
             Some(prepared) if prepared.uses_relation_guard() => {
                 lock_all_nowait_prepared(tx, prepared, descendant).await
             }
-            _ => Self::lock_all_nowait_raw(tx, descendant).await,
+            _ => Self::lock_all_nowait_on(tx, descendant).await,
         }
     }
 
@@ -194,7 +159,7 @@ impl EffectDescendantRepository {
             Some(prepared) if prepared.uses_relation_guard() => {
                 copy_prepared(tx, prepared, source, target).await
             }
-            _ => Self::copy_raw(tx, source, target).await,
+            _ => Self::copy_on(tx, source, target).await,
         }
     }
 
@@ -208,7 +173,7 @@ impl EffectDescendantRepository {
             Some(prepared) if prepared.uses_relation_guard() => {
                 settle_all_prepared(tx, prepared, descendant, now).await
             }
-            _ => Self::settle_all_raw(tx, descendant, now).await,
+            _ => Self::settle_all_on(tx, descendant, now).await,
         }
     }
 
@@ -465,7 +430,7 @@ impl EffectDescendantRepository {
 
     /// New parents acquired after pre-existing work must never wait: abort the
     /// whole UoW so its complete lock set can be retried from the beginning.
-    pub(crate) async fn lock_nowait_raw(
+    async fn lock_nowait_on(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
@@ -488,7 +453,7 @@ impl EffectDescendantRepository {
         Ok(())
     }
 
-    pub(crate) async fn lock_all_nowait_raw(
+    async fn lock_all_nowait_on(
         tx: &mut Transaction<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
@@ -497,16 +462,16 @@ impl EffectDescendantRepository {
         }
         install_epoch_proof(tx).await?;
         for key in ancestor_keys(tx, descendant).await? {
-            Self::lock_nowait_raw(tx, key).await?;
+            Self::lock_nowait_on(tx, key).await?;
         }
         Ok(())
     }
     /// Take Foundation locks before scheduler/config/source row locks.
-    pub(crate) async fn lock_raw(
+    async fn lock_on(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
-        Self::lock_nowait_raw(tx, message_key).await
+        Self::lock_nowait_on(tx, message_key).await
     }
 
     pub async fn bind_effect(
@@ -519,16 +484,16 @@ impl EffectDescendantRepository {
             Some(prepared) if prepared.uses_relation_guard() => {
                 bind_effect_prepared(tx, prepared, message_key, effect).await
             }
-            _ => Self::bind_effect_raw(tx, message_key, effect).await,
+            _ => Self::bind_effect_on(tx, message_key, effect).await,
         }
     }
 
-    pub(crate) async fn bind_effect_raw(
+    async fn bind_effect_on(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
     ) -> Result<EffectDeliveryBinding, IngressUowError> {
-        Self::lock_raw(tx, message_key).await?;
+        Self::lock_on(tx, message_key).await?;
         ensure_intent(tx, message_key, effect).await?;
         if matches!(
             effect,
@@ -558,18 +523,18 @@ impl EffectDescendantRepository {
             Some(prepared) if prepared.uses_relation_guard() => {
                 attach_prepared(tx, prepared, message_key, effect, descendant).await
             }
-            _ => Self::attach_raw(tx, message_key, effect, descendant).await,
+            _ => Self::attach_on(tx, message_key, effect, descendant).await,
         }
     }
 
     /// Bind scheduling custody to one recorded canonical effect and its target.
-    pub(crate) async fn attach_raw(
+    async fn attach_on(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
-        if Self::bind_effect_raw(tx, message_key, effect).await?
+        if Self::bind_effect_on(tx, message_key, effect).await?
             == EffectDeliveryBinding::AwaitingDurableOwner
         {
             return Err(IngressUowError::EffectIntentConflict);
@@ -595,7 +560,7 @@ impl EffectDescendantRepository {
     }
 
     /// Lock all ancestors in canonical order before touching a scheduler row.
-    pub(crate) async fn lock_all_raw(
+    async fn lock_all_on(
         tx: &mut Transaction<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
@@ -604,14 +569,14 @@ impl EffectDescendantRepository {
         }
         install_epoch_proof(tx).await?;
         for key in ancestor_keys(tx, descendant).await? {
-            Self::lock_raw(tx, key).await?;
+            Self::lock_on(tx, key).await?;
         }
         Ok(())
     }
 
     /// Copy ancestry during candidate fanout/coalescing; the source stays live
     /// until its caller has copied every target and explicitly settles it.
-    pub(crate) async fn copy_raw(
+    async fn copy_on(
         tx: &mut Transaction<'_>,
         source: Uuid,
         target: Uuid,
@@ -619,7 +584,7 @@ impl EffectDescendantRepository {
         if !table_exists(tx).await? {
             return Ok(());
         }
-        Self::lock_all_nowait_raw(tx, source).await?;
+        Self::lock_all_nowait_on(tx, source).await?;
         let keys = ancestor_keys(tx, source).await?;
         tx.execute(
             "INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key) SELECT message_key, kind, semantic_identity_hash, ? FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL ON CONFLICT DO NOTHING",
@@ -632,7 +597,7 @@ impl EffectDescendantRepository {
     }
 
     /// Explicit durable scheduler/provider settlement, not transport ACK.
-    pub(crate) async fn settle_all_raw(
+    async fn settle_all_on(
         tx: &mut Transaction<'_>,
         descendant: Uuid,
         now: DateTime<Utc>,
@@ -640,7 +605,7 @@ impl EffectDescendantRepository {
         if !table_exists(tx).await? {
             return Ok(());
         }
-        Self::lock_all_raw(tx, descendant).await?;
+        Self::lock_all_on(tx, descendant).await?;
         let keys = ancestor_keys(tx, descendant).await?;
         let query = sql(tx,
             "UPDATE ingress_effect_descendants SET settled_at = ?::timestamptz WHERE descendant_key = ? AND settled_at IS NULL",
@@ -654,6 +619,66 @@ impl EffectDescendantRepository {
             crate::ingress_substrate::refresh_retention(tx, key, now).await?;
         }
         Ok(())
+    }
+}
+
+/// The descendant repository as scheduler stores use it, on their own
+/// unqualified statements. Each method requires an [`EnteredTransaction`],
+/// which [`begin_raw_ingress_writer`] returns and an ingress unit-of-work
+/// transaction lends, so a descendant lock or write cannot be issued on a
+/// transaction that was opened directly on a database handle.
+impl EffectDescendantRepository {
+    /// Take Foundation locks before scheduler/config/source row locks.
+    pub(crate) async fn lock_raw(
+        writer: &mut EnteredTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<(), IngressUowError> {
+        Self::lock_on(writer, message_key).await
+    }
+
+    /// Lock every ancestor without waiting; a held parent aborts the caller.
+    pub(crate) async fn lock_all_nowait_raw(
+        writer: &mut EnteredTransaction<'_>,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        Self::lock_all_nowait_on(writer, descendant).await
+    }
+
+    /// Lock all ancestors in canonical order before touching a scheduler row.
+    pub(crate) async fn lock_all_raw(
+        writer: &mut EnteredTransaction<'_>,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        Self::lock_all_on(writer, descendant).await
+    }
+
+    /// Bind scheduling custody to one recorded canonical effect and its target.
+    pub(crate) async fn attach_raw(
+        writer: &mut EnteredTransaction<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        Self::attach_on(writer, message_key, effect, descendant).await
+    }
+
+    /// Copy ancestry during candidate fanout/coalescing; the source stays live
+    /// until its caller has copied every target and explicitly settles it.
+    pub(crate) async fn copy_raw(
+        writer: &mut EnteredTransaction<'_>,
+        source: Uuid,
+        target: Uuid,
+    ) -> Result<(), IngressUowError> {
+        Self::copy_on(writer, source, target).await
+    }
+
+    /// Explicit durable scheduler/provider settlement, not transport ACK.
+    pub(crate) async fn settle_all_raw(
+        writer: &mut EnteredTransaction<'_>,
+        descendant: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), IngressUowError> {
+        Self::settle_all_on(writer, descendant, now).await
     }
 }
 

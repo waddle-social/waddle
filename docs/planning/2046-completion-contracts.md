@@ -295,11 +295,12 @@ In dependency order. Sizes are estimates from reading source.
    an epoch-guarded relation on an attested pool. Still open: the entry does
    not attest the ledger or epoch manifest per transaction; the pool still
    exposes raw `execute`, `query` and `begin`; attach-time checks outside the
-   ingress modules call `attest_transaction` directly; the `*_raw`
-   descendant repositories in `S/ingress_uow/effect_descendants.rs` accept
-   any transaction, and their callers in the notification and push outboxes
-   are outside what the source check scans; and the clustered stores open
-   their own transactions outside the entry. See D2.
+   ingress modules call `attest_transaction` directly; and the clustered
+   stores open their own transactions outside the entry. The `*_raw`
+   descendant repositories in `S/ingress_uow/effect_descendants.rs`, which
+   the notification and push outboxes call, take `EnteredTransaction`, a
+   handle only the entry module constructs, so they cannot run on a
+   transaction opened directly on a database handle. See D2.
 7. **Replace the refusal with the attach (S).** `S/main.rs` attaches the
    serving pool with a control-plane pool when clustering is enabled, and
    startup has no clustering refusal under the attested pool.

@@ -153,6 +153,7 @@ pub(crate) use substrate::{
 #[cfg(test)]
 pub(crate) use typed_entry::acquire_within_deadline;
 pub(crate) use typed_entry::{
-    begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
-    IngressEntryError, IngressEntryRequest, IngressEntryTransaction, PreparedAttestedReceiptWriter,
+    begin_ingress_entry, begin_unattested_raw_writer, EnteredTransaction, IngressEntryAcquisition,
+    IngressEntryAuthority, IngressEntryClamp, IngressEntryError, IngressEntryRequest,
+    IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };

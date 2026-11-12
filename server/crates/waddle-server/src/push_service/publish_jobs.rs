@@ -8,6 +8,7 @@ use crate::db::DatabaseError;
 use crate::db::Row;
 use crate::db::Transaction;
 use crate::ingress_substrate::DefinerApiCandidateContext;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_substrate::ALIAS_RETENTION;
 use crate::ingress_uow::DbRetryClass;
 use crate::ingress_uow::EffectDescendantRepository;
@@ -121,7 +122,7 @@ pub(super) async fn wake_queued_publish_jobs_for_node_tx(
 }
 
 pub(super) async fn claim_publish_job_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job_id: &str,
     now_ms: i64,
 ) -> Result<Option<PushPublishJob>, XmppError> {
@@ -331,7 +332,7 @@ pub(super) struct KnownPublishJobFailure {
 /// A known failure of this attempt cannot resolve an earlier unknown send.
 /// Decide from the durable row atomically and retain the captured claim fence.
 pub(super) async fn record_known_publish_job_failure_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job: &PushPublishJob,
     error: &str,
     now_ms: i64,
@@ -464,7 +465,7 @@ pub(super) async fn has_notification_outbox_frozen_schema_tx(
 }
 
 pub(super) async fn lock_notification_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
     lock_notification_ancestry_typed_tx(tx, job)
@@ -504,7 +505,7 @@ impl From<DatabaseError> for NotificationAncestryLockError {
 }
 
 pub(super) async fn lock_notification_ancestry_typed_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), NotificationAncestryLockError> {
     if let Some(id) = job.ancestry_job_id() {
@@ -527,7 +528,7 @@ pub(super) async fn lock_notification_ancestry_typed_tx(
 }
 
 pub(super) async fn settle_notification_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
     if let Some(id) = job.ancestry_job_id() {
@@ -544,7 +545,7 @@ pub(super) async fn settle_notification_ancestry_tx(
 }
 
 pub(super) async fn settle_terminal_notification_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
     let mut rows = tx
@@ -842,7 +843,7 @@ pub(super) async fn pending_notification_custody_sql_with_api(
 }
 
 pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
 ) -> Result<u64, XmppError> {
@@ -875,7 +876,7 @@ pub(super) async fn registration_publish_job_nodes_tx(
 }
 
 pub(super) async fn cancel_registration_publish_jobs_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     owner_bare_jid: &BareJid,
     service: &BareJid,
     node: &str,
@@ -889,7 +890,7 @@ async fn retireable_publish_jobs_sql(tx: &mut Transaction<'_>) -> Result<String,
 }
 
 async fn cancel_retryable_publish_jobs_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
     service: Option<&BareJid>,
@@ -2064,14 +2065,17 @@ mod tests {
             .to_string();
 
         let now_ms = crate::time::now_ms();
-        let mut first_tx = store.db.begin().await.expect("first tx");
+        let mut first_tx =
+            EnteredTransaction::from_fixture_transaction(store.db.begin().await.expect("first tx"));
         assert!(claim_publish_job_tx(&mut first_tx, &job_id, now_ms)
             .await
             .expect("first claim")
             .is_some());
         first_tx.commit().await.expect("first commit");
 
-        let mut second_tx = store.db.begin().await.expect("second tx");
+        let mut second_tx = EnteredTransaction::from_fixture_transaction(
+            store.db.begin().await.expect("second tx"),
+        );
         assert!(claim_publish_job_tx(&mut second_tx, &job_id, now_ms + 1)
             .await
             .expect("second claim")

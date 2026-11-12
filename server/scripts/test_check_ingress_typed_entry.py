@@ -113,6 +113,41 @@ class CallDetectionTests(unittest.TestCase):
         self.assertEqual(len(check.occurrence_lines(source, check.ATTEST)), 1)
 
 
+class TypedHandleTests(unittest.TestCase):
+    def test_raw_methods_must_take_the_entered_handle_first(self):
+        typed = '''
+        pub(crate) async fn lock_raw(
+            writer: &mut EnteredTransaction<'_>,
+            message_key: MessageKey,
+        ) -> Result<(), IngressUowError> {}
+        pub(crate) async fn copy_raw(tx: &mut crate::ingress_substrate::EnteredTransaction<'_>) {}
+        async fn lock_on(tx: &mut Transaction<'_>) {}
+        // pub(crate) async fn settle_all_raw(tx: &mut Transaction<'_>) {}
+        '''
+        self.assertEqual(check.untyped_raw_methods(typed), [])
+        for source in (
+            "pub(crate) async fn lock_raw(tx: &mut Transaction<'_>, key: MessageKey) {}",
+            "pub(crate) async fn attach_raw(\n    tx: &mut Transaction<'_>,\n) {}",
+            "pub async fn settle_all_raw(key: MessageKey, tx: &mut EnteredTransaction<'_>) {}",
+            "async fn copy_raw(tx: &mut IngressUowTransaction<'_>) {}",
+            "fn lock_raw() {}",
+        ):
+            self.assertEqual(len(check.untyped_raw_methods(source)), 1, source)
+
+    def test_handle_literals_are_found_but_not_its_definition(self):
+        self.assertEqual(
+            check.handle_constructions("Ok(EnteredTransaction { transaction: tx })"), [1]
+        )
+        source = '''
+        pub(crate) struct EnteredTransaction<'a> { transaction: Transaction<'a> }
+        impl<'a> EnteredTransaction<'a> {}
+        impl<'a> std::ops::Deref for EnteredTransaction<'a> {}
+        impl std::ops::DerefMut for EnteredTransaction<'_> {}
+        fn f(tx: &mut EnteredTransaction<'_>) -> EnteredTransaction<'_> { todo!() }
+        '''
+        self.assertEqual(check.handle_constructions(source), [])
+
+
 class TreeTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -212,6 +247,27 @@ class TreeTests(unittest.TestCase):
                 self.write(relative, "async fn f() { capability.attest_transaction(tx).await; }\n")
                 self.assertEqual(self.run_check().returncode, 1)
                 (self.server / relative).unlink()
+
+    def test_untyped_raw_repository_method_fails(self):
+        self.write(
+            check.RAW_REPOSITORY,
+            "impl R {\n    pub(crate) async fn lock_raw(tx: &mut Transaction<'_>) {}\n}\n",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{check.RAW_REPOSITORY}:2: lock_raw must take", result.stdout)
+        self.write(
+            check.RAW_REPOSITORY,
+            "impl R {\n    pub(crate) async fn lock_raw(tx: &mut EnteredTransaction<'_>) {}\n}\n",
+        )
+        self.assertEqual(self.run_check().returncode, 0)
+
+    def test_handle_constructed_outside_the_entry_fails_anywhere_in_the_crate(self):
+        relative = check.SOURCE / "push_service/worker.rs"
+        self.write(relative, "fn f(tx: Transaction<'_>) {\n    EnteredTransaction { transaction: tx };\n}\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{relative}:2: EnteredTransaction constructed outside", result.stdout)
 
     def test_entry_that_stops_attesting_fails(self):
         self.write(check.ENTRY, "async fn f() {}\n")

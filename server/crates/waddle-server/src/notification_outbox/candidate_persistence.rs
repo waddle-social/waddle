@@ -13,6 +13,7 @@ use super::{
     STATUS_FAILED, STATUS_QUEUED,
 };
 use crate::db::Transaction;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_uow::EffectDescendantRepository;
 
 impl NotificationOutboxStore {
@@ -246,7 +247,7 @@ impl NotificationOutboxStore {
 }
 
 pub(super) async fn enqueue_outbox_job_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context: &Element,
@@ -274,7 +275,7 @@ pub(super) async fn enqueue_outbox_job_tx(
 }
 
 async fn insert_outbox_job_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context_xml: &str,
@@ -347,7 +348,7 @@ enum OutboxMergeOutcome {
 }
 
 async fn merge_outbox_job_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context_xml: &str,
@@ -476,7 +477,7 @@ async fn merge_outbox_job_tx(
 }
 
 async fn mark_malformed_outbox_job_failed_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job_id: &str,
     error: &str,
     now_ms: i64,
@@ -597,7 +598,7 @@ async fn candidate_delivery_id_tx(
 }
 
 pub(super) async fn lock_candidate_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     candidate: &NotificationCandidate,
 ) -> Result<(), NotificationOutboxError> {
     if let Some(id) = candidate_delivery_id_tx(tx, candidate).await? {
@@ -607,7 +608,7 @@ pub(super) async fn lock_candidate_ancestry_tx(
 }
 
 async fn copy_candidate_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     candidate: &NotificationCandidate,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
@@ -622,7 +623,7 @@ async fn copy_candidate_ancestry_tx(
 }
 
 pub(super) async fn settle_candidate_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     candidate: &NotificationCandidate,
 ) -> Result<(), NotificationOutboxError> {
     if let Some(id) = candidate_delivery_id_tx(tx, candidate).await? {

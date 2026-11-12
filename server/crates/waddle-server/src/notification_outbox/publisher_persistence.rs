@@ -12,8 +12,9 @@ use super::{
     NotificationOutboxJob, NotificationOutboxStatus, NotificationOutboxStore, PubSubItem, Row,
     STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED,
 };
-use crate::db::{DatabaseDriver, Transaction};
+use crate::db::DatabaseDriver;
 use crate::ingress_substrate::DefinerApiCandidateContext;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_uow::EffectDescendantRepository;
 use crate::push_service::CanonicalNotificationTerminalProof;
 
@@ -744,14 +745,14 @@ pub(super) async fn current_unread_count_for_job(
 }
 
 pub(super) async fn lock_outbox_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     lock_outbox_ancestry_with_api(tx, None, job_id).await
 }
 
 pub(super) async fn lock_outbox_ancestry_with_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: Option<&DefinerApiCandidateContext<'_>>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
@@ -778,14 +779,14 @@ pub(super) async fn lock_outbox_ancestry_with_api(
 }
 
 pub(super) async fn settle_outbox_ancestry_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     settle_outbox_ancestry_with_api(tx, None, job_id).await
 }
 
 pub(super) async fn settle_outbox_ancestry_with_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: Option<&DefinerApiCandidateContext<'_>>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
@@ -806,7 +807,7 @@ pub(super) async fn settle_outbox_ancestry_with_api(
 /// crash left an uncertain outbox boundary without any provider queue row.
 /// Call after cancelling provider-owned work in the same transaction.
 pub(crate) async fn retire_registration_outbox_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     owner: &BareJid,
     service: Option<&BareJid>,
     node: Option<&str>,
@@ -815,7 +816,7 @@ pub(crate) async fn retire_registration_outbox_tx(
 }
 
 pub(crate) async fn retire_registration_outbox_with_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: Option<&DefinerApiCandidateContext<'_>>,
     owner: &BareJid,
     service: Option<&BareJid>,
@@ -886,14 +887,14 @@ pub(crate) async fn retire_registration_outbox_with_api(
 /// An upstream refusal cannot release a descendant already owned by the
 /// durable provider queue. The provider worker settles that remaining custody.
 pub(super) async fn settle_outbox_if_unowned_tx(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     settle_outbox_if_unowned_with_api(tx, None, job_id).await
 }
 
 pub(super) async fn settle_outbox_if_unowned_with_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: Option<&DefinerApiCandidateContext<'_>>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {

@@ -583,6 +583,17 @@ impl<'a> IngressUowTransaction<'a> {
         self.entry.parts_mut()
     }
 
+    /// The same pair with the transaction as the typed handle that
+    /// scheduler stores require for descendant locks and writes.
+    fn entered_parts(
+        &mut self,
+    ) -> (
+        &mut crate::ingress_substrate::EnteredTransaction<'a>,
+        Option<&PreparedAttestedReceiptWriter>,
+    ) {
+        self.entry.entered_parts_mut()
+    }
+
     pub(crate) fn room_observers_enabled(&self) -> bool {
         self.observations
     }
@@ -596,6 +607,15 @@ impl<'a> IngressUowTransaction<'a> {
     /// bypass the epoch, lineage, and claim-fencing invariants.
     pub(crate) fn transaction_mut(&mut self) -> &mut Transaction<'a> {
         self.entry.transaction_mut()
+    }
+
+    /// The transaction as the typed handle scheduler stores require when a
+    /// unit of work attaches their descendants in its own transaction.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn entered_transaction_mut(
+        &mut self,
+    ) -> &mut crate::ingress_substrate::EnteredTransaction<'a> {
+        self.entry.entered_parts_mut().0
     }
 
     /// Install per-transaction PostgreSQL timeout bounds without exposing raw

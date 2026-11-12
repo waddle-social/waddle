@@ -1,11 +1,11 @@
 //! Isolate malformed scheduling data without inventing a terminal disposition.
 use super::{
     begin_bounded, target, DatabaseDriver, Digest, EffectDescendantRepository, IngressUowError,
-    NotificationOutboxError, NotificationOutboxStore, Recorded, Sha256, SuppressedReason,
-    Transaction, Uuid,
+    NotificationOutboxError, NotificationOutboxStore, Recorded, Sha256, SuppressedReason, Uuid,
 };
 use crate::db::Row;
 use crate::ingress_substrate::DefinerApiCandidateContext;
+use crate::ingress_substrate::EnteredTransaction;
 
 pub(super) fn is_candidate_data_error(error: &NotificationOutboxError) -> bool {
     matches!(
@@ -24,14 +24,14 @@ pub(super) fn is_candidate_data_error(error: &NotificationOutboxError) -> bool {
 
 /// Only a vanished scanned intent can accompany a legally collected parent.
 pub(super) async fn lock_scanned_parent(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     recorded: &Recorded,
 ) -> Result<bool, IngressUowError> {
     lock_scanned_parent_with_api(tx, None, recorded).await
 }
 
 pub(super) async fn lock_scanned_parent_with_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: Option<&DefinerApiCandidateContext<'_>>,
     recorded: &Recorded,
 ) -> Result<bool, IngressUowError> {

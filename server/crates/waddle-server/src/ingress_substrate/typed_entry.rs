@@ -184,7 +184,7 @@ impl PreparedAttestedReceiptWriter {
 ///
 /// Dropping the value without [`Self::commit`] rolls the transaction back.
 pub(crate) struct IngressEntryTransaction<'a> {
-    transaction: Transaction<'a>,
+    transaction: EnteredTransaction<'a>,
     protocol_epoch: ProtocolEpoch,
     prepared: Option<PreparedAttestedReceiptWriter>,
 }
@@ -208,17 +208,33 @@ impl<'a> IngressEntryTransaction<'a> {
         &mut self.transaction
     }
 
+    /// The transaction as the typed handle raw descendant repositories
+    /// require, together with its witness.
+    pub(crate) fn entered_parts_mut(
+        &mut self,
+    ) -> (
+        &mut EnteredTransaction<'a>,
+        Option<&PreparedAttestedReceiptWriter>,
+    ) {
+        (&mut self.transaction, self.prepared.as_ref())
+    }
+
     /// The transaction together with its witness, for repositories that
     /// choose schema-qualified statements from the prepared identity.
     pub(crate) fn parts_mut(
         &mut self,
     ) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
-        (&mut self.transaction, self.prepared.as_ref())
+        (&mut self.transaction.transaction, self.prepared.as_ref())
     }
 
     /// Release the transaction to a caller that owns its remaining lifetime
     /// itself. The witness travels with it, never without it.
-    pub(crate) fn into_parts(self) -> (Transaction<'a>, Option<PreparedAttestedReceiptWriter>) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        EnteredTransaction<'a>,
+        Option<PreparedAttestedReceiptWriter>,
+    ) {
         (self.transaction, self.prepared)
     }
 
@@ -338,10 +354,129 @@ pub(crate) async fn begin_ingress_entry<'a>(
     }
 
     Ok(IngressEntryTransaction {
-        transaction,
+        transaction: EnteredTransaction { transaction },
         protocol_epoch,
         prepared,
     })
+}
+
+/// A transaction that one of this module's begin functions opened.
+///
+/// Repositories that lock or write ingress descendants on a caller's own
+/// statements take this type instead of a bare transaction. Only
+/// [`begin_ingress_entry`] and [`begin_unattested_raw_writer`] construct it,
+/// so such a write cannot be issued on a transaction that was opened
+/// directly on a database handle. It dereferences to the transaction for the
+/// caller's own statements; dropping it without [`Self::commit`] rolls back.
+pub(crate) struct EnteredTransaction<'a> {
+    transaction: Transaction<'a>,
+}
+
+impl<'a> EnteredTransaction<'a> {
+    pub(crate) async fn commit(self) -> Result<(), DatabaseError> {
+        self.transaction.commit().await
+    }
+
+    pub(crate) async fn rollback(self) -> Result<(), DatabaseError> {
+        self.transaction.rollback().await
+    }
+
+    /// Give up the typed handle. The plain transaction cannot be turned
+    /// back into one.
+    pub(crate) fn into_transaction(self) -> Transaction<'a> {
+        self.transaction
+    }
+
+    /// Wrap a transaction a fixture opened itself, for tests that hold a
+    /// canonical lock or seed rows from an arbitrary connection.
+    #[cfg(test)]
+    pub(crate) fn from_fixture_transaction(transaction: Transaction<'a>) -> Self {
+        Self { transaction }
+    }
+}
+
+impl<'a> std::ops::Deref for EnteredTransaction<'a> {
+    type Target = Transaction<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
+impl std::ops::DerefMut for EnteredTransaction<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.transaction
+    }
+}
+
+/// Begin a scheduler transaction on a handle without physical attestation.
+///
+/// Stores that schedule work for ingress descendants also run standalone,
+/// against a database that has no ingress foundation. On PostgreSQL the
+/// transaction therefore probes for `ingress_effect_descendants` under the
+/// writer clamp. With the foundation it takes the epoch row lock and
+/// installs the epoch proof, keeping the clamp; without it the session's
+/// own timeouts are restored and no epoch is read. SQLite only takes its
+/// write lock.
+pub(crate) async fn begin_unattested_raw_writer(
+    db: &Database,
+) -> Result<EnteredTransaction<'_>, IngressEntryError> {
+    let mut tx = db.begin_immediate().await?;
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await?;
+        // Bound the catalog probe too, without changing standalone stores'
+        // timeout policy after a foundation-free probe.
+        let mut rows = tx
+            .query(
+                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+                (),
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(IngressEntryError::BoundsUnproven)?;
+        let lock_timeout: String = row.get(0)?;
+        let statement_timeout: String = row.get(1)?;
+        drop(rows);
+        if !tighten_local_transaction_timeouts(&mut tx).await? {
+            return Err(IngressEntryError::BoundsUnproven);
+        }
+        let mut foundation = tx
+            .query(
+                "SELECT 1 WHERE to_regclass('ingress_effect_descendants') IS NOT NULL",
+                (),
+            )
+            .await?;
+        let has_foundation = foundation.next().await?.is_some();
+        drop(foundation);
+        if has_foundation {
+            if !tighten_local_transaction_timeouts(&mut tx).await? {
+                return Err(IngressEntryError::BoundsUnproven);
+            }
+            let live = acquire_epoch_lock_first(&mut tx)
+                .await
+                .map_err(IngressEntryError::Preparation)?;
+            let supported = supported_protocol_epoch();
+            if live > supported {
+                return Err(IngressEntryError::EpochUnsupported { live, supported });
+            }
+            let mut proof = tx.query("SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)", crate::db_params![live.to_storage().to_string()]).await?;
+            proof
+                .next()
+                .await?
+                .ok_or(IngressEntryError::EpochProofMissing)?;
+            drop(proof);
+        } else {
+            tx.execute(
+                "SELECT set_config('lock_timeout', ?, true), set_config('statement_timeout', ?, true)",
+                crate::db_params![lock_timeout, statement_timeout],
+            )
+            .await?;
+        }
+    }
+    Ok(EnteredTransaction { transaction: tx })
 }
 
 /// Bound transaction acquisition, including pool checkout and SQLite's
