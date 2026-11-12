@@ -309,8 +309,8 @@ pub fn granted_resume_window(enable: SmInlineEnable, server_max: Duration) -> Du
 
 impl DurableSmStore {
     /// Look up the session an inline `<resume/>` names. A `previd` that is
-    /// not a token this server issues, or that names no session, is a known
-    /// failure.
+    /// not a token this server issues, or that names no session or one that
+    /// has ended, is a known failure.
     pub async fn begin_inline_resume(
         &self,
         resume: &SmInlineResume,
@@ -323,11 +323,16 @@ impl DurableSmStore {
         let operation =
             ResumeOperation::for_previd(resume.previd.as_str()).map_err(|_| unknown())?;
         match self.resume_candidate(&operation).await {
-            Ok(Some(candidate)) => Ok(InlineResumeAttempt {
-                operation,
-                candidate,
-                h: resume.h,
-            }),
+            Ok(Some(candidate)) => match candidate.terminal {
+                Some(reason) => Err(InlineResumeFailed::from_rejection(&ResumeRejection::new(
+                    ResumeDenial::Terminal(reason),
+                ))),
+                None => Ok(InlineResumeAttempt {
+                    operation,
+                    candidate,
+                    h: resume.h,
+                }),
+            },
             Ok(None) => Err(unknown()),
             Err(error) => Err(InlineResumeFailed::from_rejection(&ResumeRejection::new(
                 ResumeRejectionReason::Store(error),

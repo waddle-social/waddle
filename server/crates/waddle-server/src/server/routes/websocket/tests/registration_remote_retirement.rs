@@ -35,7 +35,20 @@ async fn cross_node_fresh_bind_retires_socket_blocked_in_flush() {
     assert_remote_retirement(super::super::send::PendingFlushSink { sent: Vec::new() }).await;
 }
 
-async fn assert_remote_retirement<S>(inner: S)
+/// The scenario's future on the heap. It runs the whole connection shutdown
+/// path, parked-IQ dispatch included, beneath the test body, and a debug
+/// build keeps a by-value copy of an awaited future in each caller's poll
+/// frame. Constructing it here leaves those copies in this function's
+/// frame, which is gone before the future is first polled, so the nested
+/// path fits the default test-thread stack.
+fn assert_remote_retirement<S>(inner: S) -> futures::future::LocalBoxFuture<'static, ()>
+where
+    S: futures::Sink<axum::extract::ws::Message, Error = &'static str> + Unpin + 'static,
+{
+    Box::pin(remote_retirement_scenario(inner))
+}
+
+async fn remote_retirement_scenario<S>(inner: S)
 where
     S: futures::Sink<axum::extract::ws::Message, Error = &'static str> + Unpin,
 {

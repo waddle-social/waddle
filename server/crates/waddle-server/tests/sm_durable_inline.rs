@@ -363,3 +363,36 @@ async fn a_failed_inline_resume_reports_failed_and_falls_back_to_bind2() {
         .expect("session");
     assert_eq!(stored.generation.value(), 1);
 }
+
+#[tokio::test]
+async fn an_inline_resume_of_an_ended_session_is_a_known_item_not_found() {
+    let store = store("sm-durable-inline-terminal").await;
+    let commit = enabled(&store, &binding()).await;
+    let resume = resume_request(&commit.enabled_reply().id, 0);
+    store
+        .close(commit.fence(), None, at(2))
+        .await
+        .expect("the owner closes its session");
+
+    // The session is refused when it is looked up, before the caller takes
+    // a claim or reads an ingress checkpoint that an ended session no
+    // longer has, and the known failure lets the exchange fall back to its
+    // bind.
+    let failed = store
+        .begin_inline_resume(&resume)
+        .await
+        .expect_err("an ended session cannot be resumed");
+    assert_eq!(
+        failed.failed().condition,
+        Some(DefinedCondition::ItemNotFound)
+    );
+    let bind = bind_with_enable();
+    let plan = InlinePlan::Resume {
+        resume: &resume,
+        fallback: Some(&bind),
+    };
+    assert!(matches!(
+        decide_bind2(plan, Some(&InlineResumeOutcome::Failed(failed))),
+        Ok(Bind2Decision::Bind { .. })
+    ));
+}
