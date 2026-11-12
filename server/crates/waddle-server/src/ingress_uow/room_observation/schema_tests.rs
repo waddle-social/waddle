@@ -1988,9 +1988,19 @@ fn url_with_database(base: &str, database: &str) -> String {
 }
 
 fn url_with_username(base: &str, username: &str) -> String {
+    // A socket-directory URL has no authority to carry a username, and a
+    // `user` parameter outranks the authority in libpq, so the login always
+    // travels as that parameter.
     let mut url = url::Url::parse(base).expect("PostgreSQL test URL");
-    url.set_username(username)
-        .expect("test login is valid in the PostgreSQL URL");
+    let retained: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "user")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("user", username);
     url.to_string()
 }
 
