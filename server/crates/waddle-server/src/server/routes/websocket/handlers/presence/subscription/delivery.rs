@@ -517,18 +517,13 @@ pub(in crate::server::routes::websocket::handlers::presence::subscription) async
         let Some(origin) = ordered_relay_origin else {
             return false;
         };
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return false;
         };
         remote_presence_outcome_consumed(
-            bridge
-                .try_deliver_full_jid_remote(target, stanza, origin, None, None)
+            addressing
+                .connection(target)
+                .deliver(stanza, origin, None, None)
                 .await,
         )
     }

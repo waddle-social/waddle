@@ -1215,15 +1215,10 @@ pub(crate) fn deliver_full_jid_via_ordered_relay_at<'a>(
         {
             let origin = deps.ordered_relay_origin.as_ref()?;
             let state = deps.web_socket_state?;
-            let bridge = state
-                .deps
-                .app_state
-                .clustering_claims
-                .ordered_relay_delivery_bridge
-                .as_ref()?;
-            bridge
-                .try_deliver_full_jid_remote_at(
-                    target,
+            let addressing = state.deps.app_state.clustering_claims.addressing()?;
+            addressing
+                .connection(target)
+                .deliver_at(
                     stanza,
                     origin,
                     call_setup,
@@ -1359,24 +1354,14 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
         && matches!(stanza, Stanza::Message(message)
         if matches!(message.type_, XmppMessageType::Chat | XmppMessageType::Normal | XmppMessageType::Headline))
     {
-        if let (Some(origin), Some(bridge)) = (
+        if let (Some(origin), Some(addressing)) = (
             deps.ordered_relay_origin.as_ref(),
-            deps.web_socket_state.and_then(|state| {
-                state
-                    .deps
-                    .app_state
-                    .clustering_claims
-                    .ordered_relay_delivery_bridge
-                    .as_ref()
-            }),
+            deps.web_socket_state
+                .and_then(|state| state.deps.app_state.clustering_claims.addressing()),
         ) {
-            if let Some(outcome) = bridge
-                .try_deliver_processed_full_jid_remote(
-                    target,
-                    stanza,
-                    origin,
-                    deps.ingress_append_context.clone(),
-                )
+            if let Some(outcome) = addressing
+                .connection(target)
+                .deliver_processed(stanza, origin, deps.ingress_append_context.clone())
                 .await
             {
                 return outcome;
@@ -1601,15 +1586,10 @@ pub(crate) async fn deliver_registered_remote_resource_at(
     #[cfg(feature = "clustering")]
     {
         let state = deps.web_socket_state?;
-        let bridge = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()?;
-        bridge
-            .try_deliver_registered_remote_resource_at(
-                target,
+        let addressing = state.deps.app_state.clustering_claims.addressing()?;
+        addressing
+            .connection(target)
+            .deliver_to_registered_remote_at(
                 stanza,
                 kind,
                 deps.ingress_append_context.as_ref(),

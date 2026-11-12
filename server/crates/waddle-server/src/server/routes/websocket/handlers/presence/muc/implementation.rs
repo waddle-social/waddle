@@ -491,18 +491,12 @@ pub(crate) async fn registered_remote_resource_delivery(
 ) -> RegisteredRemoteDelivery {
     #[cfg(feature = "clustering")]
     {
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return RegisteredRemoteDelivery::Absent;
         };
-        match bridge
-            .try_deliver_registered_remote_resource(
-                target,
+        match addressing
+            .connection(target)
+            .deliver_to_registered_remote(
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
                 None,
@@ -531,17 +525,12 @@ pub(crate) async fn registered_remote_resource_write_accepted_delivery(
 ) -> RegisteredRemoteDelivery {
     #[cfg(feature = "clustering")]
     {
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return RegisteredRemoteDelivery::Absent;
         };
-        match bridge
-            .try_deliver_registered_remote_resource_write_accepted(target, stanza)
+        match addressing
+            .connection(target)
+            .deliver_to_registered_remote_write_accepted(stanza)
             .await
         {
             RegisteredRemoteWriteAcceptedDelivery::Delivered => RegisteredRemoteDelivery::Delivered,

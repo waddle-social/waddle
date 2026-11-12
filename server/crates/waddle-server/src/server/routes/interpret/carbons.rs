@@ -541,15 +541,10 @@ async fn try_deliver_registered_remote_resource(
     #[cfg(feature = "clustering")]
     {
         let state = web_socket_state?;
-        let bridge = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()?;
-        bridge
-            .try_deliver_registered_remote_resource(
-                target,
+        let addressing = state.deps.app_state.clustering_claims.addressing()?;
+        addressing
+            .connection(target)
+            .deliver_to_registered_remote(
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
                 None,

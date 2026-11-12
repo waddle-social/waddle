@@ -32,18 +32,19 @@ use std::future::Future;
 use std::sync::Arc;
 
 use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::registry::DeliveryKind;
 use waddle_xmpp::roster::{RosterItem, RosterVersion};
 use waddle_xmpp::Stanza;
 
 use super::ordered_relay::{MucProxyOrigin, OrderedRelayMucProxyKind};
 use super::route_bridge::{
     MucProxyRouteDecision, OrderedRelayDeliveryBridge, OrderedRelayMucProxyOutcome,
-    RemoteCarbonFanout,
+    RegisteredRemoteWriteAcceptedDelivery, RemoteCarbonFanout,
 };
 use super::ClusteringHandles;
 use crate::ingress::identity::{IngressAppendObligationRef, IngressRelayAdmission};
 use crate::server::routes::interpret::{
-    FullJidDeliveryOutcome, OrderedRelayRouteOrigin, RecipientInventory,
+    FullJidDeliveryOutcome, OrderedRelayRouteOrigin, RecipientInventory, SmIngressAppendContext,
 };
 
 impl ClusteringHandles {
@@ -68,6 +69,14 @@ impl<'a> Addressing<'a> {
         AccountAddress {
             bridge: self.bridge,
             account,
+        }
+    }
+
+    /// Address one bound connection by its full JID.
+    pub(crate) fn connection(self, connection: &'a jid::FullJid) -> ConnectionAddress<'a> {
+        ConnectionAddress {
+            bridge: self.bridge,
+            connection,
         }
     }
 
@@ -237,5 +246,132 @@ impl<'a> AccountAddress<'a> {
     /// caller must not substitute its local view.
     pub(crate) async fn recipient_inventory(&self) -> Result<Option<RecipientInventory>, ()> {
         self.bridge.recipient_inventory_remote(self.account).await
+    }
+}
+
+/// One bound connection, addressed by its full JID.
+///
+/// Two different nodes can matter for a connection: the owner of the
+/// account's `UserActor` claim, which orders deliveries to the account's
+/// resources, and the node that hosts the socket. The `deliver*` operations
+/// address the account owner when it is another node. The
+/// `deliver_to_registered_remote*` operations are for the account owner
+/// itself: they reach a socket that another node hosts and has registered
+/// here.
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionAddress<'a> {
+    bridge: &'a Arc<OrderedRelayDeliveryBridge>,
+    connection: &'a jid::FullJid,
+}
+
+impl<'a> ConnectionAddress<'a> {
+    /// Deliver a stanza to this exact resource through the account's owner.
+    ///
+    /// `Some` is the result of a relay attempt and is final. `None` means no
+    /// relay was attempted and the caller keeps its local full-JID path.
+    pub(crate) fn deliver(
+        self,
+        stanza: &'a Stanza,
+        origin: &'a OrderedRelayRouteOrigin,
+        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+        ingress_append_context: Option<SmIngressAppendContext>,
+    ) -> impl Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a {
+        self.bridge.try_deliver_full_jid_remote(
+            self.connection,
+            stanza,
+            origin,
+            call_setup,
+            ingress_append_context,
+        )
+    }
+
+    /// [`Self::deliver`] for a stanza whose receive time was fixed earlier,
+    /// so the owner stamps and archives it with that time.
+    pub(crate) fn deliver_at(
+        self,
+        stanza: &'a Stanza,
+        origin: &'a OrderedRelayRouteOrigin,
+        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+        ingress_append_context: Option<SmIngressAppendContext>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> impl Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a {
+        self.bridge.try_deliver_full_jid_remote_at(
+            self.connection,
+            stanza,
+            origin,
+            call_setup,
+            ingress_append_context,
+            received_at,
+        )
+    }
+
+    /// [`Self::deliver`] for a stanza this node has already processed
+    /// (archived, carbon-copied, policy-checked): the owner only writes it
+    /// to the resource.
+    pub(crate) fn deliver_processed(
+        self,
+        stanza: &'a Stanza,
+        origin: &'a OrderedRelayRouteOrigin,
+        ingress_append_context: Option<SmIngressAppendContext>,
+    ) -> impl Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a {
+        self.bridge.try_deliver_processed_full_jid_remote(
+            self.connection,
+            stanza,
+            origin,
+            ingress_append_context,
+        )
+    }
+
+    /// Deliver a frame to this resource when its socket is hosted by another
+    /// node and registered with this account owner.
+    ///
+    /// `Some` is the result of a relay attempt and is final. `None` means
+    /// the resource is not a registered remote one, and the caller keeps its
+    /// local delivery path.
+    pub(crate) async fn deliver_to_registered_remote(
+        &self,
+        stanza: &Stanza,
+        kind: DeliveryKind,
+        ingress_append_context: Option<&SmIngressAppendContext>,
+    ) -> Option<FullJidDeliveryOutcome> {
+        self.bridge
+            .try_deliver_registered_remote_resource(
+                self.connection,
+                stanza,
+                kind,
+                ingress_append_context,
+            )
+            .await
+    }
+
+    /// [`Self::deliver_to_registered_remote`] for a stanza whose receive
+    /// time was fixed earlier.
+    pub(crate) async fn deliver_to_registered_remote_at(
+        &self,
+        stanza: &Stanza,
+        kind: DeliveryKind,
+        ingress_append_context: Option<&SmIngressAppendContext>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<FullJidDeliveryOutcome> {
+        self.bridge
+            .try_deliver_registered_remote_resource_at(
+                self.connection,
+                stanza,
+                kind,
+                ingress_append_context,
+                received_at,
+            )
+            .await
+    }
+
+    /// Deliver a frame to a registered remote resource and wait until the
+    /// hosting node reports that its socket writer accepted it.
+    pub(crate) async fn deliver_to_registered_remote_write_accepted(
+        &self,
+        stanza: &Stanza,
+    ) -> RegisteredRemoteWriteAcceptedDelivery {
+        self.bridge
+            .try_deliver_registered_remote_resource_write_accepted(self.connection, stanza)
+            .await
     }
 }

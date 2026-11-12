@@ -121,17 +121,13 @@ pub(super) async fn route_full_jid_iq(
     *iq.to_mut() = Some(Jid::from(target.clone()));
     let stanza = Stanza::Iq(Box::new(iq.clone()));
     #[cfg(feature = "clustering")]
-    if let (Some(origin), Some(bridge)) = (
+    if let (Some(origin), Some(addressing)) = (
         ordered_relay_origin.as_ref(),
-        state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref(),
+        state.deps.app_state.clustering_claims.addressing(),
     ) {
-        if let Some(outcome) = bridge
-            .try_deliver_full_jid_remote(&target, &stanza, origin, None, None)
+        if let Some(outcome) = addressing
+            .connection(&target)
+            .deliver(&stanza, origin, None, None)
             .await
         {
             return match outcome {
@@ -143,9 +139,9 @@ pub(super) async fn route_full_jid_iq(
                 FullJidDeliveryOutcome::Unavailable => fallback_iq_frames(&iq, state),
             };
         }
-        if let Some(outcome) = bridge
-            .try_deliver_registered_remote_resource(
-                &target,
+        if let Some(outcome) = addressing
+            .connection(&target)
+            .deliver_to_registered_remote(
                 &stanza,
                 waddle_xmpp::registry::DeliveryKind::PeerStanza,
                 None,

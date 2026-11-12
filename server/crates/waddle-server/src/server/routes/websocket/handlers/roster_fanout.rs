@@ -132,16 +132,11 @@ async fn try_live_resource(
         return try_queue_entry(state, resource, push, entry);
     }
     #[cfg(feature = "clustering")]
-    if let Some(bridge) = &state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-    {
+    if let Some(addressing) = state.deps.app_state.clustering_claims.addressing() {
         let stanza = Stanza::Iq(Box::new(push.clone()));
-        if let Some(outcome) = bridge
-            .try_deliver_registered_remote_resource(
-                resource,
+        if let Some(outcome) = addressing
+            .connection(resource)
+            .deliver_to_registered_remote(
                 &stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
                 None,
