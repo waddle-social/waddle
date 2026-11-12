@@ -19,6 +19,7 @@ use crate::websocket_transport::LegacySocketAdmission;
 use kameo::actor::{Actor, ActorRef, Spawn, WeakActorRef};
 use kameo::error::{ActorStopReason, Infallible};
 use kameo::mailbox::{self, MailboxReceiver, Signal};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -77,8 +78,9 @@ impl Actor for LiveConnectionActor {
     }
 
     /// Run turns of the live loop until the mailbox has a signal for Kameo to
-    /// handle, or the loop ends. `None` stops the actor normally, which
-    /// settles the connection in `on_stop`.
+    /// handle, or the loop ends. The loop ends only by retiring the
+    /// connection; `None` then stops the actor normally, and `on_stop`
+    /// settles the retirement.
     ///
     /// The turns run in a boxed future. The handlers' futures are large, and
     /// Kameo polls this hook through several nested futures of its own, each
@@ -137,7 +139,8 @@ impl LiveConnectionActor {
                     self.signal_taken = false;
                 }
             }
-            if live.prepare_turn(&ctx).await.is_break() {
+            if let ControlFlow::Break(retire) = live.prepare_turn(&ctx).await {
+                live.retire(&ctx, retire).await;
                 return None;
             }
             let command_turn = if self.signal_taken {
@@ -166,7 +169,15 @@ impl LiveConnectionActor {
                     if let Some(tap) = &self.test_tap {
                         tap.note_loop_event_handled();
                     }
-                    if live.handle_event(&ctx, event).await.is_break() {
+                    let turn_kind = event.turn_kind();
+                    let turn_started = std::time::Instant::now();
+                    let flow = live.handle_event(&ctx, event).await;
+                    waddle_xmpp::telemetry::authority::record_actor_turn(
+                        turn_kind,
+                        turn_started.elapsed(),
+                    );
+                    if let ControlFlow::Break(retire) = flow {
+                        live.retire(&ctx, retire).await;
                         return None;
                     }
                 }

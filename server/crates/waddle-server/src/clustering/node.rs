@@ -61,6 +61,10 @@ pub enum CriticalNodeFailure {
     RoomRegistryTerminated,
     UserRegistryTerminated,
     WebSocketOwnerPanicked,
+    /// A binding was handed to another connection on this node while the
+    /// pumps of its old socket were not seen to stop within the transfer
+    /// deadline, so the old socket could still be written.
+    WebSocketPumpUnjoined,
 }
 
 /// The single authority for client admission on this node.

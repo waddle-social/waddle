@@ -883,6 +883,47 @@ pub(crate) struct LiveSocketTransport {
     pub(crate) cleanup: LiveSocketCleanup,
     pub(crate) input: WebSocketInput<axum::Error>,
     pub(crate) output: WebSocketMessageSink<axum::Error>,
+    /// Fires when the pumps stop for any reason. See [`PumpStop`].
+    pub(crate) pump_stop: PumpStop,
+}
+
+/// The owner's view of the first stop of its transport pumps.
+///
+/// The custodian's stop listener fills this in synchronously, before the
+/// pumps observe the cancellation, so an owner that waits on it learns of a
+/// peer close, an I/O failure or a pump that returned on its own without
+/// reading or writing the socket first.
+#[derive(Clone)]
+pub(crate) struct PumpStop {
+    stopped: CancellationToken,
+    reason: Arc<std::sync::OnceLock<StopReason>>,
+}
+
+impl PumpStop {
+    pub(crate) fn install(custodian: &IoCustodianHandle) -> Self {
+        let pump_stop = Self {
+            stopped: CancellationToken::new(),
+            reason: Arc::new(std::sync::OnceLock::new()),
+        };
+        let listener = pump_stop.clone();
+        custodian.set_stop_listener(Arc::new(move |reason| {
+            let _ = listener.reason.set(reason);
+            listener.stopped.cancel();
+        }));
+        pump_stop
+    }
+
+    /// Wait for the pumps to stop and return the first reason. Abandoning the
+    /// wait loses nothing: a stop stays observable.
+    pub(crate) async fn stopped(&self) -> StopReason {
+        self.stopped.cancelled().await;
+        self.reason().unwrap_or(StopReason::Requested)
+    }
+
+    /// The first stop reason, once the pumps have stopped.
+    pub(crate) fn reason(&self) -> Option<StopReason> {
+        self.reason.get().copied()
+    }
 }
 
 /// The owner's half of the inventory slot. Dropping it reports that the owner
@@ -961,6 +1002,7 @@ impl LegacySocketAdmission {
                     observer: custodian.observer(),
                     cleanup,
                     input,
+                    pump_stop: PumpStop::install(&custodian),
                     output: output.into_message_sink(),
                 })
             }

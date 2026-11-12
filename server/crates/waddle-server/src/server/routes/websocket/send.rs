@@ -1,14 +1,21 @@
+use super::connection::{RetirementFence, RetirementRefusal};
 use super::{debug, error, Arc, Message, Sink, SinkExt};
 use crate::clustering::NodeAdmissionPermit;
+use waddle_xmpp::ownership::ConnectionRef;
 
 /// Interrupt ordinary writes when a verified detach targets this physical
-/// connection. Protocol handlers finish their current durable work normally;
-/// bounded conflict/close writes may explicitly bypass this wrapper.
+/// connection, and refuse them once the connection has retired. Protocol
+/// handlers finish their current durable work normally; bounded conflict and
+/// close writes may explicitly bypass this wrapper.
 pub(super) struct InterruptibleSink<S> {
     inner: S,
     interrupt: waddle_xmpp::registry::SocketWriteInterruption,
     cancelled: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     resume_control: Option<Arc<waddle_xmpp::registry::LiveResumeControl>>,
+    // The fence, and the generation every write of this sink belongs to.
+    retirement: Option<(Arc<RetirementFence>, ConnectionRef)>,
+    // Set only while a `RetirementClose` borrows this sink.
+    retirement_close: bool,
 }
 
 impl<S> InterruptibleSink<S> {
@@ -19,6 +26,8 @@ impl<S> InterruptibleSink<S> {
             interrupt,
             cancelled,
             resume_control: None,
+            retirement: None,
+            retirement_close: false,
         }
     }
 
@@ -30,10 +39,32 @@ impl<S> InterruptibleSink<S> {
         self
     }
 
+    /// Refuse ordinary writes once `fence` has retired `generation`, the
+    /// physical connection this sink writes to.
+    pub(super) fn with_retirement(
+        mut self,
+        fence: Arc<RetirementFence>,
+        generation: ConnectionRef,
+    ) -> Self {
+        self.retirement = Some((fence, generation));
+        self
+    }
+
     fn poll_resume_control(&self, cx: &mut std::task::Context<'_>) {
         if let Some(control) = &self.resume_control {
             let _ = control.poll(cx);
         }
+    }
+
+    /// Why the retirement fence refuses this write, unless the write is part
+    /// of the retirement's own close.
+    fn retired(&self) -> Option<RetirementRefusal> {
+        if self.retirement_close {
+            return None;
+        }
+        self.retirement
+            .as_ref()
+            .and_then(|(fence, generation)| fence.admit(generation).err())
     }
 
     /// Conflict closure is optional and bounded by its caller, but still gets
@@ -41,17 +72,68 @@ impl<S> InterruptibleSink<S> {
     pub(super) fn uninterrupted(&mut self) -> &mut S {
         &mut self.inner
     }
+
+    /// The sink a retirement writes its own close through. It stays subject
+    /// to write interruption; only the retirement fence is lifted, and only
+    /// while the returned borrow lives.
+    pub(super) fn retirement_close(&mut self) -> RetirementClose<'_, S> {
+        self.retirement_close = true;
+        RetirementClose(self)
+    }
+}
+
+/// See [`InterruptibleSink::retirement_close`].
+pub(super) struct RetirementClose<'a, S>(&'a mut InterruptibleSink<S>);
+
+impl<S> Drop for RetirementClose<'_, S> {
+    fn drop(&mut self) {
+        self.0.retirement_close = false;
+    }
+}
+
+impl<S: Sink<Message> + Unpin> Sink<Message> for RetirementClose<'_, S> {
+    type Error = InterruptedWrite<S::Error>;
+
+    fn poll_ready(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_ready(cx)
+    }
+
+    fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        std::pin::Pin::new(&mut *self.get_mut().0).start_send(item)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::pin::Pin::new(&mut *self.get_mut().0).poll_close(cx)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum InterruptedWrite<E> {
     #[error("connection force-detached")]
     Detached,
+    /// The retirement fence refused this write before it started. Nothing
+    /// was enqueued.
+    #[error("{0}")]
+    Retired(RetirementRefusal),
     #[error("{0}")]
     Transport(E),
 }
 
-/// Classify expected resume interruption without hiding transport failures.
+/// Classify a write the connection itself interrupted, for a resume or for
+/// its own retirement, without hiding transport failures.
 pub(super) trait WebSocketWriteError: std::fmt::Display {
     fn is_detached(&self) -> bool {
         false
@@ -72,7 +154,7 @@ impl WebSocketWriteError for std::convert::Infallible {}
 
 impl<E: std::fmt::Display> WebSocketWriteError for InterruptedWrite<E> {
     fn is_detached(&self) -> bool {
-        matches!(self, Self::Detached)
+        matches!(self, Self::Detached | Self::Retired(_))
     }
 }
 
@@ -103,6 +185,9 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
         let this = self.get_mut();
+        if let Some(refusal) = this.retired() {
+            return Err(InterruptedWrite::Retired(refusal));
+        }
         this.interrupt
             .with_uninterrupted(|| std::pin::Pin::new(&mut this.inner).start_send(item))
             .ok_or(InterruptedWrite::Detached)?

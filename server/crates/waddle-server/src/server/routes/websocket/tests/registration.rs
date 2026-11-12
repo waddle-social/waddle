@@ -2254,6 +2254,7 @@ async fn assert_replay_gap_rollback_endpoint_custody(
             permit: &permit,
             shutdown: &shutdown,
         },
+        crate::server::routes::websocket::connection::RetirementCause::PeerClose,
         false,
         ConnectionShutdownChannels {
             outbound_rx: &mut rx,

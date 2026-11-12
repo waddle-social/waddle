@@ -130,6 +130,7 @@ where
                 permit: &permit,
                 shutdown: &shutdown,
             },
+            crate::server::routes::websocket::connection::RetirementCause::PeerClose,
             false,
             ConnectionShutdownChannels {
                 outbound_rx: &mut outbound_rx,

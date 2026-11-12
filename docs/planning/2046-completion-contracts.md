@@ -383,23 +383,39 @@ Kameo handles a message between two turns of the loop, with no control source,
 socket or timer polled meanwhile, so a message handler on the connection actor
 must not await unbounded work; such work runs as a turn of the loop instead.
 
+The loop ends only by retiring the connection
+(`W/connection/retirement.rs`). A turn that must end it returns a typed
+cause and the close that cause still owes the peer; `retire` latches the
+cause once in a fence keyed on the `ConnectionRef`, writes the owed close,
+and from then on the write sink refuses ordinary frames for that generation.
+The custodian's stop listener feeds a token that every wait polls first, so
+a stopped pump ends the session without a mailbox turn. Settlement
+acknowledges a transfer to another binding on the node (a force-detach, a
+registry replacement, or a waiter that asks during cleanup) only after the
+pumps were seen to drop their halves of the socket within
+`TRANSFER_JOIN_DEADLINE`, one second from the moment the retiring owner
+drops its own halves; a miss fails the node terminally
+(`CriticalNodeFailure::WebSocketPumpUnjoined`) and answers no waiter. The
+observation is the pumps' relinquishment witness: the custodian reports
+`Joined` only after the owner's cleanup guard drops, which is after
+settlement. An actor that panics or is killed is retired by its hosting
+task.
+
 What the later slices build on is kept without a user: the typed binding
 messages (`W/connection/binding_messages.rs`: prepare, install, confirm and
 retire, each naming its exact attempt), the actor outbound endpoint and its
 custody stages in the registry (`ActorSocketOutboundEndpoint`,
 `ActorOutboundStage`), the retained-input and actor data-frame paths of the
-transport (`S/websocket_transport.rs`), and the custodian's stop and
-retirement listeners (`W/supervised_io.rs`). Each carries a dead-code
-expectation that names the slice that will use it.
+transport (`S/websocket_transport.rs`), and the custodian's retirement
+listener and physical-stop handoff (`W/supervised_io.rs`). Each carries a
+dead-code expectation with its reason.
 
 | # | Slice | Deletes | Proof | Size | Gate |
 | --- | --- | --- | --- | --- | --- |
-| S4 | One `retire(cause)`: typed cause, idempotent, fenced on `ConnectionRef`; a same-node transfer is acknowledged only after observed pump termination within a deadline, else the terminal path (D4) | Scattered close paths | `websocket_admission_live`, `clustering_shutdown_deadline`, `supervised_io`, `xep0198_cross_node_resume` | M | Selector |
 | S5 | Actor-owned endpoint: the actor mints `BindingRef`; prepare, install, confirm and retire are mailbox messages; sink receipts map to typed attempt evidence; pump queues get real byte bounds | `pending_tx`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ingress_generation` | `characterization_bind`, `characterization_routing`, `xep0198_attached_resume_ws`, `xep0198_replay_bytes` | L | Selector, then flip |
 | S6 | The D5 rows owned by the connection actor move out of `WsConnState` | `LiveSocketState` scaffolding | All suites | M | Behaviour-neutral |
 
-Open before S4: the join deadline and its effect on force-detach
-acknowledgement latency (`TRANSPORT_JOIN_TIMEOUT` is 10 s). Open before S5:
+Open before S5:
 `TRANSPORT_QUEUE_BYTES` is `u32::MAX`, which is no byte bound; the
 ordered-relay handoff receiver is unbounded; and how a terminal write receipt
 maps to an uncertain attempt without stream management.

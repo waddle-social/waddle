@@ -220,6 +220,7 @@ async fn assert_shutdown_order(cancel_cleanup: bool, timing: RequestTiming) {
                     permit: &permit,
                     shutdown: &shutdown,
                 },
+                crate::server::routes::websocket::connection::RetirementCause::PeerClose,
                 false,
                 ConnectionShutdownChannels {
                     outbound_rx: &mut outbound_rx,

@@ -34,7 +34,8 @@ use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 use crate::websocket_transport::{
     InputError, IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits,
-    LiveSocketCleanup, LiveSocketTransport, TransportLimits, WebSocketInput, WebSocketMessageSink,
+    LiveSocketCleanup, LiveSocketTransport, PumpStop, SocketAdmissionError, StopReason,
+    TransportLimits, WebSocketInput, WebSocketMessageSink,
 };
 use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
@@ -54,6 +55,13 @@ use waddle_xmpp::stream_management::SmRequest;
 )]
 mod binding_messages;
 mod live_actor;
+mod retirement;
+
+pub(super) use retirement::{
+    fence_unjoined_transfer, observe_pump_termination, PumpTermination, RetirementCause,
+    RetirementEntry, RetirementFence, RetirementRefusal, TRANSFER_JOIN_DEADLINE,
+};
+use retirement::{OwedClose, Retire};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchCompletionOutcome {
@@ -428,6 +436,12 @@ struct LiveSocketState {
     // yields `None`, which is how replacement is detected.
     pending_tx: Option<SocketOutboundEndpoint>,
     turn: TurnGates,
+    // Fires when the transport pumps stop. Each wait polls it before every
+    // other source.
+    pump_stop: PumpStop,
+    // The connection's once-only retirement latch, shared with the write sink
+    // and with the task that hosts the actor.
+    retirement: Arc<RetirementFence>,
 }
 
 /// The gates one turn of the live loop computes before it waits. They are a
@@ -493,6 +507,8 @@ enum OwnerExit {
 /// source yielded. Variants are listed in the priority order `next_event`
 /// polls them.
 enum LoopEvent {
+    /// The transport pumps stopped, for the carried first reason.
+    PumpStopped(StopReason),
     IdentityRevoked,
     PermitRevoked,
     Shutdown,
@@ -508,6 +524,89 @@ enum LoopEvent {
     OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
     TimerExpired(TimerId),
     SendWindowPauseDeadline,
+}
+
+impl LoopEvent {
+    /// The bounded metric attribute for the turn that handles this event.
+    fn turn_kind(&self) -> waddle_xmpp::telemetry::attributes::ActorTurnEvent {
+        use waddle_xmpp::telemetry::attributes::ActorTurnEvent;
+        match self {
+            Self::PumpStopped(_)
+            | Self::IdentityRevoked
+            | Self::PermitRevoked
+            | Self::ForceDetach(_)
+            | Self::CallerGone
+            | Self::LiveResumeServiced => ActorTurnEvent::Control,
+            Self::Shutdown => ActorTurnEvent::Shutdown,
+            Self::DeferredInbound | Self::Inbound(_) | Self::OrderedRelayHandoff(_) => {
+                ActorTurnEvent::InboundFrame
+            }
+            Self::Outbound(_) => ActorTurnEvent::OutboundDelivery,
+            Self::TimerExpired(_) | Self::SendWindowPauseDeadline => ActorTurnEvent::Timer,
+        }
+    }
+}
+
+/// Which handler ended the loop without naming a cause.
+#[derive(Clone, Copy)]
+enum HandlerExit {
+    /// The inbound frame handler, which also ends the loop after it has
+    /// closed the stream itself.
+    Inbound,
+    /// A handler that ends the loop only when a write did not complete.
+    Write,
+}
+
+/// The revocation that has ended this connection's authority, if any.
+fn revocation_cause(ctx: &LiveOwnerCtx<'_>) -> Option<RetirementCause> {
+    if ctx.shutdown_token.is_cancelled() {
+        return Some(RetirementCause::Shutdown);
+    }
+    match ctx.admission.revalidate() {
+        Ok(()) => ctx
+            .admission_permit
+            .revalidate()
+            .is_err()
+            .then_some(RetirementCause::PermitRevoked),
+        Err(SocketAdmissionError::IdentityRevoked) => Some(RetirementCause::IdentityRevoked),
+        Err(SocketAdmissionError::Cancelled) => Some(RetirementCause::Shutdown),
+        Err(_) => Some(RetirementCause::PermitRevoked),
+    }
+}
+
+/// Name the retirement behind a handler that only reported that the loop
+/// must end. A revocation is the server's own decision and outranks a pump
+/// stop that may merely follow it; a stopped pump outranks what the handler
+/// could tell on its own.
+fn handler_exit_cause(
+    ctx: &LiveOwnerCtx<'_>,
+    pump_stop: &PumpStop,
+    conn: &WsConnState,
+    exit: HandlerExit,
+) -> RetirementCause {
+    if let Some(cause) = revocation_cause(ctx) {
+        return cause;
+    }
+    if let Some(reason) = pump_stop.reason() {
+        return RetirementCause::from_pump_stop(reason);
+    }
+    match exit {
+        HandlerExit::Write => RetirementCause::WriteFailure,
+        HandlerExit::Inbound
+            if !matches!(conn.phase, ConnectionPhase::Closing { .. })
+                && conn.sm_inbound_completion.has_unhandled_hole() =>
+        {
+            RetirementCause::DispatchTimeout
+        }
+        HandlerExit::Inbound => RetirementCause::StreamClosed,
+    }
+}
+
+/// The retirement behind an inbound source that ended without a peer close.
+fn reader_end_cause(pump_stop: &PumpStop) -> RetirementCause {
+    pump_stop
+        .reason()
+        .map_or(RetirementCause::PumpExit, RetirementCause::from_pump_stop)
 }
 
 fn fence_panicked_owner(lifecycle: &crate::clustering::NodeLifecycle, stop: &CancellationToken) {
@@ -535,6 +634,9 @@ impl LiveWebSocketConnection {
         let stop = self.state.deps.shutdown.stop_token();
         let inventory = self.state.deps.app_state.websocket_inventory.clone();
         let transport = Arc::new(std::sync::OnceLock::new());
+        // Shared with the live state. If the owner unwinds or is killed, this
+        // task retires the connection in its place.
+        let retirement = Arc::new(RetirementFence::new(connection_ref.clone()));
         #[cfg(feature = "test-support")]
         let panic_caught = self
             .state
@@ -557,11 +659,25 @@ impl LiveWebSocketConnection {
             // is just as unconfirmed. A panic during settlement unwinds
             // through the hosting actor's stop hook to this point as well.
             let panicked = !matches!(
-                AssertUnwindSafe(self.run(caller_gone, Arc::clone(&transport)))
-                    .catch_unwind()
-                    .await,
+                AssertUnwindSafe(self.run(
+                    caller_gone,
+                    Arc::clone(&transport),
+                    Arc::clone(&retirement),
+                ))
+                .catch_unwind()
+                .await,
                 Ok(OwnerExit::Settled)
             );
+            if panicked {
+                // No retirement after this one can act: the fence refuses any
+                // late effect for this generation, and the socket halves were
+                // dropped with the live state.
+                if let RetirementEntry::First(cause) =
+                    retirement.retire(RetirementCause::OwnerPanicked)
+                {
+                    waddle_xmpp::telemetry::authority::record_actor_retirement(cause.metric());
+                }
+            }
             // The owner has returned or unwound, so every transport handle is
             // dropped and the pumps are stopping. Release the inventory slot
             // once the custodian has seen both pumps and the owner's marker
@@ -579,6 +695,7 @@ impl LiveWebSocketConnection {
                 Some(observer) => release_transport_slot(&inventory, observer, join_bound).await,
                 None => true,
             };
+
             if panicked {
                 #[cfg(feature = "test-support")]
                 if let Some(barrier) = panic_caught {
@@ -601,6 +718,9 @@ impl LiveWebSocketConnection {
                     }
                 }
             }
+            if let Some(observer) = transport.get() {
+                record_transport_retirement(observer, slot_released, panicked);
+            }
             if !slot_released {
                 error!(
                     ?connection_ref,
@@ -622,6 +742,7 @@ impl LiveWebSocketConnection {
         mut self,
         caller_gone: CancellationToken,
         transport: Arc<std::sync::OnceLock<IoCustodianObserver>>,
+        retirement: Arc<RetirementFence>,
     ) -> OwnerExit {
         #[cfg(feature = "test-support")]
         if let Some(barrier) = &self
@@ -664,6 +785,7 @@ impl LiveWebSocketConnection {
             cleanup: _transport_cleanup,
             input: ws_receiver,
             output: ws_sender,
+            pump_stop,
         } = match self
             .admission
             .start_socket(
@@ -700,7 +822,11 @@ impl LiveWebSocketConnection {
         let live_resume_control = conn.live_resume_control.clone();
         let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
         let ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
-            .with_resume_control(live_resume_control.clone());
+            .with_resume_control(live_resume_control.clone())
+            .with_retirement(
+                Arc::clone(&retirement),
+                self.admission.connection_ref().clone(),
+            );
         // This owner spans live I/O and shutdown settlement, including
         // cancellation/unwind. The physical halves belong to the pump tasks,
         // so the witness is theirs: dropping `socket_io` stops the pumps, and
@@ -737,6 +863,8 @@ impl LiveWebSocketConnection {
             force_detach_rx: None,
             pending_tx: Some(outbound_endpoint),
             turn: TurnGates::default(),
+            pump_stop,
+            retirement,
         });
         // The actor is run on this task and dropped before `host` returns, so
         // the connection's resources are released before the admission it
@@ -780,8 +908,9 @@ impl LiveSocketState {
 
     /// Do the work that precedes every wait: apply the send-window gate, note
     /// whether deferred frames are queued, and bring a frame the socket
-    /// already holds forward. `Break` ends the loop without waiting.
-    async fn prepare_turn(&mut self, ctx: &LiveOwnerCtx<'_>) -> ControlFlow<()> {
+    /// already holds forward. `Break` ends the loop without waiting and names
+    /// the retirement.
+    async fn prepare_turn(&mut self, ctx: &LiveOwnerCtx<'_>) -> ControlFlow<Retire> {
         let admission = ctx.admission;
         let admission_permit = ctx.admission_permit;
         let shutdown_token = ctx.shutdown_token;
@@ -790,6 +919,7 @@ impl LiveSocketState {
             socket_io,
             conn,
             turn,
+            pump_stop,
             ..
         } = self;
         let Some(socket_halves) = socket_io.as_mut() else {
@@ -828,8 +958,10 @@ impl LiveSocketState {
             {
                 conn.send_window_last_request_acked = conn.sm_state.last_acked;
                 if admission.revalidate().is_err() {
-                    close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                    return ControlFlow::Break(());
+                    return ControlFlow::Break(Retire::owing(
+                        revocation_cause(ctx).unwrap_or(RetirementCause::PermitRevoked),
+                        OwedClose::NodeUnavailable,
+                    ));
                 }
                 if !matches!(
                     send_ws_message_with_authority(
@@ -841,7 +973,12 @@ impl LiveSocketState {
                     .await,
                     AuthoritySendOutcome::Sent
                 ) {
-                    return ControlFlow::Break(());
+                    return ControlFlow::Break(Retire::settled(handler_exit_cause(
+                        ctx,
+                        pump_stop,
+                        conn,
+                        HandlerExit::Write,
+                    )));
                 }
                 conn.sm_state.note_ack_request_sent();
             }
@@ -880,6 +1017,7 @@ impl LiveSocketState {
     /// borrows (`timers`, the live-resume control), so no value is lost
     /// between turns.
     ///
+    /// The pump-stop signal is polled first, then the other control sources.
     /// `commands` is the hosting actor's mailbox. When offered it is polled after
     /// the control sources and before the data sources and timers: a full
     /// command queue cannot delay revocation, shutdown or detach, and a
@@ -905,6 +1043,13 @@ impl LiveSocketState {
         let (_, ws_receiver) = socket_halves.halves_mut();
         let event = tokio::select! {
             biased;
+
+            // A stopped pump ends the session whatever else is ready: the
+            // socket can no longer be read or written, so no later source of
+            // this wait could complete its work. The custodian reports the
+            // stop directly, without a mailbox turn and without the loop
+            // first reading or writing the socket.
+            reason = self.pump_stop.stopped() => LoopEvent::PumpStopped(reason),
 
             // Observe source revision changes at turn boundaries. The
             // bound permit also fences each ordinary synchronous enqueue.
@@ -981,8 +1126,13 @@ impl LiveSocketState {
     }
 
     /// Handle the one event this turn waited for. `Break` ends the loop and
-    /// leads to settlement.
-    async fn handle_event(&mut self, ctx: &LiveOwnerCtx<'_>, event: LoopEvent) -> ControlFlow<()> {
+    /// names the retirement; the caller passes it to [`Self::retire`], which
+    /// is the only place a retirement's close is written.
+    async fn handle_event(
+        &mut self,
+        ctx: &LiveOwnerCtx<'_>,
+        event: LoopEvent,
+    ) -> ControlFlow<Retire> {
         let state = ctx.state;
         let admission = ctx.admission;
         let admission_permit = ctx.admission_permit;
@@ -998,21 +1148,38 @@ impl LiveSocketState {
             pending_force_detach,
             force_detach_rx,
             pending_tx,
+            pump_stop,
             ..
         } = self;
+        let handler_exit = |conn: &WsConnState, exit| {
+            Retire::settled(handler_exit_cause(ctx, pump_stop, conn, exit))
+        };
         let Some(socket_halves) = socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
         };
         let (mut ws_sender, mut ws_receiver) = socket_halves.halves_mut();
 
         match event {
+            LoopEvent::PumpStopped(reason) => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    ?reason,
+                    "Transport pumps stopped: retiring live session"
+                );
+                return ControlFlow::Break(Retire::settled(RetirementCause::from_pump_stop(
+                    reason,
+                )));
+            }
+
             LoopEvent::IdentityRevoked => {
                 info!(
                     jid = ?conn.phase.bound_jid(),
                     "Node identity changed: closing live session"
                 );
-                close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                return ControlFlow::Break(());
+                return ControlFlow::Break(Retire::owing(
+                    RetirementCause::IdentityRevoked,
+                    OwedClose::NodeUnavailable,
+                ));
             }
 
             LoopEvent::PermitRevoked => {
@@ -1020,8 +1187,10 @@ impl LiveSocketState {
                     jid = ?conn.phase.bound_jid(),
                     "Node lifecycle changed: closing live session"
                 );
-                close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                return ControlFlow::Break(());
+                return ControlFlow::Break(Retire::owing(
+                    RetirementCause::PermitRevoked,
+                    OwedClose::NodeUnavailable,
+                ));
             }
 
             LoopEvent::Shutdown => {
@@ -1029,8 +1198,10 @@ impl LiveSocketState {
                     jid = ?conn.phase.bound_jid(),
                     "Graceful shutdown: closing live session with system-shutdown stream error"
                 );
-                close_live_session_for_node_unavailable(&mut ws_sender, &*conn).await;
-                return ControlFlow::Break(());
+                return ControlFlow::Break(Retire::owing(
+                    RetirementCause::Shutdown,
+                    OwedClose::NodeUnavailable,
+                ));
             }
 
             // Cross-node XEP-0198 resume uses the live-steal handshake; stale
@@ -1070,16 +1241,11 @@ impl LiveSocketState {
                                     conn.binding_ref.as_ref(),
                                 ));
                             }
-                            return ControlFlow::Break(());
+                            return ControlFlow::Break(Retire::settled(
+                                RetirementCause::ForceDetach,
+                            ));
                         } else {
                             info!("force-detaching this session (<conflict/> close)");
-                            close_live_session_for_force_detach(
-                                ws_sender.uninterrupted(),
-                                &*conn,
-                                admission_permit,
-                                shutdown_token,
-                            )
-                            .await;
                             // Deferred: acked only after this connection's own
                             // detach-for-resume cleanup in `settle` actually runs.
                             pending_force_detach.push(request);
@@ -1090,7 +1256,10 @@ impl LiveSocketState {
                                     conn.binding_ref.as_ref(),
                                 ));
                             }
-                            return ControlFlow::Break(());
+                            return ControlFlow::Break(Retire::owing(
+                                RetirementCause::ForceDetach,
+                                OwedClose::Conflict,
+                            ));
                         }
                     }
                     None => {
@@ -1107,7 +1276,7 @@ impl LiveSocketState {
                     connection_ref = ?admission.connection_ref(),
                     "WebSocket upgrade waiter dropped; settling connection"
                 );
-                return ControlFlow::Break(());
+                return ControlFlow::Break(Retire::settled(RetirementCause::OwnerCancelled));
             }
 
             LoopEvent::LiveResumeServiced => {}
@@ -1139,7 +1308,7 @@ impl LiveSocketState {
                     )
                     .await
                     {
-                        return ControlFlow::Break(());
+                        return ControlFlow::Break(handler_exit(conn, HandlerExit::Inbound));
                     }
                     if caller_gone.is_cancelled() {
                         break;
@@ -1173,7 +1342,7 @@ impl LiveSocketState {
                         )
                         .await
                         {
-                            return ControlFlow::Break(());
+                            return ControlFlow::Break(handler_exit(conn, HandlerExit::Inbound));
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {
@@ -1192,7 +1361,7 @@ impl LiveSocketState {
                             .await,
                             AuthoritySendOutcome::Sent
                         ) {
-                            return ControlFlow::Break(());
+                            return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
@@ -1203,16 +1372,16 @@ impl LiveSocketState {
                     }
                     Some(Ok(Message::Close(_))) => {
                         info!("WebSocket close requested");
-                        return ControlFlow::Break(());
+                        return ControlFlow::Break(Retire::settled(RetirementCause::PeerClose));
                     }
                     Some(Err(e)) => {
                         error!(error = %e, "WebSocket error");
-                        return ControlFlow::Break(());
+                        return ControlFlow::Break(Retire::settled(reader_end_cause(pump_stop)));
                     }
                     None => {
                         // Stream ended
                         debug!("WebSocket stream ended");
-                        return ControlFlow::Break(());
+                        return ControlFlow::Break(Retire::settled(reader_end_cause(pump_stop)));
                     }
                 }
             }
@@ -1235,7 +1404,7 @@ impl LiveSocketState {
                         )
                         .await
                         {
-                            return ControlFlow::Break(());
+                            return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                         }
                     }
                     None => {
@@ -1250,7 +1419,7 @@ impl LiveSocketState {
                         // this stream's occupancy generation in every room.
                         info!("Outbound channel closed; session superseded by replacement");
                         *superseded = true;
-                        return ControlFlow::Break(());
+                        return ControlFlow::Break(Retire::settled(RetirementCause::Replaced));
                     }
                 }
             }
@@ -1268,12 +1437,12 @@ impl LiveSocketState {
                     )
                     .await
                     {
-                        return ControlFlow::Break(());
+                        return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                     }
                 }
                 None => {
                     warn!("Ordered relay handoff completion channel closed");
-                    return ControlFlow::Break(());
+                    return ControlFlow::Break(Retire::settled(RetirementCause::StreamClosed));
                 }
             },
 
@@ -1324,7 +1493,7 @@ impl LiveSocketState {
                     }
                 }
                 if ping_send_failed {
-                    return ControlFlow::Break(());
+                    return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
                 }
                 if drive.close {
                     // The policy's Log event (relayed above via interpret)
@@ -1335,12 +1504,10 @@ impl LiveSocketState {
                         jid = ?conn.phase.bound_jid(),
                         "Keepalive policy closed the connection"
                     );
-                    let _ = close_ws_connection(
-                        &mut ws_sender,
-                        "Failed to send WebSocket close frame after keepalive close",
-                    )
-                    .await;
-                    return ControlFlow::Break(());
+                    return ControlFlow::Break(Retire::owing(
+                        RetirementCause::PeerUnresponsive,
+                        OwedClose::Transport,
+                    ));
                 }
             }
 
@@ -1357,10 +1524,61 @@ impl LiveSocketState {
                     "SM send-window loop pause timed out with no recovering ack; \
                      closing into detach-for-resume"
                 );
-                return ControlFlow::Break(());
+                return ControlFlow::Break(Retire::settled(RetirementCause::PeerUnresponsive));
             }
         }
         ControlFlow::Continue(())
+    }
+
+    /// Retire the connection: the one way its live loop ends.
+    ///
+    /// The first call latches the cause, counts it and writes the close the
+    /// cause still owes the peer. From then on the write sink refuses every
+    /// ordinary frame for this generation. A later call does nothing and
+    /// returns the cause already recorded. Settlement completes the
+    /// retirement once the hosting actor has stopped.
+    async fn retire(&mut self, ctx: &LiveOwnerCtx<'_>, request: Retire) -> RetirementCause {
+        let cause = match self.retirement.retire(request.cause) {
+            RetirementEntry::First(cause) => cause,
+            RetirementEntry::Already(cause) => return cause,
+        };
+        waddle_xmpp::telemetry::authority::record_actor_retirement(cause.metric());
+        debug!(
+            connection_ref = ?ctx.admission.connection_ref(),
+            ?cause,
+            "Retiring connection"
+        );
+        let Some(socket_halves) = self.socket_io.as_mut() else {
+            return cause;
+        };
+        let (ws_sender, _) = socket_halves.halves_mut();
+        match request.close {
+            OwedClose::None => {}
+            OwedClose::NodeUnavailable => {
+                close_live_session_for_node_unavailable(
+                    &mut ws_sender.retirement_close(),
+                    &self.conn,
+                )
+                .await;
+            }
+            OwedClose::Conflict => {
+                close_live_session_for_force_detach(
+                    ws_sender.uninterrupted(),
+                    &self.conn,
+                    ctx.admission_permit,
+                    ctx.shutdown_token,
+                )
+                .await;
+            }
+            OwedClose::Transport => {
+                let _ = close_ws_connection(
+                    &mut ws_sender.retirement_close(),
+                    "Failed to send WebSocket close frame after keepalive close",
+                )
+                .await;
+            }
+        }
+        cause
     }
 
     /// Run the connection-owned shutdown once the loop has ended. The socket
@@ -1381,6 +1599,15 @@ impl LiveSocketState {
         let Some(socket_io) = self.socket_io.take() else {
             unreachable!("the live connection owns its socket halves until settlement");
         };
+        // A normal stop always follows `retire`. Latching here as well means
+        // settlement never runs for a connection that is not retired.
+        let cause = match self.retirement.retire(RetirementCause::OwnerCancelled) {
+            RetirementEntry::First(cause) => {
+                waddle_xmpp::telemetry::authority::record_actor_retirement(cause.metric());
+                cause
+            }
+            RetirementEntry::Already(cause) => cause,
+        };
         let mut outbound_rx = self.outbound_rx.into_receiver();
         finish_connection(
             ctx.state,
@@ -1390,6 +1617,7 @@ impl LiveSocketState {
                 permit: ctx.admission_permit,
                 shutdown: ctx.shutdown_token,
             },
+            cause,
             self.superseded,
             ConnectionShutdownChannels {
                 outbound_rx: &mut outbound_rx,
@@ -1418,6 +1646,59 @@ async fn release_transport_slot(
     joined
 }
 
+/// Count how the transport of one finished connection retired, and which
+/// pump ended it when the first stop reason names one.
+fn record_transport_retirement(observer: &IoCustodianObserver, joined: bool, owner_failed: bool) {
+    use waddle_xmpp::telemetry::attributes::{IoExitCause, IoPump};
+    use waddle_xmpp::telemetry::authority::{record_io_custodian_retirement, record_io_pump_exit};
+    let pump_exit = match observer.stop_reason() {
+        Some(StopReason::PeerClosed) => Some((IoPump::Reader, IoExitCause::PeerClosed)),
+        Some(StopReason::InboundIoFailure) => Some((IoPump::Reader, IoExitCause::IoError)),
+        Some(StopReason::InboundOverload | StopReason::InboundQueueClosed) => {
+            Some((IoPump::Reader, IoExitCause::Abandoned))
+        }
+        Some(StopReason::OutboundIoFailure) => Some((IoPump::Writer, IoExitCause::IoError)),
+        Some(StopReason::OutboundOverload | StopReason::OutboundQueueClosed) => {
+            Some((IoPump::Writer, IoExitCause::Abandoned))
+        }
+        // These stop both pumps from outside; neither pump ended first.
+        Some(
+            StopReason::Requested
+            | StopReason::PumpExited
+            | StopReason::ShutdownDeadline
+            | StopReason::LeaseLost,
+        )
+        | None => None,
+    };
+    if let Some((pump, cause)) = pump_exit {
+        record_io_pump_exit(pump, cause);
+    }
+    let cause = if !joined {
+        IoExitCause::Deadline
+    } else if owner_failed {
+        IoExitCause::Panicked
+    } else {
+        match observer.stop_reason() {
+            Some(StopReason::PeerClosed) => IoExitCause::PeerClosed,
+            Some(StopReason::InboundIoFailure | StopReason::OutboundIoFailure) => {
+                IoExitCause::IoError
+            }
+            Some(StopReason::ShutdownDeadline) => IoExitCause::Deadline,
+            Some(
+                StopReason::Requested
+                | StopReason::InboundOverload
+                | StopReason::OutboundOverload
+                | StopReason::InboundQueueClosed
+                | StopReason::OutboundQueueClosed
+                | StopReason::PumpExited
+                | StopReason::LeaseLost,
+            ) => IoExitCause::Cancelled,
+            None => IoExitCause::Abandoned,
+        }
+    };
+    record_io_custodian_retirement(cause);
+}
+
 /// Channel state carried from the live loop into its connection-owned shutdown.
 pub(super) struct ConnectionShutdownChannels<'a> {
     pub(super) outbound_rx: &'a mut mpsc::Receiver<OutboundStanza>,
@@ -1435,6 +1716,7 @@ pub(super) async fn finish_connection<S, R, E>(
     conn: &mut WsConnState,
     mut socket_io: LocalSocketIo<InterruptibleSink<S>, R>,
     authority: FrameAuthority<'_>,
+    cause: RetirementCause,
     mut superseded: bool,
     channels: ConnectionShutdownChannels<'_>,
 ) where
@@ -1519,7 +1801,15 @@ pub(super) async fn finish_connection<S, R, E>(
     // No later shutdown work uses either transport half. Release them before
     // potentially slow persistence and lifecycle cleanup, without treating the
     // local witness as evidence that cleanup or peer closure has completed.
+    // Dropping them stops the pumps, so the transfer deadline starts here and
+    // runs alongside the cleanup below.
     drop(socket_io);
+    let pump_deadline = tokio::time::Instant::now() + TRANSFER_JOIN_DEADLINE;
+    let pump_witness = conn.local_io_relinquishment.clone();
+    // Set as soon as a waiter that asked for this binding during cleanup is
+    // retained, so the transfer it implies is known before the lifecycle is
+    // finished.
+    let late_transfer = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Connection is ending. Decide between two paths:
     //   A. Fully clean up (unregister + remove MUC occupants) — the default
@@ -1576,41 +1866,67 @@ pub(super) async fn finish_connection<S, R, E>(
             cleanup_connection_shutdown(state.as_ref(), outbound_rx, conn, superseded).await
         };
         finalize_replay_recorded_completions(state, conn, outcome);
-        cleanup::finish_socket_cleanup(state, conn, outcome).await;
-        outcome
-    };
-    let (shutdown_outcome, late_requests) = match (force_detach_rx.take(), cleanup_bare) {
-        (Some(receiver), Some(bound_bare)) => {
-            service_late_force_detach_waiters(
-                receiver,
-                bound_bare,
-                cleanup_binding,
-                primary_origin,
-                cleanup,
-            )
-            .await
+        // Finishing the socket lifecycle releases a successor bind on this
+        // node, and the acknowledgements below release a resumer. Neither may
+        // happen for a transfer while the old pumps could still write.
+        let pumps = observe_pump_termination(pump_witness.as_ref(), pump_deadline).await;
+        let transfer = cause.is_transfer()
+            || primary_origin.is_some()
+            || superseded
+            || late_transfer.load(std::sync::atomic::Ordering::Acquire);
+        let fenced = pumps == PumpTermination::Missed && transfer;
+        if fenced {
+            fail_unjoined_transfer(state, conn);
         }
-        _ => (cleanup.await, Vec::new()),
+        cleanup::finish_socket_cleanup(state, conn, outcome).await;
+        (outcome, pumps, fenced)
     };
-
-    // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
-    // detach-for-resume persistence has actually run above — tell the
-    // cross-node resume asker it is safe to proceed with `steal_for_resume`.
-    // Council-adjudicated FIX 4: ack only what actually happened — map the
-    // typed `shutdown_outcome` onto the wire outcome rather than always
-    // claiming `Detached`, so the asker never proceeds with
-    // `steal_for_resume` against a snapshot that was never persisted (a
-    // storage-error fallback, an ownership-race promotion, or any other
-    // non-detach cleanup path).
-    ack_force_detach_requests(std::mem::take(pending_force_detach), shutdown_outcome);
-    // If ordinary settlement began without a detach request, a later request
-    // cannot retroactively select force cleanup or prove its conflict close.
-    let late_outcome = if primary_origin.is_some() {
-        shutdown_outcome
+    let ((shutdown_outcome, pumps, mut fenced), late_requests) =
+        match (force_detach_rx.take(), cleanup_bare) {
+            (Some(receiver), Some(bound_bare)) => {
+                service_late_force_detach_waiters(
+                    receiver,
+                    bound_bare,
+                    cleanup_binding,
+                    primary_origin,
+                    Arc::clone(&late_transfer),
+                    cleanup,
+                )
+                .await
+            }
+            _ => (cleanup.await, Vec::new()),
+        };
+    // A waiter retained after the lifecycle check above still makes this a
+    // transfer, and still must not be answered for an unobserved pump.
+    if pumps == PumpTermination::Missed && !fenced && !late_requests.is_empty() {
+        fail_unjoined_transfer(state, conn);
+        fenced = true;
+    }
+    if fenced {
+        // Dropping the acknowledgements reports an unknown outcome. The
+        // waiters treat that as a session that is not known to be detached.
+        pending_force_detach.clear();
+        drop(late_requests);
     } else {
-        cleanup::ConnectionShutdownOutcome::NotPersisted
-    };
-    ack_force_detach_requests(late_requests, late_outcome);
+        // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
+        // detach-for-resume persistence has actually run above — tell the
+        // cross-node resume asker it is safe to proceed with `steal_for_resume`.
+        // Council-adjudicated FIX 4: ack only what actually happened — map the
+        // typed `shutdown_outcome` onto the wire outcome rather than always
+        // claiming `Detached`, so the asker never proceeds with
+        // `steal_for_resume` against a snapshot that was never persisted (a
+        // storage-error fallback, an ownership-race promotion, or any other
+        // non-detach cleanup path).
+        ack_force_detach_requests(std::mem::take(pending_force_detach), shutdown_outcome);
+        // If ordinary settlement began without a detach request, a later request
+        // cannot retroactively select force cleanup or prove its conflict close.
+        let late_outcome = if primary_origin.is_some() {
+            shutdown_outcome
+        } else {
+            cleanup::ConnectionShutdownOutcome::NotPersisted
+        };
+        ack_force_detach_requests(late_requests, late_outcome);
+    }
 
     #[cfg(feature = "test-support")]
     if let Some(barrier) = &state
@@ -1658,6 +1974,21 @@ where
              proceeding to detach without them"
         );
     }
+}
+
+/// Take the terminal failure path for a transfer whose old pumps were not
+/// seen to stop before the deadline.
+fn fail_unjoined_transfer(state: &WebSocketState, conn: &WsConnState) {
+    error!(
+        jid = ?conn.phase.cleanup_jid(),
+        connection_ref = ?conn.connection_ref,
+        deadline_ms = TRANSFER_JOIN_DEADLINE.as_millis(),
+        "Transport pumps of a transferred binding were not seen to stop; failing the node"
+    );
+    fence_unjoined_transfer(
+        &state.deps.app_state.node_lifecycle,
+        &state.deps.shutdown.stop_token(),
+    );
 }
 
 /// Close a live stream displaced by an XEP-0198 resume. The
@@ -1816,6 +2147,7 @@ fn start_late_force_detach_waiter_service(
                 bound_bare,
                 None,
                 Some(primary_origin),
+                Arc::default(),
                 cancel_task.cancelled(),
             )
             .await;
@@ -1832,6 +2164,7 @@ async fn service_late_force_detach_waiters<F>(
     bound_bare: jid::BareJid,
     binding: Option<waddle_xmpp::ownership::BindingRef>,
     primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
+    retained: Arc<std::sync::atomic::AtomicBool>,
     cleanup: F,
 ) -> (F::Output, Vec<waddle_xmpp::registry::ForceDetachRequest>)
 where
@@ -1854,6 +2187,9 @@ where
                     primary_origin,
                     &mut pending,
                 );
+                if !pending.is_empty() {
+                    retained.store(true, std::sync::atomic::Ordering::Release);
+                }
             }
         }
     };
@@ -3168,6 +3504,7 @@ mod tests {
             bare,
             Some(current),
             Some(ForceDetachOrigin::FreshBindReplacement),
+            Arc::default(),
             async move { finished.await.expect("finish cleanup") },
         ));
         assert!(
@@ -3199,7 +3536,14 @@ mod tests {
 
         let (_, pending) = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            service_late_force_detach_waiters(receiver, bare.clone(), None, None, async {}),
+            service_late_force_detach_waiters(
+                receiver,
+                bare.clone(),
+                None,
+                None,
+                Arc::default(),
+                async {},
+            ),
         )
         .await
         .expect("cutoff must not wait for an outstanding permit");
@@ -3238,6 +3582,7 @@ mod tests {
             bare.clone(),
             None,
             None,
+            Arc::default(),
             async move { finished.await.expect("complete cleanup") },
         ));
         let mut replies = Vec::new();
