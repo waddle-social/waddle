@@ -34,6 +34,12 @@ impl DurableSmStore {
     /// Open the store on a database this process may run DDL on: SQLite, or
     /// PostgreSQL without a restricted runtime role. The authority relations
     /// are created if absent.
+    ///
+    /// A single-node store also creates the portable `sm_sessions` and
+    /// `sm_unacked` relations it writes, so it is usable on a database no
+    /// portable store has opened. A clustered store shares those relations
+    /// with the fenced store, whose own initializer creates them before
+    /// this store is opened.
     pub async fn open(
         db: Database,
         bounds: ExposureBounds,
@@ -44,6 +50,9 @@ impl DurableSmStore {
         }
         if clustered && db.driver() != DatabaseDriver::Postgres {
             return Err(DurableSmError::ClusterRequiresPostgres);
+        }
+        if !clustered {
+            crate::sm_persistence::bootstrap_portable_sm_owner_schema(&db).await?;
         }
         bootstrap_schema_owner(&db).await?;
         Ok(Self {
