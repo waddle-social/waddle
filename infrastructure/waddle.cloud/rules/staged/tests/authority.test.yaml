@@ -1,0 +1,180 @@
+rule_files:
+  - waddle-authority.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: a healthy fleet with zero-registered failure series is quiet
+    interval: 1m
+    input_series:
+      - series: 'up{job="waddle-server",instance="a"}'
+        values: '1x60'
+      - series: 'up{job="waddle-server",instance="b"}'
+        values: '1x60'
+      - series: 'target_info{job="waddle-server",instance="a"}'
+        values: '1x60'
+      - series: 'target_info{job="waddle-server",instance="b"}'
+        values: '1x60'
+      - series: 'waddle_ingress_entry_transactions_total{instance="a",authority="installed_guard",outcome="refused"}'
+        values: '0x60'
+      - series: 'waddle_ingress_entry_transactions_total{instance="b",authority="installed_guard",outcome="refused"}'
+        values: '0x60'
+      - series: 'waddle_ingress_entry_transactions_total{instance="a",authority="installed_guard",outcome="entered"}'
+        values: '0+100x60'
+      - series: 'waddle_io_pump_exits_total{instance="a",pump="writer",cause="panicked"}'
+        values: '0x60'
+      - series: 'waddle_clustering_keypair_lease_outcomes_total{instance="a",outcome="fencing_lost"}'
+        values: '0x60'
+      - series: 'waddle_relay_ordered_outcomes_total{instance="a",outcome="uncertain"}'
+        values: '0x60'
+      - series: 'waddle_restricted_runtime_startup_refusals_total{instance="a",stage="startup"}'
+        values: '0x60'
+      - series: 'waddle_muc_destroy_completion_depth{instance="a"}'
+        values: '0x60'
+      - series: 'waddle_muc_destroy_completion_oldest_age_seconds{instance="a"}'
+        values: '0x60'
+      - series: 'xmpp_sm_resume_results_total{instance="a",outcome="resumed"}'
+        values: '0+10x60'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 59m
+        exp_samples: []
+
+  - name: an entry that cannot prove the epoch fires at once
+    interval: 1m
+    input_series:
+      - series: 'waddle_ingress_entry_transactions_total{instance="a",authority="installed_guard",outcome="epoch_unsupported"}'
+        values: '0x10 1x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressEntryRefused",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressEntryRefused",alertstate="firing"}'
+        eval_time: 12m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressEntryRefused",alertstate="firing",authority="installed_guard",outcome="epoch_unsupported",severity="critical",team="waddle"}'
+            value: 1
+
+  - name: a panicked pump fires although the other two sources have no series
+    interval: 1m
+    input_series:
+      - series: 'waddle_io_pump_exits_total{instance="a",pump="writer",cause="panicked"}'
+        values: '0x5 1x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="TransportTaskPanickedOrAbandoned",alertstate="firing"}'
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TransportTaskPanickedOrAbandoned",alertstate="firing",severity="critical",team="waddle"}'
+            value: 1
+
+  - name: a lost keypair fence and a refused restricted start each fire
+    interval: 1m
+    input_series:
+      - series: 'waddle_clustering_keypair_lease_outcomes_total{instance="a",outcome="fencing_lost"}'
+        values: '0x5 1x30'
+      - series: 'waddle_restricted_runtime_startup_refusals_total{instance="b",stage="preflight"}'
+        values: '0x5 2x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="KeypairLeaseFencingLost",alertstate="firing"}'
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KeypairLeaseFencingLost",alertstate="firing",severity="critical",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="RestrictedStartupRefusing",alertstate="firing"}'
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RestrictedStartupRefusing",alertstate="firing",stage="preflight",severity="critical",team="waddle"}'
+            value: 1
+
+  - name: an old destroy completion fires after its hold and uses max across pods
+    interval: 1m
+    input_series:
+      - series: 'waddle_muc_destroy_completion_oldest_age_seconds{instance="a"}'
+        values: '1000+60x40'
+      - series: 'waddle_muc_destroy_completion_oldest_age_seconds{instance="b"}'
+        values: '0x40'
+      - series: 'waddle_muc_destroy_completion_depth{instance="a"}'
+        values: '1x40'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="DestroyCompletionAge",alertstate="firing"}'
+        eval_time: 9m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="DestroyCompletionAge",alertstate="firing"}'
+        eval_time: 11m
+        exp_samples:
+          - labels: 'ALERTS{alertname="DestroyCompletionAge",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: an uncertain relay outcome fires after five minutes
+    interval: 1m
+    input_series:
+      - series: 'waddle_relay_ordered_outcomes_total{instance="a",outcome="uncertain"}'
+        values: '0x5 1+1x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="RelayOutcomeUncertain",alertstate="firing"}'
+        eval_time: 12m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RelayOutcomeUncertain",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: resume failures fire only above the rate and the volume floor
+    interval: 1m
+    input_series:
+      - series: 'xmpp_sm_resume_results_total{instance="a",outcome="resumed"}'
+        values: '0+4x60'
+      - series: 'xmpp_sm_resume_results_total{instance="a",outcome="not_found"}'
+        values: '0+4x60'
+      - series: 'xmpp_sm_resume_results_total{instance="b",outcome="storage"}'
+        values: '0x60'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="SmResumeFailureRate",alertstate="firing"}'
+        eval_time: 40m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SmResumeFailureRate",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: a low volume of failed resumes stays quiet
+    interval: 1m
+    input_series:
+      - series: 'xmpp_sm_resume_results_total{instance="a",outcome="not_found"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="SmResumeFailureRate",alertstate="firing"}'
+        eval_time: 40m
+        exp_samples: []
+
+  - name: collector loss fires while pods are still scraped
+    interval: 1m
+    input_series:
+      - series: 'up{job="waddle-server",instance="a"}'
+        values: '1x40'
+      - series: 'up{job="waddle-server",instance="b"}'
+        values: '1x40'
+      - series: 'target_info{job="waddle-server",instance="a"}'
+        values: '1x5 stale'
+      - series: 'target_info{job="waddle-server",instance="b"}'
+        values: '1x5 stale'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="OtlpPipelineSilent",alertstate="firing"}'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="OtlpPipelineSilent",alertstate="firing"}'
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OtlpPipelineSilent",alertstate="firing",severity="critical",team="waddle"}'
+            value: 1
+
+  - name: a pod without the ingress entry series is reported missing
+    interval: 1m
+    input_series:
+      - series: 'target_info{job="waddle-server",instance="a"}'
+        values: '1x40'
+      - series: 'target_info{job="waddle-server",instance="b"}'
+        values: '1x40'
+      - series: 'waddle_ingress_entry_transactions_total{instance="a",authority="unattested",outcome="failed"}'
+        values: '0x40'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AuthoritySeriesMissing",alertstate="firing"}'
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AuthoritySeriesMissing",alertstate="firing",instance="b",severity="warning",team="waddle"}'
+            value: 1
