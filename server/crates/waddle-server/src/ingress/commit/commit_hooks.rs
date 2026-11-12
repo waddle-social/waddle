@@ -20,18 +20,11 @@ pub(super) fn fail_after_manifest() -> bool {
         false
     }
 }
-#[cfg(feature = "clustering")]
+#[cfg(all(test, feature = "clustering"))]
 pub(in crate::ingress) fn allow_clustered_room_manifests() -> bool {
-    #[cfg(test)]
-    {
-        ALLOW_CLUSTERED_ROOM_MANIFESTS
-            .try_with(|enabled| *enabled)
-            .unwrap_or(false)
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
+    ALLOW_CLUSTERED_ROOM_MANIFESTS
+        .try_with(|enabled| *enabled)
+        .unwrap_or(false)
 }
 #[cfg(not(test))]
 pub(super) fn take_failure() -> Option<IngressUowError> {

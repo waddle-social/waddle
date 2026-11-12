@@ -236,14 +236,20 @@ async fn postgres_orphan_gc_fences_future_epoch_before_deleting_proofs() {
     assert_eq!(gc_proof_count(&fixture.db).await, 0);
 
     seed_gc_proofs(&fixture.db, MessageKey::new(), 1).await;
-    fixture
-        .db
-        .execute(
-            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
-                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
-        )
-        .await
-        .expect("activate unsupported epoch two");
+    // Each autocommit statement is its own transaction, so every step is a
+    // sanctioned single advance; epoch three is the first unsupported one.
+    for statement in [
+        "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        "UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+    ] {
+        fixture
+            .db
+            .execute(statement)
+            .await
+            .expect("advance one step toward unsupported epoch three");
+    }
     assert!(matches!(
         gc_orphan_proof_batch(&fixture.db, &gc_budget()).await,
         Err(AliasGcError::Substrate(
@@ -1977,13 +1983,15 @@ async fn epoch_advances_at_most_once_per_transaction_and_future_epochs_fence_gc(
     );
     drop(tx);
 
-    // Advance to epoch 2 through two sanctioned transactions; the live
+    // Advance to epoch 3 through three sanctioned transactions; the live
     // epoch now exceeds what this binary supports, so its GC fails
     // closed instead of auto-claiming the future epoch.
     for statement in [
         "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
              lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
         "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        "UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = now(), \
              lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
     ] {
         sqlx::query(statement)

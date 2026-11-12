@@ -186,7 +186,7 @@ impl Fixture {
         self.grant_temp(true).await;
         for statement in [
             "CREATE TEMP TABLE ingress_protocol_epoch (id integer PRIMARY KEY, epoch bigint NOT NULL) ON COMMIT PRESERVE ROWS",
-            "INSERT INTO pg_temp.ingress_protocol_epoch VALUES (1, 2)",
+            "INSERT INTO pg_temp.ingress_protocol_epoch VALUES (1, 3)",
             "CREATE TEMP TABLE ingress_messages (message_key uuid PRIMARY KEY, digest_version integer, digest bytea, envelope_version integer, envelope bytea, created_at timestamptz DEFAULT now(), terminal_at timestamptz, retention_eligible_at timestamptz, source_binding_version smallint, source_bare_jid text, source_auth_context_id uuid, source_auth_context_version numeric(20,0), source_auth_epoch numeric(20,0), source_sm_ingress_id uuid, source_ingress_ordinal numeric(20,0)) ON COMMIT PRESERVE ROWS",
             "CREATE TEMP TABLE ingress_origin_aliases (alias_key_hash bytea PRIMARY KEY, sender_bare_jid text, target_kind integer, target_jid text, origin_id text, message_key uuid) ON COMMIT PRESERVE ROWS",
         ] {

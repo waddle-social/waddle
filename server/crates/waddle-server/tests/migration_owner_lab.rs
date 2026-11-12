@@ -820,8 +820,9 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     assert!(ack_table, "timeout preserves V1027 schema");
     assert!(!rejection_table, "timeout leaves V1028 unapplied");
 
-    // Only this disposable fixture advances: the binary accepts its current
-    // supported epoch and refuses the next one before applying the catalog.
+    // Only this disposable fixture advances: the binary accepts a supported
+    // nonzero epoch and refuses the first epoch past the supported one before
+    // applying the catalog.
     let update_epoch = format!("UPDATE {}.ingress_protocol_epoch SET epoch = $1, activated_at = now(), lineage_uuid = $2 WHERE id = 1", fixture.schema);
     sqlx::query(&update_epoch)
         .bind(1_i64)
@@ -840,12 +841,14 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         vec![1028, 1029, 1030, 1031]
     );
     make_v1028_pending(&fixture).await;
-    sqlx::query(&update_epoch)
-        .bind(2_i64)
-        .bind(fixture.lineage.lineage_uuid.0)
-        .execute(&fixture.admin)
-        .await
-        .expect("model future epoch");
+    for epoch in [2_i64, 3] {
+        sqlx::query(&update_epoch)
+            .bind(epoch)
+            .bind(fixture.lineage.lineage_uuid.0)
+            .execute(&fixture.admin)
+            .await
+            .expect("model future epoch");
+    }
     assert!(matches!(
         run_dark_postgres_owner(
             &fixture.migrator_options,

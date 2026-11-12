@@ -57,6 +57,8 @@ pub enum MailboxError {
     StaleFence(#[from] StaleMailboxLaneFence),
     #[error(transparent)]
     Admission(#[from] MailboxAdmissionRefusal),
+    #[error(transparent)]
+    Cutover(#[from] MailboxCutoverRefusal),
     #[error("stored mailbox row is malformed")]
     InvalidStored,
     #[error("mailbox lane is missing")]
@@ -75,6 +77,25 @@ pub enum MailboxError {
     NotPending,
     #[error("mailbox lane counter changed under its row lock")]
     CounterConflict,
+}
+
+/// Mailbox rows that fit neither side of the cutover to mailbox acceptance.
+///
+/// Below the mailbox epoch no commit appends or decides an entry, so an
+/// entry that still awaits its owner or its origin can never be finished.
+/// At any epoch an entry belongs to a canonical message that is bound to its
+/// source and has an open or latched owner decision; an entry without them
+/// was not written by the mailbox's own commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error(
+    "mailbox state fits neither the relay nor the mailbox era at protocol epoch {live:?}: \
+     {unfinished_below_epoch} unfinished entries below the mailbox epoch, \
+     {without_owner_decision} entries whose message has no source binding or owner decision"
+)]
+pub struct MailboxCutoverRefusal {
+    pub live: waddle_xmpp::ingress::ProtocolEpoch,
+    pub unfinished_below_epoch: u64,
+    pub without_owner_decision: u64,
 }
 
 /// Storage identity of one lane row.
@@ -884,6 +905,56 @@ impl MailboxRepository {
             lanes.push(MailboxLaneId::from_storage(&lane)?);
         }
         Ok(lanes)
+    }
+
+    /// Check that the mailbox rows on file can be explained by the cutover
+    /// rule, before a node serves.
+    ///
+    /// The rule: a message committed below the mailbox epoch was dispatched
+    /// through the ordered relay and acknowledged on the origin's commit; it
+    /// has no entry, and its unreceipted dispatch belongs to ingress
+    /// recovery. A message committed at the mailbox epoch or later has its
+    /// source binding, an owner decision and one entry. Nothing is adopted
+    /// from one era into the other and no decision is derived for a
+    /// relay-era message. State that fits neither side is refused, never
+    /// repaired by guessing.
+    pub async fn verify_cutover_state(
+        transaction: &mut IngressUowTransaction<'_>,
+    ) -> Result<(), IngressUowError> {
+        let live = transaction.protocol_epoch();
+        let below_epoch = live < crate::ingress_substrate::mailbox_acceptance_epoch();
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let messages = prepared_ingress_relation(prepared, PreparedIngressRelation::Messages);
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT \
+                       (SELECT count(*) FROM {entries} WHERE disposition < 3), \
+                       (SELECT count(*) FROM {entries} e JOIN {messages} m \
+                          ON m.message_key = e.message_key \
+                         WHERE m.source_binding_version IS NULL OR m.owner_decision IS NULL)",
+                    entries = relations.entries,
+                ),
+                (),
+            )
+            .await?;
+        let row = rows.next().await?.ok_or(MailboxError::InvalidStored)?;
+        let unfinished: i64 = row.get(0)?;
+        let without_owner_decision: i64 = row.get(1)?;
+        drop(rows);
+        let unfinished_below_epoch = if below_epoch { unfinished } else { 0 };
+        if unfinished_below_epoch == 0 && without_owner_decision == 0 {
+            return Ok(());
+        }
+        Err(MailboxError::Cutover(MailboxCutoverRefusal {
+            live,
+            unfinished_below_epoch: u64::try_from(unfinished_below_epoch)
+                .map_err(|_| MailboxError::InvalidStored)?,
+            without_owner_decision: u64::try_from(without_owner_decision)
+                .map_err(|_| MailboxError::InvalidStored)?,
+        })
+        .into())
     }
 
     /// Backlogged lanes whose recorded target is not `target`, in lane-id

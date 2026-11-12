@@ -12,11 +12,11 @@
 //!
 //! The contract under test: `h` covers a groupchat stanza only once the room
 //! owner has durably accepted it, and a lost reply or a restart recovers that
-//! one acceptance instead of producing a second. The server meets the
-//! handled-count part of the contract when remote room acceptance runs
-//! through the durable mailbox, so those tests start their nodes with that
-//! selector. Each has a `*_characterizes_*` twin that pins what the default
-//! relay selector does instead.
+//! one acceptance instead of producing a second. Remote room acceptance runs
+//! through the durable mailbox from protocol epoch 2 on, so the scenarios
+//! that test the handled count activate that epoch on the shared database.
+//! The scenarios that only test recovery of one acceptance after a lost
+//! reply or an origin restart select the ordered relay explicitly.
 //!
 //! The binary needs PostgreSQL and fails without `WADDLE_TEST_POSTGRES_URL`:
 //! every scenario is about durable state shared by two processes.
@@ -30,9 +30,8 @@ use std::time::Duration;
 
 use cluster_support::{
     cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
-    open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server,
-    spawn_cluster_server_with_envs, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
-    CLUSTER_PEER_USERNAME,
+    open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
+    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
@@ -50,12 +49,30 @@ const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
 /// How the nodes of a scenario carry remote room acceptance.
 #[derive(Clone, Copy)]
 enum Acceptance {
-    /// The server's default: the origin counts the stanza when its own
-    /// commit succeeds.
+    /// The origin counts the stanza when its own commit succeeds.
     Relay,
-    /// The origin counts the stanza only after reading the owner's decision
-    /// from the durable mailbox.
+    /// The server's default at the mailbox epoch: the origin counts the
+    /// stanza only after reading the owner's decision from the durable
+    /// mailbox.
     Mailbox,
+}
+
+/// Advance the shared database's ingress protocol epoch to 2, where remote
+/// room acceptance uses the mailbox. Each statement is one step of the
+/// epoch guard; a database already there is left alone. Running nodes read
+/// the epoch at the start of every ingress transaction.
+async fn activate_mailbox_epoch(db: &Database) {
+    let conn = db.guard().await.expect("epoch guard");
+    for _ in 0..2 {
+        conn.execute(
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
+             lineage_uuid = (SELECT lineage_uuid::uuid FROM _lineage WHERE id = 1) \
+             WHERE id = 1 AND epoch < 2",
+            (),
+        )
+        .await
+        .expect("activate the mailbox epoch");
+    }
 }
 
 impl Acceptance {
@@ -377,6 +394,9 @@ impl Scenario {
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+        if matches!(acceptance, Acceptance::Mailbox) {
+            activate_mailbox_epoch(&db).await;
+        }
 
         let room: jid::BareJid = format!("acceptance-{}@muc.{DOMAIN}", uuid::Uuid::new_v4())
             .parse()
@@ -603,24 +623,6 @@ async fn lost_delivery_and_hint_are_repaired_by_the_owner_poller() {
     );
 }
 
-/// Characterizes the relay selector, which
-/// `h_does_not_advance_while_owner_commit_paused` shows the mailbox selector
-/// does not share: the origin answers `<r/>` with a handled count that
-/// already includes the groupchat stanza while the room owner is stopped
-/// before its commit and the room archive is empty. It goes when the relay
-/// selector does.
-#[tokio::test]
-async fn h_while_owner_commit_paused_characterizes_current_early_ack() {
-    let mut scenario = Scenario::start().await;
-    let paused = request_h_while_owner_commit_paused(&mut scenario).await;
-    assert_eq!(
-        paused.h,
-        Some(1),
-        "the origin counts the stanza before the owner has accepted it"
-    );
-    scenario.seams.release(HOLD_BEFORE_COMMIT);
-}
-
 /// The owner commits and executes a groupchat message but its relay reply
 /// never reaches the origin. The origin's own handling of the failed ask,
 /// and then the client's retransmission of the same stanza, both resolve to
@@ -716,11 +718,12 @@ async fn origin_sigkill_after_owner_commit() {
     );
 
     let port_a = free_tcp_port();
-    let (server_a, _, _) = spawn_cluster_server(
+    let (server_a, _, _) = spawn_cluster_server_with_envs(
         &scenario.postgres_url,
         &scenario.pool.pool_env,
         port_a,
         &[scenario.port_b],
+        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
     )
     .await;
     wait_for_readiness(&server_a, true, Duration::from_secs(30)).await;
@@ -882,24 +885,6 @@ async fn owner_sigkill_before_commit() {
         Some(u32::from(observed.refused)),
         "h covers the stanza only together with its refusal"
     );
-}
-
-/// Characterizes the relay selector, which `owner_sigkill_before_commit`
-/// shows the mailbox selector does not share: after the owner dies before its
-/// commit, the origin reports the stanza as handled, the room archive never
-/// receives it, and the sender is sent no error. It goes when the relay
-/// selector does.
-#[tokio::test]
-async fn owner_sigkill_before_commit_characterizes_current_silent_loss() {
-    let mut scenario = Scenario::start().await;
-    let observed = observe_owner_killed_before_commit(&mut scenario).await;
-    assert_eq!(observed.archived, Vec::<String>::new());
-    assert_eq!(
-        observed.h,
-        Some(1),
-        "the origin counted the stanza the owner never accepted"
-    );
-    assert!(!observed.refused, "the sender is told nothing");
 }
 
 /// Room membership changes between the owner's acceptance of a groupchat

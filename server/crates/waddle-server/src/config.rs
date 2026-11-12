@@ -3192,7 +3192,7 @@ mod ingress_authority_config_tests {
         use crate::ingress_uow::RemoteRoomAcceptance;
         assert_eq!(
             IngressConfig::default().remote_room_acceptance,
-            RemoteRoomAcceptance::OrderedRelay
+            RemoteRoomAcceptance::DurableMailbox
         );
         for (value, expected) in [
             ("relay", RemoteRoomAcceptance::OrderedRelay),

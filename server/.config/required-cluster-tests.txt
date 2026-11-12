@@ -496,13 +496,9 @@ waddle-server::restricted_runtime_startup owner_phase_is_idempotent_and_fails_cl
 waddle-server::restricted_runtime_startup owner_phase_refuses_a_schema_public_can_use
 
 # #1948 remote-room acceptance fault harness: two real nodes, the sender's
-# XEP-0198 handled count against the room owner's durable acceptance. The
-# `*_characterizes_*` tests pin the current early acknowledgement and are
-# replaced by their `#[ignore]`d contract tests when the origin gates `h` on
-# owner acceptance; the other two already hold and guard reply-loss and
-# origin-restart recovery against a second acceptance.
-waddle-server::xep0045_xep0198_remote_acceptance h_while_owner_commit_paused_characterizes_current_early_ack
-waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit_characterizes_current_silent_loss
+# XEP-0198 handled count against the room owner's durable acceptance. These
+# two run under the relay selector and guard reply-loss and origin-restart
+# recovery against a second acceptance.
 waddle-server::xep0045_xep0198_remote_acceptance reply_loss_recovers_same_acceptance
 waddle-server::xep0045_xep0198_remote_acceptance origin_sigkill_after_owner_commit
 
@@ -588,12 +584,14 @@ waddle-server::mailbox_core_postgres appender_behind_a_collector_neither_deadloc
 # #1948 owner acceptance transaction: with the mailbox selected the origin's
 # commit must append the pending entry, and the owner's commit must latch its
 # decision on the canonical message and the entry together, for an acceptance
-# and for a refusal; the relay selector must write no lane. An image whose
-# owner can accept without recording it, or whose default path writes mailbox
-# rows, must not ship.
+# and for a refusal. A commit below protocol epoch 2, and a commit under the
+# relay selector, must write no lane, and a message committed below the epoch
+# must get no entry when it is retransmitted after the activation. An image
+# whose owner can accept without recording it, or which gives a relay-era
+# message a mailbox entry, must not ship.
 waddle-server::ingress_commit mailbox_acceptance::origin_appends_pending_entry_and_owner_accepts_in_one_transaction
 waddle-server::ingress_commit mailbox_acceptance::owner_rejection_records_its_child_and_decides_the_entry
-waddle-server::ingress_commit mailbox_acceptance::relay_selector_writes_no_mailbox_entry
+waddle-server::ingress_commit mailbox_acceptance::commits_below_the_mailbox_epoch_or_under_the_relay_selector_write_no_entry
 
 # #1948 origin handled count: under the mailbox selector the origin must not
 # count a groupchat stanza before it has read its room owner's decision, an

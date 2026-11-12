@@ -22,8 +22,8 @@ Abbreviations: `S/` is `server/crates/waddle-server/src/`, `W/` is
 | Restricted database runtime | Refused before any pool escapes | `S/main.rs:94`, `S/server/lifecycle.rs:95-97` |
 | Connection actor on `/ws` | Every started connection is hosted by the connection actor, which runs the live loop and the legacy handlers. The gate returns the legacy admission, and registration still installs the binding and owns the outbound endpoint | `W/connection/live_actor.rs`, `W/connection.rs` (`LiveWebSocketConnection::run`), `S/server/state.rs` (`WebSocketAdmissionGate::reserve`) |
 | Connection state | The actor owns a whole `WsConnState` by value inside `LiveSocketState`; there is no separate state type | `W/connection.rs` (`LiveSocketState`) |
-| Durable mailbox (P2.2–P2.4) | Built behind `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=mailbox` (default `relay`): storage, retention, owner acceptance transaction, origin handled-count gate, hint, poller, retry and dead letters. Not activated: no epoch bump, no adoption of relay-era dispatch intents, and every ordered-relay lane still live | `S/ingress_uow/mailbox.rs`, `S/ingress/commit_mailbox.rs`, `S/ingress/origin_gate.rs`, `S/ingress/mailbox_worker.rs`, `S/clustering/route_bridge/mailbox.rs`, [`p2-2-durable-mailbox-core.md`](p2-2-durable-mailbox-core.md) |
-| Clustered frozen room manifests | Sealed where remote room acceptance uses the mailbox; otherwise off outside tests | `S/ingress/commit_room.rs` (`new_manifests_enabled`), `S/ingress/commit/commit_hooks.rs` |
+| Durable mailbox (P2.2–P2.4) | Remote room acceptance uses the mailbox in every ingress transaction at protocol epoch 2 or later on clustered PostgreSQL (`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=mailbox`, the default): storage, retention, owner acceptance transaction, origin handled-count gate, hint, poller, lane adoption after a claim move, retry and dead letters. The owner phase activates the epoch. The relay still carries the stanza itself and every other ordered-relay lane | `S/ingress_uow/mailbox.rs`, `S/ingress/commit_mailbox.rs`, `S/ingress/origin_gate.rs`, `S/ingress/mailbox_worker.rs`, `S/server/runtime_owner.rs` (`activate_ingress_protocol_epoch`), [`p2-2-durable-mailbox-core.md`](p2-2-durable-mailbox-core.md) |
+| Clustered frozen room manifests | Sealed by a transaction that carries remote room acceptance through the mailbox; a clustered transaction below protocol epoch 2 or under the relay selector records none | `S/ingress/commit_room.rs` (`new_manifests_enabled`) |
 | Hosted CI | Actions disabled, workflow files removed | [`2046-ci-pause.md`](2046-ci-pause.md) |
 
 ## Working rules
@@ -94,8 +94,11 @@ order:
 
 The new binary additionally requires an activation value that an old writer
 fails on inside its own transaction. Today the only such fence is the protocol
-epoch, and it covers the 13 guarded ingress tables
-(`S/ingress_substrate/substrate.rs:38-50`). The SM, binding and mailbox tables
+epoch, and it covers the 15 guarded ingress tables
+(`EPOCH_GUARDED_TABLES` in `S/ingress_substrate/substrate.rs`). The owner
+phase advances the epoch to the value the new binary implements
+(`activate_ingress_protocol_epoch` in `S/server/runtime_owner.rs`); the
+mailbox cutover is epoch 2. The SM, binding and mailbox tables
 that M2 and M3 add are enrolled under the same guard when they are created, so
 steps 2–4 are a second line of defence and not the only one.
 

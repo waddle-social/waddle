@@ -99,6 +99,23 @@ async fn entry_state(
     (disposition, decision)
 }
 
+/// Advance the fixture's protocol epoch to 2, from which a commit carries
+/// remote room acceptance through the mailbox. Each statement is one step
+/// of the epoch guard and its own transaction.
+async fn activate_mailbox_epoch(fixture: &IngressFixture) {
+    for _ in 0..2 {
+        fixture
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
+                 lineage_uuid = ?::uuid WHERE id = 1",
+                waddle_server::db_params![uuid::Uuid::new_v4().to_string()],
+            )
+            .await;
+    }
+}
+
+/// A clustered PostgreSQL fixture at the mailbox epoch with the mailbox
+/// selected, and the fence of the room claim it seeded.
 async fn mailbox_fixture(name: &str) -> Option<(IngressFixture, RoomClaimFenceContext)> {
     let mut fixture = IngressFixture::postgres(name).await?;
     let room_fence = fixture.room_fence(&room()).await;
@@ -107,6 +124,7 @@ async fn mailbox_fixture(name: &str) -> Option<(IngressFixture, RoomClaimFenceCo
         .clone()
         .with_remote_room_acceptance(RemoteRoomAcceptance::DurableMailbox);
     assert!(fixture.uow.mailbox_acceptance_enabled());
+    activate_mailbox_epoch(&fixture).await;
     Some((fixture, room_fence))
 }
 
@@ -206,21 +224,56 @@ async fn owner_rejection_records_its_child_and_decides_the_entry() {
     fixture.close().await;
 }
 
+/// The cutover boundary is the protocol epoch each commit locks. Below the
+/// mailbox epoch a clustered commit dispatches through the relay and writes
+/// no lane, whatever the selector. After the activation the relay selector
+/// still writes none, and the message committed before the activation gets
+/// no entry when it is retransmitted: it carries no source binding, so no
+/// owner decision is opened for it.
 #[tokio::test]
-async fn relay_selector_writes_no_mailbox_entry() {
+async fn commits_below_the_mailbox_epoch_or_under_the_relay_selector_write_no_entry() {
     let Some(mut fixture) = IngressFixture::postgres("mailbox_off").await else {
         return;
     };
     fixture.room_fence(&room()).await;
-    assert!(!fixture.uow.mailbox_acceptance_enabled());
-    let origin = origin_groupchat(&fixture, "mailbox-off", "relayed body");
-    let key = commit_submission(&fixture.uow, &origin, 5)
+    assert!(
+        fixture.uow.mailbox_acceptance_enabled(),
+        "the mailbox is the default selector on clustered PostgreSQL"
+    );
+    let relay_era = origin_groupchat(&fixture, "mailbox-off", "relayed body");
+    let relay_era_commit = commit_submission(&fixture.uow, &relay_era, 5)
         .await
-        .expect("origin commit")
+        .expect("origin commit below the mailbox epoch");
+    let relay_era_key = relay_era_commit.message_key.expect("canonical message");
+    assert_eq!(relay_era_commit.remote_acceptance, None);
+    assert_eq!(entry_state(&fixture, relay_era_key).await, (None, None));
+    assert_eq!(fixture.count("ingress_mailbox_lanes").await, 0);
+
+    activate_mailbox_epoch(&fixture).await;
+    let relay_selected = fixture
+        .uow
+        .clone()
+        .with_remote_room_acceptance(RemoteRoomAcceptance::OrderedRelay);
+    assert!(!relay_selected.mailbox_acceptance_enabled());
+    let relayed = origin_groupchat(&fixture, "mailbox-relay", "relay selector body");
+    let relayed_key = commit_submission(&relay_selected, &relayed, 5)
+        .await
+        .expect("origin commit under the relay selector")
         .message_key
         .expect("canonical message");
-    assert_eq!(entry_state(&fixture, key).await, (None, None));
+    assert_eq!(entry_state(&fixture, relayed_key).await, (None, None));
     assert_eq!(fixture.count("ingress_mailbox_lanes").await, 0);
+
+    let replay = commit_submission(&fixture.uow, &relay_era, 5)
+        .await
+        .expect("retransmission after the activation");
+    assert_eq!(replay.message_key, Some(relay_era_key));
+    assert_eq!(
+        replay.remote_acceptance, None,
+        "a relay-era message awaits no owner decision"
+    );
+    assert_eq!(entry_state(&fixture, relay_era_key).await, (None, None));
+    assert_eq!(fixture.count("ingress_mailbox_entries").await, 0);
     fixture.close().await;
 }
 

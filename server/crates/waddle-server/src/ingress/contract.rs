@@ -85,6 +85,7 @@ pub struct IngressAuthority {
     pub(in crate::ingress) mailbox_hints:
         std::sync::OnceLock<Arc<dyn super::origin_gate::MailboxHintSink>>,
     /// Stanzas this node's streams have awaiting a remote room owner.
+    #[cfg(feature = "clustering")]
     pub(in crate::ingress) pending_acceptances: super::origin_gate::PendingAcceptances,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
@@ -368,7 +369,16 @@ impl IngressAuthority {
             .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
             .await
         {
-            Ok(transaction) => transaction.commit().await?,
+            Ok(mut transaction) => {
+                // A node that carries remote room acceptance through the
+                // mailbox serves only on mailbox rows the cutover rule
+                // explains; see `MailboxRepository::verify_cutover_state`.
+                if uow.mailbox_acceptance_enabled() {
+                    crate::ingress_uow::MailboxRepository::verify_cutover_state(&mut transaction)
+                        .await?;
+                }
+                transaction.commit().await?
+            }
             Err(IngressUowError::Lineage(error)) => {
                 tracing::warn!(
                     %error,
@@ -407,6 +417,7 @@ impl IngressAuthority {
             clustered,
             receipt_custody,
             mailbox_hints: std::sync::OnceLock::new(),
+            #[cfg(feature = "clustering")]
             pending_acceptances: super::origin_gate::PendingAcceptances::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
@@ -465,6 +476,7 @@ impl IngressAuthority {
             clustered: false,
             receipt_custody,
             mailbox_hints: std::sync::OnceLock::new(),
+            #[cfg(feature = "clustering")]
             pending_acceptances: super::origin_gate::PendingAcceptances::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]

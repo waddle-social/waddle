@@ -54,7 +54,7 @@ running production system.
 | 7 | Typed ingress transaction entry | Yes: `S/ingress_substrate/typed_entry.rs` | Yes: the ingress unit of work, the pooled receipt writer, `begin_raw_ingress_writer` and `PostgresIngressSubstrate::begin` call `begin_ingress_entry` | Yes for the unattested authority (production's pool is not attested); the attested authorities are reached only with row 1 | No test targets the entry alone. Every ingress suite passes through it on the unattested authority; `restricted_runtime_startup::alias_gc_collects_an_expired_message_under_the_runtime_role` and `runtime_locks_the_epoch_row_but_cannot_change_it` use the attested one. `server/scripts/check-ingress-typed-entry.py` is a source check, not a test | No: `typed_entry.rs` changed in #2335 | No |
 | 8 | Supervised transport pumps | Yes: `W/supervised_io.rs`, `S/websocket_transport.rs` | Yes: the live loop in `W/connection.rs` reads and writes through the pump queues under a `LegacySocketAdmission` | Yes: unconditional on the `/ws` path | `supervised_io`, `websocket_transport`, `socket_admission`, `websocket_admission_live` (whole binaries); `characterization_bind::local_io_witness_tracks_each_production_websocket` | Not recorded: last changed in #2327 | No |
 | 9 | Connection actor hosting the live loop | Yes: `W/connection/live_actor.rs`, `W/connection_actor*.rs` | Yes: `W/connection.rs` branches on `LiveConnectionHost` | No: `LiveConnectionHost` defaults to `PlainTask` (`S/server/state.rs`); only the `test-support` variable `WADDLE_TEST_LIVE_CONNECTION_HOST` selects `Actor`, and the production build has no `test-support` | `websocket_admission_live` (actor-host cases), `characterization_bind::*_under_the_actor_host`, `graceful_shutdown_ws::sigterm_closes_live_session_with_system_shutdown_and_exits_under_the_actor_host`, `canonical_actor_bridge`, `prebind_actor_transcript` | Not recorded: last changed in #2327 | No |
-| 10 | Clustered frozen room manifests | Yes: `S/ingress/commit_room.rs` | Yes: gated by `allow_clustered_room_manifests()` | No: the gate returns `false` outside `cfg(test)` (`S/ingress/commit/commit_hooks.rs:24-34`) | `lib` `ingress::xep0045_room_manifest_tests` | Not recorded: gate last changed in #2160 | No |
+| 10 | Clustered frozen room manifests | Yes: `S/ingress/commit_room.rs` | Yes: `new_manifests_enabled` | Yes, in a transaction at protocol epoch 2 or later on clustered PostgreSQL with the mailbox selector (the default); a transaction below that epoch or under the relay selector records none | `ingress_commit::mailbox_acceptance` (written, not yet run) | #1948 |
 | 11 | Room owner decision repository (`RoomOwnerDecision`, `ingress_messages.owner_decision`) | Yes: `S/ingress_uow/repositories.rs`, migration in `S/db/migrations/waddle.rs` | Used inside the ingress unit of work only; no caller outside `S/ingress_uow/` names `RoomOwnerDecision` | Not determined here: whether a production path writes a decision depends on row 10's gate | `xep0045_xep0198_remote_acceptance` (two of its contract tests are `#[ignore]`d for #1948); `lib` `ingress_uow` tests | Not recorded: last changed in #2307 | No |
 | 12 | Durable mailbox value types | Yes: `X/ingress/mailbox.rs` | No: nothing outside that file uses it | No | 23 unit tests in `X/ingress/mailbox.rs` | Not recorded: added in #2326 | No |
 | 13 | SASL2 server handshake (dark) | Yes: `W/sasl.rs`, `W/connection_actor/prebind.rs` | Yes, behind `sasl2_test_capability` | No: `S/server/http.rs:1582` sets `sasl2_test_capability: false`; only test state sets it | `sasl2_dark_ws`; `prebind_actor_transcript` | Not recorded: last changed before #2334 (#2299 for `W/sasl.rs`) | No |
@@ -76,12 +76,13 @@ running production system.
 - **#1986 (durable mailbox).** Value types only (row 12). No store, no
   caller, no lane served from it; the ordered relay still carries every
   lane (row 15).
-- **#1948 (remote-room acceptance before `h`).** The harness exists and
-  pins that the contract does not hold: the two contract tests are
-  `#[ignore]`d and their `*_characterizes_*` twins assert the current
-  behaviour ([failure matrix](2046-failure-matrix.md), rows 4 and 5).
-  Clustered room manifests, which the acceptance path depends on, are off
-  outside tests (row 10).
+- **#1948 (remote-room acceptance before `h`).** From protocol epoch 2 on,
+  a clustered PostgreSQL deployment carries remote room acceptance through
+  the durable mailbox and seals clustered room manifests in the owner's
+  transaction (`S/ingress/commit_mailbox.rs`, `S/ingress/commit_room.rs`).
+  The owner phase activates the epoch. The two-node contract tests are
+  written and have not been run
+  ([failure matrix](2046-failure-matrix.md), rows 4 and 5).
 
 ## Executable evidence
 

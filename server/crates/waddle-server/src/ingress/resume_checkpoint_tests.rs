@@ -226,7 +226,7 @@ async fn resume_checkpoint_preserves_missing_malformed_epoch_and_lineage_failure
         )
         .await
         .expect("restore identity");
-    connection.execute("UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = '2026-09-06T00:00:00Z', lineage_uuid = '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001' WHERE id = 1", ())
+    connection.execute("UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = '2026-09-06T00:00:00Z', lineage_uuid = '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001' WHERE id = 1", ())
         .await.expect("future epoch");
     assert!(matches!(
         authority.load_resume_checkpoint(&stream).await,

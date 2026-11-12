@@ -250,7 +250,7 @@ async fn sqlite_direct_admission_is_exact_bounded_and_recoverable() {
         .execute("INSERT INTO temp.ingress_protocol_epoch VALUES (1, 0)", ())
         .await
         .expect("shadow epoch row");
-    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future epoch");
+    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 3, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future epoch");
     drop(guard);
     assert!(matches!(
         lab.start(&admission, &lease).await,
@@ -1175,16 +1175,18 @@ async fn postgres_real_claim_recovery_requires_never_started_and_epoch_first() {
         ))
     ));
     sqlx::query(&format!("ALTER TABLE {}.ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_row", fixture.target)).execute(&fixture.admin).await.expect("restore guard");
-    let mut transition = fixture.admin.begin().await.expect("epoch transition");
-    sqlx::query(&format!(
-        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
-        fixture.target
-    ))
-    .execute(&mut *transition)
-    .await
-    .expect("epoch relation lock");
-    sqlx::query(&format!("UPDATE {}.ingress_protocol_epoch SET epoch = 2, activated_at = now(), lineage_uuid = $1 WHERE id = 1", fixture.target)).bind(fixture.lineage.lineage_uuid.0).execute(&mut *transition).await.expect("advance epoch");
-    transition.commit().await.expect("commit epoch transition");
+    for epoch in [2_i64, 3] {
+        let mut transition = fixture.admin.begin().await.expect("epoch transition");
+        sqlx::query(&format!(
+            "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+            fixture.target
+        ))
+        .execute(&mut *transition)
+        .await
+        .expect("epoch relation lock");
+        sqlx::query(&format!("UPDATE {}.ingress_protocol_epoch SET epoch = $1, activated_at = now(), lineage_uuid = $2 WHERE id = 1", fixture.target)).bind(epoch).bind(fixture.lineage.lineage_uuid.0).execute(&mut *transition).await.expect("advance epoch");
+        transition.commit().await.expect("commit epoch transition");
+    }
     assert!(matches!(
         lab.start(&c, &fresh).await,
         Err(DirectAdmissionLabError::Authority(

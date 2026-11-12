@@ -21,6 +21,14 @@ clustering:
   # WADDLE_CLUSTERING_POD_TEMPLATE_HASH's identical "ships ahead of Phase 4's
   # chart unlock rather than needing a second chart change then" precedent.
   claimReleaseBudgetSeconds: 5
+  # How a groupchat message for a room owned by another node reaches the
+  # owner's acceptance (WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE). "mailbox"
+  # records the owner's decision in the durable mailbox before the sender's
+  # stanza is acknowledged; it takes effect once the owner phase has
+  # activated ingress protocol epoch 2 and behaves like "relay" below that
+  # epoch. "relay" keeps relay acceptance at every epoch. Every node of a
+  # deployment must use the same value.
+  remoteRoomAcceptance: mailbox
 
 deployment:
   # Stable operator-provided UUID identifying this deployment.

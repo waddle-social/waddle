@@ -1,13 +1,15 @@
 # P2.2 — durable mailbox core
 
-Status: **implemented behind a selector that defaults to the relay**.
+Status: **active from protocol epoch 2**.
 Migration V1031 creates the lane and entry tables and `MailboxRepository` is
-the only code that writes them. The ingress commit appends and decides entries
-only when `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=mailbox` on a clustered
-PostgreSQL deployment. The sections from "Ownership and
-boundaries" onward are the design review that preceded the implementation and
-are kept for their failure analysis. Where they describe a question as open,
-the "Implemented contract" section below is the answer in force.
+the only code that writes them. On a clustered PostgreSQL deployment the
+ingress commit appends and decides entries in every transaction whose
+protocol epoch is 2 or later, unless
+`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=relay` is set. The sections from
+"Ownership and boundaries" onward are the design review that preceded the
+implementation and are kept for their failure analysis. Where they describe a
+question as open, the "Implemented contract" section below is the answer in
+force.
 
 ## Implemented contract
 
@@ -71,12 +73,15 @@ consumed and deletes consumed entries explicitly.
 ### Remote room acceptance
 
 `RemoteRoomAcceptance` (`ingress_uow`) selects how a groupchat message for a
-room owned by another node reaches the owner's acceptance. `OrderedRelay`, the
-default, leaves the relay path as it is. `DurableMailbox` takes effect only
-with clustered fencing on PostgreSQL (`mailbox_acceptance_enabled`) and is set
-from `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE` (`relay` or `mailbox`).
+room owned by another node reaches the owner's acceptance. `DurableMailbox`
+is the default and is set from `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`
+(`mailbox` or `relay`). It can take effect only with clustered fencing on
+PostgreSQL (`mailbox_acceptance_enabled`), and it does take effect in a
+transaction whose protocol epoch is at least `mailbox_acceptance_epoch()`,
+which is 2 (`mailbox_acceptance_active`). `OrderedRelay` leaves the relay
+path as it is at every epoch.
 
-With the mailbox selected (`ingress/commit_mailbox.rs`):
+In a transaction that uses the mailbox (`ingress/commit_mailbox.rs`):
 
 - **Origin commit.** After its stream row and before any canonical row, the
   origin locks its lane: origin = the stream-management session (or the bound
@@ -192,6 +197,53 @@ keeps `h` behind it.
   `dead_lettered`) and `ingress.mailbox.room_acceptances{outcome}` are
   registered at zero. `ingress.mailbox.hints{outcome}` is context only.
 
+### Cutover
+
+The cutover from relay acceptance to mailbox acceptance is the protocol
+epoch, and it is coordinated, not rolling (D1 in
+[`2046-completion-contracts.md`](2046-completion-contracts.md)).
+
+- **Activation.** `supported_protocol_epoch()` is 2. With every server
+  stopped, the owner phase (`prepare_restricted_runtime_owner`) advances
+  `ingress_protocol_epoch` one step per transaction until it reaches 2,
+  stamping each step with the deployment's lineage
+  (`activate_ingress_protocol_epoch`). A binary that implements only epoch 1
+  then fails every ingress transaction it opens with
+  `EpochUnsupported`, inside that transaction, and a guarded write that was
+  blocked behind the activation fails its epoch proof when it continues.
+- **Per-transaction boundary.** Every ingress transaction reads the live
+  epoch under the epoch row lock before it writes. A commit below epoch 2
+  dispatches to the room owner through the ordered relay, records no source
+  binding for that purpose, writes no lane and no entry, seals no clustered
+  manifest and counts the stanza on the origin's commit. A commit at epoch 2
+  or later binds the source, opens the owner decision and appends the entry.
+  Because the activation runs while no server runs, the two kinds never
+  interleave on one stream.
+- **Relay-era rows.** A `DispatchToRoomRemote` intent recorded below epoch 2
+  belongs to a message without a source binding, and the schema allows an
+  owner decision only on a bound message. Such a message was already
+  acknowledged to its sender. It is never given a mailbox entry or a
+  decision, including when its stanza is retransmitted after the activation
+  (`record_origin` returns no entry for an unbound message). Its unreceipted
+  dispatch stays with the ingress maintenance pass, exactly as before the
+  activation. Nothing is adopted from one era into the other.
+- **Startup refusal.** A node that selects the mailbox on clustered
+  PostgreSQL checks the mailbox rows before it serves
+  (`MailboxRepository::verify_cutover_state`, from
+  `IngressAuthority::finish_startup`). It refuses to start, with
+  `MailboxError::Cutover`, when an entry belongs to a message without a
+  source binding or without an owner decision, or when the live epoch is
+  below 2 and an entry is still pending or unconsumed: no commit at that
+  epoch could ever finish it. It does not repair either state.
+- **Deployments without the owner phase.** A PostgreSQL deployment that does
+  not run the restricted-runtime owner phase stays at epoch 0. It keeps the
+  relay's behaviour whatever the selector says, and nothing fences an older
+  binary there.
+- **Selector.** `ingress.remoteRoomAcceptance` in the Helm chart sets
+  `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`. `relay` keeps relay acceptance at
+  every epoch and must be set on every node or none; it exists for the
+  lanes that still depend on the ordered relay and is removed with them.
+
 ### Owner transfer and unread decisions
 
 - **Lane adoption.** A lane records the owner incarnation its origin last
@@ -255,12 +307,6 @@ their receipts stay pending and the same recovery delivers them.
 
 These hold today and bound what the mailbox selector may be used for.
 
-- **Not the default.** The relay selector is the default, the production
-  hook that disables clustered manifests outside the mailbox selector is still
-  in place (`commit_hooks::allow_clustered_room_manifests`), and the ingress
-  protocol epoch is unchanged. Nothing adopts `DispatchToRoomRemote` intents
-  recorded under the relay selector: such a message has no source binding, so
-  it gets no entry and no owner decision is ever recorded for it.
 - **Relay still carries the stanza.** The origin still relays the groupchat
   stanza through `deliver_ordered`; the mailbox entry and the poller make the
   owner's acceptance durable and recoverable beside it. No ordered-relay kind

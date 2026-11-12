@@ -437,11 +437,10 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         }
         _ => false,
     };
-    // P1 has no remote frozen-child completion protocol. Clustered production
-    // must retain legacy keyed relay settlement until P2; persisted manifests
-    // remain authoritative even after new seals are disabled.
+    // A persisted manifest stays authoritative whether or not this
+    // transaction may seal a new one.
     let can_seal = sealed_manifest.is_some()
-        || (super::super::commit_room::new_manifests_enabled(uow)
+        || (super::super::commit_room::new_manifests_enabled(uow, &tx)
             && (alias != AliasOutcomeClass::Existing || owner_first));
     if can_seal && sealed_manifest.is_none() && rejection.is_none() {
         super::super::commit_room::assert_snapshot_coordinates(&mut tx, submission).await?;

@@ -728,7 +728,8 @@ async fn guarded_tables_reject_unproven_and_unsupported_epoch_writes() {
     assert!(matches!(appended, MailboxAppendOutcome::Appended(_)));
 
     // An epoch this binary does not implement refuses the transaction before
-    // any mailbox statement runs.
+    // any mailbox statement runs. Each advance is its own transaction.
+    fixture.advance_epoch().await;
     fixture.advance_epoch().await;
     assert!(matches!(
         fixture.uow.begin().await,

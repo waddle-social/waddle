@@ -196,6 +196,7 @@ pub async fn await_room_acceptance(
 /// by lane. A lane is one sender session's traffic to one room, so each
 /// sample describes one stream: how many of its stanzas await the owner and
 /// how long the oldest has waited.
+#[cfg(feature = "clustering")]
 #[derive(Debug, Default)]
 pub struct PendingAcceptances {
     lanes: std::sync::Mutex<
@@ -203,6 +204,7 @@ pub struct PendingAcceptances {
     >,
 }
 
+#[cfg(feature = "clustering")]
 impl PendingAcceptances {
     /// Record that a wait on `lane` began at `started` and sample the lane.
     fn opened(&self, lane: crate::ingress_uow::MailboxLaneId, started: tokio::time::Instant) {

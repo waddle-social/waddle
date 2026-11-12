@@ -118,6 +118,7 @@ use substrate::discard_database_error;
 pub use substrate::gc_expired_aliases;
 use substrate::gc_retained_child_sql;
 pub use substrate::insert_sm_ref;
+pub use substrate::mailbox_acceptance_epoch;
 pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
 pub use substrate::record_message;

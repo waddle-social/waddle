@@ -32,16 +32,33 @@ use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 /// cutoff, keeping wall-clock decisions at its caller boundary.
 pub const ALIAS_RETENTION: Duration = Duration::days(8);
 
-/// Highest protocol epoch whose write semantics this binary implements:
-/// the substrate's retention, locking, and proof contracts are built for
-/// the epoch-1 activation this slice installs.
+/// Highest protocol epoch whose write semantics this binary implements.
+///
+/// Epoch 1 requires the transaction-local proof on every guarded write.
+/// Epoch 2 additionally carries remote room acceptance through the durable
+/// mailbox (see [`mailbox_acceptance_epoch`]). A binary that implements only
+/// epoch 1 refuses a live epoch 2 inside its own transaction, so it cannot
+/// commit a relay-era dispatch beside mailbox-era ones.
 ///
 /// The GC's self-installed proof claims at most this epoch; a live epoch
 /// beyond it fails closed so a future activation fences old collectors
 /// instead of being claimed automatically.  Bump only in the slice that
 /// teaches the substrate the new epoch's semantics.
 pub fn supported_protocol_epoch() -> ProtocolEpoch {
-    ProtocolEpoch::from_storage(1)
+    ProtocolEpoch::from_storage(2)
+}
+
+/// The protocol epoch from which a clustered PostgreSQL deployment carries
+/// remote room acceptance through the durable mailbox and seals clustered
+/// room manifests.
+///
+/// Every ingress transaction reads the live epoch under its row lock, so the
+/// epoch is the cutover boundary: a commit at an earlier epoch dispatches to
+/// the room owner through the ordered relay and writes no mailbox entry, and
+/// a commit at this epoch or later appends one. The owner phase activates
+/// the epoch while no server runs; the two kinds of commit never interleave.
+pub fn mailbox_acceptance_epoch() -> ProtocolEpoch {
+    ProtocolEpoch::from_storage(2)
 }
 
 /// Ingress tables protected by the epoch-proof triggers from migration V1009.

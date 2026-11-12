@@ -91,7 +91,7 @@ async fn sqlite_observes_exact_ledger_and_never_reverts_terminal() {
         .execute("INSERT INTO temp.ingress_protocol_epoch VALUES (1, 0)", ())
         .await
         .expect("supported shadow");
-    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
+    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 3, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
     drop(guard);
     assert!(matches!(
         lab.recover_state(&pin.key).await,
@@ -734,7 +734,7 @@ async fn postgres_observes_exact_ledger_under_hostile_path_and_recovers() {
         restarted.bind_existing_allocation(&pin.key, &binding).await,
         Err(AdmissionPinLabError::Rejected)
     ));
-    for epoch in [1_i64, 2] {
+    for epoch in [1_i64, 2, 3] {
         let mut transition = fixture.admin.begin().await.expect("epoch transition");
         sqlx::query(&format!(
             "LOCK TABLE ONLY {schema}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE"

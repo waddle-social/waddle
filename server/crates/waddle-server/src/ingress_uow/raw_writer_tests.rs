@@ -124,7 +124,7 @@ async fn postgres_raw_substrate_rejects_unsupported_epoch_even_with_valid_gucs()
     let Some(fixture) = IngressFixture::postgres("raw_writer_future_epoch").await else {
         return;
     };
-    for epoch in [1_i64, 2] {
+    for epoch in [1_i64, 2, 3] {
         fixture.execute(
             "UPDATE ingress_protocol_epoch SET epoch = ?, activated_at = now(), lineage_uuid = ?::uuid WHERE id = 1",
             crate::db_params![epoch, uuid::Uuid::new_v4().to_string()],
@@ -138,7 +138,7 @@ async fn postgres_raw_substrate_rejects_unsupported_epoch_even_with_valid_gucs()
     let mut tx = EnteredTransaction::from_fixture_transaction(
         fixture.db.begin().await.expect("raw transaction"),
     );
-    tx.execute("SELECT set_config('waddle.protocol_epoch', '2', true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)", ()).await.expect("valid epoch and xid GUCs");
+    tx.execute("SELECT set_config('waddle.protocol_epoch', '3', true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)", ()).await.expect("valid epoch and xid GUCs");
     tx.execute(
         "UPDATE ingress_effect_descendants SET settled_at = settled_at WHERE false",
         (),

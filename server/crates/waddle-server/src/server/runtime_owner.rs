@@ -43,6 +43,7 @@ use crate::db::lineage::{self, AttestedLineage, PgIdentity};
 use crate::db::physical_attestation::{quote_identifier, PgRoleName};
 use crate::db::{Database, DatabaseDriver, DatabaseError};
 use crate::inbox::bootstrap_inbox_owner_schema;
+use crate::ingress_substrate::supported_protocol_epoch;
 use crate::ingress_uow::{
     initialize_room_observations, prepare_dark_room_observation_schema, ObservationError,
     RoomObservationSchemaError,
@@ -225,6 +226,13 @@ pub enum RestrictedRuntimeOwnerError {
     Mam(#[source] MamSchemaBootstrapError),
     #[error("webhook delivery ledger owner preparation failed")]
     WebhookDeliveries(#[source] DatabaseError),
+    #[error("could not activate the ingress protocol epoch")]
+    ProtocolEpochActivation(#[source] DatabaseError),
+    #[error(
+        "the ingress protocol epoch row is missing, or records epoch {live} beyond the \
+         {supported} this binary implements"
+    )]
+    ProtocolEpochUnsupported { live: i64, supported: i64 },
     #[error("could not inspect database sessions and prepared transactions")]
     ExclusiveDatabaseInspection(#[source] DatabaseError),
     #[error(
@@ -726,6 +734,7 @@ pub async fn prepare_restricted_runtime_owner(
 
     grant_runtime(owner, &identity, plan).await?;
     verify_runtime_role(owner, &identity, plan).await?;
+    activate_ingress_protocol_epoch(owner, &identity, &expected).await?;
 
     // Reported last so the grants are in place when the delay elapses: the
     // rerun then only activates the generation.
@@ -735,6 +744,74 @@ pub async fn prepare_restricted_runtime_owner(
     }
 
     Ok(RestrictedRuntimeOwnerEvidence { lineage: expected })
+}
+
+/// Advance the ingress protocol epoch to the one this binary implements.
+///
+/// This is the activation value of a coordinated cutover: the phase runs
+/// while no server runs, and from its commit on a binary that implements
+/// only an earlier epoch refuses every ingress transaction it opens, inside
+/// that transaction. A writer that was blocked behind this update reads the
+/// new epoch when it continues and fails its epoch proof.
+///
+/// The epoch guard permits one step per transaction, so each step is its
+/// own transaction; a rerun continues from the epoch on file and an epoch
+/// already at the supported value is left alone. Each activated epoch is
+/// stamped with the deployment's lineage. An epoch beyond the supported one
+/// belongs to a newer binary and is refused.
+async fn activate_ingress_protocol_epoch(
+    owner: &Database,
+    identity: &PgIdentity,
+    lineage: &AttestedLineage,
+) -> Result<(), RestrictedRuntimeOwnerError> {
+    let epoch_table = format!(
+        "{}.ingress_protocol_epoch",
+        quote_identifier(&identity.schema.name.0)
+    );
+    let supported = i64::from(supported_protocol_epoch().to_storage());
+    loop {
+        let step = async {
+            let mut tx = owner.begin().await?;
+            let mut rows = tx
+                .query(
+                    &format!("SELECT epoch FROM {epoch_table} WHERE id = 1 FOR UPDATE"),
+                    (),
+                )
+                .await?;
+            let live = match rows.next().await? {
+                Some(row) => Some(row.get::<i64>(0)?),
+                None => None,
+            };
+            drop(rows);
+            if live.is_some_and(|live| (0..supported).contains(&live)) {
+                tx.execute(
+                    &format!(
+                        "UPDATE {epoch_table} SET epoch = epoch + 1, activated_at = now(), \
+                         lineage_uuid = ?::uuid WHERE id = 1"
+                    ),
+                    crate::db_params![lineage.lineage_uuid.0.to_string()],
+                )
+                .await?;
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            Ok::<_, DatabaseError>(live)
+        };
+        match step
+            .await
+            .map_err(RestrictedRuntimeOwnerError::ProtocolEpochActivation)?
+        {
+            Some(live) if live == supported => return Ok(()),
+            Some(live) if (0..supported).contains(&live) => {}
+            live => {
+                return Err(RestrictedRuntimeOwnerError::ProtocolEpochUnsupported {
+                    live: live.unwrap_or(-1),
+                    supported,
+                })
+            }
+        }
+    }
 }
 
 fn plan_is_clustered(plan: &RestrictedRuntimeOwnerPlan) -> bool {

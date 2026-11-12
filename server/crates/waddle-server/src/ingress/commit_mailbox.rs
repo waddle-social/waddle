@@ -131,7 +131,7 @@ async fn origin_fence(
 }
 
 /// Without clustering no room is owned by another node, and
-/// [`IngressUnitOfWork::mailbox_acceptance_enabled`] is never true.
+/// [`IngressUnitOfWork::mailbox_acceptance_active`] is never true.
 #[cfg(not(feature = "clustering"))]
 async fn origin_fence(
     _tx: &mut IngressUowTransaction<'_>,
@@ -150,7 +150,7 @@ pub(super) async fn begin_origin(
     submission: &IngressSubmission,
     stream: Option<&StreamAttempt>,
 ) -> Result<Option<OriginAdmission>, IngressUowError> {
-    if !uow.mailbox_acceptance_enabled() || submission.plan.rejection.is_some() {
+    if !uow.mailbox_acceptance_active(tx) || submission.plan.rejection.is_some() {
         return Ok(None);
     }
     let Some(room) = origin_room(submission) else {
@@ -206,9 +206,12 @@ pub(super) enum OriginEntry {
 /// A retransmission that finds the owner's decision already recorded
 /// consumes it in this transaction instead of waiting again.
 ///
-/// A message that carries no source binding predates mailbox acceptance: it
-/// keeps the relay's behaviour and gets no entry, so nothing is recorded as
-/// awaiting an owner decision that the earlier path never promised.
+/// A message that carries no source binding was committed before the
+/// mailbox epoch, when its dispatch went through the ordered relay and its
+/// sender was acknowledged on the origin's commit alone. It keeps that
+/// behaviour: it gets no entry and no owner decision is opened for it, so
+/// nothing records an acceptance the relay never promised, and its
+/// unreceipted dispatch stays with the ingress recovery pass.
 pub(super) async fn record_origin(
     tx: &mut IngressUowTransaction<'_>,
     acceptance: &mut OriginAcceptance,
@@ -305,7 +308,7 @@ pub(super) async fn begin_owner(
     submission: &IngressSubmission,
 ) -> Result<Option<OwnerAcceptance>, IngressUowError> {
     use crate::ingress_uow::MailboxTargetFence;
-    if !uow.mailbox_acceptance_enabled() {
+    if !uow.mailbox_acceptance_active(tx) {
         return Ok(None);
     }
     let IngressStreamIdentity::Relayed {
