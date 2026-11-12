@@ -3,11 +3,17 @@
 //! that entry and on the canonical message in one transaction.
 
 use super::{commit_submission, IngressDecisionClass, IngressEffectIntent, IngressFixture};
+use waddle_server::ingress::origin_gate::{
+    await_room_acceptance, resolve_room_acceptance, RoomAcceptancePoll, RoomAcceptanceUnresolved,
+    RoomAcceptanceWatch,
+};
 use waddle_server::ingress::{
     IngressCanonicalRef, IngressStreamIdentity, IngressSubmission, RoomExecutionPath,
 };
 use waddle_server::ingress_uow::{MailboxRepository, RemoteRoomAcceptance};
-use waddle_xmpp::ingress::mailbox::{MailboxEntryDisposition, MailboxOperationKey};
+use waddle_xmpp::ingress::mailbox::{
+    MailboxEntryDisposition, MailboxOperationKey, MailboxOwnerDecision,
+};
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, MessageKey, NormalizedTarget, RelayTargetIdentity,
 };
@@ -215,5 +221,109 @@ async fn relay_selector_writes_no_mailbox_entry() {
         .expect("canonical message");
     assert_eq!(entry_state(&fixture, key).await, (None, None));
     assert_eq!(fixture.count("ingress_mailbox_lanes").await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn origin_reads_the_owner_decision_before_counting_the_stanza() {
+    let Some((fixture, room_fence)) = mailbox_fixture("mailbox_gate").await else {
+        return;
+    };
+    let origin = origin_groupchat(&fixture, "mailbox-gate", "gated body");
+    let committed = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit");
+    let key = committed.message_key.expect("canonical message");
+    let pending = committed
+        .remote_acceptance
+        .clone()
+        .expect("the commit reports the stanza as awaiting its owner");
+    assert_eq!(pending.operation, MailboxOperationKey::RoomAcceptance(key));
+
+    // Nothing but the owner's recorded decision resolves the wait.
+    assert_eq!(
+        resolve_room_acceptance(&fixture.uow, &pending)
+            .await
+            .expect("lookup"),
+        RoomAcceptancePoll::Pending
+    );
+    let impatient = RoomAcceptanceWatch {
+        budget: std::time::Duration::from_millis(60),
+        first_interval: std::time::Duration::from_millis(10),
+        max_interval: std::time::Duration::from_millis(20),
+    };
+    assert_eq!(
+        await_room_acceptance(&fixture.uow, &pending, impatient, || false).await,
+        Err(RoomAcceptanceUnresolved::BudgetExhausted),
+        "an elapsed budget is not an acceptance"
+    );
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::Pending), Some(0))
+    );
+
+    let owner = owner_groupchat(&origin, key, &room_fence);
+    commit_submission(&fixture.uow, &owner, 5)
+        .await
+        .expect("owner acceptance");
+    assert_eq!(
+        await_room_acceptance(&fixture.uow, &pending, impatient, || false).await,
+        Ok(MailboxOwnerDecision::Accepted)
+    );
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (
+            Some(MailboxEntryDisposition::Consumed(
+                MailboxOwnerDecision::Accepted
+            )),
+            Some(1)
+        ),
+        "reading the decision consumes the entry and keeps which decision it was"
+    );
+    // A second lookup, as after a lost reply, answers the same decision.
+    assert_eq!(
+        resolve_room_acceptance(&fixture.uow, &pending)
+            .await
+            .expect("repeat lookup"),
+        RoomAcceptancePoll::Decided(MailboxOwnerDecision::Accepted)
+    );
+    // A retransmission after the decision no longer waits.
+    let replay = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin replay");
+    assert_eq!(replay.message_key, Some(key));
+    assert_eq!(replay.remote_acceptance, None);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn retransmission_after_the_owner_decided_consumes_in_its_own_commit() {
+    let Some((fixture, room_fence)) = mailbox_fixture("mailbox_replay").await else {
+        return;
+    };
+    let origin = origin_groupchat(&fixture, "mailbox-replay", "replayed body");
+    let key = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit")
+        .message_key
+        .expect("canonical message");
+    commit_submission(&fixture.uow, &owner_groupchat(&origin, key, &room_fence), 5)
+        .await
+        .expect("owner acceptance");
+    // The origin never read the decision (its watcher was lost). The same
+    // stanza arrives again and finds the decision already recorded.
+    let replay = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin replay");
+    assert_eq!(replay.remote_acceptance, None);
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (
+            Some(MailboxEntryDisposition::Consumed(
+                MailboxOwnerDecision::Accepted
+            )),
+            Some(1)
+        )
+    );
     fixture.close().await;
 }

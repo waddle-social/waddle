@@ -202,6 +202,7 @@ pub(in crate::ingress) fn rebuild(
             arm_owned_receipts,
             route_progress: input.route_progress,
             receipts_pending,
+            remote_acceptance: None,
         },
         delegated,
         unrecoverable,

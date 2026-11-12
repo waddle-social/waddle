@@ -220,6 +220,7 @@ pub use handoff::ORDERED_RELAY_HANDOFF_CAPACITY;
 pub use handoff::{
     ordered_relay_handoff_channel, OrderedRelayHandoffCompletion, OrderedRelayHandoffReceiver,
     OrderedRelayHandoffSender, OrderedRelayInboundSequence, SmInboundCompletionTracker,
+    WithheldInbound,
 };
 #[cfg(feature = "clustering")]
 pub use handoff::{OrderedRelayHandoffHandle, OrderedRelayHandoffRefusal};

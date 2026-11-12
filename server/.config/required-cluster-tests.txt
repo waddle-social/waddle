@@ -594,3 +594,14 @@ waddle-server::mailbox_core_postgres appender_behind_a_collector_neither_deadloc
 waddle-server::ingress_commit mailbox_acceptance::origin_appends_pending_entry_and_owner_accepts_in_one_transaction
 waddle-server::ingress_commit mailbox_acceptance::owner_rejection_records_its_child_and_decides_the_entry
 waddle-server::ingress_commit mailbox_acceptance::relay_selector_writes_no_mailbox_entry
+
+# #1948 origin handled count: under the mailbox selector the origin must not
+# count a groupchat stanza before it has read its room owner's decision, an
+# elapsed budget must not count as acceptance, a repeated lookup must answer
+# the same decision, and a retransmission after the decision must not wait
+# again. An image whose `h` can cover a stanza no owner accepted must not
+# ship.
+waddle-server::ingress_commit mailbox_acceptance::origin_reads_the_owner_decision_before_counting_the_stanza
+waddle-server::ingress_commit mailbox_acceptance::retransmission_after_the_owner_decided_consumes_in_its_own_commit
+waddle-server::xep0045_xep0198_remote_acceptance h_does_not_advance_while_owner_commit_paused
+waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit

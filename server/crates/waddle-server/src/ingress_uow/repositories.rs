@@ -1156,8 +1156,7 @@ impl CanonicalMessageRepository {
     }
 
     /// The rejection child mapped to `source`, if its owner rejected it.
-    #[cfg(all(test, not(feature = "clustering")))]
-    async fn rejection_child(
+    pub(crate) async fn rejection_child(
         transaction: &mut IngressUowTransaction<'_>,
         source: MessageKey,
     ) -> Result<Option<MessageKey>, IngressUowError> {

@@ -890,6 +890,37 @@ impl MetricAttribute for IngressAliasOutcome {
     }
 }
 
+/// `outcome` — how an origin's wait for its remote room owner's decision
+/// ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxAcceptanceOutcome {
+    /// The owner's acceptance was read and the stanza counted as handled.
+    Accepted,
+    /// The owner's refusal was read and the stanza counted as handled.
+    Rejected,
+    /// No owner decision could be proven; the stanza stays unacknowledged.
+    Unresolved,
+}
+
+impl MailboxAcceptanceOutcome {
+    pub const ALL: [Self; 3] = [Self::Accepted, Self::Rejected, Self::Unresolved];
+}
+
+impl sealed::Sealed for MailboxAcceptanceOutcome {}
+impl MetricAttribute for MailboxAcceptanceOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
 /// `outcome` — how an ingress retention GC run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressGcOutcome {

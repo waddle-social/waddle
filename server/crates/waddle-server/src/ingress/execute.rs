@@ -164,6 +164,7 @@ mod tests {
             arm_owned_receipts: Vec::new(),
             route_progress: Vec::new(),
             receipts_pending: vec![key.clone()],
+            remote_acceptance: None,
         };
         let mut outcomes = vec![(frame(), ExternalOutcome::Done)];
         assert!(

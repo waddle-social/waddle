@@ -12,10 +12,12 @@
 //!
 //! The contract under test: `h` covers a groupchat stanza only once the room
 //! owner has durably accepted it, and a lost reply or a restart recovers that
-//! one acceptance instead of producing a second. Tests named for the contract
-//! are `#[ignore]`d while the server does not meet it; each has a
-//! `*_characterizes_*` twin that pins what the server does instead and is
-//! deleted when the contract test is enabled.
+//! one acceptance instead of producing a second. The server meets the
+//! handled-count part of the contract when remote room acceptance runs
+//! through the durable mailbox, so those tests start their nodes with that
+//! selector. Each has a `*_characterizes_*` twin that pins what the default
+//! relay selector does instead. A contract test the server does not meet
+//! under either selector is `#[ignore]`d.
 //!
 //! The binary needs PostgreSQL and fails without `WADDLE_TEST_POSTGRES_URL`:
 //! every scenario is about durable state shared by two processes.
@@ -43,6 +45,28 @@ use waddle_xmpp::stream_management::SM_NS;
 
 const DOMAIN: &str = "localhost";
 const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
+/// Selects how both nodes carry remote room acceptance.
+const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
+
+/// How the nodes of a scenario carry remote room acceptance.
+#[derive(Clone, Copy)]
+enum Acceptance {
+    /// The server's default: the origin counts the stanza when its own
+    /// commit succeeds.
+    Relay,
+    /// The origin counts the stanza only after reading the owner's decision
+    /// from the durable mailbox.
+    Mailbox,
+}
+
+impl Acceptance {
+    fn value(self) -> &'static str {
+        match self {
+            Self::Relay => "relay",
+            Self::Mailbox => "mailbox",
+        }
+    }
+}
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
 const DROP_REPLY: &str = "drop-reply";
@@ -313,11 +337,16 @@ struct Scenario {
     sender: SmClient,
     sender_occupant: jid::FullJid,
     witness: SmClient,
+    acceptance: Acceptance,
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Scenario {
     async fn start() -> Self {
+        Self::start_with(Acceptance::Relay).await
+    }
+
+    async fn start_with(acceptance: Acceptance) -> Self {
         let postgres_url = waddle_ws_test_support::require_test_postgres_url()
             .expect("the remote acceptance suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
         let serial = cluster_e2e_serial_lock().lock().await;
@@ -328,14 +357,23 @@ impl Scenario {
         let seams = OwnerSeams::new();
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
-        let (server_a, _node_a, _) =
-            spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+        let (server_a, _node_a, _) = spawn_cluster_server_with_envs(
+            &postgres_url,
+            &pool.pool_env,
+            port_a,
+            &[port_b],
+            &[(ACCEPTANCE_ENV, acceptance.value())],
+        )
+        .await;
         let (server_b, node_b, _) = spawn_cluster_server_with_envs(
             &postgres_url,
             &pool.pool_env,
             port_b,
             &[port_a],
-            &[(SEAM_DIRECTORY_ENV, &seams.directory())],
+            &[
+                (SEAM_DIRECTORY_ENV, &seams.directory()),
+                (ACCEPTANCE_ENV, acceptance.value()),
+            ],
         )
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
@@ -396,6 +434,7 @@ impl Scenario {
             sender,
             sender_occupant,
             witness,
+            acceptance,
             _serial: serial,
         }
     }
@@ -482,9 +521,8 @@ async fn request_h_while_owner_commit_paused(scenario: &mut Scenario) -> PausedO
 /// commit, `<r/>` is still answered and the answer excludes the stanza. Once
 /// the owner commits, the stanza is archived once, reflected, and counted.
 #[tokio::test]
-#[ignore = "#1948: origin handled count advances before owner acceptance"]
 async fn h_does_not_advance_while_owner_commit_paused() {
-    let mut scenario = Scenario::start().await;
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
     let paused = request_h_while_owner_commit_paused(&mut scenario).await;
     assert_eq!(
         paused.h,
@@ -506,11 +544,12 @@ async fn h_does_not_advance_while_owner_commit_paused() {
     assert_eq!(h, Some(1), "h covers the stanza once the owner accepted it");
 }
 
-/// Characterizes the defect `h_does_not_advance_while_owner_commit_paused`
-/// is ignored for: the origin answers `<r/>` with a handled count that
+/// Characterizes the relay selector, which
+/// `h_does_not_advance_while_owner_commit_paused` shows the mailbox selector
+/// does not share: the origin answers `<r/>` with a handled count that
 /// already includes the groupchat stanza while the room owner is stopped
-/// before its commit and the room archive is empty. Deleted when the origin
-/// gates `h` on owner acceptance and the contract test is enabled.
+/// before its commit and the room archive is empty. It goes when the relay
+/// selector does.
 #[tokio::test]
 async fn h_while_owner_commit_paused_characterizes_current_early_ack() {
     let mut scenario = Scenario::start().await;
@@ -732,7 +771,10 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
         &scenario.pool.pool_env,
         port_b,
         &[scenario.port_a],
-        &[(SEAM_DIRECTORY_ENV, &scenario.seams.directory())],
+        &[
+            (SEAM_DIRECTORY_ENV, &scenario.seams.directory()),
+            (ACCEPTANCE_ENV, scenario.acceptance.value()),
+        ],
     )
     .await;
     wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
@@ -768,9 +810,8 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
 /// handled count may cover the stanza only if the sender was also sent the
 /// error that refuses it; otherwise the stanza is still pending.
 #[tokio::test]
-#[ignore = "#1948: origin handled count covers a stanza the dead owner never accepted, with no error to the sender"]
 async fn owner_sigkill_before_commit() {
-    let mut scenario = Scenario::start().await;
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
     let observed = observe_owner_killed_before_commit(&mut scenario).await;
     assert_eq!(
         observed.archived,
@@ -784,11 +825,11 @@ async fn owner_sigkill_before_commit() {
     );
 }
 
-/// Characterizes the defect `owner_sigkill_before_commit` is ignored for:
-/// after the owner dies before its commit, the origin reports the stanza as
-/// handled, the room archive never receives it, and the sender is sent no
-/// error. Deleted when the origin gates `h` on owner acceptance and the
-/// contract test is enabled.
+/// Characterizes the relay selector, which `owner_sigkill_before_commit`
+/// shows the mailbox selector does not share: after the owner dies before its
+/// commit, the origin reports the stanza as handled, the room archive never
+/// receives it, and the sender is sent no error. It goes when the relay
+/// selector does.
 #[tokio::test]
 async fn owner_sigkill_before_commit_characterizes_current_silent_loss() {
     let mut scenario = Scenario::start().await;

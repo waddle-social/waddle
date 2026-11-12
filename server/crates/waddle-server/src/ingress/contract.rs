@@ -901,6 +901,7 @@ pub(in crate::ingress) fn non_advancing(class: IngressDecisionClass) -> IngressD
         arm_owned_receipts: Vec::new(),
         route_progress: Vec::new(),
         receipts_pending: Vec::new(),
+        remote_acceptance: None,
     }
 }
 

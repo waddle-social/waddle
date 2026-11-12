@@ -180,8 +180,24 @@ pub(super) async fn begin_origin(
     ))))
 }
 
+/// Where the origin's stanza stands with its room owner after
+/// [`record_origin`].
+pub(super) enum OriginEntry {
+    /// The message takes no part in mailbox acceptance.
+    None,
+    /// The owner has not decided. The stanza must not be counted as handled
+    /// by this commit.
+    Awaiting(StoredMailboxEntry),
+    /// The owner's decision was already on file and this commit consumed it,
+    /// so the stanza is handled.
+    Settled,
+}
+
 /// Open the owner decision and append the pending entry for `key`, after the
 /// origin's dispatch intent is recorded and under the canonical row lock.
+///
+/// A retransmission that finds the owner's decision already recorded
+/// consumes it in this transaction instead of waiting again.
 ///
 /// A message that carries no source binding predates mailbox acceptance: it
 /// keeps the relay's behaviour and gets no entry, so nothing is recorded as
@@ -190,12 +206,12 @@ pub(super) async fn record_origin(
     tx: &mut IngressUowTransaction<'_>,
     acceptance: &mut OriginAcceptance,
     key: MessageKey,
-) -> Result<Option<StoredMailboxEntry>, IngressUowError> {
+) -> Result<OriginEntry, IngressUowError> {
     let state = CanonicalMessageRepository::room_owner_state(tx, key)
         .await?
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
     if !state.source_bound {
-        return Ok(None);
+        return Ok(OriginEntry::None);
     }
     let dispatched = crate::ingress_uow::EffectIntentRepository::load(tx, key)
         .await?
@@ -207,20 +223,39 @@ pub(super) async fn record_origin(
         });
     // A replay that records no dispatch to the owner asks nothing of it.
     if !dispatched {
-        return Ok(None);
+        return Ok(OriginEntry::None);
     }
     if state.decision.is_none() {
         CanonicalMessageRepository::initialize_room_owner_decision(tx, key, &acceptance.room)
             .await?;
     }
-    let outcome = MailboxRepository::append(
-        tx,
-        &mut acceptance.lane,
-        MailboxOperationKey::RoomAcceptance(key),
-        &ROOM_ACCEPTANCE_LIMITS,
-    )
-    .await?;
-    Ok(Some(*outcome.entry()))
+    let operation = MailboxOperationKey::RoomAcceptance(key);
+    let entry =
+        *MailboxRepository::append(tx, &mut acceptance.lane, operation, &ROOM_ACCEPTANCE_LIMITS)
+            .await?
+            .entry();
+    match entry.disposition {
+        MailboxEntryDisposition::Pending => Ok(OriginEntry::Awaiting(entry)),
+        MailboxEntryDisposition::Consumed(_) => Ok(OriginEntry::Settled),
+        MailboxEntryDisposition::OwnerAccepted | MailboxEntryDisposition::OwnerRejected => {
+            // The entry may sit on the lane of an earlier session of the same
+            // sender. Only the lane this transaction holds can be consumed
+            // here; otherwise the resolver consumes it under its own lock.
+            if entry.lane == acceptance.lane.id() {
+                MailboxRepository::consume(tx, &acceptance.lane, operation).await?;
+                Ok(OriginEntry::Settled)
+            } else {
+                Ok(OriginEntry::Awaiting(entry))
+            }
+        }
+    }
+}
+
+impl OriginAcceptance {
+    /// The claim epoch the origin presented for its lane.
+    pub(super) fn origin_epoch(&self) -> waddle_xmpp::ownership::ClaimEpoch {
+        self.lane.fence().origin_epoch
+    }
 }
 
 /// The owner's side of one remote room acceptance: the entry's lane, locked

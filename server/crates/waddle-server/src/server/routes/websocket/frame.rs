@@ -1566,6 +1566,10 @@ async fn dispatch_authoritative_message(
         .map(waddle_xmpp::pending_delivery::SmSessionId::new);
     let fence = conn.sm_ingress_fence.clone();
     let resumable = conn.sm_state.is_resumable();
+    // The handle that settles this stanza's reserved inbound slot if its
+    // remote room owner has not decided when the commit returns.
+    #[cfg(feature = "clustering")]
+    let acceptance_handoff = origin.as_ref().and_then(|origin| origin.handoff.clone());
     let deps = super::interpret_loop::build_interpret_deps(
         state,
         conn.authenticated_session
@@ -1758,18 +1762,51 @@ async fn dispatch_authoritative_message(
             ]);
         }
     };
+    // A stanza that awaits its remote room owner was committed without
+    // being counted as handled. Its reserved slot stays open until the
+    // ingress authority has read the owner's decision, so `h` and every
+    // `<a/>` report only the prefix before it.
+    #[cfg(feature = "clustering")]
+    let acceptance_slot = match (
+        decision.remote_acceptance.is_some(),
+        sequence.is_some(),
+        acceptance_handoff,
+    ) {
+        (true, true, Some(handoff)) => Some(crate::ingress::origin_gate::InboundAcceptanceSlot {
+            handoff,
+            withheld: conn.sm_inbound_completion.withheld(),
+        }),
+        _ => None,
+    };
+    #[cfg(not(feature = "clustering"))]
+    let acceptance_slot: Option<()> = None;
     if resumable {
         if let (Some(seq), Some(checkpoint)) = (sequence, checkpoint) {
-            conn.sm_inbound_completion.mark_committed(seq, checkpoint);
+            // The commit persisted a checkpoint that excludes a stanza still
+            // awaiting its owner.
+            let persisted = decision
+                .remote_acceptance
+                .as_ref()
+                .and_then(|pending| pending.persisted_checkpoint)
+                .map_or(checkpoint, |persisted| persisted.to_storage());
+            conn.sm_inbound_completion.mark_committed(seq, persisted);
         }
     }
     settle_inbound_dispatch(
         InboundDisposition::Handled,
-        false,
+        acceptance_slot.is_some(),
         sequence,
         &mut conn.sm_inbound_completion,
         &mut conn.sm_state,
     );
+    #[cfg(feature = "clustering")]
+    if let Some(pending) = decision.remote_acceptance.clone() {
+        state
+            .deps
+            .protocol
+            .ingress
+            .watch_room_acceptance(pending, acceptance_slot);
+    }
     if revoked {
         return ResponseBatch::default();
     }

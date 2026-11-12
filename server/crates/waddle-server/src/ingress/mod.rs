@@ -22,6 +22,7 @@ mod commit_room;
 mod commit_stream;
 pub mod decision;
 mod durable;
+pub mod origin_gate;
 pub(crate) use durable::receipt_key;
 pub mod execute;
 mod execute_uow;
@@ -69,7 +70,10 @@ pub mod suppression;
 pub use crate::server::routes::interpret::{
     effects, plan_message_dispatch, Deps, HostOwnedResources,
 };
-pub use decision::{AliasOutcomeClass, EffectReceiptKey, IngressDecision, IngressDecisionClass};
+pub use decision::{
+    AliasOutcomeClass, EffectReceiptKey, IngressDecision, IngressDecisionClass,
+    PendingRoomAcceptance,
+};
 pub use effects::{
     DurableEffect, ExternalEffect, ImmediateSink, IngressPlan, PlanSuppressionPolicy,
     PlannedEffect, RoomExecutionPath,

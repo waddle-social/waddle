@@ -54,6 +54,7 @@ fn decision(
         arm_owned_receipts: Vec::new(),
         route_progress: Vec::new(),
         receipts_pending: vec![],
+        remote_acceptance: None,
     }
 }
 

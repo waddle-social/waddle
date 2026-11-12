@@ -573,9 +573,14 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     }
     // The origin's dispatch intent is recorded now, so the same transaction
     // opens the owner decision and appends the pending mailbox entry.
+    let mut awaiting_owner = None;
     if rejection.is_none() {
         if let Some(acceptance) = origin_acceptance.as_mut() {
-            super::super::commit_mailbox::record_origin(&mut tx, acceptance, key).await?;
+            if let super::super::commit_mailbox::OriginEntry::Awaiting(entry) =
+                super::super::commit_mailbox::record_origin(&mut tx, acceptance, key).await?
+            {
+                awaiting_owner = Some((entry, acceptance.origin_epoch()));
+            }
         }
     }
     let mut intents = EffectIntentRepository::load(&mut tx, key).await?;
@@ -806,7 +811,24 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         super::super::commit_mailbox::decide_owner(&mut tx, acceptance, outcome).await?;
     }
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
-    super::super::commit_stream::finish_stream(&mut tx, stream.as_ref(), key).await?;
+    // A stanza whose owner has not decided is bound to its wire position
+    // without being counted as handled.
+    super::super::commit_stream::finish_stream(
+        &mut tx,
+        stream.as_ref(),
+        key,
+        awaiting_owner.is_some(),
+    )
+    .await?;
+    let remote_acceptance =
+        awaiting_owner.map(
+            |(entry, origin_epoch)| super::super::decision::PendingRoomAcceptance {
+                operation: entry.operation,
+                lane: entry.lane,
+                origin_epoch,
+                persisted_checkpoint: stream.as_ref().map(|stream| stream.checkpoint(true)),
+            },
+        );
     let class = rejection.unwrap_or_else(|| {
         decision_class(
             submission,
@@ -1068,6 +1090,7 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         arm_owned_receipts,
         route_progress,
         receipts_pending: pending,
+        remote_acceptance,
     };
     super::commit_transaction(tx).await?;
     Ok(decision)

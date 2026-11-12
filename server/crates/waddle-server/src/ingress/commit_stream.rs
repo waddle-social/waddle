@@ -91,14 +91,32 @@ pub(super) async fn lock_stream(
         checkpoint: *checkpoint_h,
     }))
 }
+impl StreamAttempt {
+    /// The handled checkpoint to persist for this attempt.
+    ///
+    /// A stanza that still awaits its remote room owner is bound to its wire
+    /// position without being counted: the checkpoint stays at the prefix
+    /// before it, so a resumed session reports a handled count the owner's
+    /// decision has not yet been read for only up to that prefix.
+    pub(super) fn checkpoint(&self, awaiting_owner: bool) -> WireHandledCount {
+        if awaiting_owner && self.checkpoint == self.wire {
+            WireHandledCount::new(self.wire.to_storage().wrapping_sub(1))
+        } else {
+            self.checkpoint
+        }
+    }
+}
+
 pub(super) async fn finish_stream(
     tx: &mut IngressUowTransaction<'_>,
     stream: Option<&StreamAttempt>,
     key: MessageKey,
+    awaiting_owner: bool,
 ) -> Result<(), IngressUowError> {
     let Some(stream) = stream else {
         return Ok(());
     };
+    let checkpoint = stream.checkpoint(awaiting_owner);
     if matches!(
         SmIngressRepository::insert_sm_ref(tx, stream.id, stream.ordinal, stream.wire, key).await?,
         MessageWriteOutcome::MessageVanished
@@ -106,15 +124,10 @@ pub(super) async fn finish_stream(
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
     if stream.bound.is_some() {
-        SmIngressStreamRepository::flush_checkpoint(tx, stream.id, stream.checkpoint).await?;
+        SmIngressStreamRepository::flush_checkpoint(tx, stream.id, checkpoint).await?;
     } else if matches!(
-        SmIngressStreamRepository::advance_frontier(
-            tx,
-            stream.id,
-            stream.ordinal,
-            stream.checkpoint
-        )
-        .await?,
+        SmIngressStreamRepository::advance_frontier(tx, stream.id, stream.ordinal, checkpoint)
+            .await?,
         FrontierOutcome::Stale { .. }
     ) {
         return Err(IngressUowError::IngressFrontierStale);

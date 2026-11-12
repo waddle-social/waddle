@@ -109,6 +109,45 @@ No second acceptance record exists: the entry's disposition and
 `owner_decision` are written together and the manifest or the rejection child
 is the evidence.
 
+### Origin handled count
+
+The origin never counts a stanza as handled on the strength of its own commit
+while its room owner is undecided (`ingress/origin_gate.rs`):
+
+- **Commit.** When the entry is still `Pending`, the origin's commit binds the
+  stanza to its wire position but persists the handled checkpoint of the
+  prefix before it, and the decision carries a `PendingRoomAcceptance`. A
+  retransmission that finds the owner's decision already recorded consumes
+  the entry in its own commit and is counted normally.
+- **Connection.** `frame.rs` leaves the stanza's reserved inbound slot open
+  (the slot mechanism deferred ordered-relay hand-offs already use) and calls
+  `IngressAuthority::watch_room_acceptance`. `h` and every `<a/>` therefore
+  report only the proven prefix, while `<r/>` and later stanzas are still
+  processed. Later stanzas complete their own slots but cannot move `h` past
+  the open one.
+- **Authoritative lookup.** The watcher polls `resolve_room_acceptance`: it
+  reads the entry, and for a decided entry locks the lane as origin and the
+  canonical message, requires `owner_decision` to record the same decision
+  (and a refusal to have its rejection child), consumes the entry and
+  commits. The same read serves a lost relay reply and an indeterminate owner
+  commit; a relay reply, a relay failure and a timeout are never evidence.
+- **Settlement.** A read decision completes the slot and `h` advances; the
+  existing checkpoint flush then persists it. If no decision can be proven
+  within 60 seconds, or the entry is missing, dead-lettered, contradicted by
+  the canonical message or fenced by a later stream claim, the watcher
+  withholds the slot: the tracker turns it into a permanent hole, the stanza
+  is never acknowledged on that connection and the sender keeps
+  responsibility for it. A resumed or new session retransmits it and resolves
+  to the same canonical message and entry.
+
+A stream without stream management has no handled count; its watcher only
+consumes the decision. `ingress.mailbox.room_acceptances{outcome}` counts how
+waits end.
+
+Separate registered and handled frontiers are not built: the single
+checkpoint excludes the one open stanza, and the tracker's contiguity rule
+keeps `h` behind it.
+
 ### Guard, roles and manifest
 
 Both tables are in `EPOCH_GUARDED_TABLES` and in
