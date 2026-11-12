@@ -791,32 +791,19 @@ pub(crate) async fn extension_room_owner(
     state: &WebSocketState,
     room: &BareJid,
 ) -> Result<Option<waddle_xmpp::ownership::NodeIdentity>, PlanFailure> {
-    let clustering = &state.deps.app_state.clustering_claims;
-    let Some(store) = clustering.claim_store.as_ref() else {
-        return Ok(None);
-    };
-    let entity = waddle_xmpp::ownership::Entity::new(
-        waddle_xmpp::ownership::EntityType::RoomActor,
-        room.to_string(),
-    );
-    let Some(claim) = store
-        .current_claim(&entity)
+    use crate::clustering::addressing::Ownership;
+    match state
+        .deps
+        .app_state
+        .clustering_claims
+        .room_owner(room)
         .await
         .map_err(|_| PlanFailure::OwnershipLookup)?
-    else {
-        return Ok(None);
-    };
-    if !claim.owner_lease_fresh {
-        return Err(PlanFailure::RoomClaimStale);
-    }
-    if clustering
-        .node_identity
-        .as_ref()
-        .is_some_and(|identity| identity.current() == claim.owner)
     {
-        return Ok(None);
+        Ownership::NotClustered | Ownership::Unclaimed | Ownership::Local => Ok(None),
+        Ownership::Stale => Err(PlanFailure::RoomClaimStale),
+        Ownership::Remote(owner) => Ok(Some(owner)),
     }
-    Ok(Some(claim.owner))
 }
 
 /// The host forwards remote-owned rooms before planning; a claim that moved

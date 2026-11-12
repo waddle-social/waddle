@@ -5,10 +5,10 @@
 
 use super::effects::PlanFailure;
 use super::{BareJid, Deps, Message, Stanza};
+use crate::clustering::addressing::{Ownership, OwnershipLookupFailed};
 use crate::clustering::ordered_relay::{MucProxyOrigin, OrderedRelayMucProxyKind};
 use crate::clustering::route_bridge::MucProxyRouteDecision;
 use waddle_xmpp::ingress::RelayTargetIdentity;
-use waddle_xmpp::ownership::{Entity, EntityType};
 
 /// One typed room command. The route is resolved separately for a read-only
 /// plan and for an immediate attempt; neither may retarget a frozen effect.
@@ -39,27 +39,18 @@ impl RoomMessageRoute<'_> {
         if deps.ordered_relay_origin.is_none() {
             return PlannedRoomRoute::Local;
         }
-        let Some(store) = clustering.claim_store.as_ref() else {
-            return PlannedRoomRoute::Local;
-        };
-        let entity = Entity::new(EntityType::RoomActor, self.room.to_string());
-        let claim = match store.current_claim(&entity).await {
-            Ok(None) => return PlannedRoomRoute::Local,
-            Ok(Some(claim)) if claim.owner_lease_fresh => claim,
-            Ok(Some(_)) => return PlannedRoomRoute::Unavailable(PlanFailure::RoomClaimStale),
-            Err(_) => return PlannedRoomRoute::Unavailable(PlanFailure::OwnershipLookup),
-        };
-        if clustering
-            .node_identity
-            .as_ref()
-            .is_some_and(|identity| identity.current() == claim.owner)
-        {
-            return PlannedRoomRoute::Local;
+        match clustering.room_owner(self.room).await {
+            Ok(Ownership::NotClustered | Ownership::Unclaimed | Ownership::Local) => {
+                PlannedRoomRoute::Local
+            }
+            Ok(Ownership::Remote(owner)) => PlannedRoomRoute::Remote(
+                RelayTargetIdentity::owner_node(owner.node_id, owner.node_epoch),
+            ),
+            Ok(Ownership::Stale) => PlannedRoomRoute::Unavailable(PlanFailure::RoomClaimStale),
+            Err(OwnershipLookupFailed) => {
+                PlannedRoomRoute::Unavailable(PlanFailure::OwnershipLookup)
+            }
         }
-        PlannedRoomRoute::Remote(RelayTargetIdentity::owner_node(
-            claim.owner.node_id,
-            claim.owner.node_epoch,
-        ))
     }
 
     /// Perform the existing bridge operation once. The bridge retains its

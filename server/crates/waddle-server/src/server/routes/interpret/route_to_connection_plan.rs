@@ -78,16 +78,14 @@ pub(in crate::server::routes::interpret) async fn remote_owner(
         }) {
             return true;
         }
-        let (Some(store), Some(identity)) = (&handles.claim_store, &handles.node_identity) else {
+        // Without a node identity this node cannot tell its own claim from
+        // another node's, so it never plans a relay.
+        if handles.node_identity.is_none() {
             return false;
-        };
-        let entity = waddle_xmpp::ownership::Entity::new(
-            waddle_xmpp::ownership::EntityType::UserActor,
-            target.to_string(),
-        );
-        match store.current_claim(&entity).await {
-            Ok(Some(claim)) => claim.owner_lease_fresh && claim.owner != identity.current(),
-            Ok(None) => false,
+        }
+        match handles.account_owner(target).await {
+            Ok(crate::clustering::addressing::Ownership::Remote(_)) => true,
+            Ok(_) => false,
             Err(_) => {
                 deps.effects
                     .fail_plan(super::super::effects::PlanFailure::OwnershipLookup);

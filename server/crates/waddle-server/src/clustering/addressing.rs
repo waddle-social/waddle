@@ -46,6 +46,7 @@ use crate::ingress::identity::{IngressAppendObligationRef, IngressRelayAdmission
 use crate::server::routes::interpret::{
     FullJidDeliveryOutcome, OrderedRelayRouteOrigin, RecipientInventory, SmIngressAppendContext,
 };
+use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
 
 impl ClusteringHandles {
     /// The addressing boundary of this node, when it has a relay substrate.
@@ -373,5 +374,79 @@ impl<'a> ConnectionAddress<'a> {
         self.bridge
             .try_deliver_registered_remote_resource_write_accepted(self.connection, stanza)
             .await
+    }
+}
+
+/// Who owns an addressed room or account right now.
+///
+/// This is a read of the claim, taken without sending anything, for callers
+/// that plan work before they may send it. It is advisory: the claim can
+/// move after the read, and the operation that later sends re-resolves the
+/// owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    /// This node has no claim store: it is not clustered, and every target
+    /// is local.
+    NotClustered,
+    /// No claim exists for the target. No node hosts it.
+    Unclaimed,
+    /// This node holds the claim with a fresh lease.
+    Local,
+    /// Another node holds the claim with a fresh lease. A node without a
+    /// node identity of its own reports every fresh claim as remote.
+    Remote(NodeIdentity),
+    /// A claim exists but its owner's lease is stale: the owner may have
+    /// crashed or be late renewing. The target cannot be used until the
+    /// claim is renewed or taken over.
+    Stale,
+}
+
+/// The claim store did not answer an ownership read. This is not evidence
+/// that the target is unclaimed or local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the claim store did not answer the ownership read")]
+pub(crate) struct OwnershipLookupFailed;
+
+impl ClusteringHandles {
+    /// Who owns the room's `RoomActor` claim.
+    pub(crate) async fn room_owner(
+        &self,
+        room: &jid::BareJid,
+    ) -> Result<Ownership, OwnershipLookupFailed> {
+        self.entity_owner(Entity::new(EntityType::RoomActor, room.to_string()))
+            .await
+    }
+
+    /// Who owns the account's `UserActor` claim.
+    pub(crate) async fn account_owner(
+        &self,
+        account: &jid::BareJid,
+    ) -> Result<Ownership, OwnershipLookupFailed> {
+        self.entity_owner(Entity::new(EntityType::UserActor, account.to_string()))
+            .await
+    }
+
+    async fn entity_owner(&self, entity: Entity) -> Result<Ownership, OwnershipLookupFailed> {
+        let Some(store) = self.claim_store.as_ref() else {
+            return Ok(Ownership::NotClustered);
+        };
+        let Some(claim) = store
+            .current_claim(&entity)
+            .await
+            .map_err(|_| OwnershipLookupFailed)?
+        else {
+            return Ok(Ownership::Unclaimed);
+        };
+        if !claim.owner_lease_fresh {
+            return Ok(Ownership::Stale);
+        }
+        if self
+            .node_identity
+            .as_ref()
+            .is_some_and(|identity| identity.current() == claim.owner)
+        {
+            return Ok(Ownership::Local);
+        }
+        Ok(Ownership::Remote(claim.owner))
     }
 }
