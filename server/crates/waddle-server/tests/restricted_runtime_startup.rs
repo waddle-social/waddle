@@ -455,13 +455,28 @@ async fn runtime_locks_the_epoch_row_but_cannot_change_it() {
     let runtime = &prepared.roles.runtime;
     let epoch = format!("{SCHEMA}.ingress_protocol_epoch");
 
+    // The owner phase ends by stepping the epoch to the supported one and
+    // stamping the step with the deployment's lineage; that row is what the
+    // runtime must leave exactly as it found it.
+    let read_row = format!(
+        "SELECT id, epoch, activated_at::text, lineage_uuid::text FROM {epoch} ORDER BY id"
+    );
+    let activated: Vec<(i32, i64, Option<String>, Option<String>)> = sqlx::query_as(&read_row)
+        .fetch_all(&prepared.admin)
+        .await
+        .expect("read the activated epoch row");
+    let [(1, 2, Some(_), Some(lineage))] = activated.as_slice() else {
+        panic!("the owner phase leaves one row at epoch 2 with its stamp: {activated:?}");
+    };
+    assert_eq!(lineage, &prepared.lineage.lineage_uuid.0.to_string());
+
     let mut connection = runtime_connection(&prepared).await;
     let locked: i64 =
         sqlx::query_scalar(&format!("SELECT epoch FROM {epoch} WHERE id = 1 FOR SHARE"))
             .fetch_one(&mut connection)
             .await
             .expect("the runtime locks the epoch row for share");
-    assert_eq!(locked, 0);
+    assert_eq!(locked, 2);
     // The column grant reaches the guard trigger, which refuses every
     // change that is not an owner-run epoch step; every other statement is
     // refused for lack of privilege before any trigger or constraint runs.
@@ -469,6 +484,7 @@ async fn runtime_locks_the_epoch_row_but_cannot_change_it() {
         (format!("UPDATE {epoch} SET id = 2"), "P0001"),
         (format!("UPDATE {epoch} SET id = 1"), "P0001"),
         (format!("UPDATE {epoch} SET epoch = 1"), "42501"),
+        (format!("UPDATE {epoch} SET epoch = 3"), "42501"),
         (
             format!("UPDATE {epoch} SET activated_at = pg_catalog.now()"),
             "42501",
@@ -494,13 +510,11 @@ async fn runtime_locks_the_epoch_row_but_cannot_change_it() {
         );
     }
     connection.close().await.expect("close runtime probe");
-    let unchanged: (i32, i64, bool, bool) = sqlx::query_as(&format!(
-        "SELECT id, epoch, activated_at IS NULL, lineage_uuid IS NULL FROM {epoch}"
-    ))
-    .fetch_one(&prepared.admin)
-    .await
-    .expect("read the epoch row");
-    assert_eq!(unchanged, (1, 0, true, true));
+    let unchanged: Vec<(i32, i64, Option<String>, Option<String>)> = sqlx::query_as(&read_row)
+        .fetch_all(&prepared.admin)
+        .await
+        .expect("read the epoch row");
+    assert_eq!(unchanged, activated);
 
     preflight(&prepared)
         .await
