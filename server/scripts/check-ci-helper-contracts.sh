@@ -23,7 +23,8 @@ for contract in \
   test_check_ingress_typed_entry \
   test_check_rust_structure \
   test_check_libp2p_rollout \
-  test_check_postgres_test_group; do
+  test_check_postgres_test_group \
+  test_schema_catalog; do
   python3 "scripts/${contract}.py"
 done
 
