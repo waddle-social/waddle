@@ -76,13 +76,14 @@ supplied current principal with the stored one for exact equality.
 | `outbound_unacked_bytes` | payload bytes of retained frames |
 | `max_resume_secs`, `detached_at_ms` | resume window |
 | `enable_operation`, `last_operation` | operation identities |
+| `updated_at_ms` | last write, used to age released tombstones |
 
 Reused relations: `sm_unacked` holds the retained frames (exact wire bytes,
 receipt time, ingress receipts, provenance) with `sequence` equal to the
 ordinal's 32-bit wire value; `sm_sessions` holds the resource snapshot
-(presence, carbons, roster and blocklist interest, occupancy session) while
-the session is detached. Under the durable selector the authority is the only
-writer of those rows for the sessions it enabled.
+(presence, carbons, roster and blocklist interest, occupancy session) from
+the detach until a resume is completed. Under the durable selector the
+authority is the only writer of those rows for the sessions it enabled.
 
 The inbound handled count for stanzas that entered canonical ingress remains
 owned by `ingress_sm_streams`. `inbound_handled` is the value the owner last
@@ -117,7 +118,10 @@ For a wire `h`, `delta = h - wire(acked) (mod 2^32)`:
 | above `2^31` | ignored as stale | `HandledBehind` |
 
 Nothing is deleted on any error row. An advance deletes exactly the
-`sm_unacked` rows in `(acked, acked + delta]`.
+`sm_unacked` rows in `(acked, acked + delta]` and the admission outcomes of
+those frames. An admission is idempotent under its operation id while its
+frame is retained; once the frame is acknowledged the same operation would be
+admitted as a new frame.
 
 ## State machine
 
@@ -153,8 +157,12 @@ Recovery of each intermediate condition:
   compensates (to `Detached`) under its exact fence.
 - **`TransferHydrating` or `Live`, owner gone**: a later authorized resume
   claims the row directly. `detached_at_ms` is set by the first detach or
-  owner-lost record and is not renewed by a failed hydration, so abandoned
-  rows still expire.
+  owner-lost record, or by a resume that takes the session from a live owner,
+  and is cleared only when a resume completes. A failed hydration does not
+  renew it. Expiry applies to `Detached` rows; a row left `Live` or
+  `TransferHydrating` by a dead owner becomes `Detached` through an
+  owner-lost record: by a successor holding the session claim on a clustered
+  store, or for every owned row after a single-node restart.
 - **Resume commit unknown**: resolved like enable. Only a known rejection
   yields the permit for a fresh bind; an unresolved operation yields none.
 - **Late compensation or cleanup**: it names an old generation and fails the
@@ -167,16 +175,18 @@ Recovery of each intermediate condition:
 One transaction: look up the digest; lock the row; authorize the principal;
 validate `h` against `(acked, exposure_ceiling)`; settle the acknowledged
 prefix; store `generation + 1`, the new binding, the presenting principal and
-the claim; set `TransferHydrating`; take and delete the detached resource
-snapshot; record the operation. The witness carries the new fence, the
-restored resource state, the inbound floor, the superseded binding and the
-replay range `(acked, appended]`.
+the claim; set `TransferHydrating`; read the detached resource snapshot;
+record the operation. The witness carries the new fence, the restored
+resource state, the inbound floor, the superseded binding and the replay
+range `(acked, appended]`. The snapshot row stays until the resume
+completes, so a compensated or abandoned resume leaves it for the next one
+and a witness rebuilt after an unknown commit still carries it.
 
 Replay precedes live output by ordinal. Admissions that commit during
 hydration append above the replay range without exposure. Completing the
 resume moves the session to `Live`, raises the ceiling to `appended`, and
 returns that tail; the caller writes the replay range, then the tail, then
-accepts live frames.
+accepts live frames. Completion also deletes the resource snapshot.
 
 ## Conflict close
 
@@ -194,3 +204,6 @@ old generation and binding and fails the fence.
 - Transfer of a terminal session's frames to offline delivery. The store
   retains them and exposes release; the pending-delivery promotion writer is
   not converted here.
+- Replacing a resource's sessions when the resource is bound again on a
+  clustered store. The binder holds the account claim, not each session's
+  claim, and no fence joins the two; the store refuses the operation there.
