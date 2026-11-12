@@ -1,3 +1,4 @@
+use crate::ingress_substrate::EnteredTransaction;
 #[cfg(feature = "clustering")]
 use chrono::{TimeZone, Utc};
 #[cfg(feature = "clustering")]
@@ -1093,7 +1094,9 @@ async fn effect_intents_reconcile_authorities_and_repair_omissions_sqlite() {
     let db = Database::in_memory("effect_reconciliation")
         .await
         .expect("SQLite");
-    let mut transaction = db.begin_immediate().await.expect("write transaction");
+    let mut transaction = EnteredTransaction::from_fixture_transaction(
+        db.begin_immediate().await.expect("write transaction"),
+    );
     transaction
         .execute_batch(
             "CREATE TABLE ingress_messages (message_key TEXT PRIMARY KEY, retention_eligible_at TEXT NULL,
@@ -1119,10 +1122,7 @@ async fn effect_intents_reconcile_authorities_and_repair_omissions_sqlite() {
     transaction.commit().await.expect("commit repaired effects");
 }
 
-async fn assert_intent_reconciliation(
-    transaction: &mut crate::db::Transaction<'_>,
-    key: MessageKey,
-) {
+async fn assert_intent_reconciliation(transaction: &mut EnteredTransaction<'_>, key: MessageKey) {
     use super::repositories::{EffectIntentRepository, ReconcileVerdict};
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, IngressEffectKind};
     use waddle_xmpp_core::xep0359::StanzaId;

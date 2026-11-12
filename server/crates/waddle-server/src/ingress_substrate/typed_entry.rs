@@ -32,7 +32,10 @@ use std::time::Duration;
 
 use waddle_xmpp::ingress::ProtocolEpoch;
 
-use super::substrate::discard_database_error;
+use super::substrate::{
+    acquire_gc_epoch_lock_first, acquire_supported_epoch_lock_first, discard_database_error,
+    gc_error_from_database, install_gc_timeouts, AliasGcBudget, AliasGcError,
+};
 use super::{
     acquire_epoch_lock_first, quote_postgres_identifier, set_local_transaction_timeouts,
     supported_protocol_epoch, tighten_local_transaction_timeouts, IngressSubstrateError,
@@ -206,27 +209,19 @@ impl<'a> IngressEntryTransaction<'a> {
         self.prepared.as_mut()
     }
 
-    pub(crate) fn transaction_mut(&mut self) -> &mut Transaction<'a> {
+    pub(crate) fn transaction_mut(&mut self) -> &mut EnteredTransaction<'a> {
         &mut self.transaction
-    }
-
-    /// The transaction as the typed handle raw descendant repositories
-    /// require, together with its witness.
-    pub(crate) fn entered_parts_mut(
-        &mut self,
-    ) -> (
-        &mut EnteredTransaction<'a>,
-        Option<&PreparedAttestedReceiptWriter>,
-    ) {
-        (&mut self.transaction, self.prepared.as_ref())
     }
 
     /// The transaction together with its witness, for repositories that
     /// choose schema-qualified statements from the prepared identity.
     pub(crate) fn parts_mut(
         &mut self,
-    ) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
-        (&mut self.transaction.transaction, self.prepared.as_ref())
+    ) -> (
+        &mut EnteredTransaction<'a>,
+        Option<&PreparedAttestedReceiptWriter>,
+    ) {
+        (&mut self.transaction, self.prepared.as_ref())
     }
 
     /// Release the transaction to a caller that owns its remaining lifetime
@@ -401,27 +396,45 @@ async fn enter_ingress_transaction<'a>(
 /// so such a write cannot be issued on a transaction that was opened
 /// directly on a database handle. It dereferences to the transaction for the
 /// caller's own statements; dropping it without [`Self::commit`] rolls back.
-pub(crate) struct EnteredTransaction<'a> {
+pub struct EnteredTransaction<'a> {
     transaction: Transaction<'a>,
 }
 
 impl<'a> EnteredTransaction<'a> {
-    pub(crate) async fn commit(self) -> Result<(), DatabaseError> {
+    pub async fn commit(self) -> Result<(), DatabaseError> {
         self.transaction.commit().await
     }
 
-    pub(crate) async fn rollback(self) -> Result<(), DatabaseError> {
+    pub async fn rollback(self) -> Result<(), DatabaseError> {
         self.transaction.rollback().await
     }
 
-    /// Give up the typed handle. The plain transaction cannot be turned
-    /// back into one.
-    pub(crate) fn into_transaction(self) -> Transaction<'a> {
-        self.transaction
+    /// SQL dialect of the connection held by this transaction.
+    pub fn driver(&self) -> DatabaseDriver {
+        self.transaction.driver()
     }
 
-    /// Wrap a transaction a fixture opened itself, for tests that hold a
-    /// canonical lock or seed rows from an arbitrary connection.
+    /// Execute a statement on this transaction.
+    pub async fn execute(
+        &mut self,
+        sql: &str,
+        params: impl crate::db::IntoParams,
+    ) -> Result<u64, DatabaseError> {
+        self.transaction.execute(sql, params).await
+    }
+
+    /// Run a query on this transaction.
+    pub async fn query(
+        &mut self,
+        sql: &str,
+        params: impl crate::db::IntoParams,
+    ) -> Result<crate::db::Rows, DatabaseError> {
+        self.transaction.query(sql, params).await
+    }
+
+    /// Wrap a transaction a fixture opened itself, for unit tests that hold
+    /// a canonical lock or seed rows from a connection of their own. It
+    /// exists only in the crate's own test builds.
     #[cfg(test)]
     pub(crate) fn from_fixture_transaction(transaction: Transaction<'a>) -> Self {
         Self { transaction }
@@ -729,4 +742,130 @@ async fn read_epoch_in_relation(
     u32::try_from(epoch)
         .map(ProtocolEpoch::from_storage)
         .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch.into_preparation())
+}
+
+/// Begin a substrate writer on a handle without physical attestation:
+/// SQLite takes its write reservation, PostgreSQL begins at READ COMMITTED
+/// under the writer clamp, locks the supported live epoch and installs the
+/// epoch proof.
+pub(in crate::ingress_substrate) async fn begin_unattested_substrate_writer(
+    db: &Database,
+) -> Result<EnteredTransaction<'_>, IngressSubstrateError> {
+    let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(discard_database_error)?;
+        if !tighten_local_transaction_timeouts(&mut tx)
+            .await
+            .map_err(discard_database_error)?
+        {
+            return Err(IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            });
+        }
+        let epoch = acquire_supported_epoch_lock_first(&mut tx).await?;
+        tx.execute(
+            "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+            crate::db_params![epoch.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    }
+    Ok(EnteredTransaction { transaction: tx })
+}
+
+/// Begin the pooled receipt writer's transaction on a handle without
+/// physical attestation: READ COMMITTED on PostgreSQL, the epoch row lock
+/// first, and the epoch proof.
+pub(in crate::ingress_substrate) async fn begin_unattested_receipt_writer(
+    db: &Database,
+) -> Result<EnteredTransaction<'_>, IngressSubstrateError> {
+    let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(discard_database_error)?;
+    }
+    let epoch = acquire_epoch_lock_first(&mut tx).await?;
+    if epoch > supported_protocol_epoch() {
+        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+    }
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)", crate::db_params![epoch.to_storage().to_string()]).await.map_err(discard_database_error)?;
+    }
+    Ok(EnteredTransaction { transaction: tx })
+}
+
+/// An alias GC transaction on a handle without physical attestation that
+/// has its isolation and the GC's own lock and statement budgets installed
+/// but has not yet locked the epoch. The caller may drop it, which rolls
+/// back, if its cooperative deadline passed while it was being opened.
+pub(in crate::ingress_substrate) struct UnprovenGcWriter<'a> {
+    transaction: Transaction<'a>,
+}
+
+/// Open an alias GC writing transaction on a handle without physical
+/// attestation.
+pub(in crate::ingress_substrate) async fn open_unattested_gc_writer<'a>(
+    db: &'a Database,
+    budget: &AliasGcBudget,
+) -> Result<UnprovenGcWriter<'a>, AliasGcError> {
+    let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
+    // First statement: PostgreSQL's READ COMMITTED mode is required so every
+    // lock and recheck sees the latest committed rows, and so a scan starts
+    // from a snapshot taken after the epoch lock.
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(gc_error_from_database)?;
+    }
+    install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
+    Ok(UnprovenGcWriter { transaction: tx })
+}
+
+impl<'a> UnprovenGcWriter<'a> {
+    /// Lock the live epoch and install its proof.
+    ///
+    /// GC is an epoch-aware writer: the transaction-bound proof lets its
+    /// deletes pass the V1009 guard at epoch >= 1 (a no-op at epoch 0). The
+    /// `FOR SHARE` epoch read holds to commit, so a concurrent activation
+    /// waits and the proof cannot go stale mid-transaction. The proof only
+    /// claims epochs this binary was built for: a future activation past the
+    /// supported epoch must fence this GC, not be auto-claimed.
+    pub(in crate::ingress_substrate) async fn prove_epoch(
+        self,
+    ) -> Result<EnteredTransaction<'a>, AliasGcError> {
+        let mut tx = self.transaction;
+        let live_epoch = acquire_gc_epoch_lock_first(&mut tx, 0)
+            .await
+            .map_err(|failure| failure.error)?;
+        if live_epoch > supported_protocol_epoch() {
+            return Err(AliasGcError::Substrate(
+                IngressSubstrateError::UnsupportedLiveEpoch,
+            ));
+        }
+        if tx.driver() == DatabaseDriver::Postgres {
+            let mut proof = tx
+                .query(
+                    r#"
+                SELECT
+                    set_config('waddle.protocol_epoch', ?, true),
+                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
+                "#,
+                    crate::db_params![live_epoch.to_storage().to_string()],
+                )
+                .await
+                .map_err(gc_error_from_database)?;
+            proof
+                .next()
+                .await
+                .map_err(gc_error_from_database)?
+                .ok_or(AliasGcError::Substrate(IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                }))?;
+            drop(proof);
+        }
+        Ok(EnteredTransaction { transaction: tx })
+    }
 }

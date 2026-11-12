@@ -5,6 +5,8 @@
 //! cannot fence that writer. These experiments require all custody writers to
 //! be quiescent; the type does not attest or enforce that prerequisite.
 
+#[cfg(test)]
+use crate::ingress_substrate::EnteredTransaction;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;
 use sqlx::Row;
@@ -462,10 +464,12 @@ mod tests {
         let binding = CanonicalSourceBinding::new(principal, None);
         let now = Utc::now();
         let terminal = now - chrono::Duration::days(9);
-        let mut tx = database
-            .begin_immediate()
-            .await
-            .expect("seed retention rows");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            database
+                .begin_immediate()
+                .await
+                .expect("seed retention rows"),
+        );
         record_message_with_source(&mut tx, source, &digest, None, &binding)
             .await
             .expect("source with immutable principal");

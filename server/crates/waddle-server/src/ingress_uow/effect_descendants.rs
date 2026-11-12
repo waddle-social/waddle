@@ -180,7 +180,7 @@ impl EffectDescendantRepository {
     /// Fixed API variants for raw callers that retain the same prepared
     /// relation-guard transaction. These never begin or commit transactions.
     pub(crate) async fn lock_message_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
@@ -211,7 +211,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn lock_all_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
@@ -239,7 +239,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn attach_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         message_key: MessageKey,
         kind: i32,
@@ -264,7 +264,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn copy_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         source: Uuid,
         target: Uuid,
@@ -287,7 +287,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn settle_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         descendant: Uuid,
         _now: DateTime<Utc>,
@@ -306,7 +306,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn bind_effect_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
@@ -337,7 +337,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn attach_effect_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
@@ -365,7 +365,7 @@ impl EffectDescendantRepository {
         reason = "the restricted definer API candidate is not selected by production ingress yet"
     )]
     pub(crate) async fn descendant_exists_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         descendant_key: &str,
         pending_only: bool,
@@ -378,7 +378,7 @@ impl EffectDescendantRepository {
     }
 
     pub(crate) async fn intent_exists_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
@@ -404,7 +404,7 @@ impl EffectDescendantRepository {
         reason = "the restricted definer API candidate is not selected by production ingress yet"
     )]
     pub(crate) async fn descendant_settled_with_candidate_api(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         api: &DefinerApiCandidateContext<'_>,
         message_key: MessageKey,
         kind: i32,
@@ -431,7 +431,7 @@ impl EffectDescendantRepository {
     /// New parents acquired after pre-existing work must never wait: abort the
     /// whole UoW so its complete lock set can be retried from the beginning.
     async fn lock_nowait_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
         install_epoch_proof(tx).await?;
@@ -454,7 +454,7 @@ impl EffectDescendantRepository {
     }
 
     async fn lock_all_nowait_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
         if !table_exists(tx).await? {
@@ -468,7 +468,7 @@ impl EffectDescendantRepository {
     }
     /// Take Foundation locks before scheduler/config/source row locks.
     async fn lock_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
         Self::lock_nowait_on(tx, message_key).await
@@ -489,7 +489,7 @@ impl EffectDescendantRepository {
     }
 
     async fn bind_effect_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
     ) -> Result<EffectDeliveryBinding, IngressUowError> {
@@ -529,7 +529,7 @@ impl EffectDescendantRepository {
 
     /// Bind scheduling custody to one recorded canonical effect and its target.
     async fn attach_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
         descendant: Uuid,
@@ -561,7 +561,7 @@ impl EffectDescendantRepository {
 
     /// Lock all ancestors in canonical order before touching a scheduler row.
     async fn lock_all_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
         if !table_exists(tx).await? {
@@ -577,7 +577,7 @@ impl EffectDescendantRepository {
     /// Copy ancestry during candidate fanout/coalescing; the source stays live
     /// until its caller has copied every target and explicitly settles it.
     async fn copy_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         source: Uuid,
         target: Uuid,
     ) -> Result<(), IngressUowError> {
@@ -598,7 +598,7 @@ impl EffectDescendantRepository {
 
     /// Explicit durable scheduler/provider settlement, not transport ACK.
     async fn settle_all_on(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         descendant: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), IngressUowError> {
@@ -683,7 +683,7 @@ impl EffectDescendantRepository {
 }
 
 async fn lock_nowait_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     message_key: MessageKey,
 ) -> Result<(), IngressUowError> {
@@ -717,7 +717,7 @@ async fn lock_nowait_prepared(
 }
 
 async fn lock_all_nowait_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     descendant: Uuid,
 ) -> Result<(), IngressUowError> {
@@ -733,7 +733,7 @@ async fn lock_all_nowait_prepared(
 }
 
 async fn copy_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     source: Uuid,
     target: Uuid,
@@ -769,7 +769,7 @@ async fn copy_prepared(
 }
 
 async fn settle_all_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     descendant: Uuid,
     now: DateTime<Utc>,
@@ -810,7 +810,7 @@ async fn settle_all_prepared(
 }
 
 async fn bind_effect_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     message_key: MessageKey,
     effect: &IngressEffectKey,
@@ -841,7 +841,7 @@ async fn bind_effect_prepared(
 }
 
 async fn attach_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &crate::ingress_substrate::PreparedAttestedReceiptWriter,
     message_key: MessageKey,
     effect: &IngressEffectKey,
@@ -896,7 +896,7 @@ async fn attach_prepared(
 }
 
 async fn ensure_intent(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     effect: &IngressEffectKey,
 ) -> Result<(), IngressUowError> {
@@ -904,7 +904,7 @@ async fn ensure_intent(
 }
 
 async fn ensure_intent_in_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&crate::ingress_substrate::PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     effect: &IngressEffectKey,
@@ -978,14 +978,14 @@ pub(crate) async fn bound_raw_transaction(tx: &mut Transaction<'_>) -> Result<()
 }
 
 async fn ancestor_keys(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     descendant: Uuid,
 ) -> Result<Vec<MessageKey>, IngressUowError> {
     ancestor_keys_in_prepared(tx, None, descendant).await
 }
 
 async fn ancestor_keys_in_prepared(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     descendant: Uuid,
 ) -> Result<Vec<MessageKey>, IngressUowError> {
@@ -1022,7 +1022,7 @@ fn sql<'a>(tx: &Transaction<'_>, postgres: &'a str, sqlite: &'a str) -> &'a str 
 }
 
 async fn candidate_boolean(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     query: &str,
     params: impl IntoParams,
 ) -> Result<bool, IngressUowError> {
@@ -1039,7 +1039,7 @@ async fn candidate_boolean(
 }
 
 async fn ensure_intent_with_candidate_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: &DefinerApiCandidateContext<'_>,
     message_key: MessageKey,
     effect: &IngressEffectKey,

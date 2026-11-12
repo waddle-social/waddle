@@ -5,7 +5,7 @@
 transaction begins: the entry acquires the transaction, bounds it, attests
 its connection on an attested pool, and proves the protocol epoch before it
 hands out the witness ingress repositories need. In the ingress modules this
-check finds four kinds of code that could stand in for the entry:
+check finds five kinds of code that could stand in for the entry:
 
 - `attest`: a call of `attest_transaction(`.
 - `begin`: a transaction opened directly on a database handle
@@ -20,6 +20,13 @@ check finds four kinds of code that could stand in for the entry:
 - `autocommit`: a statement connection taken straight from a database
   handle with `.guard()`. Its statements run outside any transaction, so a
   write issued on it could never have passed through the entry.
+
+- `bare-transaction`: a function parameter of type `&mut Transaction`.
+  Functions that write an epoch-guarded relation take `&mut
+  EnteredTransaction`, the handle only the entry module constructs, or an
+  ingress unit-of-work transaction; a bare transaction parameter is left to
+  readers, to helpers the entry itself calls before the handle exists, and
+  to schema code.
 
 The scheduler stores outside the ingress modules reach ingress descendants
 only through `EffectDescendantRepository::*_raw`. Those methods must take
@@ -63,6 +70,7 @@ ATTEST = "attest"
 BEGIN = "begin"
 EPOCH_LOCK = "epoch-lock"
 AUTOCOMMIT = "autocommit"
+BARE_TRANSACTION = "bare-transaction"
 PATTERNS = {
     ATTEST: re.compile(r"\battest_transaction\s*\("),
     BEGIN: re.compile(
@@ -75,6 +83,7 @@ PATTERNS = {
         r"|install_epoch_proof|read_live_epoch_for_share)\s*\("
     ),
     AUTOCOMMIT: re.compile(r"\.\s*guard\s*\("),
+    BARE_TRANSACTION: re.compile(r"\w+\s*:\s*&mut\s+(?:crate::db::)?Transaction\s*<"),
 }
 KINDS = tuple(PATTERNS)
 DEFINITION = re.compile(r"\bfn\s+$")

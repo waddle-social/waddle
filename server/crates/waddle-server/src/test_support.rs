@@ -284,7 +284,7 @@ pub async fn attach_notification_candidate_lineage_for_test(
 ) -> Result<(), IngressUowError> {
     let mut transaction = uow.begin().await?;
     NotificationOutboxStore::attach_candidate_lineage_with_api(
-        transaction.entered_transaction_mut(),
+        transaction.transaction_mut(),
         None,
         message,
         effect,

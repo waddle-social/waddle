@@ -6,12 +6,13 @@ use super::substrate::{
     prepared_ingress_sql, PreparedAttestedReceiptWriter, PreparedIngressRelation,
 };
 use super::{
-    acquire_epoch_lock_first, decode_stored_alias, discard_database_error,
-    supported_protocol_epoch, Database, DatabaseDriver, IngressOrdinal, IngressSubstrateError,
-    MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid, WireHandledCount,
+    decode_stored_alias, discard_database_error, Database, DatabaseDriver, IngressOrdinal,
+    IngressSubstrateError, MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid,
+    WireHandledCount,
 };
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::ingress::room_manifest::{FrozenRoomManifest, StoredRoomManifest};
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_substrate::{
     begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
     IngressEntryError, IngressEntryRequest,
@@ -304,7 +305,7 @@ pub(super) fn serialize_envelope(
 /// The caller proves first MUC acceptance from recorded authority. Existing
 /// observer-only context remains immutable across retries.
 pub async fn record_room_canonical_envelope(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     key: MessageKey,
     envelope: &MessageEnvelope,
 ) -> Result<(), IngressSubstrateError> {
@@ -312,7 +313,7 @@ pub async fn record_room_canonical_envelope(
 }
 
 pub(crate) async fn record_room_envelope_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     key: MessageKey,
     envelope: &MessageEnvelope,
@@ -654,7 +655,7 @@ fn decode_envelope(
 }
 
 async fn candidate_boolean(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     query: &str,
     params: impl crate::db::IntoParams,
 ) -> Result<bool, IngressSubstrateError> {
@@ -678,7 +679,7 @@ async fn candidate_boolean(
 /// Pending messages may already belong to the next wrap while an earlier IQ
 /// keeps the checkpoint behind; replays can likewise belong to the prior wrap.
 pub(super) async fn wire_generation(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     id: SmIngressId,
     h: WireHandledCount,
@@ -740,7 +741,7 @@ pub(super) async fn wire_generation(
 }
 
 pub async fn lookup_wire_binding(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     id: SmIngressId,
     h: WireHandledCount,
 ) -> Result<Option<(MessageKey, IngressOrdinal)>, IngressSubstrateError> {
@@ -748,7 +749,7 @@ pub async fn lookup_wire_binding(
 }
 
 pub(crate) async fn lookup_wire_binding_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     id: SmIngressId,
     h: WireHandledCount,
@@ -795,7 +796,7 @@ pub(crate) async fn lookup_wire_binding_in_prepared_transaction(
 }
 
 pub async fn advance_frontier(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     id: SmIngressId,
     offered: IngressOrdinal,
     checkpoint_h: WireHandledCount,
@@ -804,7 +805,7 @@ pub async fn advance_frontier(
 }
 
 pub(crate) async fn advance_frontier_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     id: SmIngressId,
     offered: IngressOrdinal,
@@ -922,7 +923,7 @@ pub(crate) async fn advance_frontier_in_prepared_transaction(
 }
 
 pub async fn flush_checkpoint(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     id: SmIngressId,
     h: WireHandledCount,
 ) -> Result<(), IngressSubstrateError> {
@@ -930,7 +931,7 @@ pub async fn flush_checkpoint(
 }
 
 pub(crate) async fn flush_checkpoint_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     id: SmIngressId,
     h: WireHandledCount,
@@ -1035,14 +1036,14 @@ pub(crate) async fn flush_checkpoint_in_prepared_transaction(
 }
 
 pub async fn load_stream_checkpoint(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     id: SmIngressId,
 ) -> Result<Option<WireHandledCount>, IngressSubstrateError> {
     load_stream_checkpoint_in_prepared_transaction(tx, None, id).await
 }
 
 pub(crate) async fn load_stream_checkpoint_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     id: SmIngressId,
 ) -> Result<Option<WireHandledCount>, IngressSubstrateError> {
@@ -1073,7 +1074,7 @@ pub(crate) async fn load_stream_checkpoint_in_prepared_transaction(
 }
 
 pub async fn record_receipt(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     key: MessageKey,
     kind: EffectReceiptKind,
     hash: &[u8; 32],
@@ -1087,7 +1088,7 @@ pub async fn record_receipt(
 /// never issues another epoch prelock. A schema is supplied only from the
 /// opaque attested preparation carried by the same UoW transaction.
 pub(crate) async fn record_receipt_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     key: MessageKey,
     kind: EffectReceiptKind,
     hash: &[u8; 32],
@@ -1128,14 +1129,14 @@ pub(crate) async fn record_receipt_in_prepared_transaction(
 /// Number of completion receipts recorded for one canonical row, read on a
 /// plain pooled connection so maintenance accounting never waits on a lock.
 pub async fn receipts_complete(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
     receipts_complete_in_schema(tx, key, None).await
 }
 
 pub(crate) async fn receipts_complete_in_schema(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     key: MessageKey,
     attested_schema: Option<&str>,
 ) -> Result<bool, IngressSubstrateError> {
@@ -1181,19 +1182,7 @@ pub async fn record_receipt_pooled(
         return record_receipt_pooled_attested(db, &capability, key, kind, hash).await;
     }
 
-    let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
-    if tx.driver() == DatabaseDriver::Postgres {
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-            .await
-            .map_err(discard_database_error)?;
-    }
-    let epoch = acquire_epoch_lock_first(&mut tx).await?;
-    if epoch > supported_protocol_epoch() {
-        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
-    }
-    if tx.driver() == DatabaseDriver::Postgres {
-        tx.execute("SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)", crate::db_params![epoch.to_storage().to_string()]).await.map_err(discard_database_error)?;
-    }
+    let mut tx = super::typed_entry::begin_unattested_receipt_writer(db).await?;
     record_receipt(&mut tx, key, kind, hash).await?;
     tx.commit().await.map_err(discard_database_error)
 }
@@ -1265,7 +1254,7 @@ async fn exact_receipt_exists_after_commit_error(
 }
 
 async fn exact_receipt_exists(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     key: MessageKey,
     kind: EffectReceiptKind,
     hash: &[u8; 32],
@@ -1297,7 +1286,7 @@ async fn exact_receipt_exists(
 
 /// The canonical lock makes envelope completion and concurrent retries atomic.
 pub(super) async fn complete_message_envelope(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     key: MessageKey,
     digest: &SemanticDigest,

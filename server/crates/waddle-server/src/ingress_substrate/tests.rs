@@ -13,6 +13,7 @@ use super::{
     EPOCH_GUARDED_TABLES, FAIL_ORPHAN_SWEEP,
 };
 use crate::db::{DatabaseConfig, MigrationRunner};
+use crate::ingress_substrate::EnteredTransaction;
 use chrono::{TimeZone, Utc};
 use sqlx::Connection;
 use std::borrow::Cow;
@@ -82,7 +83,9 @@ async fn orphan_gc_reclaims_bounded_batches(db: &Database) {
 
 async fn orphan_gc_preserves_live_parent(db: &Database) {
     let key = MessageKey::new();
-    let mut tx = db.begin_immediate().await.expect("begin canonical insert");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        db.begin_immediate().await.expect("begin canonical insert"),
+    );
     record_message(&mut tx, key, &digest(1), None)
         .await
         .expect("live canonical parent");
@@ -285,7 +288,9 @@ async fn postgres_orphan_gc_expired_budget_preserves_proofs() {
 
 async fn seed_healthy_gc_proofs(db: &Database, count: usize) -> MessageKey {
     let key = MessageKey::from_storage(Uuid::from_u128(1));
-    let mut tx = db.begin_immediate().await.expect("begin healthy parent");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        db.begin_immediate().await.expect("begin healthy parent"),
+    );
     record_message(&mut tx, key, &digest(1), None)
         .await
         .expect("healthy parent");

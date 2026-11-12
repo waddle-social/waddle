@@ -1,12 +1,12 @@
 # Code in the ingress modules, outside the typed entry
 # (crates/waddle-server/src/ingress_substrate/typed_entry.rs), that may
 # attest a transaction, open one directly on a database handle, take the
-# epoch row lock without the entry's witness, or run statements on an
-# autocommit connection.
+# epoch row lock without the entry's witness, run statements on an
+# autocommit connection, or take a bare transaction parameter.
 #
-# Format: `<path relative to server/> <attest|begin|epoch-lock|autocommit>
-# <count>`.
-# scripts/check-ingress-typed-entry.py defines the four kinds and requires
+# Format: `<path relative to server/>
+# <attest|begin|epoch-lock|autocommit|bare-transaction> <count>`.
+# scripts/check-ingress-typed-entry.py defines the five kinds and requires
 # each listed file to hold exactly that many occurrences.
 
 # --- Read-only attach- and verify-time checks ------------------------------
@@ -50,34 +50,69 @@ crates/waddle-server/src/ingress_substrate/canonical_sender.rs autocommit 1
 # positions.
 crates/waddle-server/src/ingress_uow/archive_dispatch.rs autocommit 1
 
-# --- Writers on entry transactions or on unattested handles -----------------
-# Each either runs on a transaction that came from the entry module, or is
-# reached only when the database handle carries no attested writer
-# capability, in which case the same function sends an attested pool through
-# the entry.
+# --- Epoch locks on transactions the entry opened ---------------------------
+# These re-read the epoch row on a transaction that already carries the
+# typed handle; they cannot be reached with a bare transaction.
 
-# record_receipt_pooled: the branch after `db.attested_pg_writer_capability()`
-# returned None (one begin, one epoch lock). `record_receipt` re-reads the
-# epoch row on a caller-owned transaction and has no serving caller.
-crates/waddle-server/src/ingress_substrate/authority.rs begin 1
-crates/waddle-server/src/ingress_substrate/authority.rs epoch-lock 2
+# `record_receipt` takes `EnteredTransaction` and re-locks the epoch before
+# its insert.
+crates/waddle-server/src/ingress_substrate/authority.rs epoch-lock 1
 
-# The descendant repository's private implementations re-read the epoch row
-# and reinstall the proof (`install_epoch_proof`) before each canonical lock.
-# They run only on a transaction the entry module opened: their `*_raw`
-# wrappers take `EnteredTransaction`, which this check requires, and their
-# unit-of-work wrappers take `IngressUowTransaction`.
+# The descendant repository's implementations take `EnteredTransaction` and
+# reinstall the proof (`install_epoch_proof`) before each canonical lock.
 crates/waddle-server/src/ingress_uow/effect_descendants.rs epoch-lock 4
 
-# Alias GC and PostgresIngressSubstrate. `gc_candidate_batch` and
-# `gc_orphan_proof_batch` each open their own transaction and take the epoch
-# row lock (`acquire_gc_epoch_lock_first`) only in the branch for a handle
-# without attestation, as does `PostgresIngressSubstrate::begin_inner`; an
-# attested pool begins all three through the entry. The fourth begin is
-# `expired_candidates`, a bounded scan that takes no epoch lock and writes
-# nothing.
-crates/waddle-server/src/ingress_substrate/substrate.rs begin 4
-crates/waddle-server/src/ingress_substrate/substrate.rs epoch-lock 2
+# `acquire_gc_epoch_lock_first` wraps the epoch read for the alias GC; the
+# entry module calls it when it opens a GC writer on an unattested handle.
+crates/waddle-server/src/ingress_substrate/substrate.rs epoch-lock 1
+
+# `expired_candidates`: the alias GC's bounded candidate scan. It takes no
+# epoch lock and writes nothing.
+crates/waddle-server/src/ingress_substrate/substrate.rs begin 1
+
+# --- Functions that take a bare transaction ---------------------------------
+# Writers of epoch-guarded relations take `EnteredTransaction` or an ingress
+# unit-of-work transaction. What remains is listed here.
+
+# Helpers the entry module calls while it opens a transaction, before the
+# typed handle exists: the epoch row readers (six), the timeout setters
+# (three, one of them the GC's), and the GC's epoch lock wrapper. The
+# eleventh, `gc_retained_child_sql`, is a catalog probe the read-only
+# candidate scan shares with the collector.
+crates/waddle-server/src/ingress_substrate/substrate.rs bare-transaction 11
+
+# `load_envelope` and its prepared form: a SELECT that pooled readers call on
+# a plain read transaction.
+crates/waddle-server/src/ingress_substrate/authority.rs bare-transaction 2
+
+# `receipt_complete_nonterminal_keys`, `unreceipted_nonterminal_candidates`
+# and their shared pager: maintenance scans on a plain read transaction.
+crates/waddle-server/src/ingress_substrate/maintenance.rs bare-transaction 3
+
+# `bound_raw_transaction` (timeouts), `table_exists` and
+# `descendant_foundation_exists` (catalog probes), and `install_epoch_proof`,
+# which is private and called only from the typed descendant methods.
+crates/waddle-server/src/ingress_uow/effect_descendants.rs bare-transaction 4
+
+# The relation guard's prelock, epoch proof and owner-marker check: the entry
+# calls the first two while preparing a transaction, and attach-time
+# verification calls the third on its read-only snapshot.
+crates/waddle-server/src/ingress_uow/relation_guard.rs bare-transaction 3
+
+# `lookup_unclaimed_in_transaction` and `load_effects`: private SELECTs.
+crates/waddle-server/src/ingress_uow/repositories.rs bare-transaction 2
+
+# Room observation: owner-phase schema preparation and attach-time
+# verification, and retention of the observation tables. None of these
+# relations is epoch-guarded.
+crates/waddle-server/src/ingress_uow/room_observation/schema.rs bare-transaction 27
+crates/waddle-server/src/ingress_uow/room_observation/retention.rs bare-transaction 3
+crates/waddle-server/src/ingress_uow/room_observation/mod.rs bare-transaction 1
+
+# `start_fresh_sqlite`: compiled only with the `test-support` feature, for
+# the direct-admission lab's own SQLite fixture transaction. It writes
+# `ingress_send_attempts` and is the one writer here without the handle.
+crates/waddle-server/src/ingress_uow/send_attempts.rs bare-transaction 1
 
 # --- Maintenance transactions outside the entry -----------------------------
 # These run on whatever pool the server serves on, including the attested
