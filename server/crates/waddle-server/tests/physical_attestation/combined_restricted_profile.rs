@@ -806,7 +806,8 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
     }
     #[cfg(feature = "clustering")]
     for statement in [
-        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.clustering_muc_rooms, guarded.clustering_muc_room_affiliations, guarded.clustering_muc_room_lifecycles, guarded.clustering_muc_destroy_outbox TO {runtime}"),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON guarded.clustering_muc_rooms, guarded.clustering_muc_room_affiliations, guarded.clustering_muc_destroy_outbox TO {runtime}"),
+        format!("GRANT SELECT, INSERT, UPDATE ON guarded.clustering_muc_room_lifecycles TO {runtime}"),
         format!("GRANT SELECT, INSERT, DELETE ON guarded.clustering_muc_admin_receipts TO {runtime}"),
     ] {
         owner_sql(&owner_db, &statement).await?;
