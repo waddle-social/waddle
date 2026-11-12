@@ -118,7 +118,7 @@ BEGIN
              AND c.relkind = 'r' AND c.relpersistence = 'p' AND c.relowner = s
              AND NOT c.relispartition AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity
              AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inh
-                             WHERE inh.inhrelid = c.oid OR inh.inhparent = c.oid)) <> 30 THEN
+                             WHERE inh.inhrelid = c.oid OR inh.inhparent = c.oid)) <> 36 THEN
         RAISE EXCEPTION 'waddle: v1 relation inventory mismatch';
     END IF;
     -- A/H begin without ownership, memberships, table or column grants in this
