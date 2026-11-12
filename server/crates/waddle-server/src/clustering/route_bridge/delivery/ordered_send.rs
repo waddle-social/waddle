@@ -31,12 +31,47 @@ pub(in super::super) enum RemotePrepareError {
     Declined,
 }
 
+/// Bind the ingress append obligation the seed captured to the payload's
+/// explicit target resource. A payload without a full-JID recipient, or a
+/// seed without an eligible context, carries none.
+fn bind_append_obligation(seed: &mut RemoteDeliverySeed) {
+    if let OrderedRelayPayload::Message {
+        recipient,
+        stanza,
+        ingress_append,
+        received_at: None,
+    }
+    | OrderedRelayPayload::ProcessedDirectMessage {
+        recipient,
+        stanza,
+        ingress_append,
+    } = &mut seed.payload
+    {
+        *ingress_append = recipient
+            .is_full()
+            .then(|| {
+                IngressAppendObligationRef::for_remote_message(
+                    seed.ingress_append_context.as_ref(),
+                    &stanza.0,
+                )
+            })
+            .flatten();
+    }
+}
+
 impl OrderedRelayDeliveryBridge {
     pub(in super::super) async fn deliver_seeded_remote(
         self: Arc<Self>,
-        seed: RemoteDeliverySeed,
+        mut seed: RemoteDeliverySeed,
         allow_target_refresh_retry: bool,
     ) -> Option<RemoteDeliveryOutcome> {
+        bind_append_obligation(&mut seed);
+        // A user recipient is served by the durable mailbox where it is
+        // selected together with durable stream management; the relay
+        // envelope below is sent only when the mailbox did not take it.
+        if let Some(outcome) = self.deliver_seeded_direct(&seed).await {
+            return Some(outcome);
+        }
         let channel = seed.channel.clone();
         let Some(lock) = self.lock_for_channel(&channel).await else {
             self.divert_channel(channel, OrderedRelayDiversionReason::Backpressure)
@@ -67,28 +102,7 @@ impl OrderedRelayDeliveryBridge {
         &self,
         mut seed: RemoteDeliverySeed,
     ) -> Result<PreparedRemoteDelivery, RemotePrepareError> {
-        if let OrderedRelayPayload::Message {
-            recipient,
-            stanza,
-            ingress_append,
-            received_at: None,
-        }
-        | OrderedRelayPayload::ProcessedDirectMessage {
-            recipient,
-            stanza,
-            ingress_append,
-        } = &mut seed.payload
-        {
-            *ingress_append = recipient
-                .is_full()
-                .then(|| {
-                    IngressAppendObligationRef::for_remote_message(
-                        seed.ingress_append_context.as_ref(),
-                        &stanza.0,
-                    )
-                })
-                .flatten();
-        }
+        bind_append_obligation(&mut seed);
         let mut envelope = {
             let mut sender = self.sender_state.lock().await;
             match sender.next_envelope(

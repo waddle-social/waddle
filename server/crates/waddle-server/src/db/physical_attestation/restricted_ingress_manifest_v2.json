@@ -2,9 +2,9 @@
   "version": 2,
   "postgres_major": 17,
   "source_sha256": {
-    "candidate": "e101b25be4ee8c62fa82c7234ebfe83cd77b4178e7fb3319594c4d5ad8e53529",
+    "candidate": "935a66b0addae085e066aaf532b89c14d34bb5667e764a31db3d3a02d045bfb8",
     "relation": "2a66930709b7cd08b6ba4d20da97992f16766d2708739f6d5c54cde82c167a35",
-    "waddle": "eb45d09b1df41d02d471a4c8f755761418b346f817bbcc01e6cceeea07b1d554",
+    "waddle": "e195aa2999016b52953e4c06219229e085a30910477dc0e4a421ab5bb50abf5e",
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
     "pending_schema": "695365ed95f025b36ece6839c0635dab14d0df83d98271c648177f0a89a956fe",
     "pending_recovery": "4376a57a2c8d5212140449832966ba818230556c93b3046db052e3a6cd5450fc",
@@ -4155,6 +4155,60 @@
       }
     },
     {
+      "table": "ingress_direct_requests",
+      "function": "waddle_ingress_definer_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_direct_requests_definer_api_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_direct_requests",
+      "function": "waddle_ingress_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_direct_requests_epoch_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_direct_requests",
+      "function": "waddle_ingress_truncate_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_direct_requests_epoch_guard_truncate",
+        "tgqual": null,
+        "tgtype": 34,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
       "table": "ingress_effect_descendants",
       "function": "waddle_ingress_definer_epoch_guard",
       "properties": {
@@ -6941,6 +6995,791 @@
       "inheritance_edges": 0
     },
     {
+      "name": "ingress_direct_requests",
+      "rules": 0,
+      "columns": [
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 1,
+            "attname": "request_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 2,
+            "attname": "recipient_jid",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 3,
+            "attname": "sender_entity",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 4,
+            "attname": "payload",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "17",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 5,
+            "attname": "message_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "0",
+          "properties": {
+            "attlen": 2,
+            "attnum": 6,
+            "attname": "owner_decision",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 7,
+            "attname": "refusal",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 8,
+            "attname": "settled_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "now()",
+          "properties": {
+            "attlen": 8,
+            "attnum": 9,
+            "attname": "created_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ingress_direct_requests_message",
+          "options": null,
+          "definition": "CREATE INDEX ingress_direct_requests_message ON __SCHEMA_NAME__.ingress_direct_requests USING btree (message_key) WHERE (message_key IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              5
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_direct_requests_pkey",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_direct_requests_pkey ON __SCHEMA_NAME__.ingress_direct_requests USING btree (request_key)",
+          "properties": {
+            "indkey": [
+              1
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_direct_requests_settled",
+          "options": null,
+          "definition": "CREATE INDEX ingress_direct_requests_settled ON __SCHEMA_NAME__.ingress_direct_requests USING btree (settled_at) WHERE (settled_at IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              8
+            ],
+            "indclass": [
+              "3127"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_direct_requests_unsettled",
+          "options": null,
+          "definition": "CREATE INDEX ingress_direct_requests_unsettled ON __SCHEMA_NAME__.ingress_direct_requests USING btree (created_at) WHERE (settled_at IS NULL)",
+          "properties": {
+            "indkey": [
+              9
+            ],
+            "indclass": [
+              "3127"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_direct_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_cascade_del",
+          "constraint": "ingress_mailbox_entries_direct_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_direct_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_mailbox_entries_direct_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_direct_requests_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_messages",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_direct_requests_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_messages",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "ingress_direct_requests_definer_api_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_definer_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_direct_requests_epoch_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_direct_requests_epoch_guard_truncate",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_truncate_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 34,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        }
+      ],
+      "properties": {
+        "of_type": "0",
+        "options": null,
+        "has_rules": false,
+        "tablespace": "0",
+        "access_method": "heap",
+        "replica_identity": "d"
+      },
+      "constraints": [
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((owner_decision = ANY (ARRAY[0, 1, 2])))",
+          "properties": {
+            "conkey": [
+              6
+            ],
+            "confkey": null,
+            "conname": "ingress_direct_requests_decision_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((recipient_jid <> ''::text) AND (octet_length(recipient_jid) <= 3071) AND (sender_entity <> ''::text) AND (octet_length(sender_entity) <= 3200)))",
+          "properties": {
+            "conkey": [
+              2,
+              3
+            ],
+            "confkey": null,
+            "conname": "ingress_direct_requests_jid_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (message_key) REFERENCES __SCHEMA_NAME__.ingress_messages(message_key) ON DELETE CASCADE",
+          "properties": {
+            "conkey": [
+              5
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_direct_requests_message_key_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "c",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_messages",
+          "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1114112)))",
+          "properties": {
+            "conkey": [
+              4
+            ],
+            "confkey": null,
+            "conname": "ingress_direct_requests_payload_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_direct_requests_pkey",
+          "parent": false,
+          "definition": "PRIMARY KEY (request_key)",
+          "properties": {
+            "conkey": [
+              1
+            ],
+            "confkey": null,
+            "conname": "ingress_direct_requests_pkey",
+            "contype": "p",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((((owner_decision = 2) AND (refusal = ANY (ARRAY[1, 2]))) OR ((owner_decision <> 2) AND (refusal IS NULL))))",
+          "properties": {
+            "conkey": [
+              6,
+              7
+            ],
+            "confkey": null,
+            "conname": "ingress_direct_requests_refusal_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((settled_at IS NULL) OR (owner_decision <> 0)))",
+          "properties": {
+            "conkey": [
+              8,
+              6
+            ],
+            "confkey": null,
+            "conname": "ingress_direct_requests_settled_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        }
+      ],
+      "inheritance_edges": 0
+    },
+    {
       "name": "ingress_effect_descendants",
       "rules": 0,
       "columns": [
@@ -9264,9 +10103,69 @@
             "attmissingval": null,
             "attcompression": ""
           }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 13,
+            "attname": "direct_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
         }
       ],
       "indexes": [
+        {
+          "name": "ingress_mailbox_entries_direct_operation",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_entries_direct_operation ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (direct_key) WHERE (direct_key IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              13
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
         {
           "name": "ingress_mailbox_entries_message_operation",
           "options": null,
@@ -9405,6 +10304,54 @@
         }
       ],
       "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_direct_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_mailbox_entries_direct_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_direct_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_direct_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_mailbox_entries_direct_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_direct_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
         {
           "name": "RI_ConstraintTrigger_c_<oid>",
           "when": null,
@@ -9694,6 +10641,44 @@
           "foreign_schema": null
         },
         {
+          "index": "ingress_direct_requests_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (direct_key) REFERENCES __SCHEMA_NAME__.ingress_direct_requests(request_key) ON DELETE CASCADE",
+          "properties": {
+            "conkey": [
+              13
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_mailbox_entries_direct_key_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "c",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_direct_requests",
+          "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
           "index": null,
           "parent": false,
           "definition": "CHECK (((disposition >= 0) AND (disposition <= 4)))",
@@ -9832,7 +10817,7 @@
         {
           "index": null,
           "parent": false,
-          "definition": "CHECK (((operation_kind >= 1) AND (operation_kind <= 5)))",
+          "definition": "CHECK (((operation_kind >= 1) AND (operation_kind <= 6)))",
           "properties": {
             "conkey": [
               3
@@ -9862,12 +10847,13 @@
         {
           "index": null,
           "parent": false,
-          "definition": "CHECK ((((operation_kind = 1) AND (message_key IS NOT NULL) AND (request_key IS NULL)) OR (((operation_kind >= 2) AND (operation_kind <= 5)) AND (message_key IS NULL) AND (request_key IS NOT NULL))))",
+          "definition": "CHECK ((((operation_kind = 1) AND (message_key IS NOT NULL) AND (request_key IS NULL) AND (direct_key IS NULL)) OR (((operation_kind >= 2) AND (operation_kind <= 5)) AND (message_key IS NULL) AND (request_key IS NOT NULL) AND (direct_key IS NULL)) OR ((operation_kind = 6) AND (message_key IS NULL) AND (request_key IS NULL) AND (direct_key IS NOT NULL))))",
           "properties": {
             "conkey": [
               3,
               4,
-              12
+              12,
+              13
             ],
             "confkey": null,
             "conname": "ingress_mailbox_entries_parent_check",
@@ -11334,6 +12320,30 @@
           "index": "ingress_messages_pkey",
           "parent": false,
           "function": "RI_FKey_cascade_del",
+          "constraint": "ingress_direct_requests_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_direct_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_cascade_del",
           "constraint": "ingress_effect_intents_message_key_fkey",
           "properties": {
             "tgargs": "\\x",
@@ -11517,6 +12527,30 @@
           },
           "function_args": "",
           "related_table": "ingress_deliveries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_direct_requests_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_direct_requests",
           "related_schema": "__SCHEMA_NAME__",
           "function_schema": "pg_catalog"
         },

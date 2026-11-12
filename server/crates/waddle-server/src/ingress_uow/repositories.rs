@@ -3439,6 +3439,81 @@ impl ClaimRepository {
         })
     }
 
+    /// Read which node incarnation holds the `UserActor` claim of an
+    /// account, and its epoch, without locking the claim row. The result is
+    /// a fence to present, not a proof that this node holds the claim.
+    pub(crate) async fn user_claim(
+        transaction: &mut IngressUowTransaction<'_>,
+        account: &BareJid,
+    ) -> Result<Option<(NodeIdentity, ClaimEpoch)>, IngressUowError> {
+        let entity = format!("{}:{}", EntityType::UserActor.as_db_str(), account);
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Claims,
+            (
+                "SELECT node_id, node_epoch, claim_epoch FROM ",
+                " WHERE entity = ?",
+            ),
+            "SELECT node_id, node_epoch, claim_epoch FROM clustering_claims WHERE entity = ?",
+        );
+        let mut rows = tx.query(&sql, crate::db_params![entity]).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let node_id: String = row.get(0)?;
+        let node_epoch: String = row.get(1)?;
+        let claim_epoch: i64 = row.get(2)?;
+        Ok(Some((
+            NodeIdentity::new(node_id, node_epoch),
+            ClaimEpoch(claim_epoch),
+        )))
+    }
+
+    /// Assert the exact `UserActor` claim row of `account` under `FOR
+    /// SHARE`, after proving `owner` is still this node's current, active
+    /// identity. The claim cannot move before the transaction ends.
+    pub async fn assert_user_claim(
+        transaction: &mut IngressUowTransaction<'_>,
+        account: &BareJid,
+        owner: &NodeIdentity,
+        claim_epoch: ClaimEpoch,
+    ) -> Result<(), IngressUowError> {
+        let authority = transaction.acquire_authority(owner).await?;
+        let entity = format!("{}:{}", EntityType::UserActor.as_db_str(), account);
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Claims,
+            (
+                "SELECT 1 FROM ",
+                " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+            ),
+            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?",
+        );
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![
+                    entity,
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    claim_epoch.0,
+                ],
+            )
+            .await?;
+        if rows.next().await?.is_none() {
+            return Err(IngressUowError::ClaimFenceMissing);
+        }
+        drop(rows);
+        if let Some(authority) = authority {
+            transaction.retain_authority(authority);
+        }
+        Ok(())
+    }
+
     /// Read which node incarnation holds a room's claim, and its epoch,
     /// without locking the claim row. The result is a fence to present, not
     /// a proof that this node holds the claim.

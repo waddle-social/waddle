@@ -62,23 +62,27 @@ mirrors").
 ## The request
 
 `ingress_direct_requests`, PostgreSQL only, under the epoch guard
-(migration V1033):
+(migration V1033, `S/db/migrations/direct_requests_postgres.sql`):
 
 | Column | Meaning |
 | --- | --- |
 | `request_key UUID PRIMARY KEY` | The `DirectRequestKey`. |
 | `recipient_jid TEXT` | The lane's recipient, bare or full. |
 | `sender_entity TEXT` | The entity whose claim the origin presented as sender; the target resolves an append obligation against it, as the relay receiver does with the envelope's sender claim. |
-| `payload BYTEA` | The `OrderedRelayPayload` the relay would have sent, serialised once at this boundary with the relay's codec and parsed back by the repository. At most the frame size limit plus the envelope overhead. |
+| `payload BYTEA` | The `OrderedRelayPayload` the relay would have sent, serialised once at this boundary and parsed back by the repository. A payload that names another recipient than the row, or a room payload, is refused in both directions. |
 | `message_key UUID NULL REFERENCES ingress_messages ON DELETE CASCADE` | Set for a copy an ingress transaction owns, so the request leaves with its canonical message. |
 | `owner_decision SMALLINT` | 0 undecided, 1 accepted, 2 rejected. Moves once, from 0. |
+| `refusal SMALLINT NULL` | For a rejection: 1 nothing took the stanza, 2 the recipient's session is hosted by another node. |
 | `settled_at TIMESTAMPTZ NULL` | Set by the origin when it has read the decision. |
 | `created_at TIMESTAMPTZ` | For retention and monitoring. |
 
 `ingress_mailbox_entries` gains a nullable `direct_key UUID REFERENCES
 ingress_direct_requests ON DELETE CASCADE`, operation kind 6, a parent check
 that requires exactly `direct_key` for kind 6, and a partial unique index on
-`direct_key`.
+`direct_key`. The guarded-table count goes from 18 to 19. The runtime role
+holds `SELECT, INSERT, UPDATE, DELETE` on the table. The definer-API
+candidate gets the guard trigger and no function, so the repository refuses
+with `DefinerApiUnsupported` there.
 
 - **Origin commit.** One ingress transaction locks the lane, inserts the
   request and appends the entry `Pending`. A retry with the same key finds
@@ -93,56 +97,66 @@ that requires exactly `direct_key` for kind 6, and a partial unique index on
 
 ## Acceptance
 
-The target's worker runs the stored payload through the code the relay
-receiver runs (`deliver_processed_resource`, `deliver_reserved_full_jid`,
-`deliver_reserved_bare_jid`), then commits one ingress transaction that
-asserts the account's `UserActor` claim, locks the lane as its target,
-latches the request's decision and moves the cursor.
+The target's worker (`decide_direct` in
+`S/clustering/route_bridge/delivery/direct.rs`) runs the stored payload
+through the code the relay receiver runs (`deliver_user_payload`: the
+connection or the stream-management session registry for a full JID, the
+recipient pipeline for a bare JID), and commits one ingress transaction
+(`IngressAuthority::decide_direct_request`) that asserts the account's
+`UserActor` claim, locks the lane as its target, latches the request's
+decision and moves the cursor.
 
-Custody is taken before or after that transaction depending on what makes a
-repeated attempt safe:
+Custody is taken by the recipient's session path, which is where the
+admission authority lives; the worker itself admits nothing:
 
-| Recipient state on the target | Custody | Order | A repeated attempt |
-| --- | --- | --- | --- |
-| Durable session, detached | `DurableSmStore::admit` with `AdmissionAuthority::Detached { session, generation }` and an operation id derived from the request key | admit, then decide | Returns the ordinal of the first admission; appends nothing. |
-| Durable session, live, copy owned by an ingress transaction | The connection admits the frame on its own `Owner` fence when it takes it from its endpoint, and records the copy's ingress receipt with it | hand over, then decide | The receipt marks the copy as delivered (`live_delivery_status`); nothing is handed over twice. |
-| Durable session, live, any other copy | The connection's `Owner` admission, which mints its own operation id | decide, then hand over | Not repeated. A crash between the two loses the copy, as an uncertain relay outcome does today. |
-| No stream management | A write attempt on the connection's endpoint | decide, then hand over | Not repeated; this is the non-SM attempted-uncertain outcome the relay has. |
-| Not present, or a bare JID for which the recipient pipeline produced only local fallback replies | none | decide `Rejected` | — |
+- A **live** connection admits the frame to durable stream management on
+  its own `Owner` fence when it takes it from its endpoint
+  (`W/stream_management/durable.rs`). It holds the only projection of the
+  session's outbound window and checks that each admission it makes is the
+  next sequence, so a second admitter on the same fence would
+  desynchronise it.
+- A **detached** session is appended to through the stream-management
+  session registry. That registry holds no durable session: admission with
+  `AdmissionAuthority::Detached` from outside a connection has no caller in
+  the tree, and the store exposes no lookup of a session by full JID
+  (`DurableSmStore::session` takes a session key). A recipient whose only
+  session is a detached durable one is therefore "not present" to the
+  worker, the request is rejected, and the origin runs its offline
+  fallback. This is the outcome the relay has in the same configuration.
+  When the registry's detached append admits on the `Detached` authority,
+  the worker gains it without change.
 
-Why the worker does not admit on the `Owner` authority itself: the live
-connection holds the only projection of the session's outbound window
-(`DurableSmLink` in `W/stream_management/durable.rs`) and checks that each
-admission it makes is the next sequence. A second admitter on the same
-fence would desynchronise that projection. The worker therefore uses the
-`Owner` authority only through the connection, and the `Detached` authority
-directly.
+The order of hand-over and decision depends on what makes a repeated
+attempt safe:
 
-### Resolving a full JID
+| Stanza | Order | A repeated attempt |
+| --- | --- | --- |
+| A copy an ingress transaction owns, to a full JID | hand over, then decide | The append records the copy's ingress receipt, so the repeat is recognised and nothing is delivered twice. `TargetUnavailable` from the hand-over is decided `Rejected`; any other failure is retried under the entry's retry budget. |
+| Any other stanza (IQ, presence, a message outside an ingress transaction, anything to a bare JID) | check that something on the node could take it, decide, then hand over once | Not repeated: an entry that records a decision is only moved. A failure after the decision loses the stanza, as an uncertain relay outcome does today, and cannot deliver it twice. |
+| Nothing on the node could take it | decide `Rejected` | — |
 
-The worker needs `(session, generation)` for a detached admission. The
-store exposes `DurableSmStore::session(SmSessionKey)` and no lookup by full
-JID. The read lives with the direct-lane code
-(`S/ingress/direct_sessions.rs`): one statement on `sm_durable_sessions` by
-`full_jid` returns the session keys, and each is read through
-`DurableSmStore::session`. A detached session whose `sm_session:<key>` claim
-this node holds is admitted against; the worker builds the claim fence from
-the claim store's row for that entity. A session whose claim another node
-holds is not this node's to admit to: the entry is decided `Rejected` with
-the reason "hosted elsewhere", and the origin keeps the relay for that copy.
+A resource without stream management falls under the second row: the entry
+is decided before the write attempt, which is the non-SM
+attempted-uncertain outcome the relay has.
+
+The refusal "hosted elsewhere" is part of the stored vocabulary and has no
+writer: the worker cannot yet tell a session claimed by a third node from
+an absent one, and treats both as not delivered.
 
 ### Bare JID
 
 The account owner freezes the resource selection when it accepts: the
 recipient pipeline runs once on the target, as it does for a relayed
-bare-JID stanza, and its fan-out to the account's resources is local. A
-retry after an uncertain attempt does not run the pipeline again: bare-JID
-entries are decided before the pipeline runs, except for a copy owned by an
-ingress transaction, whose per-resource receipts make the repeat safe.
+bare-JID stanza, after the decision is recorded. A repeated attempt does
+not run the pipeline again.
 
 ## Consumption by the origin
 
-The sender waits for the decision with the budget it gives a relay ask.
+The origin's seam is `deliver_seeded_remote` (`ordered_send.rs`), which
+every user-recipient send passes through: `deliver_seeded_direct` commits
+the request under the channel's send lock, so the lane's sequence is the
+order the origin sent in, and then waits up to ten seconds for the decision
+without the lock.
 One transaction locks the lane as origin, checks the entry's disposition
 against the request's `owner_decision`, consumes the entry and settles the
 request. The outcome maps onto what the relay's callers already handle:
@@ -150,9 +164,9 @@ request. The outcome maps onto what the relay's callers already handle:
 | Mailbox outcome | Caller sees |
 | --- | --- |
 | Accepted | `Delivered` |
-| Rejected | `Unavailable`: the caller runs its local fallback |
-| Rejected, hosted elsewhere | the relay is used for this copy |
+| Rejected (either refusal) | `Unavailable`: the caller runs its local fallback |
 | No decision within the budget, dead letter, storage failure after the commit | `MaybeCommitted`: no fallback, no second send. The entry stays; the target's poller decides it, and a copy owned by an ingress transaction is also covered by that message's receipts and the ingress maintenance pass. |
+| The lane or the account owner's node is at its pending cap | a definite no-effect outcome (`Dropped`, or `Unavailable` for an IQ), as for a full relay channel |
 | Nothing committed (not gated, no `UserActor` claim, storage failure before the commit) | the relay is used |
 
 There is never a local fallback or a relay send after a commit whose
@@ -186,8 +200,6 @@ decision is unknown.
   `WADDLE_XMPP_DURABLE_SM=legacy`.
 - A send whose origin resource is hosted through a remote channel mirror
   (`route_remote_resource_origin`).
-- A copy whose recipient session is claimed by a node other than the
-  account owner.
 - A send for which the origin could not commit a request.
 
 ## Deletion precondition for the `BareJid` and `FullJid` relay lanes
@@ -213,6 +225,19 @@ decision is unknown.
 
 ## Build state
 
-Not built. The decisions above are made; no code for them is in the tree,
-and every `BareJid` and `FullJid` send uses the relay in every
-configuration.
+Built, not yet verified by a test run. V1033, the repository
+(`S/ingress_uow/direct_requests.rs`), the origin commit, wait and
+consumption and the owner's decision (`S/ingress/direct_request.rs`), the
+origin seam and the worker (`delivery/direct.rs`), worker dispatch and
+adoption of account lanes (`S/ingress/mailbox_worker.rs`) and retention
+(`S/ingress/maintenance/implementation.rs`) are in the tree.
+
+Not built:
+
+- Admission to a detached durable session (see [Acceptance](#acceptance)),
+  and with it the read that resolves a full JID to a session and
+  generation.
+- A writer of the "hosted elsewhere" refusal.
+- A sweep that reports decided direct requests no origin consumed. The
+  monitoring query `waddle_ingress_direct_requests` reports them.
+- A PostgreSQL repository suite for `ingress_direct_requests`.

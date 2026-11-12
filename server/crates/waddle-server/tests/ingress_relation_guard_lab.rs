@@ -16,11 +16,12 @@ const CANDIDATE: &str =
     include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 const DEFINER_API_CANDIDATE: &str =
     include_str!("../src/db/migrations/owner/ingress_definer_api_candidate.sql");
-const TABLES: [&str; 18] = [
+const TABLES: [&str; 19] = [
     "ingress_archive_dispatch",
     "ingress_carbon_receipts",
     "ingress_deliveries",
     "ingress_delivery_receipts",
+    "ingress_direct_requests",
     "ingress_effect_descendants",
     "ingress_effect_intents",
     "ingress_effect_receipts",
@@ -123,8 +124,8 @@ impl Fixture {
             .await
             .expect("migration version");
         assert_eq!(
-            last, 1032,
-            "laboratory must use the actual catalog through V1032"
+            last, 1033,
+            "laboratory must use the actual catalog through V1033"
         );
         sqlx::raw_sql(CANDIDATE)
             .execute(&mut owner_connection)

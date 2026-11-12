@@ -32,7 +32,7 @@ use waddle_xmpp::Stanza;
 use waddle_xmpp_core::{Affiliation, Role};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
-use super::delivery::deliver_reserved_muc_proxy;
+use super::delivery::{decide_direct, deliver_reserved_muc_proxy};
 use super::{
     MucProxyOrigin, NodeId, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
     OrderedRelayMucProxyKind, RelayHandle,
@@ -318,6 +318,10 @@ async fn work_lane(
                 let decided =
                     seat_room_occupancy(services, authority, &claimed.request.room, target).await
                         && decide_request(services, authority, &claimed, target).await;
+                record_attempt(authority, claimed.lane, claimed.operation, target, decided).await
+            }
+            Ok(MailboxLaneHead::ReadyDirect(claimed)) => {
+                let decided = decide_direct(services, authority, &claimed, target).await;
                 record_attempt(authority, claimed.lane, claimed.operation, target, decided).await
             }
             Err(error) => {

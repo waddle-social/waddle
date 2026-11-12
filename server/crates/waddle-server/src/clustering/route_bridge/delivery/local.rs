@@ -23,65 +23,15 @@ impl OrderedRelayDeliveryBridge {
         };
         validate_claims(&services, envelope).await?;
         match relay_payload_target(envelope)? {
-            RelayPayloadTarget::Full(target, stanza) => {
-                let obligation = match &envelope.payload {
-                    OrderedRelayPayload::Message { ingress_append, .. }
-                    | OrderedRelayPayload::ProcessedDirectMessage { ingress_append, .. } => {
-                        ingress_append.as_ref()
-                    }
-                    _ => None,
-                };
-                // Bind the claim unconditionally; never decide from a
-                // detached-session probe (teardown inserts the detached
-                // session during cleanup, so a resource can be live at the
-                // probe and detached by the fallback). The canonical read is
-                // deferred to the append decision that trusts it (#1790).
-                let ingress_append_context = super::ingress_append::authorize_ingress_append(
+            target @ (RelayPayloadTarget::Full(..) | RelayPayloadTarget::Bare(..)) => self
+                .deliver_user_payload(
                     &services,
                     &envelope.sender_claim.entity,
-                    stanza,
-                    obligation,
-                );
-                if super::ingress_append::requires_ingress_authority(obligation)
-                    && ingress_append_context.is_none()
-                {
-                    return Err(OrderedRelayNackReason::TargetUnavailable);
-                }
-                if matches!(
-                    envelope.payload,
-                    OrderedRelayPayload::ProcessedDirectMessage { .. }
-                ) {
-                    if obligation.is_some() && ingress_append_context.is_none() {
-                        return Err(OrderedRelayNackReason::TargetUnavailable);
-                    }
-                    return self
-                        .deliver_processed_resource(
-                            &services,
-                            target,
-                            stanza,
-                            ingress_append_context.as_ref(),
-                        )
-                        .await
-                        .map(|()| Vec::new());
-                }
-                self.deliver_reserved_full_jid(
-                    &services,
+                    &envelope.payload,
                     target,
-                    stanza,
-                    ingress_append_context.as_ref(),
-                    match &envelope.payload {
-                        OrderedRelayPayload::Message { received_at, .. } => *received_at,
-                        _ => None,
-                    },
                 )
                 .await
-                .map(|()| Vec::new())
-            }
-            RelayPayloadTarget::Bare(target, stanza) => {
-                deliver_reserved_bare_jid(&services, &target, stanza)
-                    .await
-                    .map(|()| Vec::new())
-            }
+                .map(|()| Vec::new()),
             RelayPayloadTarget::Muc(room, kind, origin, stanza, admission) => {
                 deliver_reserved_muc_proxy(
                     &services,
@@ -94,6 +44,76 @@ impl OrderedRelayDeliveryBridge {
                 )
                 .await
             }
+        }
+    }
+
+    /// Deliver a payload addressed to a user on this node, which owns the
+    /// recipient's account: a full JID through its connection or its
+    /// stream-management session, a bare JID through the recipient
+    /// pipeline. `sender_entity` is the claim entity the origin presented
+    /// as sender and has been validated by the caller. The ordered relay's
+    /// receiver and the mailbox worker of a direct request both end here.
+    pub(in super::super) async fn deliver_user_payload(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        sender_entity: &waddle_xmpp::ownership::Entity,
+        payload: &OrderedRelayPayload,
+        target: RelayPayloadTarget<'_>,
+    ) -> Result<(), OrderedRelayNackReason> {
+        match target {
+            RelayPayloadTarget::Full(target, stanza) => {
+                let obligation = match payload {
+                    OrderedRelayPayload::Message { ingress_append, .. }
+                    | OrderedRelayPayload::ProcessedDirectMessage { ingress_append, .. } => {
+                        ingress_append.as_ref()
+                    }
+                    _ => None,
+                };
+                // Bind the claim unconditionally; never decide from a
+                // detached-session probe (teardown inserts the detached
+                // session during cleanup, so a resource can be live at the
+                // probe and detached by the fallback). The canonical read is
+                // deferred to the append decision that trusts it (#1790).
+                let ingress_append_context = super::ingress_append::authorize_ingress_append(
+                    services,
+                    sender_entity,
+                    stanza,
+                    obligation,
+                );
+                if super::ingress_append::requires_ingress_authority(obligation)
+                    && ingress_append_context.is_none()
+                {
+                    return Err(OrderedRelayNackReason::TargetUnavailable);
+                }
+                if matches!(payload, OrderedRelayPayload::ProcessedDirectMessage { .. }) {
+                    if obligation.is_some() && ingress_append_context.is_none() {
+                        return Err(OrderedRelayNackReason::TargetUnavailable);
+                    }
+                    return self
+                        .deliver_processed_resource(
+                            services,
+                            target,
+                            stanza,
+                            ingress_append_context.as_ref(),
+                        )
+                        .await;
+                }
+                self.deliver_reserved_full_jid(
+                    services,
+                    target,
+                    stanza,
+                    ingress_append_context.as_ref(),
+                    match payload {
+                        OrderedRelayPayload::Message { received_at, .. } => *received_at,
+                        _ => None,
+                    },
+                )
+                .await
+            }
+            RelayPayloadTarget::Bare(target, stanza) => {
+                deliver_reserved_bare_jid(services, &target, stanza).await
+            }
+            RelayPayloadTarget::Muc(..) => Err(OrderedRelayNackReason::ParseFailure),
         }
     }
 }

@@ -375,6 +375,11 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("ingress_room_requests", READ_WRITE),
     ("ingress_room_responses", READ_INSERT),
     ("ingress_room_occupants", READ_WRITE),
+    // A direct request is inserted by its origin, row-locked and decided by
+    // the node that owns the recipient's account, settled by its origin and
+    // deleted by the retention pass; its entry leaves through that delete's
+    // cascade.
+    ("ingress_direct_requests", READ_WRITE),
     // Inbox, stream management and pending delivery.
     ("inbox_entries", READ_INSERT_UPDATE),
     ("groupchat_notification_recovery", READ_WRITE),

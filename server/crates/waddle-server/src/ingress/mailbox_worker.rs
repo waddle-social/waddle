@@ -58,6 +58,10 @@ pub enum MailboxLaneHead {
     /// against its room and decide.
     #[cfg(feature = "clustering")]
     ReadyRequest(Box<super::room_request::ClaimedRoomRequest>),
+    /// The head entry carries a direct request, ready for the owner of the
+    /// recipient's account to take custody of and decide.
+    #[cfg(feature = "clustering")]
+    ReadyDirect(Box<super::direct_request::ClaimedDirectRequest>),
     /// The head entry's canonical evidence cannot be used. It was parked for
     /// an operator in the same transaction.
     DeadLettered,
@@ -152,6 +156,26 @@ impl IngressAuthority {
             || MailboxRepository::attempt_deferred(&mut tx, &entry).await?
         {
             return Ok(MailboxLaneHead::Idle);
+        }
+        // An entry whose parent is a direct request is prepared from that
+        // request; one whose request cannot be read is parked for an
+        // operator.
+        #[cfg(feature = "clustering")]
+        if entry.operation.direct().is_some() {
+            let Some(claimed) = Self::load_claimed_direct(&mut tx, lane, entry.operation).await?
+            else {
+                MailboxRepository::dead_letter(
+                    &mut tx,
+                    &locked,
+                    entry.operation,
+                    MailboxDeadLetterReason::CanonicalEvidenceInvalid,
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(MailboxLaneHead::DeadLettered);
+            };
+            tx.commit().await?;
+            return Ok(MailboxLaneHead::ReadyDirect(Box::new(claimed)));
         }
         // An entry whose parent is a room request is prepared from that
         // request; one whose request cannot be read is parked for an
@@ -313,12 +337,14 @@ impl IngressAuthority {
         Ok(record)
     }
 
-    /// Adopt backlogged lanes whose room this node now owns.
+    /// Adopt backlogged lanes whose work this node now owns: lanes of a
+    /// room whose claim it holds, and lanes of a bare or full JID whose
+    /// account's `UserActor` claim it holds.
     ///
     /// A lane records the owner incarnation its origin last proved, and the
-    /// backlog scan reads only lanes recorded for this node. After a room's
-    /// claim moves (to another node, or to a new incarnation of the same
-    /// node) its lanes still name the predecessor. This pass reads at most
+    /// backlog scan reads only lanes recorded for this node. After a claim
+    /// moves (to another node, or to a new incarnation of the same node)
+    /// its lanes still name the predecessor. This pass reads at most
     /// [`MAILBOX_SCAN_LIMIT`] such lanes after `after` and, for each whose
     /// room the claims table assigns to `target`, writes that claim onto the
     /// lane in a transaction that reads the claim and locks the lane. A lane
@@ -350,47 +376,78 @@ impl IngressAuthority {
         let lanes =
             MailboxRepository::scan_foreign_backlog(&mut tx, target, after, MAILBOX_SCAN_LIMIT)
                 .await?;
+        // The claim that owns a lane's work: the room's for a room lane, the
+        // recipient account's `UserActor` claim for a bare-JID or full-JID
+        // lane.
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum LaneOwner {
+            Room(BareJid),
+            Account(BareJid),
+        }
+        async fn owner_claim(
+            tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+            owner: &LaneOwner,
+        ) -> Result<Option<(NodeIdentity, waddle_xmpp::ownership::ClaimEpoch)>, IngressUowError>
+        {
+            match owner {
+                LaneOwner::Room(room) => ClaimRepository::room_claim(tx, room).await,
+                LaneOwner::Account(account) => ClaimRepository::user_claim(tx, account).await,
+            }
+        }
         let mut owned = Vec::new();
-        let mut claims: std::collections::HashMap<BareJid, bool> = std::collections::HashMap::new();
+        let mut claims: std::collections::HashMap<LaneOwner, bool> =
+            std::collections::HashMap::new();
         for (lane, key) in &lanes {
-            let Ok(MailboxLaneIdentity {
-                recipient: MailboxLaneRecipient::Room { room, .. },
-                ..
-            }) = key.encoding().decode()
-            else {
-                continue;
+            let owner = match key.encoding().decode() {
+                Ok(MailboxLaneIdentity {
+                    recipient: MailboxLaneRecipient::Room { room, .. },
+                    ..
+                }) => LaneOwner::Room(room),
+                Ok(MailboxLaneIdentity {
+                    recipient: MailboxLaneRecipient::BareJid(account),
+                    ..
+                }) => LaneOwner::Account(account),
+                Ok(MailboxLaneIdentity {
+                    recipient: MailboxLaneRecipient::FullJid(resource),
+                    ..
+                }) => LaneOwner::Account(resource.to_bare()),
+                Err(_) => continue,
             };
-            let here = match claims.get(&room) {
+            let here = match claims.get(&owner) {
                 Some(here) => *here,
                 None => {
-                    let here = ClaimRepository::room_claim(&mut tx, &room)
+                    let here = owner_claim(&mut tx, &owner)
                         .await?
-                        .is_some_and(|(owner, _)| owner == *target);
-                    claims.insert(room.clone(), here);
+                        .is_some_and(|(holder, _)| holder == *target);
+                    claims.insert(owner.clone(), here);
                     here
                 }
             };
             if here {
-                owned.push((*lane, room));
+                owned.push((*lane, owner));
             }
         }
         tx.commit().await?;
         let mut adopted = 0;
         let mut seated: std::collections::HashMap<BareJid, bool> = std::collections::HashMap::new();
-        for (lane, room) in owned {
-            // A lane becomes visible to this node's backlog scan only after
-            // the room's durable occupancy is seated in its room actor, so
-            // no entry of the room is decided against an empty roster.
-            let ready = match seated.get(&room) {
-                Some(ready) => *ready,
-                None => {
-                    let ready = seat_occupancy(room.clone()).await;
-                    seated.insert(room.clone(), ready);
-                    ready
+        for (lane, owner) in owned {
+            // A room lane becomes visible to this node's backlog scan only
+            // after the room's durable occupancy is seated in its room
+            // actor, so no entry of the room is decided against an empty
+            // roster. An account lane has nothing to seat: the account's
+            // sessions are read when an entry is worked.
+            if let LaneOwner::Room(room) = &owner {
+                let ready = match seated.get(room) {
+                    Some(ready) => *ready,
+                    None => {
+                        let ready = seat_occupancy(room.clone()).await;
+                        seated.insert(room.clone(), ready);
+                        ready
+                    }
+                };
+                if !ready {
+                    continue;
                 }
-            };
-            if !ready {
-                continue;
             }
             let mut tx = self
                 .uow
@@ -398,15 +455,15 @@ impl IngressAuthority {
                 .await?;
             // The claim is read again in the transaction that writes it onto
             // the lane, so a claim that moved since the scan is not adopted.
-            let Some((owner, epoch)) = ClaimRepository::room_claim(&mut tx, &room).await? else {
+            let Some((holder, epoch)) = owner_claim(&mut tx, &owner).await? else {
                 continue;
             };
-            if owner != *target {
+            if holder != *target {
                 continue;
             }
             let fence = MailboxTargetFence {
                 target_epoch: epoch,
-                target_owner: owner,
+                target_owner: holder,
             };
             if MailboxRepository::adopt_backlogged_lane(&mut tx, lane, &fence).await? {
                 tx.commit().await?;

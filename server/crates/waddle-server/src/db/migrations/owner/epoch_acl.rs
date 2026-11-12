@@ -908,7 +908,8 @@ async fn check_guarded_relation_acls(
             | "ingress_sm_streams"
             | "ingress_send_attempts"
             | "ingress_room_requests"
-            | "ingress_room_occupants" => (true, true, true, true),
+            | "ingress_room_occupants"
+            | "ingress_direct_requests" => (true, true, true, true),
             "ingress_origin_aliases" | "ingress_sm_refs" | "ingress_deliveries" => {
                 (true, true, false, true)
             }

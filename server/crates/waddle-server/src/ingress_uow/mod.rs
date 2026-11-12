@@ -29,6 +29,13 @@ pub use mailbox::{
     LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal, MailboxDeadLetterReason,
     MailboxError, MailboxLaneId, MailboxRepository, MailboxTargetFence, StoredMailboxEntry,
 };
+#[cfg(feature = "clustering")]
+mod direct_requests;
+#[cfg(feature = "clustering")]
+pub use direct_requests::{
+    DirectDecision, DirectRefusal, DirectRequestError, DirectRequestRepository, NewDirectRequest,
+    StoredDirectRequest, DIRECT_REQUEST_PAYLOAD_MAX_BYTES, DIRECT_REQUEST_SETTLED_RETENTION,
+};
 mod room_requests;
 pub use room_requests::{
     LatchedRoomDecision, NewRoomRequest, RoomDecisionLatch, RoomOccupancyLoad, RoomOccupantLookup,
