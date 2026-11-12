@@ -10,7 +10,7 @@ use waddle_xmpp::ownership::account_resource_transition::{
     BindingRetirementDisposition, DirectedPresenceTeardownDisposition,
     PresentationFlushDisposition,
 };
-use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
+use waddle_xmpp::ownership::{BindingRef, SmSessionKey, UserClaimIdentity};
 
 /// The reply to a binding operation.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +107,37 @@ pub enum RepairOutcome {
     Rejected(AccountResourceTransitionError),
 }
 
+/// A request to release a resource row's reference to a stream-management
+/// session that reached a terminal state, by retiring the binding that
+/// holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseSessionRequest {
+    /// The identity the retirement's start is repeated under.
+    pub begin: AccountResourceOperationId,
+    /// The identity the retirement's completion is repeated under.
+    pub complete: AccountResourceOperationId,
+    pub session: SmSessionKey,
+    /// What became of the work the session had accepted.
+    pub custody_disposition: BindingRetirementDisposition,
+    pub directed_presence: DirectedPresenceTeardownDisposition,
+    pub presentation_flush: PresentationFlushDisposition,
+}
+
+/// The result of releasing a session reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRelease {
+    /// The binding is retired and the resource row no longer names the
+    /// session.
+    Released { revision: AccountResourceRevision },
+    /// The resource's current binding does not reference the session.
+    NotReferenced,
+    /// The session is referenced by a binding that still has a connection.
+    /// That connection retires it; the coordinator does not.
+    HeldByConnection(BindingRef, AccountResourceBindingState),
+    /// The slot refused the retirement. The reference stays.
+    Rejected(AccountResourceTransitionError),
+}
+
 /// What a coordinator did with the rows it found under a previous claim
 /// identity when it loaded the account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -151,6 +182,11 @@ pub(super) struct Repair {
     pub(super) full_jid: FullJid,
     pub(super) binding_ref: BindingRef,
     pub(super) evidence: RepairEvidence,
+}
+
+pub(super) struct ReleaseSession {
+    pub(super) full_jid: FullJid,
+    pub(super) request: ReleaseSessionRequest,
 }
 
 pub(super) struct ReadView;

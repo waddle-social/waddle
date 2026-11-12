@@ -35,8 +35,8 @@ pub use config::AccountCoordinatorConfig;
 pub use directory::AccountCoordinators;
 pub use error::AccountCoordinatorError;
 pub use messages::{
-    AccountView, AdoptionReport, BindingReply, RepairEvidence, RepairOutcome, SlotStatus,
-    UnregisterOutcome, UnregisterRequest,
+    AccountView, AdoptionReport, BindingReply, ReleaseSessionRequest, RepairEvidence,
+    RepairOutcome, SessionRelease, SlotStatus, UnregisterOutcome, UnregisterRequest,
 };
 pub use selection::{
     AccountAuthorityMode, AccountAuthoritySelection, AccountAuthoritySelectionError,

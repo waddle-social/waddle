@@ -216,6 +216,33 @@ and present only when it returns `true`.
 No connection sends the binding messages yet, so a selected coordinator
 has no bindings and reads as an account without resources.
 
+## Session reference and release order
+
+A resource row names the stream-management session of its current binding
+by session id and generation. A commit that sets or changes the reference
+is refused unless the durable session row exists and is bound at that
+generation, and the session id is also a foreign key checked at commit. The
+session therefore outlives every row that names it: **the resource row
+releases first, the session row is deleted last.**
+
+- **Replacement and close with a connection.** The displaced or closing
+  connection retires its binding. `CompleteRetirement` frees the row and
+  clears the reference in the same commit.
+- **Expiry and close of a detached session.** No connection exists. The
+  session authority marks the session terminal in its own transaction,
+  which does not touch the resource row, and then calls
+  `AccountCoordinators::release_session` for each full JID that
+  `AccountBindingStore::resources_for_session` returns. The coordinator
+  retires the detached binding with the caller's custody and teardown
+  dispositions. A binding that still has a connection is reported as
+  `HeldByConnection` and left to it.
+- **Deleting the session row.** The session authority deletes a terminal
+  row only when `resources_for_session` is empty. A delete that fails the
+  foreign key at commit means a row still names the session: it is retried
+  after the release, not treated as a fault.
+- **Resume.** The session authority binds the new generation first; the
+  connection then sends `SuccessfulResume` naming that generation.
+
 ## Decisions the service makes
 
 - **Pending replacement.** A bind for a resource that has a binding is
@@ -245,6 +272,9 @@ has no bindings and reads as an account without resources.
   not a destination, and is reported so it can be retired. A detached
   binding is among them: the slot model has no adoption for a detached
   binding, so a session detached under a previous claim cannot resume.
+- **Over the slot bound.** Rows that hold a binding are always loaded,
+  even beyond the account's slot bound. Such an account serves its stored
+  bindings and refuses a bind of any new resource until enough retire.
 - **Presence payloads.** A row stores the selection metadata, not the
   presence extension payloads. They live in the coordinator's memory and
   are empty after a reload until the resource updates its snapshot.

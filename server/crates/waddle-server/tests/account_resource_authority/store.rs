@@ -16,9 +16,9 @@ use waddle_xmpp::ownership::{SmSessionKey, UserClaimIdentity};
 use xmpp_parsers::presence::Show;
 
 use super::support::{
-    activate, begin_retirement, bind, claim, commit, complete_retirement, detach, fresh_binding,
-    insert_session, operation, presence, publish, register, registration, reject, resource, resume,
-    sm_binding, update,
+    activate, begin_retirement, bind, bind_session_generation, claim, commit, complete_retirement,
+    detach, fresh_binding, insert_session, operation, presence, publish, register, registration,
+    reject, resource, resume, sm_binding, update,
 };
 
 const INITIAL: AccountResourceRevision = AccountResourceRevision::INITIAL;
@@ -60,6 +60,13 @@ impl Fixture {
         match &self.db {
             Some(db) => insert_session(db).await,
             None => SmSessionKey::fresh(),
+        }
+    }
+
+    /// Record that the session committed a resume to `generation`.
+    async fn resumed(&self, session: SmSessionKey, generation: u64) {
+        if let Some(db) = &self.db {
+            bind_session_generation(db, session, generation).await;
         }
     }
 }
@@ -335,6 +342,7 @@ async fn detach_and_resume_keep_the_slot(fixture: &Fixture) {
         AccountResourceTransitionError::BindingMismatch,
         "a resume must name the detached binding"
     );
+    fixture.resumed(session, 2).await;
     let resume_operation = operation(resume(
         &claim,
         detached,
@@ -808,22 +816,33 @@ async fn sqlite_checks_the_session_reference_at_commit() {
     let jid = resource("orphan");
     let claim = claim(1);
     let (binding, active) = activate(store, &jid, &claim, INITIAL).await;
-    let unknown = AccountResourceSnapshot {
-        stream_management_ref: Some(sm_binding(SmSessionKey::fresh(), 1)),
+    let reference = |session, generation| AccountResourceSnapshot {
+        stream_management_ref: Some(sm_binding(session, generation)),
         ..presence(true, 0, false)
     };
+    let attempt = |snapshot| operation(update(&claim, active, &binding, snapshot));
     assert!(
         matches!(
             store
                 .execute(
                     &authority,
                     &jid,
-                    &operation(update(&claim, active, &binding, unknown))
+                    &attempt(reference(SmSessionKey::fresh(), 1))
                 )
                 .await,
-            Err(AccountBindingStoreError::Database(_))
+            Err(AccountBindingStoreError::SessionUnknown)
         ),
         "a snapshot that references no stored session does not commit"
+    );
+    let session = fixture.session().await;
+    assert!(
+        matches!(
+            store
+                .execute(&authority, &jid, &attempt(reference(session, 2)))
+                .await,
+            Err(AccountBindingStoreError::SessionGenerationMismatch)
+        ),
+        "a snapshot must name the generation the session is bound at"
     );
     let stored = store
         .load(&jid)
@@ -831,9 +850,22 @@ async fn sqlite_checks_the_session_reference_at_commit() {
         .expect("load")
         .expect("the resource row");
     assert_eq!(stored.image.revision, active);
-    let known = AccountResourceSnapshot {
-        stream_management_ref: Some(sm_binding(fixture.session().await, 1)),
-        ..presence(true, 0, false)
-    };
-    commit(store, &jid, update(&claim, active, &binding, known)).await;
+    assert!(store
+        .resources_for_session(session)
+        .await
+        .expect("resources for the session")
+        .is_empty());
+    commit(
+        store,
+        &jid,
+        update(&claim, active, &binding, reference(session, 1)),
+    )
+    .await;
+    assert_eq!(
+        store
+            .resources_for_session(session)
+            .await
+            .expect("resources for the session"),
+        vec![jid]
+    );
 }

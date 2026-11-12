@@ -29,8 +29,8 @@ use waddle_xmpp::ownership::{
 };
 
 use super::support::{
-    bind, claim, complete_retirement, detach, fresh_binding, insert_session, operation, presence,
-    publish, register, resource, resume, sm_binding, update,
+    bind, bind_session_generation, claim, complete_retirement, detach, fresh_binding,
+    insert_session, operation, presence, publish, register, resource, resume, sm_binding, update,
 };
 
 const INITIAL: AccountResourceRevision = AccountResourceRevision::INITIAL;
@@ -290,6 +290,7 @@ async fn the_binding_lifecycle_decides_what_is_routable() {
         .expect("the detached binding")
         .lifetime;
     let resumed = fresh_binding();
+    bind_session_generation(&harness.db, session, 2).await;
     let prepared = drive(
         coordinators,
         &jid,
@@ -582,6 +583,7 @@ async fn a_presentation_happens_once_across_a_resume() {
         .expect("the detached binding")
         .lifetime;
     let resumed = fresh_binding();
+    bind_session_generation(&harness.db, session, 2).await;
     let prepared = drive(
         coordinators,
         &jid,
@@ -1022,4 +1024,124 @@ async fn a_store_failure_is_a_typed_error_and_never_an_empty_selection() {
             AccountResourceOperationOutcome::Committed { .. }
         ))
     ));
+}
+
+#[tokio::test]
+async fn a_terminal_session_is_released_by_retiring_its_detached_binding() {
+    use waddle_server::account_coordinator::{ReleaseSessionRequest, SessionRelease};
+
+    let harness = harness("account-coordinator-release-session", config()).await;
+    let coordinators = &harness.coordinators;
+    let jid = resource("resumable");
+    let claim = harness.claim();
+    let session = insert_session(&harness.db).await;
+    let (binding, active) = activate(coordinators, &jid).await;
+    let request = || ReleaseSessionRequest {
+        begin: AccountResourceOperationId::fresh(),
+        complete: AccountResourceOperationId::fresh(),
+        session,
+        custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+        directed_presence: DirectedPresenceTeardownDisposition::NoDirectedRecipients,
+        presentation_flush: PresentationFlushDisposition::NoPendingPresentation,
+    };
+    assert_eq!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("release"),
+        SessionRelease::NotReferenced
+    );
+    let snapshot = AccountResourceSnapshot {
+        stream_management_ref: Some(sm_binding(session, 1)),
+        ..presence(true, 0, false)
+    };
+    let updated = drive(
+        coordinators,
+        &jid,
+        update(&claim, active, &binding, snapshot),
+    )
+    .await;
+    assert_eq!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("release"),
+        SessionRelease::HeldByConnection(binding.clone(), AccountResourceBindingState::Active),
+        "a binding that still has a connection is retired by that connection"
+    );
+    drive(coordinators, &jid, detach(&claim, updated, &binding)).await;
+    assert_eq!(
+        harness
+            .store
+            .resources_for_session(session)
+            .await
+            .expect("resources for the session"),
+        vec![jid.clone()]
+    );
+    assert!(matches!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("release"),
+        SessionRelease::Released { .. }
+    ));
+    assert!(
+        harness
+            .store
+            .resources_for_session(session)
+            .await
+            .expect("resources for the session")
+            .is_empty(),
+        "the row no longer names the session, so the session row can be deleted"
+    );
+    assert_eq!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("repeat the release"),
+        SessionRelease::NotReferenced
+    );
+}
+
+#[tokio::test]
+async fn an_account_over_its_slot_bound_serves_its_bindings_and_refuses_new_ones() {
+    let harness = harness("account-coordinator-over-bound", config()).await;
+    let first = resource("first");
+    let second = resource("second");
+    let claim = harness.claim();
+    activate(&harness.coordinators, &first).await;
+    activate(&harness.coordinators, &second).await;
+
+    let bounded = directory(
+        &harness.store,
+        &harness.claims,
+        AccountCoordinatorConfig {
+            max_resources: NonZeroUsize::MIN,
+            ..config()
+        },
+    );
+    assert_eq!(
+        resources(&bounded, &first).await,
+        vec![first.clone(), second.clone()],
+        "stored bindings beyond the bound stay served"
+    );
+    assert!(matches!(
+        bounded
+            .execute(
+                &resource("third"),
+                operation(bind(&claim, INITIAL, &fresh_binding()))
+            )
+            .await,
+        Err(AccountCoordinatorError::Resources(
+            AccountResourcesError::ResourceLimit
+        ))
+    ));
+    let status = bounded.slot_status(&first).await.expect("slot status");
+    let (binding, _) = status.binding.expect("the first binding");
+    drive(
+        &bounded,
+        &first,
+        update(&claim, status.revision, &binding, presence(true, 4, false)),
+    )
+    .await;
 }

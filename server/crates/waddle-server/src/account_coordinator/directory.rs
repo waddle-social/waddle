@@ -24,8 +24,9 @@ use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
     AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, MarkPresented,
-    OverdueRetirements, ReadView, ReclaimIfIdle, Repair, RepairEvidence, RepairOutcome, SlotStatus,
-    Status, Unregister, UnregisterOutcome, UnregisterRequest,
+    OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession, ReleaseSessionRequest, Repair,
+    RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status, Unregister,
+    UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::AccountBindingStore;
 
@@ -157,6 +158,26 @@ impl AccountCoordinators {
                 full_jid: full_jid.clone(),
                 binding_ref: binding_ref.clone(),
                 evidence,
+            }
+        )
+    }
+
+    /// Release a resource's reference to a terminal stream-management
+    /// session by retiring the detached binding that holds it. The durable
+    /// session row can be deleted once no resource references it; see
+    /// [`AccountBindingStore::resources_for_session`].
+    pub async fn release_session(
+        &self,
+        full_jid: &FullJid,
+        request: ReleaseSessionRequest,
+    ) -> Result<SessionRelease, AccountCoordinatorError> {
+        let account = full_jid.to_bare();
+        ask!(
+            self,
+            &account,
+            ReleaseSession {
+                full_jid: full_jid.clone(),
+                request,
             }
         )
     }

@@ -37,6 +37,14 @@ pub enum AccountBindingStoreError {
     OperationIdConflict,
     #[error("the snapshot exceeds the snapshot bounds")]
     SnapshotTooLarge,
+    /// A snapshot names a stream-management session that has no durable
+    /// session row.
+    #[error("the snapshot references a stream-management session that is not stored")]
+    SessionUnknown,
+    /// A snapshot names a session generation other than the one the durable
+    /// session row is bound at.
+    #[error("the snapshot references a stream-management session generation that is not current")]
+    SessionGenerationMismatch,
     #[error("a revision or generation does not fit the stored integer range")]
     CounterOutOfRange,
     /// The in-memory store was told to refuse, to exercise callers.

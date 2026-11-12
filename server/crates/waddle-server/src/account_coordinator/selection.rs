@@ -4,7 +4,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
 use thiserror::Error;
+use tracing::Instrument;
 use waddle_xmpp::ownership::NodeLeaseIdentity;
+use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
+use waddle_xmpp::telemetry::reliability::record_janitor_sweep;
 
 use super::claims::{
     AccountClaimSource, ClaimStoreClaimSource, ConnectionLiveness, LocalNodeLiveness,
@@ -145,7 +148,9 @@ impl AccountAuthoritySelection {
     }
 }
 
-/// Reclaim idle coordinators for as long as the directory exists.
+/// Reclaim idle coordinators for as long as the directory exists. Each
+/// sweep runs in a `janitor.sweep` span and is counted as a janitor sweep,
+/// so a stalled reaper shows as a missing heartbeat like any other janitor.
 async fn reclaim_idle_coordinators(
     coordinators: Weak<AccountCoordinators>,
     config: AccountCoordinatorConfig,
@@ -159,6 +164,16 @@ async fn reclaim_idle_coordinators(
         let Some(coordinators) = coordinators.upgrade() else {
             return;
         };
-        coordinators.reclaim_idle().await;
+        async {
+            let reclaimed = coordinators.reclaim_idle().await;
+            tracing::debug!(reclaimed, "account coordinator reaper: sweep finished");
+            record_janitor_sweep(Janitor::AccountCoordinatorReaper, SweepOutcome::Completed);
+        }
+        .instrument(tracing::info_span!(
+            parent: None,
+            "janitor.sweep",
+            janitor = Janitor::AccountCoordinatorReaper.value()
+        ))
+        .await;
     }
 }

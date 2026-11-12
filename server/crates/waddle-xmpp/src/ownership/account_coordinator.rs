@@ -125,6 +125,12 @@ impl AccountResources {
     /// presentations already recorded for its current binding. An existing
     /// slot for the same full JID is replaced, which is how the owner of
     /// this state adopts what a store committed.
+    ///
+    /// A slot that holds a binding is installed even when the account is
+    /// already at its slot bound: the binding exists durably and must stay
+    /// served. The account is then over its bound and refuses every bind of
+    /// a new resource until enough bindings retire. A free slot is refused
+    /// at the bound.
     pub fn restore_slot(
         &mut self,
         slot: AccountResourceSlot,
@@ -134,7 +140,10 @@ impl AccountResources {
         if &full_jid.to_bare() != self.claim_identity.bare_jid() {
             return Err(AccountResourcesError::AccountMismatch);
         }
-        if !self.slots.contains_key(&full_jid) && self.slots.len() >= self.max_resources.get() {
+        if slot.binding_ref().is_none()
+            && !self.slots.contains_key(&full_jid)
+            && self.slots.len() >= self.max_resources.get()
+        {
             return Err(AccountResourcesError::ResourceLimit);
         }
         if let Some(key) = self.presentation_key(&full_jid) {
@@ -169,6 +178,12 @@ impl AccountResources {
             .filter(|(_, slot)| slot.binding_ref().is_none())
             .map(|(jid, _)| jid.clone())
             .collect()
+    }
+
+    /// Whether the account holds more slots than its bound, which happens
+    /// only when more bindings were stored than the bound allows.
+    pub fn over_slot_bound(&self) -> bool {
+        self.slots.len() > self.max_resources.get()
     }
 
     /// The number of slots the account holds, bound or free.

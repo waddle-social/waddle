@@ -6,7 +6,7 @@ use waddle_xmpp::ownership::account_coordinator::{BindingFenceError, Presentatio
 use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceExecution, AccountResourceOperation, AccountResourceRevision,
 };
-use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
+use waddle_xmpp::ownership::{BindingRef, SmSessionKey, UserClaimIdentity};
 
 use super::error::AccountBindingStoreError;
 use super::row::StoredResource;
@@ -48,6 +48,11 @@ pub enum PresentationMark {
 /// different operation is [`AccountBindingStoreError::OperationIdConflict`].
 /// A rejected operation is not recorded: repeating it is decided afresh,
 /// which is safe because a rejection changed nothing.
+///
+/// A commit that gives a binding a stream-management reference, or changes
+/// the one it has, is refused unless the durable session row exists and is
+/// bound at the generation the reference names. The database also holds the
+/// session id as a deferred foreign key.
 #[async_trait]
 pub trait AccountBindingStore: Send + Sync + 'static {
     /// Apply one identified mutation to the row of `full_jid`. Only a
@@ -84,6 +89,13 @@ pub trait AccountBindingStore: Send + Sync + 'static {
         &self,
         full_jid: &FullJid,
     ) -> Result<Option<StoredResource>, AccountBindingStoreError>;
+
+    /// The resources whose current binding references `session`. The
+    /// durable session row cannot be deleted while this is not empty.
+    async fn resources_for_session(
+        &self,
+        session: SmSessionKey,
+    ) -> Result<Vec<FullJid>, AccountBindingStoreError>;
 
     /// Read every resource row of an account, ordered by full JID.
     async fn load_account(
