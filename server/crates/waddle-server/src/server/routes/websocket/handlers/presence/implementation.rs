@@ -199,27 +199,16 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
         #[cfg(feature = "clustering")]
         if !muc_update::is_muc_join_presence(&presence) {
             if let Some(origin) = context.ordered_relay_origin.as_ref() {
-                if let Some(bridge) = context
-                    .state
-                    .deps
-                    .app_state
-                    .clustering_claims
-                    .ordered_relay_delivery_bridge
-                    .as_ref()
+                if let Some(addressing) =
+                    context.state.deps.app_state.clustering_claims.addressing()
                 {
                     let mut routed_presence = presence.clone();
                     routed_presence.from = Some(jid::Jid::from(sender_jid.clone()));
                     routed_presence.to = Some(to_jid.clone());
                     let stanza = Stanza::Presence(routed_presence);
-                    match bridge
-                        .try_proxy_muc_remote(
-                            &room_jid,
-                            &stanza,
-                            OrderedRelayMucProxyKind::OccupantPresence,
-                            MucProxyOrigin::Connection(
+                    match addressing.room(&room_jid).command_if_remote(crate::clustering::addressing::RoomCommand { stanza: &stanza, kind: OrderedRelayMucProxyKind::OccupantPresence, sender: MucProxyOrigin::Connection(
                                 *context.occupancy_session,
-                            ),
-                            origin, None)
+                            ), origin, admission: None })
                         .await
                     {
                         Some(

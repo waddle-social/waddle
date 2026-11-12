@@ -595,18 +595,12 @@ async fn try_deliver_registered_remote_destroy_notification(
     target: &FullJid,
     stanza: &Stanza,
 ) -> bool {
-    let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    else {
+    let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
         return true;
     };
-    bridge
-        .try_deliver_registered_remote_resource(
-            target,
+    addressing
+        .connection(target)
+        .deliver_to_registered_remote(
             stanza,
             waddle_xmpp::registry::DeliveryKind::DirectFrame,
             None,

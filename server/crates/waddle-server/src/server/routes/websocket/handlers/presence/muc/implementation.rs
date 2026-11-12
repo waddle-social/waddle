@@ -491,18 +491,12 @@ pub(crate) async fn registered_remote_resource_delivery(
 ) -> RegisteredRemoteDelivery {
     #[cfg(feature = "clustering")]
     {
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return RegisteredRemoteDelivery::Absent;
         };
-        match bridge
-            .try_deliver_registered_remote_resource(
-                target,
+        match addressing
+            .connection(target)
+            .deliver_to_registered_remote(
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
                 None,
@@ -531,17 +525,12 @@ pub(crate) async fn registered_remote_resource_write_accepted_delivery(
 ) -> RegisteredRemoteDelivery {
     #[cfg(feature = "clustering")]
     {
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return RegisteredRemoteDelivery::Absent;
         };
-        match bridge
-            .try_deliver_registered_remote_resource_write_accepted(target, stanza)
+        match addressing
+            .connection(target)
+            .deliver_to_registered_remote_write_accepted(stanza)
             .await
         {
             RegisteredRemoteWriteAcceptedDelivery::Delivered => RegisteredRemoteDelivery::Delivered,
@@ -1199,12 +1188,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                     Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
                         #[cfg(feature = "clustering")]
                         if let Some(origin) = ordered_relay_origin.as_ref() {
-                            if let Some(bridge) = state
-                                .deps
-                                .app_state
-                                .clustering_claims
-                                .ordered_relay_delivery_bridge
-                                .as_ref()
+                            if let Some(addressing) =
+                                state.deps.app_state.clustering_claims.addressing()
                             {
                                 let mut presence = xmpp_parsers::presence::Presence::new(
                                     xmpp_parsers::presence::Type::None,
@@ -1230,15 +1215,9 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                                     return Vec::new();
                                 }
                                 match remote_muc_join_decision(
-                                    bridge
-                                        .try_proxy_muc_remote(
-                                            room_jid,
-                                            &stanza,
-                                            OrderedRelayMucProxyKind::JoinPresence,
-                                            MucProxyOrigin::Connection(
+                                    addressing.room(room_jid).command_if_remote(crate::clustering::addressing::RoomCommand { stanza: &stanza, kind: OrderedRelayMucProxyKind::JoinPresence, sender: MucProxyOrigin::Connection(
                                                 occupancy_session,
-                                            ),
-                                            origin, None)
+                                            ), origin, admission: None })
                                         .await,
                                 ) {
                                     Some(RemoteMucJoinDecision::Delivered(replies)) => {
@@ -1892,13 +1871,7 @@ pub async fn handle_muc_leave(
             .contains(sender_jid, room_jid);
         #[cfg(feature = "clustering")]
         if let Some(origin) = ordered_relay_origin {
-            if let Some(bridge) = state
-                .deps
-                .app_state
-                .clustering_claims
-                .ordered_relay_delivery_bridge
-                .as_ref()
-            {
+            if let Some(addressing) = state.deps.app_state.clustering_claims.addressing() {
                 let mut presence = xmpp_parsers::presence::Presence::new(
                     xmpp_parsers::presence::Type::Unavailable,
                 );
@@ -1916,15 +1889,15 @@ pub async fn handle_muc_leave(
                     .lock_membership(sender_jid, room_jid)
                     .await;
                 match remote_muc_leave_decision(
-                    bridge
-                        .try_proxy_muc_remote(
-                            room_jid,
-                            &stanza,
-                            OrderedRelayMucProxyKind::OccupantPresence,
-                            MucProxyOrigin::Connection(occupancy_session),
+                    addressing
+                        .room(room_jid)
+                        .command_if_remote(crate::clustering::addressing::RoomCommand {
+                            stanza: &stanza,
+                            kind: OrderedRelayMucProxyKind::OccupantPresence,
+                            sender: MucProxyOrigin::Connection(occupancy_session),
                             origin,
-                            None,
-                        )
+                            admission: None,
+                        })
                         .await,
                 ) {
                     RemoteMucLeaveDecision::Delivered(replies) => {

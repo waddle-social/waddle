@@ -426,18 +426,12 @@ async fn try_deliver_registered_remote_resource(
 ) -> bool {
     #[cfg(feature = "clustering")]
     {
-        let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        else {
+        let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
             return false;
         };
-        bridge
-            .try_deliver_registered_remote_resource(
-                target,
+        addressing
+            .connection(target)
+            .deliver_to_registered_remote(
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
                 None,
@@ -460,17 +454,12 @@ async fn try_remote_owner_blocklist_push(
     blocked: bool,
     jids: &[Jid],
 ) -> bool {
-    let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    else {
+    let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
         return false;
     };
-    bridge
-        .try_fanout_remote_user_blocklist_push(source_jid, user_bare, blocked, jids)
+    addressing
+        .account(user_bare)
+        .push_blocklist(source_jid, blocked, jids)
         .await
 }
 

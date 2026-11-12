@@ -83,13 +83,7 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn try_handle
         }
         _ => false,
     };
-    let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    else {
+    let Some(addressing) = state.deps.app_state.clustering_claims.addressing() else {
         return false;
     };
     let stanza = Stanza::Presence(build_subscription_presence(
@@ -99,8 +93,9 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn try_handle
         request.status.as_deref(),
         &request.payloads,
     ));
-    let outcome = bridge
-        .try_deliver_bare_jid_remote(&request.to, &stanza, origin)
+    let outcome = addressing
+        .account(&request.to)
+        .deliver(&stanza, origin)
         .await;
     debug!(
         from = %request.from,

@@ -149,13 +149,7 @@ pub(super) async fn relay_carbons_only(
 ) -> Option<super::effects::EffectOutcome> {
     #[cfg(feature = "clustering")]
     if let Some(state) = deps.web_socket_state {
-        if let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        {
+        if let Some(addressing) = state.deps.app_state.clustering_claims.addressing() {
             let ingress_append = match deps.ingress_append_context.as_ref() {
                 Some(context) => {
                     let Some(sender) = message.from.as_ref().map(jid::Jid::to_bare) else {
@@ -166,10 +160,10 @@ pub(super) async fn relay_carbons_only(
                 None => None,
             };
             for source_jid in exclude {
-                if let Some(outcome) = bridge
-                    .try_fanout_remote_user_carbons(
+                if let Some(outcome) = addressing
+                    .account(owner)
+                    .fan_out_carbons(
                         source_jid,
-                        owner,
                         message,
                         kind,
                         exclude.to_vec(),
@@ -547,15 +541,10 @@ async fn try_deliver_registered_remote_resource(
     #[cfg(feature = "clustering")]
     {
         let state = web_socket_state?;
-        let bridge = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()?;
-        bridge
-            .try_deliver_registered_remote_resource(
-                target,
+        let addressing = state.deps.app_state.clustering_claims.addressing()?;
+        addressing
+            .connection(target)
+            .deliver_to_registered_remote(
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
                 None,

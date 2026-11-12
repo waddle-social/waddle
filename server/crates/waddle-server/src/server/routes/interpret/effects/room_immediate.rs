@@ -81,25 +81,21 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
             origin,
             reflect_replies_to_sender,
         } => {
-            let Some(bridge) = deps.web_socket_state.and_then(|state| {
-                state
-                    .deps
-                    .app_state
-                    .clustering_claims
-                    .ordered_relay_delivery_bridge
-                    .as_ref()
-            }) else {
+            let Some(addressing) = deps
+                .web_socket_state
+                .and_then(|state| state.deps.app_state.clustering_claims.addressing())
+            else {
                 return EffectOutcome::Unavailable;
             };
-            match bridge
-                .try_proxy_muc_remote(
-                    &room,
-                    &stanza,
+            match addressing
+                .room(&room)
+                .command_if_remote(crate::clustering::addressing::RoomCommand {
+                    stanza: &stanza,
                     kind,
-                    muc_origin,
-                    &origin,
-                    admission.as_ref(),
-                )
+                    sender: muc_origin,
+                    origin: &origin,
+                    admission: admission.as_ref(),
+                })
                 .await
             {
                 Some(
