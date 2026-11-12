@@ -4,6 +4,7 @@ use super::{
 };
 use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
 use crate::notification_outbox::candidate_persistence::{
     enqueue_outbox_job_tx, lock_candidate_ancestry_tx, mark_candidate_outboxed_tx,
@@ -45,7 +46,9 @@ async fn attach(fixture: &IngressFixture, candidate: &NotificationCandidate) -> 
         .await
         .expect("canonical intent");
     tx.commit().await.expect("commit canonical intent");
-    let mut tx = fixture.db.begin_immediate().await.expect("candidate tx");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("candidate tx"),
+    );
     NotificationOutboxStore::insert_candidate_in_transaction(
         &mut tx,
         candidate,
@@ -70,7 +73,9 @@ async fn fanout(
     candidate: &NotificationCandidate,
     targets: &[NotificationOutboxTarget],
 ) {
-    let mut tx = store.db.begin_immediate().await.expect("drain tx");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        store.db.begin_immediate().await.expect("drain tx"),
+    );
     lock_candidate_ancestry_tx(&mut tx, candidate)
         .await
         .expect("parent lock");
@@ -131,11 +136,13 @@ async fn notification_ancestry_fanout_coalescing_and_late_parent(fixture: Ingres
         6,
         "a late canonical parent follows both existing jobs"
     );
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("provider terminal tx");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("provider terminal tx"),
+    );
     lock_outbox_ancestry_tx(&mut tx, jobs[0].job_id.as_str())
         .await
         .expect("parent lock");
@@ -156,11 +163,13 @@ async fn notification_ancestry_fanout_coalescing_and_late_parent(fixture: Ingres
         .expect("recorded")
         .remove(0);
     tx.commit().await.expect("release intent read");
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("replay candidate tx");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("replay candidate tx"),
+    );
     NotificationOutboxStore::attach_candidate_lineage_in_transaction(
         &mut tx,
         late_key,
@@ -617,7 +626,9 @@ async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
     let fresh = candidate("unrelated-fresh-owner");
     attach(&fixture, &fresh).await;
     fanout(&outbox, &fresh, &[target]).await;
-    let mut held_parent = fixture.db.begin().await.expect("hold parent");
+    let mut held_parent = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin().await.expect("hold parent"),
+    );
     EffectDescendantRepository::lock_raw(&mut held_parent, parent)
         .await
         .expect("parent lock");
@@ -751,7 +762,9 @@ async fn explicit_revocation_retires_parked_boundary_without_provider_row(
         // This lower-sorted active job is tentatively retired before the
         // contended parent. The failed disable must roll back both jobs.
         fixture.execute("INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, queue_acceptance_may_exist, created_at_ms, updated_at_ms) SELECT '00000000-0000-4000-8000-000000000001', recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, 'queued', 0, 0, 0, 1, 1 FROM notification_outbox WHERE job_id = ?", crate::db_params![job.job_id.as_str()]).await;
-        let mut held = fixture.db.begin().await.expect("hold canonical parent");
+        let mut held = EnteredTransaction::from_fixture_transaction(
+            fixture.db.begin().await.expect("hold canonical parent"),
+        );
         EffectDescendantRepository::lock_raw(&mut held, parent)
             .await
             .expect("parent lock");
@@ -881,7 +894,9 @@ async fn explicit_retirement_only_rewrites_failed_jobs_with_outstanding_custody(
     fixture.execute("UPDATE notification_outbox SET status = 'failed', last_error = 'original-known-refusal', updated_at_ms = 37", ()).await;
     // A known refusal with unresolved canonical/lineage custody is still a
     // live obligation even though its scheduler row already says failed.
-    let mut tx = fixture.db.begin_immediate().await.expect("retirement");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("retirement"),
+    );
     let retired = retire_registration_outbox_tx(
         &mut tx,
         &notification.recipient_bare_jid,
@@ -913,11 +928,13 @@ async fn explicit_retirement_only_rewrites_failed_jobs_with_outstanding_custody(
     // Once custody is settled, preserve the historic diagnosis and tail for
     // every later endpoint retirement, including non-revocation diagnoses.
     fixture.execute("UPDATE notification_outbox SET last_error = 'historical-known-refusal', updated_at_ms = 41", ()).await;
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("repeat retirement");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("repeat retirement"),
+    );
     let retired = retire_registration_outbox_tx(
         &mut tx,
         &notification.recipient_bare_jid,

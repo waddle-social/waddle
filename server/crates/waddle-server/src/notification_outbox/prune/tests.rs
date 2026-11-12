@@ -1,6 +1,7 @@
 use super::{NotificationOutboxError, NotificationOutboxPruneOutcome, NotificationOutboxStore};
 use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_substrate::{
     gc_expired_aliases, AliasGcBudget, MessageEnvelope, ALIAS_RETENTION,
 };
@@ -188,7 +189,9 @@ async fn candidate_prune_preserves_late_attachment_after_snapshot(
         .await
         .expect("old outboxed candidate");
     let (key, intent) = parent(&fixture, &candidate).await;
-    let mut attachment = fixture.db.begin().await.expect("late attachment");
+    let mut attachment = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin().await.expect("late attachment"),
+    );
     let pid = backend_pid(&mut attachment).await;
     // The actual attachment path holds the candidate but does not rewrite its
     // dedup tuple. Its new settled reference is invisible to an older DELETE.
@@ -369,7 +372,9 @@ async fn candidate_prune_waits_for_frontier_and_full_settlement_tail(fixture: In
     let candidate = candidate("prune-frontier-tail");
     store.insert_candidate(&candidate).await.expect("candidate");
     let (key, intent) = parent(&fixture, &candidate).await;
-    let mut tx = fixture.db.begin().await.expect("candidate custody");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin().await.expect("candidate custody"),
+    );
     NotificationOutboxStore::attach_candidate_lineage_in_transaction(
         &mut tx,
         key,

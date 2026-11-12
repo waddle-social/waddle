@@ -420,10 +420,10 @@ unit of work, the pooled effect-receipt writer and its post-commit readback
 all call it. So do the raw ingress writers when their database handle is an
 attested pool: `ingress_uow::begin_raw_ingress_writer`, which the notification
 and push outboxes use, and `PostgresIngressSubstrate::begin`. On a handle
-without attestation those two keep their own sequence, which for the raw
-writer first probes for the descendant foundation so a standalone store
-without it stays usable. A request names, as typed values, what the callers
-differ in:
+without attestation the substrate keeps its own sequence, and the raw writer
+begins in the same module's `begin_unattested_raw_writer`, which first probes
+for the descendant foundation so a standalone store without it stays usable.
+A request names, as typed values, what the callers differ in:
 
 - the authority: unattested (SQLite, or PostgreSQL without attestation), the
   registered V1009 guard on an attested pool, or the candidate relation guard;
@@ -477,25 +477,28 @@ listed by file, kind and exact
 count, with its reason, in
 `server/scripts/ingress-typed-entry-allowlist.txt`.
 
+Both raw-writer begins return an `EnteredTransaction`, which only the entry
+module constructs, and a unit-of-work transaction lends the same type. The
+descendant repository methods the notification and push outboxes call
+(`EffectDescendantRepository::lock_raw`, `lock_all_raw`,
+`lock_all_nowait_raw`, `attach_raw`, `copy_raw` and `settle_all_raw`) take
+that type, as does every outbox helper between them and the begin. A
+descendant lock or write on a transaction opened directly on a database
+handle therefore does not compile. Tests wrap a fixture transaction through
+a constructor that exists only in test builds. The source check also fails
+if a `*_raw` method takes anything else.
+
 What the entry does not do:
 
 - It attests the physical connection identity and lineage, not the migration
   ledger or the epoch guard manifest; those are checked once by the startup
   preflight.
 - The pool type still exposes raw `begin`, `execute` and `query`. A raw
-  writer that began through the entry gets back a plain transaction, and its
-  later statements are not schema-qualified; they resolve through the
-  `search_path` the entry pinned.
+  writer's own statements are not schema-qualified; on an attested pool they
+  resolve through the `search_path` the entry pinned.
 - The ingress maintenance scans, the room-observation retention batch and
   three pooled single-statement reads run outside the entry. None touches a
   relation the epoch guard protects, and the allowlist names each.
-- The `*_raw` descendant repositories
-  (`EffectDescendantRepository::lock_raw`, `attach_raw`, `copy_raw`,
-  `settle_all_raw` and their siblings) accept any transaction and install
-  the epoch proof on it themselves. The notification and push outboxes call
-  them from outside the ingress modules, where the source check does not
-  look, so nothing yet proves that every such transaction on an attested
-  pool began through the entry.
 - Attach-time checks in other stores call the attestor directly on their own
   read-only transactions.
 - The clustered stores (claims, keypair lease, durable rooms, fenced stream

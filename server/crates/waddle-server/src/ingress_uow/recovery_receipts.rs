@@ -345,7 +345,7 @@ impl RecoveryReceiptRepository {
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
     ) -> Result<bool, IngressUowError> {
-        let (transaction, prepared) = tx.prepared_parts();
+        let (transaction, prepared) = tx.entered_parts();
         let api =
             match prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
                 Some(prepared) => Some(DefinerApiCandidateContext::from_prepared(prepared).ok_or(
@@ -369,7 +369,7 @@ impl RecoveryReceiptRepository {
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
     ) -> Result<(), IngressUowError> {
-        let (transaction, prepared) = tx.prepared_parts();
+        let (transaction, prepared) = tx.entered_parts();
         let api =
             match prepared.filter(|prepared| prepared.uses_definer_api_candidate()) {
                 Some(prepared) => Some(DefinerApiCandidateContext::from_prepared(prepared).ok_or(

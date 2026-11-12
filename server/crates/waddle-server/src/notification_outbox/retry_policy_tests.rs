@@ -3,6 +3,7 @@ use super::{
     NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
     PublishFailureClass, STATUS_FAILED, STATUS_QUEUED,
 };
+use crate::ingress_substrate::EnteredTransaction;
 use crate::notification_outbox::test_support::{
     bare, candidate, enqueue_jobs_for_test, inbox_with_unread, store, target, target_named,
 };
@@ -520,7 +521,9 @@ async fn explicit_retirement_preserves_settled_history_but_closes_unresolved_lin
         1
     );
     drop(rows);
-    let mut tx = store.db.begin_immediate().await.expect("retirement");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        store.db.begin_immediate().await.expect("retirement"),
+    );
     let retired = retire_registration_outbox_tx(
         &mut tx,
         &bare("alice@example.com"),

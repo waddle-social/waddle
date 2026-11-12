@@ -5,6 +5,7 @@ use super::{
     NotificationOutboxStore, NotificationThreadId, Sha256, SuppressedReason, Uuid,
 };
 use crate::ingress::test_support::IngressFixture;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress, MessageEnvelope, ALIAS_RETENTION};
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
@@ -179,11 +180,13 @@ async fn pending_provider_and_restart_reconcile(fixture: IngressFixture) {
         "push.example.com".parse().expect("service"),
         PushServiceNodeName::try_new(node.node()).expect("node"),
     );
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("old coalesced job");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("old coalesced job"),
+    );
     enqueue_outbox_job_tx(
         &mut tx,
         &candidate,
@@ -242,7 +245,9 @@ async fn pending_provider_and_restart_reconcile(fixture: IngressFixture) {
     // A later same-conversation job must not become an ancestor of an already
     // adopted candidate when startup repeats.
     let unrelated = crate::notification_outbox::test_support::candidate("later-unrelated-message");
-    let mut tx = fixture.db.begin_immediate().await.expect("later job");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("later job"),
+    );
     enqueue_outbox_job_tx(
         &mut tx,
         &unrelated,
@@ -516,11 +521,13 @@ async fn malformed_legacy_candidate_boot_isolated_and_retained(fixture: IngressF
         .expect("load")
         .remove(0);
     tx.commit().await.expect("release read");
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("canonical replay");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("canonical replay"),
+    );
     EffectDescendantRepository::lock_raw(&mut tx, sender_key)
         .await
         .expect("canonical lock");
@@ -802,11 +809,13 @@ async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
         .iter()
         .find(|row| row.message == second)
         .expect("second parent");
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("canonical acceptance");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("canonical acceptance"),
+    );
     NotificationOutboxStore::attach_candidate_lineage_in_transaction(
         &mut tx,
         first,
@@ -844,11 +853,13 @@ async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
         .quarantine_recorded_candidate(second_recorded, &snapshot)
         .await
         .expect("quarantine after acceptance releases lock");
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("duplicate replay");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("duplicate replay"),
+    );
     assert!(matches!(
         NotificationOutboxStore::attach_candidate_lineage_in_transaction(
             &mut tx,
@@ -898,7 +909,9 @@ async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed
             "push.example.com".parse().expect("service"),
             PushServiceNodeName::try_new(node.node()).expect("node"),
         );
-        let mut tx = fixture.db.begin_immediate().await.expect("legacy job");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            fixture.db.begin_immediate().await.expect("legacy job"),
+        );
         enqueue_outbox_job_tx(
             &mut tx,
             item,

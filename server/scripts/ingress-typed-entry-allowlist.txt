@@ -50,9 +50,11 @@ crates/waddle-server/src/ingress_substrate/canonical_sender.rs autocommit 1
 # positions.
 crates/waddle-server/src/ingress_uow/archive_dispatch.rs autocommit 1
 
-# --- Writers that are unattested by construction ----------------------------
-# Each is reached only when the database handle carries no attested writer
-# capability; the same function sends an attested pool through the entry.
+# --- Writers on entry transactions or on unattested handles -----------------
+# Each either runs on a transaction that came from the entry module, or is
+# reached only when the database handle carries no attested writer
+# capability, in which case the same function sends an attested pool through
+# the entry.
 
 # record_receipt_pooled: the branch after `db.attested_pg_writer_capability()`
 # returned None (one begin, one epoch lock). `record_receipt` re-reads the
@@ -60,12 +62,12 @@ crates/waddle-server/src/ingress_uow/archive_dispatch.rs autocommit 1
 crates/waddle-server/src/ingress_substrate/authority.rs begin 1
 crates/waddle-server/src/ingress_substrate/authority.rs epoch-lock 2
 
-# begin_raw_ingress_writer_inner: the foundation-probing raw writer for
-# handles without attestation (one begin). `install_epoch_proof` and the
-# `*_raw` descendant repositories re-read the epoch row on the caller's raw
-# transaction; on an attested pool that transaction came from the entry.
-crates/waddle-server/src/ingress_uow/effect_descendants.rs begin 1
-crates/waddle-server/src/ingress_uow/effect_descendants.rs epoch-lock 5
+# The descendant repository's private implementations re-read the epoch row
+# and reinstall the proof (`install_epoch_proof`) before each canonical lock.
+# They run only on a transaction the entry module opened: their `*_raw`
+# wrappers take `EnteredTransaction`, which this check requires, and their
+# unit-of-work wrappers take `IngressUowTransaction`.
+crates/waddle-server/src/ingress_uow/effect_descendants.rs epoch-lock 4
 
 # Alias GC and PostgresIngressSubstrate. `gc_candidate_batch` and
 # `gc_orphan_proof_batch` each open their own transaction and take the epoch

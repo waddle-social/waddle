@@ -11,6 +11,7 @@ use super::{run_with_retry, EffectDescendantRepository, IngressUowError};
 use super::{DatabaseDriver, Transaction};
 use super::{Digest, Sha256};
 use super::{IngressEffectIntent, MessageKey, NotificationActivityMutation};
+use crate::ingress_substrate::EnteredTransaction;
 
 pub(in crate::notification_outbox::legacy_ancestry) const PAGE: i64 = 64;
 
@@ -500,7 +501,7 @@ pub(in crate::notification_outbox::legacy_ancestry) fn legacy_fanout_gap_key(
 }
 
 pub(in crate::notification_outbox::legacy_ancestry) async fn retain_legacy_fanout_gap(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     recorded: &Recorded,
 ) -> Result<(), IngressUowError> {
     EffectDescendantRepository::attach_raw(
@@ -641,7 +642,7 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn load_page(
 
 pub(in crate::notification_outbox::legacy_ancestry) async fn begin_bounded(
     db: &Database,
-) -> Result<Transaction<'_>, IngressUowError> {
+) -> Result<EnteredTransaction<'_>, IngressUowError> {
     let timeout = std::time::Duration::from_millis(100);
     let mut tx = tokio::time::timeout(timeout, crate::ingress_uow::begin_raw_ingress_writer(db))
         .await

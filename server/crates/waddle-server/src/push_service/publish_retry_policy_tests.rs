@@ -3,6 +3,7 @@ use super::{
     record_known_publish_job_failure_tx, DatabasePushServiceStore,
     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED,
 };
+use crate::ingress_substrate::EnteredTransaction;
 use crate::push_service::test_support::{notification_item, owner, scalar_i64, store};
 
 async fn expired_batch_backoff_uses_each_rows_durable_count(
@@ -299,7 +300,9 @@ async fn expired_claims_consume_budget_and_park_without_reclaim() {
         .expect("accepted");
     let id = accepted.job_id().to_string();
     for attempt in 1..=PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
-        let mut tx = store.db.begin_immediate().await.expect("claim transaction");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            store.db.begin_immediate().await.expect("claim transaction"),
+        );
         let claim = claim_publish_job_tx(&mut tx, &id, i64::MAX)
             .await
             .expect("claim")
@@ -334,7 +337,9 @@ async fn expired_claims_consume_budget_and_park_without_reclaim() {
                 .uncertain_send
         );
         // A late result cannot clear a recovered/parked claim.
-        let mut tx = store.db.begin_immediate().await.expect("late transaction");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            store.db.begin_immediate().await.expect("late transaction"),
+        );
         record_known_publish_job_failure_tx(&mut tx, &claim, "late refusal", crate::time::now_ms())
             .await
             .expect("fenced late result");
@@ -351,11 +356,13 @@ async fn expired_claims_consume_budget_and_park_without_reclaim() {
         .await
         .expect("scheduled")
         .is_empty());
-    let mut tx = store
-        .db
-        .begin_immediate()
-        .await
-        .expect("reclaim transaction");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        store
+            .db
+            .begin_immediate()
+            .await
+            .expect("reclaim transaction"),
+    );
     assert!(claim_publish_job_tx(&mut tx, &id, i64::MAX)
         .await
         .expect("reclaim")

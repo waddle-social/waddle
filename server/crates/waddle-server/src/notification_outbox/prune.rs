@@ -7,7 +7,7 @@ use super::{
 #[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::DatabaseDriver;
-use crate::db::Transaction;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_substrate::ALIAS_RETENTION;
 use crate::ingress_substrate::{DefinerApiCandidateContext, PreparedAttestedReceiptWriter};
 use crate::ingress_uow::EffectDescendantRepository;
@@ -318,8 +318,13 @@ impl NotificationOutboxStore {
     async fn begin_prune_transaction(
         &self,
         mode: PruneMode<'_>,
-    ) -> Result<(Transaction<'_>, Option<PreparedAttestedReceiptWriter>), NotificationOutboxError>
-    {
+    ) -> Result<
+        (
+            EnteredTransaction<'_>,
+            Option<PreparedAttestedReceiptWriter>,
+        ),
+        NotificationOutboxError,
+    > {
         let timeout = std::time::Duration::from_millis(100);
         tokio::time::timeout(timeout, async {
             #[cfg(feature = "test-support")]
@@ -389,7 +394,7 @@ fn prune_row_lock(driver: DatabaseDriver) -> &'static str {
 }
 
 async fn prelock_prune_ancestry(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     api: Option<&DefinerApiCandidateContext<'_>>,
     identity: Option<&str>,
     has_foundation: bool,

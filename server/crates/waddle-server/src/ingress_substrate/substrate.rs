@@ -309,7 +309,7 @@ impl PostgresIngressSubstrate {
         )
         .await
         .map_err(super::IngressEntryError::into_substrate_error)?;
-        Ok(entry.into_parts().0)
+        Ok(entry.into_parts().0.into_transaction())
     }
 
     async fn begin_inner(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
@@ -2778,7 +2778,7 @@ async fn begin_attested_gc_writer<'a>(
         }
         other => AliasGcError::Substrate(other.into_substrate_error()),
     })?;
-    Ok(entry.into_parts().0)
+    Ok(entry.into_parts().0.into_transaction())
 }
 
 pub(in crate::ingress_substrate) fn gc_database_failure(
