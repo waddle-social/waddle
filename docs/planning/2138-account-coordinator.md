@@ -156,6 +156,39 @@ stream-management reference is optional, and its check against the session
 table is deferred to commit, because the session row and the resource row
 are written in the same transaction in either order.
 
+## What the connection actor sends
+
+The pure state lives in `waddle-xmpp/src/ownership/account_coordinator.rs`
+(`AccountResources`) over the per-resource slot model. Every call is
+`AccountResources::execute(full_jid, operation)`, where the operation has an
+identity the caller keeps for retries and a mutation that names the claim
+identity, the slot revision the caller last saw and the `BindingRef`. The
+reply is `Applied` or `Replayed` with either `Committed { revision }` or a
+typed rejection. Repeating an operation identity returns the recorded
+outcome; reusing one with a different payload is an error.
+
+| Event at the connection | Mutation | Binding state after |
+| --- | --- | --- |
+| Bind requested, or a fresh bind after a failed resume on the same socket (new `BindingRef`, same `ConnectionRef`) | `Bind` | Prepared |
+| Endpoint published non-routable | `PublishEndpoint` | Published |
+| Durable rows committed | `RegisterActor` | Active; the actor may now answer the client |
+| Presence, priority, carbons, roster or block-list interest changed | `UpdateSnapshot` | unchanged |
+| Transport lost with a resumable session | `Detach` | Detached |
+| Resume succeeded on a new socket (new `BindingRef` on the new `ConnectionRef`) | `SuccessfulResume` | Active, same slot and snapshot |
+| Replacement, unregister or terminal cleanup started | `BeginRetirement` | Retiring |
+| Pump observed terminated and teardown evidence collected | `CompleteRetirement` | Retired; the slot is free |
+| The account's claim moved to this node | `ReplaceClaim`, then `AdoptBinding` per live binding | unchanged |
+
+Before answering a delayed bind, the actor re-reads
+`AccountResourceSlot::current_bind_success_receipt`, so a binding retired or
+replaced in the meantime is not acknowledged. Offline and
+pending-subscription flushes call `AccountResources::mark_presented` first
+and present only when it returns `true`.
+
+No actor or service wraps this state yet, no durable rows back it, and
+nothing in the server calls it. The module is compiled only for tests and
+with the `test-utils` feature, like the slot model it builds on.
+
 ## Choices where the notes differ
 
 - **Fence.** `2046-local-binding-id.md` fences registry mutations with a

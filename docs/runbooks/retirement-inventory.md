@@ -26,6 +26,27 @@ outside test files and test modules. `S/` is
 | Dark connection actor (the actor that hosts the live loop without being the owner) | `W/connection_actor.rs`, `W/connection_actor_core.rs`, `W/connection_actor_driver_task.rs` and `W/connection_actor_driver_task/`, `W/connection_actor/`, `W/actor_local_endpoint.rs`; selected by `LiveConnectionHost::Actor` in `S/server/state.rs`, whose default is `PlainTask` | The connection actor as the only `/ws` owner (M3) | **present, unselected** in production: `LiveConnectionHost` defaults to `PlainTask`, and the test-support environment variable `WADDLE_TEST_LIVE_CONNECTION_HOST` selects the actor | `LiveConnectionHost` and the plain-task loop in `W/connection.rs` are deleted; the actor is the only host |
 | `WsConnState` writers | `W/state.rs` (the struct); writers in `W/connection.rs` (44 occurrences), `W/cleanup.rs` (19), `W/batch_write.rs` (14), `W/connection_actor_driver_task.rs` (14), `W/connection_actor_core.rs` (13), `W/outbound.rs` (9), `W/frame.rs` (9), `W/stream_management/registration.rs` (7), `W/connection_actor.rs` (7), `W/registration.rs` (5), `W/replay.rs` (4), and twelve more files with fewer | One owner per field: the connection actor, durable stream management, the account coordinator or the transport pump, as assigned in [D5 of the completion contracts](../planning/2046-completion-contracts.md#d5-field-owners) | **present** | No function outside the connection actor takes `&mut WsConnState`; the fields D5 marks "Deleted" are gone |
 
+## Account-resource deletion plan
+
+The dual registration, user-resource mirror and registry-ownership rows
+above are deleted together, after the account coordinator of
+[`2138-account-coordinator.md`](../planning/2138-account-coordinator.md) is
+the authority. None of them can be deleted today: the WebSocket loop still
+writes each one, and routing reads them. Each step lists what must hold on
+main first.
+
+| Step | What is deleted | Preconditions |
+|---|---|---|
+| 1 | `mirror_register`, `mirror_register_outcome` and `mirror_unregister` in `S/server/dual_registration.rs`, with the file | The connection actor sends `Bind`, `PublishEndpoint` and `RegisterActor` for every bind and `SuccessfulResume` for every resume; `BeginRetirement` and `CompleteRetirement` replace every `mirror_unregister` caller (`W/registration.rs`, `W/cleanup.rs`, `W/stream_management/registration.rs`, the session janitors, the route bridge); the durable resource rows commit in the bind transaction |
+| 2 | `users[].resources` and `pending_unregisters` in `X/registry/user_registry.rs`, and the `UserActor` connection map with its `RegisterConnection` and `UnregisterConnection` messages | Step 1; `registry/selection.rs` and `UserActor` delivery read the coordinator's slots; recipient selection, carbon policy and presence fan-out pass with the coordinator as their only source; remote resources are addressed through `clustering::addressing`, not through mirror entries |
+| 3 | `connections` and `bind_slots` as the owner of a binding in `X/registry/connection_registry.rs` | Steps 1 and 2; a full JID resolves to a `BindingRef` through the coordinator before every delivery; `LocalConnectionBindingId` has no remaining reader, which needs the remote registration snapshot to carry a `BindingRef` |
+| 4 | `presence_states`, `last_activity` and `pending_subscription_stanzas` as registry fields | Step 3; the coordinator holds them process-locally, as D5 assigns |
+
+A transport-only socket index may remain after step 3 if the connection
+actor needs one to find its pump. It is recorded under "Derived indexes
+that may remain" when that is decided, and nothing may read it to choose a
+destination.
+
 ## Derived indexes that may remain
 
 The umbrella allows a retained derived index if it has a documented owner
