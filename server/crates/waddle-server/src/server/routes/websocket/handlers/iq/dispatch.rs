@@ -355,7 +355,15 @@ pub async fn handle_iq_with_conn_state(
 
     let muc_owner_or_moderation =
         handle_muc_owner_and_moderation_iq(handler_ctx, state, phase, authenticated_session).await;
-    if !muc_owner_or_moderation.frames.is_empty() || !muc_owner_or_moderation.completions.is_empty()
+    // An owner destroy can commit and still produce no frames: when the
+    // handler cannot deliver the completion itself it leaves the requester
+    // without a reply rather than send a result ahead of the destroy
+    // presence. That request was handled; it must not fall through to the
+    // unknown-IQ error below.
+    let owner_destroy = has_destroy && payload_ns == "http://jabber.org/protocol/muc#owner";
+    if owner_destroy
+        || !muc_owner_or_moderation.frames.is_empty()
+        || !muc_owner_or_moderation.completions.is_empty()
     {
         return muc_owner_or_moderation;
     }

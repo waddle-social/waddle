@@ -3990,6 +3990,247 @@ async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
 /// re-registration/re-dial recovery window (a few seconds each, per this
 /// harness's fast-timer subprocess config) — single-digit-to-low-tens of
 /// seconds total, reported at the end of this test run.
+/// XEP-0045 §10.9: the owner who destroys a room receives the destroy
+/// presence and then the IQ result. The destroy commits before the handler
+/// claims the completion it delivers inline, and every node runs a janitor
+/// that drains committed completions once a second. This holds the handler
+/// between the commit and its claim for longer than two janitor ticks on
+/// both nodes: the completion must still be the handler's to deliver.
+#[tokio::test]
+async fn room_destroy_reply_survives_janitor_ticks_between_commit_and_inline_claim() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping room_destroy_reply_survives_janitor_ticks_between_commit_and_inline_claim: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+
+    let seam = tempfile::tempdir().expect("seam directory");
+    let seam_directory = seam.path().display().to_string();
+    let hold = seam.path().join("hold-inline-claim");
+    let events = seam.path().join("events");
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        port_a,
+        &[port_b],
+        &[(
+            "WADDLE_TEST_SEAM_DESTROY_COMPLETION_DIRECTORY",
+            seam_directory.as_str(),
+        )],
+    )
+    .await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let owner_password = server_b.fixed_account_password().to_string();
+    let mut owner = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &owner_password,
+        &format!("destroy-owner-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("the owner connects to node A");
+    let room = format!("destroy-held-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    owner
+        .send(&format!(
+            r#"<presence to="{room}/owner"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("the owner creates the room");
+    owner
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("the room is created");
+
+    std::fs::write(&hold, b"").expect("arm the inline claim hold");
+    owner
+        .send(&format!(
+            r#"<iq type="set" id="destroy-held" to="{room}"><query xmlns="{NS_MUC_OWNER}"><destroy/></query></iq>"#
+        ))
+        .await
+        .expect("the owner destroys the room");
+    let engaged = Instant::now() + Duration::from_secs(20);
+    while !std::fs::read_to_string(&events).is_ok_and(|log| log.starts_with("held ")) {
+        assert!(
+            Instant::now() < engaged,
+            "the inline claim hold never engaged"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Both nodes' janitors tick at least twice while the handler is held.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    std::fs::remove_file(&hold).expect("release the inline claim hold");
+
+    let frames = owner
+        .recv_until(|frame| frame.contains("<iq") && frame.contains("destroy-held"))
+        .await
+        .expect("the destroy request is answered");
+    let reply = frames.last().expect("the IQ reply");
+    assert!(
+        reply.contains("type='result'") || reply.contains("type=\"result\""),
+        "the owner must receive a result for the destroyed room: {frames:?}"
+    );
+    let presence = frames
+        .iter()
+        .position(|frame| {
+            frame.contains("<presence") && frame.contains(&room) && frame.contains("<destroy")
+        })
+        .unwrap_or_else(|| panic!("the owner must receive the destroy presence: {frames:?}"));
+    assert!(
+        presence < frames.len() - 1,
+        "the destroy presence must precede the IQ result: {frames:?}"
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.contains("<presence") && frame.contains("<destroy"))
+            .count(),
+        1,
+        "the destroy presence must be delivered once: {frames:?}"
+    );
+
+    let log = std::fs::read_to_string(&events).expect("seam events");
+    assert_eq!(
+        log.lines()
+            .map(|line| line.split(' ').next().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["held", "released"],
+        "the hold must engage exactly once: {log}"
+    );
+    let conn = db.guard().await.expect("control connection");
+    let mut rows = conn
+        .query(
+            "SELECT (SELECT count(*) FROM clustering_muc_rooms WHERE room_jid = ?), \
+                    (SELECT count(*) FROM clustering_muc_room_lifecycles \
+                      WHERE room_jid = ? AND state = 'tombstoned'), \
+                    (SELECT count(*) FROM clustering_muc_destroy_outbox)",
+            waddle_server::db_params![room.clone(), room.clone()],
+        )
+        .await
+        .expect("read the destroyed room");
+    let row = rows.next().await.expect("row").expect("one row");
+    assert_eq!(
+        (
+            row.get::<i64>(0).expect("rooms"),
+            row.get::<i64>(1).expect("tombstones"),
+            row.get::<i64>(2).expect("outbox rows"),
+        ),
+        (0, 1, 0),
+        "the room is destroyed once and its completion settled"
+    );
+    drop(rows);
+    drop(conn);
+
+    drop(owner);
+    drop(server_a);
+    drop(server_b);
+}
+
+/// A run of owner destroys on a two-node cluster, with both nodes'
+/// completion janitors ticking throughout, is answered with a result every
+/// time. This is a statistical companion to the held-claim test above: it
+/// exercises the unheld timing the servers actually run with.
+#[tokio::test]
+async fn consecutive_room_destroys_are_each_answered_with_a_result() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping consecutive_room_destroys_are_each_answered_with_a_result: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
+    const ROOMS: usize = 30;
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let owner_password = server_b.fixed_account_password().to_string();
+    let mut owner = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &owner_password,
+        &format!("destroy-owner-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("the owner connects to node A");
+
+    let mut replies = Vec::new();
+    for index in 0..ROOMS {
+        let room = format!("destroy-reply-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+        owner
+            .send(&format!(
+                r#"<presence to="{room}/owner"><x xmlns="{NS_MUC}"/></presence>"#
+            ))
+            .await
+            .expect("the owner creates the room");
+        owner
+            .recv_until(|frame| frame.contains("<subject"))
+            .await
+            .expect("the room is created");
+        let id = format!("destroy-{index}");
+        owner
+            .send(&format!(
+                r#"<iq type="set" id="{id}" to="{room}"><query xmlns="{NS_MUC_OWNER}"><destroy/></query></iq>"#
+            ))
+            .await
+            .expect("the owner destroys the room");
+        let reply = owner
+            .recv_matching(|frame| frame.contains("<iq") && frame.contains(&id))
+            .await
+            .expect("the destroy request is answered");
+        replies.push(reply);
+    }
+    let errors: Vec<&String> = replies
+        .iter()
+        .filter(|reply| !(reply.contains("type='result'") || reply.contains("type=\"result\"")))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{} of {ROOMS} destroy requests were not answered with a result: {errors:#?}",
+        errors.len()
+    );
+
+    drop(owner);
+    drop(server_a);
+    drop(server_b);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn whole_node_isolation_fences_then_self_heals_without_operator_intervention() {
     let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {

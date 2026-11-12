@@ -666,6 +666,10 @@ pub(crate) async fn persist_destroy_completion(
 /// destroy. Clustered destroys arm this exact row inside the durable room
 /// tombstone transaction; this best-effort update is therefore never the
 /// crash-recovery proof for a durable destroy.
+///
+/// The update that takes the row from inert to due also leases it to the
+/// requesting handler, as the clustered commit does. Arming a row that is
+/// already due leaves its lease alone, so a repeated arm cannot extend it.
 pub(crate) async fn arm_destroy_completion_recovery(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
@@ -677,11 +681,18 @@ pub(crate) async fn arm_destroy_completion_recovery(
             .db_pool
             .global_actor()
             .ask(DbExecute {
-                sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
+                sql: "UPDATE clustering_muc_destroy_outbox SET \
+                        lease_token = CASE WHEN available_at_ms = ? THEN ? ELSE lease_token END, \
+                        leased_at_ms = CASE WHEN available_at_ms = ? THEN ? ELSE leased_at_ms END, \
+                        available_at_ms = ? \
                       WHERE attempt_id = ? AND lifecycle_id IS NULL AND \
                       (available_at_ms = ? OR available_at_ms <= ?)"
                     .to_string(),
                 params: crate::db_params![
+                    i64::MAX,
+                    crate::muc_destroy_completion_outbox::inline_destroy_lease_token(&attempt),
+                    i64::MAX,
+                    crate::time::now_ms(),
                     crate::time::now_ms(),
                     attempt.as_uuid().to_string(),
                     i64::MAX,
@@ -795,9 +806,45 @@ pub(crate) async fn claim_persisted_destroy_completion(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
 ) -> Option<LeasedDestroyCompletion> {
+    let now = crate::time::now_ms();
+    claim_destroy_completion_where(
+        state,
+        attempt,
+        "(lease_token IS NULL OR leased_at_ms < ?)",
+        now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS,
+        now,
+    )
+    .await
+}
+
+/// Claim the completion this handler's destroy armed for it. The row was
+/// armed leased under the attempt's inline token, which no janitor claims
+/// while that lease is live; exchanging it for a private token here is what
+/// makes this handler the one executor. If a janitor took the row over after
+/// the lease lapsed, the token no longer matches and nothing is claimed.
+pub(crate) async fn claim_inline_destroy_completion(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+) -> Option<LeasedDestroyCompletion> {
+    claim_destroy_completion_where(
+        state,
+        attempt,
+        "lease_token = ?",
+        crate::muc_destroy_completion_outbox::inline_destroy_lease_token(&attempt),
+        crate::time::now_ms(),
+    )
+    .await
+}
+
+async fn claim_destroy_completion_where(
+    state: &WebSocketState,
+    attempt: waddle_xmpp::muc::DestroyAttemptId,
+    lease_predicate: &'static str,
+    lease_argument: impl Into<crate::db::Value>,
+    now: i64,
+) -> Option<LeasedDestroyCompletion> {
     use crate::db::{row_value, ValueExt};
 
-    let now = crate::time::now_ms();
     let lease_token = uuid::Uuid::new_v4().to_string();
     let claimed = match state
         .deps
@@ -805,17 +852,17 @@ pub(crate) async fn claim_persisted_destroy_completion(
         .db_pool
         .global_actor()
         .ask(DbExecute {
-            sql: "UPDATE clustering_muc_destroy_outbox \
-                  SET lease_token = ?, leased_at_ms = ? \
-                  WHERE attempt_id = ? AND available_at_ms <= ? AND \
-                  (lease_token IS NULL OR leased_at_ms < ?)"
-                .to_string(),
-            params: crate::db_params![
-                lease_token.clone(),
-                now,
-                attempt.as_uuid().to_string(),
-                now,
-                now - DESTROY_COMPLETION_LEASE_TIMEOUT_MS,
+            sql: format!(
+                "UPDATE clustering_muc_destroy_outbox \
+                 SET lease_token = ?, leased_at_ms = ? \
+                 WHERE attempt_id = ? AND available_at_ms <= ? AND {lease_predicate}"
+            ),
+            params: vec![
+                lease_token.clone().into(),
+                now.into(),
+                attempt.as_uuid().to_string().into(),
+                now.into(),
+                lease_argument.into(),
             ],
         })
         .await
@@ -1514,7 +1561,10 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 // The destroy is already durable. Do not send an IQ result
                 // ahead of the required §10.9 presence if its inline drain
                 // cannot make progress; the leased completion and janitor
-                // retain the committed notification for retry.
+                // retain the committed notification for retry. Dispatch
+                // treats an owner destroy as answered here even with no
+                // frames, so the requester sees no reply rather than an
+                // unrelated error.
                 return ResponseBatch::default();
             };
             let room_jid_string = room_jid.to_string();

@@ -1731,12 +1731,18 @@ impl PostgresMucRoomStore {
                 {
                     let armed = tx
                         .execute(
+                            // Armed already leased to the requesting handler;
+                            // see `inline_destroy_lease_token`.
                             "UPDATE clustering_muc_destroy_outbox \
                              SET lifecycle_id = ?, available_at_ms = ?, \
-                                 lease_token = NULL, leased_at_ms = NULL \
+                                 lease_token = ?, leased_at_ms = ? \
                              WHERE attempt_id = ?",
                             crate::db_params![
                                 lifecycle.to_string(),
+                                crate::time::now_ms(),
+                                crate::muc_destroy_completion_outbox::inline_destroy_lease_token(
+                                    attempt
+                                ),
                                 crate::time::now_ms(),
                                 attempt.as_uuid().to_string(),
                             ],
@@ -2139,11 +2145,15 @@ impl PostgresMucRoomStore {
         } {
             let armed = tx
                 .execute(
+                    // Armed already leased to the requesting handler; see
+                    // `inline_destroy_lease_token`.
                     "UPDATE clustering_muc_destroy_outbox \
-                     SET lifecycle_id = ?, available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL \
+                     SET lifecycle_id = ?, available_at_ms = ?, lease_token = ?, leased_at_ms = ? \
                      WHERE attempt_id = ?",
                     crate::db_params![
                         lifecycle.to_string(),
+                        crate::time::now_ms(),
+                        crate::muc_destroy_completion_outbox::inline_destroy_lease_token(attempt),
                         crate::time::now_ms(),
                         attempt.as_uuid().to_string()
                     ],

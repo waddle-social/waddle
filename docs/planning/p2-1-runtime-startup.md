@@ -172,21 +172,18 @@ the archive, and bans an occupant, which commits an admin receipt. A
 replacement node then creates a second room and is killed. The survivor
 expires it, steals the room claim and serves the room; once the keypair
 lease has run out a further node steals the dead node's slot and joins; and
-the owner destroys the room. No relay may record an
+the owner destroys the room and receives the destroy presence followed by
+the IQ result. No relay may record an
 `insufficient_privilege` error or a catalog-changing statement, the catalog
 must be unchanged, and the owner phase must run again on the database
 afterwards.
 
 It does not cover an administrative room owner transfer, or the archive of
 an instant room read from a node that does not own the room, which the
-archive access gate refuses with or without the restricted role. The reply
-to the destroy request is not asserted: when another node's janitor leases
-the destroy completion before the requesting node drains it inline, the
-request is answered with an error although the room is destroyed, with or
-without the restricted role. The relay classifies each statement by its
-first keyword after whitespace and comments and counts a `DO` block as a
-catalog change; DDL run inside a function a statement calls is visible only
-through the catalog comparison.
+archive access gate refuses with or without the restricted role. The relay
+classifies each statement by its first keyword after whitespace and
+comments and counts a `DO` block as a catalog change; DDL run inside a
+function a statement calls is visible only through the catalog comparison.
 
 Old-writer drain and physical primary fencing remain gates, as do the parts
 of typed transaction authority listed under
