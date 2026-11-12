@@ -95,11 +95,7 @@ async fn current_actor(
 /// removes in `ingress_room_occupants`, with the generation of the
 /// connection that holds it.
 fn durable_occupancy_applies(uow: &IngressUnitOfWork, manifest: &FrozenRoomManifest) -> bool {
-    match uow.fencing() {
-        IngressFencing::SingleNode => false,
-        #[cfg(feature = "clustering")]
-        crate::ingress_uow::IngressFencing::Clustered(_) => manifest.claim_fence.is_some(),
-    }
+    manifest.claim_fence.is_some() && !matches!(uow.fencing(), IngressFencing::SingleNode)
 }
 
 /// The recorded seat of `target` in the manifest's room.
@@ -162,6 +158,7 @@ async fn enqueue_at_durable_seat(
 /// a target without a row is not an occupant any more. A target with a row
 /// stays owed; a row whose connection is gone is removed by the owner's
 /// ghost sweep or by the next owner's seating.
+#[cfg(feature = "clustering")]
 async fn retire_departed_durable_seat(
     uow: &IngressUnitOfWork,
     manifest: &FrozenRoomManifest,
@@ -206,6 +203,18 @@ async fn retire_departed_durable_seat(
     .await
     .map(Some)
     .map_err(|failure| failure.last_error)
+}
+
+/// Without cluster claims a room has one owner and its actor decides.
+#[cfg(not(feature = "clustering"))]
+async fn retire_departed_durable_seat(
+    _uow: &IngressUnitOfWork,
+    _manifest: &FrozenRoomManifest,
+    _key: waddle_xmpp::ingress::MessageKey,
+    _progress: &super::recorded::RouteProgress,
+    _target: &FullJid,
+) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
+    Ok(None)
 }
 
 /// The actor action owns this transaction so an asking task's timeout cannot
