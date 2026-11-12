@@ -11400,6 +11400,7 @@ mod fix3_shutdown_race {
         let handshake_budget = Duration::from_secs(30);
         let clustering = ClusteringHandles {
             claim_store: Some(Arc::clone(&resuming_claim_store)),
+            claim_authority: None,
             node_identity: Some(resuming_identity_handle),
             local_claims: None,
             room_local_claims: None,
@@ -11731,6 +11732,7 @@ mod fix_a_post_cas_shutdown {
         let handshake_budget = Duration::from_secs(30);
         let clustering = ClusteringHandles {
             claim_store: Some(Arc::clone(&gated_claim_store)),
+            claim_authority: None,
             node_identity: Some(resuming_identity_handle),
             local_claims: None,
             room_local_claims: None,

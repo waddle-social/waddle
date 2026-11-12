@@ -289,8 +289,20 @@ pub enum MucOwnerPreparationError {
     UnsafeOwnerBoundary,
     #[error("MUC owner preparation requires a fresh room schema")]
     ExistingRoomSchema,
+    #[error("the MUC owner step could not take its lock within the lock timeout")]
+    LockTimeout,
     #[error(transparent)]
     Database(#[from] DatabaseError),
+}
+
+/// Fail-closed refusal to attach the durable room store to an
+/// owner-prepared schema under the restricted runtime role.
+#[derive(Debug, thiserror::Error)]
+pub enum MucRuntimeAttachError {
+    #[error("the claim evidence was verified on a different database pool")]
+    ClaimAuthorityMismatch,
+    #[error(transparent)]
+    Schema(#[from] crate::room_effect_outbox::RoomEffectRuntimeAttachError),
 }
 
 /// Postgres-backed [`MucDurableStore`] (ADR-0017 Phase 3 Slice 7). See the
@@ -385,6 +397,69 @@ impl PostgresMucRoomStore {
         Self::ensure_schema_in_tx(&mut tx).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Create or complete the room tables through the schema owner, adopting
+    /// tables an owner-capable runtime created. Missing tables, columns,
+    /// constraints and indexes are added under the room schema advisory lock;
+    /// retained rooms, affiliations, lifecycles and receipts are not
+    /// rewritten, and neither the claim tables, occupancy authority nor either
+    /// outbox is touched. A rerun on a prepared schema changes nothing. The
+    /// caller fences other writers and schema changes.
+    pub async fn prepare_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+    ) -> Result<(), MucOwnerPreparationError> {
+        if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+            return Err(MucOwnerPreparationError::OwnerHandleRequired);
+        }
+        let prepare = async {
+            let mut tx = db
+                .begin_catalog_fenced(&[CatalogFenceLock::Exclusive(MUC_SCHEMA_ADVISORY_LOCK_KEY)])
+                .await?;
+            Self::bound_owner_bootstrap_waits(&mut tx).await?;
+            crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+                .await
+                .map_err(|_| MucOwnerPreparationError::UnsafeOwnerBoundary)?;
+            Self::ensure_schema_in_tx(&mut tx).await?;
+            tx.commit().await?;
+            Ok(())
+        };
+        prepare.await.map_err(|error| match error {
+            MucOwnerPreparationError::Database(error)
+                if crate::clustering::lease::is_lock_timeout(&error) =>
+            {
+                MucOwnerPreparationError::LockTimeout
+            }
+            other => other,
+        })
+    }
+
+    /// Attach the serving store to an owner-prepared schema through the
+    /// exact attested main pool. The room tables, both outboxes and the
+    /// runtime's privileges on them are verified in one read-only snapshot
+    /// and nothing is created. `claims` is the evidence that the claim and
+    /// occupancy relations every fenced room write locks were verified on
+    /// this same pool.
+    pub async fn attach_runtime(
+        db: Database,
+        stop_token: CancellationToken,
+        node_identity: SharedNodeIdentity,
+        claims: &crate::clustering::claims::VerifiedMainClaimOccupancy,
+    ) -> Result<Self, MucRuntimeAttachError> {
+        if !claims.belongs_to_main_pool(&db) {
+            return Err(MucRuntimeAttachError::ClaimAuthorityMismatch);
+        }
+        let _verified = RoomEffectOutboxStore::verify_muc_room_serving(db.clone()).await?;
+        let room_effect_outbox = RoomEffectOutboxStore::attach_serving(db.clone()).await?;
+        Ok(Self {
+            db,
+            room_effect_outbox,
+            node_identity,
+            stop_token,
+            exact_claim_fences: DashMap::new(),
+            published_claim_fences: DashMap::new(),
+        })
     }
 
     /// Open against an already-opened Postgres [`Database`] handle — the

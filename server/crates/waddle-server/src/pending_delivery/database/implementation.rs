@@ -153,7 +153,7 @@ pub(in crate::pending_delivery::database) fn claim_error_to_pending_storage_erro
         | ClaimError::Conflict
         | ClaimError::Draining
         | ClaimError::AuthorityDisabled => PendingStorageError::NotOwner { entity },
-        ClaimError::Backend(_) | ClaimError::Poisoned => {
+        ClaimError::Backend(_) | ClaimError::Poisoned | ClaimError::OwnerPreparationRequired => {
             PendingStorageError::Other(error.to_string())
         }
         // Defensive only: `ensure_claimed` never actually returns this

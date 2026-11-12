@@ -247,9 +247,11 @@ const MUC_LIFECYCLES: Table = Table {
     checks: MUC_LIFECYCLE_CHECKS,
     foreign_key: None,
     indexes: MUC_LIFECYCLE_INDEXES,
+    // Lifecycles are inserted, updated and row-locked; a destroyed room's
+    // lifecycle is tombstoned, never deleted.
     insert: true,
     update: true,
-    delete: true,
+    delete: false,
 };
 
 const MUC_ADMIN_RECEIPT_COLUMNS: &[Column] = &[
@@ -331,8 +333,31 @@ const MUC_TABLES: &[&Table] = &[
     &EFFECTS,
 ];
 
+/// Which grantees the schema ACL may name besides the schema owner. Every
+/// mode refuses PUBLIC and anything but non-grantable USAGE.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaAcl {
+    /// Any role, with non-grantable USAGE only. Tables are checked without
+    /// foreign keys or triggers of any kind.
+    UsageOnly,
+    /// Only the runtime role and the attestation definer.
+    Exact,
+    /// The runtime role, the attestation definer, and `pg_monitor` when the
+    /// schema owner granted it: room observation preparation grants that
+    /// USAGE for monitoring reads on every prepared schema.
+    ExactWithMonitor,
+}
+
+impl SchemaAcl {
+    /// Exact modes also pin heap storage and admit only the internal
+    /// triggers and inbound foreign keys the room tables declare.
+    fn exact(self) -> bool {
+        self != Self::UsageOnly
+    }
+}
+
 pub(super) async fn verify(db: &Database) -> Result<(), RoomEffectRuntimeAttachError> {
-    verify_tables(db, &[&EFFECTS], false, None, None)
+    verify_tables(db, &[&EFFECTS], SchemaAcl::UsageOnly, None, None)
         .await
         .map(drop)
 }
@@ -340,30 +365,44 @@ pub(super) async fn verify(db: &Database) -> Result<(), RoomEffectRuntimeAttachE
 pub(super) async fn verify_muc_room_runtime(
     db: &Database,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
-    verify_tables(db, MUC_TABLES, true, None, None).await
+    verify_tables(db, MUC_TABLES, SchemaAcl::Exact, None, None).await
+}
+
+pub(super) async fn verify_muc_room_serving(
+    db: &Database,
+) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
+    verify_tables(db, MUC_TABLES, SchemaAcl::ExactWithMonitor, None, None).await
 }
 
 pub(super) async fn verify_muc_room_runtime_v1(
     db: &Database,
     profile: &crate::pubsub::RestrictedServingProfileV1,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
-    verify_tables(db, MUC_TABLES, true, Some(profile), None).await
+    verify_tables(db, MUC_TABLES, SchemaAcl::Exact, Some(profile), None).await
 }
 
 pub(super) async fn verify_effect_outbox_v2(
     db: &Database,
     profile: &crate::pubsub::RestrictedServingProfileV2,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
-    verify_tables(db, &[&EFFECTS], true, Some(&profile.v1), Some(profile)).await
+    verify_tables(
+        db,
+        &[&EFFECTS],
+        SchemaAcl::Exact,
+        Some(&profile.v1),
+        Some(profile),
+    )
+    .await
 }
 
 async fn verify_tables(
     db: &Database,
     tables: &[&Table],
-    exact_schema_acl: bool,
+    schema_acl: SchemaAcl,
     profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
     v2: Option<&crate::pubsub::RestrictedServingProfileV2>,
 ) -> Result<AttestedPostgresWriterCapability, RoomEffectRuntimeAttachError> {
+    let exact_schema_acl = schema_acl.exact();
     if db.driver() != DatabaseDriver::Postgres {
         return Err(RoomEffectRuntimeAttachError::AttestedPostgresRequired);
     }
@@ -472,7 +511,7 @@ async fn verify_tables(
     verify_runtime_role(
         &mut tx,
         schema,
-        exact_schema_acl,
+        schema_acl,
         capability.definer_role().as_str(),
         profile,
     )
@@ -849,10 +888,11 @@ async fn verify_indexes(
 async fn verify_runtime_role(
     tx: &mut Transaction<'_>,
     schema: &str,
-    exact_schema_acl: bool,
+    acl_mode: SchemaAcl,
     expected_definer: &str,
     profile: Option<&crate::pubsub::RestrictedServingProfileV1>,
 ) -> Result<(), RoomEffectRuntimeAttachError> {
+    let exact_schema_acl = acl_mode.exact();
     let schema_acl = if let Some(profile) = profile {
         format!(
             "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
@@ -860,6 +900,15 @@ async fn verify_runtime_role(
              OR (a.grantee <> n.nspowner AND (a.grantor <> n.nspowner OR a.privilege_type <> 'USAGE' OR a.is_grantable)))",
             profile.api_oid, profile.helper_oid
         )
+    } else if acl_mode == SchemaAcl::ExactWithMonitor {
+        // Joining the role, rather than resolving it inside a NOT IN list,
+        // keeps an absent pg_monitor from admitting anything.
+        "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+           WHERE a.grantee = 0 OR (a.grantee <> n.nspowner AND (a.privilege_type <> 'USAGE' OR a.is_grantable \
+             OR NOT (a.grantee IN (r.oid,definer.oid) \
+               OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles monitor \
+                 WHERE monitor.rolname = 'pg_monitor' AND monitor.oid = a.grantee \
+                   AND a.grantor = n.nspowner)))))".to_owned()
     } else if exact_schema_acl {
         "AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
            WHERE a.grantee = 0 OR a.grantee NOT IN (n.nspowner,r.oid,definer.oid) \

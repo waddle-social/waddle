@@ -123,25 +123,32 @@ installation are verified.
 The runtime role holds no DDL privilege. A separate owner phase,
 `server::runtime_owner::prepare_restricted_runtime_owner`, runs on a handle
 whose session user is the migrator login and whose current role is the NOLOGIN
-schema owner. It runs the registered migrations, each non-clustered store's
-owner preparation (room observation, pending delivery, inbox, stream
-management, PubSub, spaces, push registrations, notification activity, call
-teardown, Push Service, notification outbox, VAPID, room effect outbox, MUC
-destroy outbox, MAM and the webhook delivery ledger) and the runtime grants.
-The attestor is installed afterwards by its own installer login.
+schema owner. It runs the registered migrations, each store's owner
+preparation (room observation, pending delivery, inbox, stream management,
+PubSub, spaces, push registrations, notification activity, call teardown,
+Push Service, notification outbox, VAPID, room effect outbox, MUC destroy
+outbox, MAM and the webhook delivery ledger) and the runtime grants. A plan
+with a clustering section also prepares the clustering stores; see
+[Clustered owner phase](#clustered-owner-phase). The attestor is installed
+afterwards by its own installer login.
 
 The runtime additionally needs three operator inputs that are never inferred
 from its connection: `WADDLE_DB_MIGRATOR_LOGIN` (the login that ran the owner
 phase, checked by the room observation verifier), and
 `WADDLE_XMPP_MAM_SCHEMA_OWNER` with `WADDLE_XMPP_MAM_CLAIM_SCHEMA`.
 
-Startup refuses, before binding a listener, when clustering is enabled
-together with the attested pool: the clustering stores (keypair lease, claims,
-durable MUC rooms, fenced stream management) have no owner-prepared
-attachment. A store whose relation is missing or drifted fails its attachment;
-the runtime never creates it.
+A store whose relation is missing or drifted fails its attachment; the
+runtime never creates it. With clustering enabled the runtime also attaches
+the clustering stores: it opens a second attested pool under the same login
+for node and claim liveness, verifies the claim, node, steal-intent,
+reaper-cursor, allowlist and occupancy relations once, and attaches the
+keypair lease, the claim store, the durable room store, fenced stream
+management, claim-fenced MAM and claim-fenced pending delivery with that
+evidence. A clustered start on a database prepared without the clustering
+section, or on a keypair-pool generation that is still pending, refuses
+before it publishes a listener.
 
-The non-clustered server serves under the runtime role.
+The server serves under the runtime role, clustered or not.
 `tests/restricted_runtime_startup.rs` starts the real binary on the attested
 pool against a database seeded with a dangling roster row, probes `/healthz`
 and `/readyz`, and runs WebSocket sessions that cover a direct message, roster
@@ -151,8 +158,38 @@ query, an upload slot, push device registration with enable and disable, and
 XEP-0198 enable, acknowledgement and same-node resumption. It then checks that
 the catalog is unchanged and that a relay in front of PostgreSQL saw no
 catalog-changing statement and no `insufficient_privilege` error on any
-runtime connection. Old-writer drain and physical primary fencing remain
-gates, as do the parts of typed transaction authority listed under
+runtime connection.
+
+`tests/restricted_clustered_startup.rs` starts two real binaries under the
+runtime role against a database prepared with a clustering plan, each
+through its own relay. It runs direct messages in both directions between
+clients on different nodes; a room created on one node and joined and
+written to from the other, with the reflection and the owner's archive
+read; XEP-0198 enabled on one node and resumed on the other; and a graceful
+shutdown of the room's owning node, after which the surviving node delivers
+a direct message, takes the room over, accepts a join and a message, serves
+the archive, and bans an occupant, which commits an admin receipt. A
+replacement node then creates a second room and is killed. The survivor
+expires it, steals the room claim and serves the room; once the keypair
+lease has run out a further node steals the dead node's slot and joins; and
+the owner destroys the room. No relay may record an
+`insufficient_privilege` error or a catalog-changing statement, the catalog
+must be unchanged, and the owner phase must run again on the database
+afterwards.
+
+It does not cover an administrative room owner transfer, or the archive of
+an instant room read from a node that does not own the room, which the
+archive access gate refuses with or without the restricted role. The reply
+to the destroy request is not asserted: when another node's janitor leases
+the destroy completion before the requesting node drains it inline, the
+request is answered with an error although the room is destroyed, with or
+without the restricted role. The relay classifies each statement by its
+first keyword after whitespace and comments and counts a `DO` block as a
+catalog change; DDL run inside a function a statement calls is visible only
+through the catalog comparison.
+
+Old-writer drain and physical primary fencing remain gates, as do the parts
+of typed transaction authority listed under
 [Typed ingress transaction entry](#typed-ingress-transaction-entry). No role
 or epoch activation is implied by this configuration or by a successful local
 test.
@@ -185,6 +222,141 @@ The target schema must not grant anything to PUBLIC. The owner phase refuses
 such a schema, which includes the default `public` schema, before it runs any
 DDL.
 
+### Clustered owner phase
+
+`RestrictedRuntimeOwnerPlan::clustering` carries the configured keypair
+pool's PeerIds in pool order, the keypair-pool generation, an activation
+delay, the treatment of an unenrolled lease table and whether the phase
+requires the database to itself. With it the owner phase, after the MUC
+destroy outbox and before the grants:
+
+- creates or completes the claim relations (`clustering_nodes`,
+  `clustering_claims` and its epoch sequence, `clustering_steal_intents`,
+  `clustering_orphan_reaper_cursors`). Retained rows are kept and the epoch
+  sequence only moves forward, past every retained claim;
+- enrolls or adopts the keypair pool (`clustering_keypool`,
+  `clustering_keypool_slots`, `clustering_keypair_slots` and their guard
+  triggers). An existing enrollment must name the plan's generation and
+  PeerId order, or the phase fails with `EnrollmentMismatch` before anything
+  else changes;
+- enrolls the plan's PeerIds in `clustering_peer_allowlist`. An enrolled
+  PeerId the plan does not name fails the phase with `UnexpectedPeers`
+  before anything is written, so a plan built from the wrong keypair pool
+  neither revokes serving peers nor leaves PeerIds outside the pool
+  admitted. A plan with `allowlist: Reconcile` revokes them instead;
+- creates or completes the durable room tables without rewriting a row.
+
+Fenced stream management uses the four relations the portable preparation
+creates, including the unique replay de-duplication index
+`idx_sm_unacked_dedup`. If retained rows violate that index the phase fails
+at the stream management step, before any clustering store or grant.
+
+Every preparation is repeatable: a second owner phase on a prepared database
+changes neither the catalog nor a row. Each refuses an attested runtime
+handle. A plan without a clustering section prepares none of this and
+refuses a database that holds a keypair-pool enrollment
+(`KeypoolEnrolledWithoutClusteringPlan`).
+
+The keypair guards are `SECURITY INVOKER`. The slot guard reads the
+enrollment with the runtime's own `SELECT`, so room observation's refusal of
+owner-privileged triggers on runtime-writable relations holds on an enrolled
+database. A runtime without `SELECT` on the enrollment cannot write a lease:
+the statement fails with `insufficient_privilege`. The owner phase converts
+guards that carry `SECURITY DEFINER` before it runs the room observation
+preparation, and verifies the exact guard pin when it adopts the enrollment.
+
+The runtime attaches through verifiers that create nothing:
+
+| Store | Attachment | Verified |
+|---|---|---|
+| Claims, nodes, steal intents, reaper cursors, allowlist, occupancy | `attach_main_claim_occupancy`, then `PostgresClaimStore::attach_runtime` | exact shape, schema-owner ownership and exact runtime privileges of each relation, the epoch sequence, and an attested control-plane pool on the same physical database |
+| Keypair lease | `PostgresKeypairSlotLease::attach_existing` | lease and enrollment tables, guards, exact privileges, active generation, configured PeerId order, on both pools |
+| Durable rooms | `PostgresMucRoomStore::attach_runtime` | room tables and both outboxes with exact privileges; the schema ACL admits only the runtime, the attestation definer and owner-granted non-grantable `USAGE` for `pg_monitor` |
+| Fenced stream management | `PostgresFencedSmPersistence::attach_runtime` | the portable stream management snapshot with write privileges |
+
+The room and stream management attachments take the claim evidence and
+refuse evidence verified on another pool.
+
+#### Upgrading a database a clustered server built under the schema owner
+
+Such a database holds every relation in the shape that server created, with
+rows. The owner phase adopts it in place; the claim, node, steal-intent,
+reaper-cursor and room rows and the archive are unchanged afterwards. Stale
+node and claim rows resolve through lease expiry and stealing, as after any
+full restart. `xmpp_occupancy_authority` is not reset: a generation is
+replaced by the next fresh bind of its full JID, a resumed session and a
+host-owned occupant must keep theirs, and no generation is tied to a node
+incarnation.
+
+The exception is `clustering_keypair_slots`. The unattested server creates
+it without the enrollment columns and guards, and its rows name no enrolled
+generation. The plan decides what happens:
+
+- `LegacyKeypairSlots::Refuse` (the default) fails the phase with
+  `LegacyKeypairSlots` and leaves the table alone.
+- `LegacyKeypairSlots::Retire { legacy_ttl }` drops and recreates the table
+  in one transaction that holds `ACCESS EXCLUSIVE` on it, after checking
+  that it has exactly the unattested shape (five columns, primary key, schema
+  owner, no trigger, constraint or dependent object) and that no row is
+  leased. A row is leased when it has a holder, is not marked expired and its
+  heartbeat is no older than `legacy_ttl` on the database clock, the
+  predicate the old server renews under; a heartbeat ahead of the clock
+  counts as leased. A leased row fails the phase with `LegacyLeaseLive`.
+  `legacy_ttl` below the plan's `lease_ttl` (the lease lifetime the servers
+  are configured with, 30 s by default) is refused with
+  `LegacyTtlBelowLeaseTtl`, and the plan's activation delay must be at least
+  `legacy_ttl`. Every lock the owner steps wait for is bounded by a lock
+  timeout that fails the step with a typed error.
+
+A holder identity is generated per process start, so a restarted process
+cannot renew a surviving row; only a process that is still running can.
+
+A newly enrolled generation is pending until its activation delay has
+elapsed and the lease table is empty. While it is pending the phase applies
+the grants and then fails with `KeypoolActivationPending`; the runtime
+refuses to attach a pending generation. Running the phase again after the
+delay activates it.
+
+By default the clustered phase requires the database to itself: no other
+client session and no row in `pg_prepared_xacts` for it
+(`DatabaseNotExclusive`). The caller opens the owner handle with an
+`application_name` generated for the run and names it in the plan; every
+session without that name counts, including one of the migrator login, and
+a handle that does not carry the name is refused (`OwnerSessionUntagged`).
+The check runs before the phase changes anything and again inside the
+retirement transaction, once the lease table is locked.
+
+A server that starts under the schema owner while other nodes serve reads
+the claim schema's gaps from the catalog first and takes no table lock when
+the schema is current. Each missing part is created in its own short
+transaction under a lock timeout, so a bootstrap never holds a lock on
+`clustering_nodes` while it waits for `clustering_claims`.
+
+The cutover runbook must therefore state:
+
+1. Steps 1–4 of the coordinated cutover (stop the pods, rotate the old
+   login's credential, terminate its backends, verify none remain and no
+   prepared transaction is pending) are complete before the owner phase.
+2. The owner handle is opened with an `application_name` unique to the run,
+   and the plan names it.
+3. `legacy_ttl` is the `WADDLE_CLUSTERING_LEASE_TTL_MS` the old server ran
+   with. The phase only enforces the lifetime the plan says the servers are
+   configured with; if the old deployment had raised it, the operator
+   supplies that larger value. The activation delay is at least
+   `legacy_ttl`.
+4. Retirement discards the old lease rows, including which node held which
+   slot.
+5. The owner phase is run again after the activation delay, and the new
+   version starts only after that run succeeds.
+6. Retirement is the rollback boundary. The enrolled lease table rejects
+   the old server's five-column insert, so an old image cannot lease a
+   keypair slot on an enrolled database and cannot start clustered. Rolling
+   back to it means restoring the unenrolled table shape first.
+7. The retirement shape check is written against PostgreSQL 17. PostgreSQL
+   18 records NOT NULL constraints in `pg_constraint`, so the check finds
+   constraints besides the primary key there and fails closed with
+   `LegacyShapeMismatch`.
+
 ### Runtime grant matrix
 
 The owner phase classifies every table and sequence in the schema before it
@@ -207,7 +379,7 @@ through `ON DELETE CASCADE` need no grant.
 | `SELECT`, `INSERT`, `UPDATE` | `users`, `auth_identities`, `private_xml_storage`, `user_avatar_source`, `user_avatar_fetch_state`, `upload_slots`, `link_preview_media_refs`, `xmpp_occupancy_authority`, `extension_grants`, `provider_webhook_deliveries`, `ingress_effect_intents`, `ingress_effect_descendants`, `inbox_entries`, `pubsub_push_publications`, `dnd_projection_source_version`, `notification_settings_projection_source_version`, `notification_activity`, `push_owner_locks`, `push_node_locks`, `push_publication_orders` |
 | `SELECT`, `INSERT`, `DELETE` | `pending_auth`, `xmpp_auth_codes`, `blocking_list`, `extension_bot_rooms`, `ingress_sm_refs`, `ingress_deliveries`, `sm_unacked`, `sm_acknowledged_windows`, `pending_delivery_sm_promotions`, `pubsub_subscriptions`, `push_delivery_attempts` |
 | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `ingress_origin_aliases`, `roster_versions`, `native_users`, `sessions`, `device_auth`, `permission_tuples`, `roster_items`, `vcard_storage`, `channels`, `muc_pending_invites`, `group_dm_archive_boundaries`, `webhook_deliveries`, `ingress_messages`, `ingress_sm_streams`, `ingress_send_attempts`, `groupchat_notification_recovery`, `sm_sessions`, `sm_ingress_appends`, `pending_delivery`, `pubsub_nodes`, `pubsub_items`, `pubsub_affiliations`, `dnd_projection`, `notification_settings_projection`, `spaces_metadata`, `channel_space_links`, `push_registrations`, `notification_candidates`, `notification_outbox`, `notification_outbox_lineage`, `push_nodes`, `push_devices`, `push_publish_jobs`, `call_teardown_outbox`, `clustering_muc_room_effects`, `clustering_muc_destroy_outbox`, and the six room observation data tables |
-| none | `messages`, `attachments`, `reactions`, `p21_receipt_operation_results`, every other `clustering_*` relation, `sm_revision_authority`, `sm_revision_generations`, `sm_revision_operations` |
+| none | `messages`, `attachments`, `reactions`, `p21_receipt_operation_results`, every other `clustering_*` relation a database can hold, `sm_revision_authority`, `sm_revision_generations`, `sm_revision_operations` |
 | sequence `USAGE` | `blocking_list_id_seq`, `native_users_id_seq`, `roster_items_id_seq`, `pending_delivery_notification_recovery_ordinal_seq` |
 | sequence `SELECT` | `pubsub_items_seq_seq` |
 | sequence none | `reactions_id_seq`, `clustering_claim_epoch_seq` |
@@ -222,6 +394,26 @@ pinned-path modules, including statements whose table name is formatted in.
 `ingress_origin_aliases` needs `UPDATE` because alias resolution locks its row
 with `FOR UPDATE OF`, and `roster_versions` needs `DELETE` because startup
 prunes the version of an owner whose roster holds a dangling contact.
+
+A plan with a clustering section replaces the clustering rows:
+
+| Privileges | Relations |
+|---|---|
+| `SELECT` | `clustering_peer_allowlist`, `clustering_keypool`, `clustering_keypool_slots` |
+| `SELECT`, `INSERT`, `UPDATE` | `clustering_nodes`, `clustering_orphan_reaper_cursors`, `clustering_keypair_slots`, `clustering_muc_room_lifecycles` |
+| `SELECT`, `INSERT`, `DELETE` | `clustering_muc_admin_receipts` |
+| `SELECT`, `INSERT`, `UPDATE`, `DELETE` | `clustering_claims`, `clustering_steal_intents`, `clustering_muc_rooms`, `clustering_muc_room_affiliations` |
+| sequence `SELECT`, `USAGE` | `clustering_claim_epoch_seq` |
+
+These rows follow the same enumeration run over the clustering, durable room
+and fenced stream management modules. Node and reaper-cursor rows and
+keypair leases are upserted and never deleted. Affiliations are upserted and
+deleted. Admin receipts are inserted and deleted, never updated. Lifecycle
+rows are inserted, updated and locked; a destroyed room's lifecycle is
+tombstoned, not deleted. The revisioned stream management tables and the inter-server
+resume tables stay without privileges: no serving path selects the first,
+and the registered migrations drop the second. The stream management,
+occupancy and outbox rows are the same with and without clustering.
 
 ## Typed ingress transaction entry
 
@@ -309,7 +501,9 @@ What the entry does not do:
   pool began through the entry.
 - Attach-time checks in other stores call the attestor directly on their own
   read-only transactions.
-- The clustered stores are refused under the attested pool and have no entry.
+- The clustered stores (claims, keypair lease, durable rooms, fenced stream
+  management) attach under the attested pool and open their own
+  transactions; none goes through the entry.
 
 ## Dark outbox attachment slice
 
@@ -333,12 +527,11 @@ opaque verification marker; `attach_serving` returns the functional store
 after the same verification, and queue mutation stays gated by the lifecycle
 and claim authority each operation presents. The MUC-destroy attachment
 preflight is not a replacement for the clustered MUC runtime store, which
-still runs owner constructors and is refused under the attested pool.
+attaches through `PostgresMucRoomStore::attach_runtime`; its owner
+constructor `open` refuses the attested pool.
 
 Disposable PostgreSQL tests use separate owner and restricted logins to check
 successful same-pool attachment, DDL denial, malformed shape and grants,
 owner schema changes racing with the attachment lock, and ordinary row writes
 during attachment. SQLite constructor behavior remains covered. Passing these
-tests does not permit serving with the attested pool; the verifier conflicts
-above and the clustered SM and claim/lease/MUC startup paths still need their
-own reviewed authority and rollout evidence.
+tests does not by itself permit production serving with the attested pool.

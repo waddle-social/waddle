@@ -166,6 +166,23 @@ impl RoomEffectOutboxStore {
         })
     }
 
+    /// Verify the owner-prepared MUC room schema for the serving room store.
+    /// The checks are those of [`Self::verify_muc_room_runtime`], except
+    /// that the schema ACL also admits `pg_monitor` holding non-grantable
+    /// USAGE granted by the schema owner, which room observation preparation
+    /// grants on every prepared schema.
+    pub async fn verify_muc_room_serving(
+        db: Database,
+    ) -> Result<VerifiedMucRoomRuntime, super::RoomEffectRuntimeAttachError> {
+        let capability = super::runtime_attach::verify_muc_room_serving(&db).await?;
+        Ok(VerifiedMucRoomRuntime {
+            effect_outbox: VerifiedRoomEffectOutbox {
+                capability,
+                _db: db,
+            },
+        })
+    }
+
     /// Diagnose the unselected A/H role profile against the prepared MUC
     /// schema. The returned evidence grants no mutation or serving authority.
     pub async fn verify_muc_room_runtime_v1(

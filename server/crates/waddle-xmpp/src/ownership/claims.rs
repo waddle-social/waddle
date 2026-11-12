@@ -541,6 +541,12 @@ pub enum ClaimError {
     /// published under that identity.
     #[error("this node identity is terminally disabled")]
     AuthorityDisabled,
+
+    /// The store was asked to create its schema through a database handle
+    /// that holds no DDL privilege. The schema owner prepares it and the
+    /// store attaches to it.
+    #[error("the claim schema is prepared by the schema owner, not by this database handle")]
+    OwnerPreparationRequired,
 }
 
 /// Result of an ownership- and epoch-exact release attempt.

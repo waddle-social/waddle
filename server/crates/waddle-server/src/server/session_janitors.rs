@@ -3050,6 +3050,7 @@ mod orphan_reaper_sweep_tests {
 
         let clustering = ClusteringHandles {
             claim_store: Some(Arc::clone(&sweeper_claim_store)),
+            claim_authority: None,
             node_identity: Some(sweeper_identity_handle.clone()),
             local_claims: None,
             room_local_claims: None,

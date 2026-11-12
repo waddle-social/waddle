@@ -633,10 +633,17 @@ async fn restricted_room_effect_outbox_preserves_and_fences_effect_rows() {
         ),
     )
     .await;
+    run_sql(
+        &f,
+        &format!(
+            "GRANT SELECT, INSERT, UPDATE ON {}.clustering_muc_room_lifecycles TO {}",
+            f.target, f.runtime
+        ),
+    )
+    .await;
     for table in [
         "clustering_muc_rooms",
         "clustering_muc_room_affiliations",
-        "clustering_muc_room_lifecycles",
         "clustering_muc_destroy_outbox",
     ] {
         run_sql(

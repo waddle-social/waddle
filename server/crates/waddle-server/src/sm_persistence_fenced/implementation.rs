@@ -74,7 +74,7 @@ pub(in crate::sm_persistence_fenced) fn claim_error_to_sm_persistence_error(
         | ClaimError::Conflict
         | ClaimError::Draining
         | ClaimError::AuthorityDisabled => SmPersistenceError::NotOwner { entity },
-        ClaimError::Backend(_) | ClaimError::Poisoned => {
+        ClaimError::Backend(_) | ClaimError::Poisoned | ClaimError::OwnerPreparationRequired => {
             SmPersistenceError::Other(error.to_string())
         }
         // Defensive only: `ensure_claimed`/`acquire` never actually return
@@ -179,6 +179,11 @@ impl PostgresFencedSmPersistence {
                 db.driver()
             )));
         }
+        // The restricted runtime holds no DDL privilege; its schema is
+        // prepared by the owner and attached through `attach_runtime`.
+        if db.uses_attested_postgres_pool() {
+            return Err(SmPersistenceError::OwnerPreparationRequired);
+        }
         let storage = Self {
             db,
             claim_store,
@@ -190,6 +195,42 @@ impl PostgresFencedSmPersistence {
             "Postgres-fenced SM persistence storage initialized (ADR-0017 Phase 3 Slice 4)"
         );
         Ok(storage)
+    }
+}
+
+/// Fail-closed refusal to attach fenced SM persistence under the restricted
+/// runtime role.
+#[derive(Debug, thiserror::Error)]
+pub enum FencedSmRuntimeAttachError {
+    #[error("the claim evidence was verified on a different database pool")]
+    ClaimAuthorityMismatch,
+    #[error(transparent)]
+    Schema(#[from] crate::sm_persistence::SmRuntimeAttachError),
+}
+
+impl PostgresFencedSmPersistence {
+    /// Attach to the owner-prepared stream management schema through the
+    /// exact attested main pool. The fenced store reads and writes the same
+    /// four relations as the portable store, so the same structural and
+    /// privilege snapshot applies; nothing is created. `claims` is the
+    /// evidence that `clustering_claims`, which every fenced write locks, was
+    /// verified on this same pool.
+    pub async fn attach_runtime(
+        db: Database,
+        claim_store: Arc<dyn ClaimStore>,
+        node_identity: SharedNodeIdentity,
+        claims: &crate::clustering::claims::VerifiedMainClaimOccupancy,
+    ) -> Result<Self, FencedSmRuntimeAttachError> {
+        if !claims.belongs_to_main_pool(&db) {
+            return Err(FencedSmRuntimeAttachError::ClaimAuthorityMismatch);
+        }
+        crate::sm_persistence::verify_runtime_postgres_schema(&db).await?;
+        Ok(Self {
+            db,
+            claim_store,
+            node_identity,
+            claim_fences: Arc::new(DashMap::new()),
+        })
     }
 }
 

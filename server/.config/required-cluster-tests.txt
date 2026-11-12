@@ -484,10 +484,10 @@ waddle-server::notification_outbox publisher_persistence::sqlite_terminal_transa
 # #2116 restricted database runtime: the owner phase must prepare every store
 # and grant exactly the classified privileges, and the server must start and
 # serve under the runtime role, which holds no DDL privilege, failing closed
-# on a missing relation, a widened grant or clustering. An image whose
-# restricted startup creates schema or refuses to serve must not ship.
+# on a missing relation or a widened grant. An image whose restricted
+# startup creates schema or refuses to serve must not ship.
 waddle-server::restricted_runtime_startup owner_phase_prepares_the_stores_the_runtime_role_attaches
-waddle-server::restricted_runtime_startup restricted_runtime_refuses_instead_of_creating_or_clustering
+waddle-server::restricted_runtime_startup restricted_runtime_refuses_instead_of_creating_a_missing_relation
 waddle-server::restricted_runtime_startup restricted_runtime_role_serves_without_ddl
 waddle-server::restricted_runtime_startup runtime_locks_the_epoch_row_but_cannot_change_it
 waddle-server::restricted_runtime_startup mam_admits_only_the_exact_monitor_schema_grant
@@ -505,3 +505,34 @@ waddle-server::xep0045_xep0198_remote_acceptance h_while_owner_commit_paused_cha
 waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit_characterizes_current_silent_loss
 waddle-server::xep0045_xep0198_remote_acceptance reply_loss_recovers_same_acceptance
 waddle-server::xep0045_xep0198_remote_acceptance origin_sigkill_after_owner_commit
+
+# #2116 clustered restricted database runtime, owner side: the owner phase
+# must prepare and adopt the claim, allowlist, keypair-pool and durable room
+# relations without losing a retained row, including on a database a
+# clustered server built under the schema owner, and the runtime role must
+# attach each clustering store through exact verifiers. An image whose owner
+# phase drops a live keypair lease, rewrites retained rows or leaves the
+# runtime with privileges outside the clustered matrix must not ship.
+waddle-server::restricted_runtime_startup clustered::clustered_owner_phase_prepares_the_stores_the_runtime_role_attaches
+waddle-server::restricted_runtime_startup clustered::clustered_owner_phase_fails_closed_on_a_mismatched_plan_or_database
+waddle-server::restricted_runtime_startup clustered::clustered_owner_phase_fences_activation_and_legacy_leases
+waddle-server::restricted_runtime_startup clustered::clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built
+waddle-server::restricted_runtime_startup clustered::owner_phase_builds_the_replay_dedup_index_over_retained_rows_or_fails_closed
+waddle-server clustering::lease::runtime_attach_tests::postgres_keypool_owner_retires_an_unenrolled_lease_table_only_when_idle
+
+# #2116 clustered restricted database runtime, serving side: two servers
+# under the runtime role must form a cluster and serve clients on both nodes
+# without DDL and without being refused a privilege, and a clustered start
+# on a database that was not prepared for it must refuse without creating
+# anything. An image whose clustered restricted startup creates schema,
+# falls back to an unfenced store or cannot serve must not ship.
+waddle-server::restricted_clustered_startup two_restricted_nodes_form_a_cluster_and_serve_without_ddl
+waddle-server::restricted_runtime_startup clustered::clustered_restricted_startup_refuses_an_unprepared_or_pending_database
+
+# #2116 claim schema bootstrap on a serving cluster: a node that starts
+# under the schema owner while other nodes serve must not take a table lock
+# on a current claim schema. An image whose bootstrap can deadlock with a
+# claim acquire or stall node heartbeats during a rolling restart must not
+# ship.
+waddle-server clustering::claims::tests::schema_bootstrap_on_a_current_schema_neither_waits_for_nor_deadlocks_a_claim_acquire
+waddle-server clustering::claims::tests::schema_bootstrap_on_a_current_schema_does_not_block_a_node_heartbeat

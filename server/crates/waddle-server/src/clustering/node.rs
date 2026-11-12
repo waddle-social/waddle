@@ -617,6 +617,23 @@ pub enum ClusteringError {
     #[cfg(feature = "clustering")]
     #[error("clustering MUC durable store initialization failed: {0}")]
     MucDurableStoreInit(waddle_xmpp::XmppError),
+
+    /// The owner-prepared claim, node, steal-intent, reaper-cursor, peer
+    /// allowlist or occupancy relations did not verify on the attested pool.
+    #[cfg(feature = "clustering")]
+    #[error("clustering claim authority attachment failed: {0}")]
+    ClaimAuthorityAttach(#[source] claims::ClaimOccupancyAttachError),
+
+    /// The claim store could not attach to the verified claim authority.
+    #[cfg(feature = "clustering")]
+    #[error("clustering claim store attachment failed: {0}")]
+    ClaimStoreAttach(#[source] claims::ClaimStoreAttachError),
+
+    /// The owner-prepared durable room schema did not verify on the attested
+    /// pool. Fatal for the same reason as [`Self::MucDurableStoreInit`].
+    #[cfg(feature = "clustering")]
+    #[error("clustering MUC durable store attachment failed: {0}")]
+    MucDurableStoreAttach(#[source] crate::muc_durable::MucRuntimeAttachError),
 }
 
 /// Derive the clustering subsystem's own cancellation scope from the
@@ -659,6 +676,11 @@ pub struct ClusteringHandles {
     /// same underlying `Database` the node-lease loop uses, so both views
     /// observe the same `clustering_claims` rows.
     pub claim_store: Option<Arc<dyn waddle_xmpp::ownership::ClaimStore>>,
+    /// Evidence that the claim and occupancy relations were verified on the
+    /// attested main pool. Present only when this node runs under the
+    /// restricted runtime role; stores that fence on claims attach with it.
+    #[cfg(feature = "clustering")]
+    pub claim_authority: Option<Arc<claims::VerifiedMainClaimOccupancy>>,
     /// Live view of this node's current claim identity — the same shared
     /// handle `self_fence::run_node_lease` updates on every
     /// re-registration. See [`waddle_xmpp::ownership::SharedNodeIdentity`].
@@ -973,6 +995,29 @@ pub async fn start_if_enabled(
         // through this exact `Arc`.
         let room_local_claims = local_claims::RoomLocalClaims::new();
         let user_local_claims = local_claims::UserLocalClaims::new();
+        // The restricted runtime role creates nothing. Verify the claim,
+        // node, steal-intent, reaper-cursor, peer-allowlist and occupancy
+        // relations once, before the swarm reads the allowlist or leases a
+        // keypair slot; every claim-fenced store below attaches with this
+        // evidence.
+        let claim_authority = if db.uses_attested_postgres_pool() {
+            Some(Arc::new(
+                claims::attach_main_claim_occupancy(db.clone())
+                    .await
+                    .map_err(ClusteringError::ClaimAuthorityAttach)?,
+            ))
+        } else {
+            None
+        };
+        let claim_store = || -> Result<claims::PostgresClaimStore, ClusteringError> {
+            match &claim_authority {
+                Some(authority) => {
+                    claims::PostgresClaimStore::attach_runtime(db.clone(), authority)
+                        .map_err(ClusteringError::ClaimStoreAttach)
+                }
+                None => Ok(claims::PostgresClaimStore::new(db.clone())),
+            }
+        };
         // The swarm leases its keypair-pool slot from `db` (Postgres control
         // plane) before binding, enforces the peer allowlist at the behaviour
         // layer, and registers its supervised relay actor in kademlia.
@@ -1002,7 +1047,7 @@ pub async fn start_if_enabled(
         // coupling" precedent). Register once, up front (fail startup on a
         // genuine registration failure, exactly like the keypair-slot
         // acquire above), then hand the loop off to the background task.
-        let node_lease = claims::PostgresClaimStore::new(db.clone());
+        let node_lease = claim_store()?;
         let live_identity = handle.node_identity.clone();
         let node_identity = live_identity.current();
         // FIX 6: read through the typed `ClusteringConfig::pod_template_hash`
@@ -1010,13 +1055,24 @@ pub async fn start_if_enabled(
         // sibling var) rather than a raw `std::env::var` at this call site.
         let pod_template_hash = config.pod_template_hash.clone();
         let local_peer_id = handle.local_peer_id.to_string();
-        super::prepare_node_lease(
-            &node_lease,
-            &node_identity,
-            pod_template_hash.clone(),
-            Some(local_peer_id.clone()),
-        )
-        .await?;
+        if claim_authority.is_some() {
+            // The owner phase prepared the claim schema.
+            super::register_node_lease(
+                &node_lease,
+                &node_identity,
+                pod_template_hash.clone(),
+                Some(local_peer_id.clone()),
+            )
+            .await?;
+        } else {
+            super::prepare_node_lease(
+                &node_lease,
+                &node_identity,
+                pod_template_hash.clone(),
+                Some(local_peer_id.clone()),
+            )
+            .await?;
+        }
         handle.refresh_membership();
 
         // ADR-0017 Phase 3 Slice 4 follow-up plumbing: hand back a
@@ -1029,9 +1085,7 @@ pub async fn start_if_enabled(
         // construction time. `claim_store_handle` wraps the same `db`
         // clone as `node_lease` — not a second, independent store.
         let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
-            waddle_xmpp::ownership::observed_claim_store(claims::PostgresClaimStore::new(
-                db.clone(),
-            ));
+            waddle_xmpp::ownership::observed_claim_store(claim_store()?);
         // ADR-0017 Phase 3 Slice 5 (carried debt (b)): construct the real
         // `LocallyClaimedEntities` empty now, hand the same `Arc` to both
         // `run_node_lease` (below) and the returned handles — the SM
@@ -1050,8 +1104,7 @@ pub async fn start_if_enabled(
             Arc::clone(&room_local_claims),
             Arc::clone(&user_local_claims),
         );
-        let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
-            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+        let node_lease_handle: Arc<dyn claims::NodeLeaseStore> = Arc::new(claim_store()?);
         // ADR-0017 Phase 3 Slice 7: the durable MUC room store. Built here
         // (not deferred to `server/mod.rs`) because it only needs `db` and
         // `clustering_stop` — both already in scope — unlike
@@ -1066,17 +1119,31 @@ pub async fn start_if_enabled(
         // discipline `sm_persistence`/`pending_delivery`'s
         // `open_for_cluster_mode` already enforce at startup for their own
         // durability stores.
-        let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(
-            crate::muc_durable::PostgresMucRoomStore::open(
-                db.clone(),
-                clustering_stop.clone(),
-                live_identity.clone(),
-            )
-            .await
-            .map_err(ClusteringError::MucDurableStoreInit)?,
-        );
+        let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = match &claim_authority {
+            Some(authority) => Arc::new(
+                crate::muc_durable::PostgresMucRoomStore::attach_runtime(
+                    db.clone(),
+                    clustering_stop.clone(),
+                    live_identity.clone(),
+                    authority,
+                )
+                .await
+                .map_err(ClusteringError::MucDurableStoreAttach)?,
+            ),
+            None => Arc::new(
+                crate::muc_durable::PostgresMucRoomStore::open(
+                    db.clone(),
+                    clustering_stop.clone(),
+                    live_identity.clone(),
+                )
+                .await
+                .map_err(ClusteringError::MucDurableStoreInit)?,
+            ),
+        };
+        let run_claim_store = claim_store()?;
         let handles = ClusteringHandles {
             claim_store: Some(claim_store_handle),
+            claim_authority,
             node_identity: Some(live_identity.clone()),
             local_claims: Some(Arc::clone(&local_claims)),
             room_local_claims: Some(Arc::clone(&room_local_claims)),
@@ -1120,9 +1187,7 @@ pub async fn start_if_enabled(
                 // `clustering_claims` as `claim_store_handle` above —
                 // wraps the same `db` clone, never a second, independent
                 // store.
-                claim_store: waddle_xmpp::ownership::observed_claim_store(
-                    claims::PostgresClaimStore::new(db.clone()),
-                ),
+                claim_store: waddle_xmpp::ownership::observed_claim_store(run_claim_store),
                 claim_release_budget: config.node_lease.claim_release_budget,
                 shutdown_sm_drain: Some(shutdown_sm_drain),
             },

@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use crate::config::LineageConfig;
 
-use super::bootstrap::{attach_verified_global_runtime, RuntimeAttachmentError, RuntimePoolLimits};
+use super::bootstrap::{
+    attach_verified_global_runtime, attach_verified_global_runtime_with_control_plane,
+    ControlPlanePoolLimits, RuntimeAttachmentError, RuntimePoolLimits,
+};
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName, PgSystemIdentifier,
@@ -386,21 +389,42 @@ impl RuntimeStartupIdentity {
     /// attest after `BEGIN` and that conflicts with the pinned lock order.
     /// No DDL, enrollment or store initialization runs here; each store
     /// attaches to its owner-prepared relations afterwards.
+    ///
+    /// `control_plane` adds the separate pool that carries node and claim
+    /// liveness statements when the server is clustered. It connects with
+    /// the same login and is attested against the same physical identity as
+    /// the main pool, with its own connection and admission budget.
     pub async fn attach_serving(
         &self,
         preparation: RestrictedStartupPreparation,
         database_url: &str,
         limits: RuntimePoolLimits,
+        control_plane: Option<ControlPlanePoolLimits>,
     ) -> Result<super::DatabasePool, RuntimeStartupError> {
         let options = PgConnectOptions::from_str(database_url)
             .map_err(|_| RuntimeStartupError::InvalidDatabaseUrl)?;
-        let attachment = attach_verified_global_runtime(
-            options,
-            self.physical.clone(),
-            &preparation.expected,
-            limits,
-        )
-        .await
+        let attachment = match control_plane {
+            Some(control_plane) => {
+                attach_verified_global_runtime_with_control_plane(
+                    options.clone(),
+                    options,
+                    self.physical.clone(),
+                    &preparation.expected,
+                    limits,
+                    control_plane,
+                )
+                .await
+            }
+            None => {
+                attach_verified_global_runtime(
+                    options,
+                    self.physical.clone(),
+                    &preparation.expected,
+                    limits,
+                )
+                .await
+            }
+        }
         .map_err(RuntimeStartupError::ServingAttachment)?;
         Ok(attachment.into_pool())
     }

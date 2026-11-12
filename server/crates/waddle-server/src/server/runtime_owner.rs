@@ -1,5 +1,5 @@
-//! Owner phase for a server that serves without clustering under the
-//! restricted PostgreSQL runtime role.
+//! Owner phase for a server that serves under the restricted PostgreSQL
+//! runtime role, with or without clustering.
 //!
 //! The runtime role holds no DDL privilege, so every relation it attaches to
 //! at startup is created here, through the schema owner, before the runtime
@@ -15,9 +15,12 @@
 //! fenced for the whole call, and the schema owner already holds EXECUTE on
 //! `pg_catalog.pg_control_system()`.
 //!
-//! The clustering stores (keypair lease, claims, durable MUC rooms, fenced
-//! stream management) are not prepared: a restricted runtime with clustering
-//! enabled is refused at startup.
+//! A plan with a clustering section additionally prepares the claim
+//! relations, the peer allowlist, the keypair-pool enrollment and the durable
+//! room tables, and grants the runtime the clustered privilege set. Fenced
+//! stream management uses the relations the portable preparation creates.
+//! Without that section none of the clustering stores is prepared and the
+//! runtime holds no privilege on any clustering relation a database carries.
 
 use thiserror::Error;
 use waddle_xmpp::inbox::storage::InboxStorageError;
@@ -27,6 +30,12 @@ use waddle_xmpp::stream_management::persistence::SmPersistenceError;
 use waddle_xmpp::XmppError;
 
 use crate::call_teardown_outbox::{CallTeardownOutboxError, CallTeardownOutboxStore};
+#[cfg(feature = "clustering")]
+pub use crate::clustering::allowlist::AllowlistRemoval;
+#[cfg(feature = "clustering")]
+pub use crate::clustering::lease::LegacyKeypairSlots;
+#[cfg(feature = "clustering")]
+use crate::clustering::lease::{KeypoolEnrollment, KeypoolPreparation, PostgresKeypairSlotLease};
 use crate::config::LineageConfig;
 use crate::db::bootstrap::{bootstrap_global_owner, OwnerBootstrapError};
 use crate::db::lineage::{self, AttestedLineage, PgIdentity};
@@ -70,6 +79,79 @@ pub struct RestrictedRuntimeOwnerPlan {
     /// Root key the VAPID signing key is sealed under. The runtime must be
     /// started with the same session key.
     pub vapid_root_key: Vec<u8>,
+    /// Present when the runtime serves with clustering enabled.
+    #[cfg(feature = "clustering")]
+    pub clustering: Option<ClusteringOwnerPlan>,
+}
+
+/// Clustering inputs for the owner phase.
+#[cfg(feature = "clustering")]
+#[derive(Clone, Debug)]
+pub struct ClusteringOwnerPlan {
+    /// PeerIds of the configured keypair pool, in pool order. They become
+    /// both the keypair-pool enrollment and the exact peer allowlist.
+    pub peer_ids: Vec<libp2p::PeerId>,
+    /// Generation the keypair-pool enrollment is recorded under. A database
+    /// already enrolled under another generation is refused.
+    pub keypool_generation: uuid::Uuid,
+    /// How long a newly enrolled generation stays pending. While it is
+    /// pending the phase ends with
+    /// [`RestrictedRuntimeOwnerError::KeypoolActivationPending`] and the
+    /// runtime refuses to attach; rerunning the phase after the delay
+    /// activates it.
+    pub activation_delay: std::time::Duration,
+    /// What to do with a keypair-slot table an unattested runtime created.
+    pub legacy_keypair_slots: LegacyKeypairSlots,
+    /// The keypair-slot lease lifetime the servers are configured with
+    /// (`WADDLE_CLUSTERING_LEASE_TTL_MS`). A retirement refuses a
+    /// `legacy_ttl` below it. If the retired deployment ran with a longer
+    /// lifetime, `legacy_ttl` must be that longer value.
+    pub lease_ttl: std::time::Duration,
+    /// What to do with enrolled PeerIds the plan does not name.
+    pub allowlist: AllowlistRemoval,
+    /// Whether the phase requires the database to itself.
+    pub exclusive_database: ExclusiveDatabase,
+}
+
+#[cfg(feature = "clustering")]
+impl ClusteringOwnerPlan {
+    /// A plan that activates immediately, refuses an unenrolled keypair-slot
+    /// table and PeerIds it does not name, assumes the default lease
+    /// lifetime, and requires an exclusive database.
+    /// `owner_application_name` is the `application_name` the owner handle's
+    /// sessions were opened with; it is unique to this run.
+    pub fn new(
+        peer_ids: Vec<libp2p::PeerId>,
+        keypool_generation: uuid::Uuid,
+        owner_application_name: String,
+    ) -> Self {
+        Self {
+            peer_ids,
+            keypool_generation,
+            activation_delay: std::time::Duration::ZERO,
+            legacy_keypair_slots: LegacyKeypairSlots::Refuse,
+            lease_ttl: crate::config::ClusteringLeaseConfig::default().lease_ttl,
+            allowlist: AllowlistRemoval::Refuse,
+            exclusive_database: ExclusiveDatabase::Required {
+                owner_application_name,
+            },
+        }
+    }
+}
+
+/// Whether the clustered owner phase checks that it has the database to
+/// itself: no other client session and no prepared transaction. The check
+/// runs before the phase changes anything and again, with the lease table
+/// locked, before an unenrolled lease table is retired.
+#[cfg(feature = "clustering")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExclusiveDatabase {
+    /// Every session of the owner handle was opened with this
+    /// `application_name`, generated for this run. Any other client session
+    /// on the database is refused, including one of the migrator login.
+    Required { owner_application_name: String },
+    /// The caller vouches that concurrent sessions are harmless.
+    NotChecked,
 }
 
 /// The owner phase that failed. Earlier phases have committed.
@@ -136,6 +218,43 @@ pub enum RestrictedRuntimeOwnerError {
     Mam(#[source] MamSchemaBootstrapError),
     #[error("webhook delivery ledger owner preparation failed")]
     WebhookDeliveries(#[source] DatabaseError),
+    #[error("could not inspect database sessions and prepared transactions")]
+    ExclusiveDatabaseInspection(#[source] DatabaseError),
+    #[error(
+        "the owner handle's session does not carry the application_name the plan names, so \
+         its sessions cannot be told apart from another client's"
+    )]
+    OwnerSessionUntagged,
+    #[error(
+        "the clustered owner phase needs the database to itself: {sessions} other client \
+         session(s) and {prepared_transactions} prepared transaction(s) are present"
+    )]
+    DatabaseNotExclusive {
+        sessions: i64,
+        prepared_transactions: i64,
+    },
+    #[error(
+        "relation {relation} belongs to a keypair-pool enrollment, but the plan has no \
+         clustering section; a database enrolled for clustering is served with clustering"
+    )]
+    KeypoolEnrolledWithoutClusteringPlan { relation: String },
+    #[cfg(feature = "clustering")]
+    #[error("claim owner preparation failed")]
+    Claims(#[source] crate::clustering::claims::ClaimOwnerPreparationError),
+    #[cfg(feature = "clustering")]
+    #[error("peer allowlist owner preparation failed")]
+    PeerAllowlist(#[source] crate::clustering::allowlist::AllowlistOwnerPreparationError),
+    #[cfg(feature = "clustering")]
+    #[error("keypair-pool owner preparation failed")]
+    Keypool(#[source] crate::clustering::lease::KeypoolOwnerError),
+    #[cfg(feature = "clustering")]
+    #[error("durable room owner preparation failed")]
+    MucRooms(#[source] crate::muc_durable::MucOwnerPreparationError),
+    #[error(
+        "every schema is prepared, but the keypair-pool generation is still pending; rerun the \
+         owner phase after its activation delay"
+    )]
+    KeypoolActivationPending,
 }
 
 /// Evidence that every owner phase and runtime grant completed. It carries the
@@ -283,7 +402,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("reactions", NONE),
     ("p21_receipt_operation_results", NONE),
     // Clustering and fenced stream management relations that an upgraded
-    // database can hold. A runtime that serves without clustering uses none.
+    // database can hold. A runtime that serves without clustering uses none;
+    // [`CLUSTERED_TABLE_GRANTS`] replaces the clustering rows when it does.
+    // No serving path selects the revisioned stream management store or the
+    // inter-server-resume tables, so those stay without privileges.
     ("clustering_claims", NONE),
     ("clustering_nodes", NONE),
     ("clustering_keypair_slots", NONE),
@@ -301,6 +423,101 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("sm_revision_generations", NONE),
     ("sm_revision_operations", NONE),
 ];
+
+/// The rows that replace their [`TABLE_GRANTS`] entry when the plan has a
+/// clustering section, plus the keypair-pool enrollment tables, which only a
+/// clustered database holds.
+///
+/// Each entry is the exact set the store's attachment verifies. Claims,
+/// steal intents and rooms are inserted, updated, locked and deleted. Node
+/// and reaper-cursor rows and keypair leases are upserted and never deleted
+/// (the lease guard forbids it). Affiliations are upserted and deleted. The
+/// allowlist and the enrollment are owner-controlled and read-only. Admin
+/// receipts are inserted and deleted, never updated. Lifecycles are
+/// inserted, updated and row-locked; a destroyed room's lifecycle is
+/// tombstoned, not deleted.
+const CLUSTERED_TABLE_GRANTS: &[(&str, &str)] = &[
+    ("clustering_claims", READ_WRITE),
+    ("clustering_nodes", READ_INSERT_UPDATE),
+    ("clustering_steal_intents", READ_WRITE),
+    ("clustering_orphan_reaper_cursors", READ_INSERT_UPDATE),
+    ("clustering_peer_allowlist", READ),
+    (KEYPOOL_TABLES[0], READ),
+    (KEYPOOL_TABLES[1], READ),
+    ("clustering_keypair_slots", READ_INSERT_UPDATE),
+    ("clustering_muc_rooms", READ_WRITE),
+    ("clustering_muc_room_affiliations", READ_WRITE),
+    ("clustering_muc_room_lifecycles", READ_INSERT_UPDATE),
+    ("clustering_muc_admin_receipts", READ_INSERT_DELETE),
+];
+
+/// The keypair-pool enrollment tables. They exist only on a database
+/// enrolled for clustering, which a plan without a clustering section
+/// refuses to prepare.
+const KEYPOOL_TABLES: [&str; 2] = ["clustering_keypool", "clustering_keypool_slots"];
+
+/// Claim epochs come from the sequence, and the claim attachment reads its
+/// position to check it against retained claims.
+const CLUSTERED_SEQUENCE_GRANTS: &[(&str, &str)] =
+    &[("clustering_claim_epoch_seq", "SELECT, USAGE")];
+
+/// The matrix in force for one plan: the clustered rows take precedence when
+/// the plan has a clustering section.
+#[derive(Clone, Copy)]
+struct GrantMatrix {
+    clustered: bool,
+}
+
+impl GrantMatrix {
+    fn table(self, name: &str) -> Option<&'static str> {
+        let clustered: &[(&str, &str)] = if self.clustered {
+            CLUSTERED_TABLE_GRANTS
+        } else {
+            &[]
+        };
+        clustered
+            .iter()
+            .chain(TABLE_GRANTS)
+            .find(|(table, _)| *table == name)
+            .map(|(_, privileges)| *privileges)
+    }
+
+    fn sequence(self, name: &str) -> Option<&'static str> {
+        let clustered: &[(&str, &str)] = if self.clustered {
+            CLUSTERED_SEQUENCE_GRANTS
+        } else {
+            &[]
+        };
+        clustered
+            .iter()
+            .chain(SEQUENCE_GRANTS)
+            .find(|(sequence, _)| *sequence == name)
+            .map(|(_, privileges)| *privileges)
+    }
+
+    /// Whether the matrix grants `privilege` on `relation`. A column
+    /// privilege is spelled `UPDATE(column)`.
+    fn classifies(self, relation: &str, privilege: &str) -> bool {
+        if OWNER_GRANTED_TABLES.contains(&relation) {
+            return true;
+        }
+        let granted = self
+            .table(relation)
+            .or_else(|| self.sequence(relation))
+            .is_some_and(|privileges| {
+                privileges
+                    .split(", ")
+                    .any(|candidate| candidate == privilege)
+            });
+        granted
+            || COLUMN_UPDATE_GRANTS.iter().any(|(name, columns)| {
+                *name == relation
+                    && columns
+                        .iter()
+                        .any(|column| privilege == format!("UPDATE({column})"))
+            })
+    }
+}
 
 /// Column-level UPDATE, each verified exactly by an attachment.
 ///
@@ -354,8 +571,8 @@ const SEQUENCE_GRANTS: &[(&str, &str)] = &[
     ("clustering_claim_epoch_seq", NONE),
 ];
 
-/// Prepare every schema the non-clustered restricted runtime attaches to and
-/// grant the runtime role its privileges, in dependency order, on `owner`.
+/// Prepare every schema the restricted runtime attaches to and grant the
+/// runtime role its privileges, in dependency order, on `owner`.
 ///
 /// `owner` is an unattested PostgreSQL main-lane handle whose session user is
 /// `plan.migrator` and whose current role is `plan.schema_owner`, with the
@@ -372,6 +589,17 @@ pub async fn prepare_restricted_runtime_owner(
     }
 
     refuse_public_schema_privileges(owner).await?;
+    #[cfg(feature = "clustering")]
+    if let Some(ClusteringOwnerPlan {
+        exclusive_database:
+            ExclusiveDatabase::Required {
+                owner_application_name,
+            },
+        ..
+    }) = &plan.clustering
+    {
+        require_exclusive_database(owner, owner_application_name).await?;
+    }
 
     bootstrap_global_owner(owner, &plan.lineage, false)
         .await
@@ -397,6 +625,20 @@ pub async fn prepare_restricted_runtime_owner(
     // and again after the grants, so the phase never succeeds on a database
     // the runtime's attachments would refuse.
     verify_runtime_role(owner, &identity, plan).await?;
+
+    // A keypair-pool enrollment created with owner-privileged guards would
+    // fail the room observation preparation below, which refuses such
+    // triggers on relations the runtime writes.
+    #[cfg(feature = "clustering")]
+    if plan.clustering.is_some() {
+        PostgresKeypairSlotLease::convert_definer_guards_owner(
+            owner,
+            &identity,
+            plan.runtime.as_str(),
+        )
+        .await
+        .map_err(RestrictedRuntimeOwnerError::Keypool)?;
+    }
 
     // The registered migrations create the observation tables; the two
     // scheduling indexes come from the store's own initializer.
@@ -446,6 +688,11 @@ pub async fn prepare_restricted_runtime_owner(
     MucDestroyCompletionOutboxStore::try_new(owner.clone())
         .await
         .map_err(RestrictedRuntimeOwnerError::MucDestroy)?;
+    #[cfg(feature = "clustering")]
+    let keypool = match &plan.clustering {
+        Some(clustering) => Some(prepare_clustering(owner, &identity, plan, clustering).await?),
+        None => None,
+    };
     prepare_mam(owner, &identity, plan).await?;
     webhook_delivery::initialize_owner_schema(owner)
         .await
@@ -454,7 +701,118 @@ pub async fn prepare_restricted_runtime_owner(
     grant_runtime(owner, &identity, plan).await?;
     verify_runtime_role(owner, &identity, plan).await?;
 
+    // Reported last so the grants are in place when the delay elapses: the
+    // rerun then only activates the generation.
+    #[cfg(feature = "clustering")]
+    if keypool == Some(KeypoolPreparation::Pending) {
+        return Err(RestrictedRuntimeOwnerError::KeypoolActivationPending);
+    }
+
     Ok(RestrictedRuntimeOwnerEvidence { lineage: expected })
+}
+
+fn plan_is_clustered(plan: &RestrictedRuntimeOwnerPlan) -> bool {
+    #[cfg(feature = "clustering")]
+    {
+        plan.clustering.is_some()
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = plan;
+        false
+    }
+}
+
+/// Prepare the stores only a clustered runtime attaches to. Retained claims,
+/// nodes, steal intents, reaper cursors and durable rooms are adopted in
+/// place; the allowlist is reconciled to the plan; the keypair pool is
+/// enrolled, adopted or, under an explicit plan, rebuilt from an unenrolled
+/// lease table.
+#[cfg(feature = "clustering")]
+async fn prepare_clustering(
+    owner: &Database,
+    identity: &PgIdentity,
+    plan: &RestrictedRuntimeOwnerPlan,
+    clustering: &ClusteringOwnerPlan,
+) -> Result<KeypoolPreparation, RestrictedRuntimeOwnerError> {
+    crate::clustering::claims::prepare_claims_owner(owner, identity)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::Claims)?;
+    // The enrollment is checked first: a plan that names another generation
+    // or PeerId order is refused before the allowlist is reconciled to it.
+    let keypool = PostgresKeypairSlotLease::prepare_keypool_owner(
+        owner,
+        identity,
+        &KeypoolEnrollment {
+            generation: clustering.keypool_generation,
+            peer_ids: &clustering.peer_ids,
+            runtime_role: plan.runtime.as_str(),
+            activation_delay: clustering.activation_delay,
+            legacy: clustering.legacy_keypair_slots,
+            lease_ttl: clustering.lease_ttl,
+            exclusive_owner_tag: match &clustering.exclusive_database {
+                ExclusiveDatabase::Required {
+                    owner_application_name,
+                } => Some(owner_application_name),
+                ExclusiveDatabase::NotChecked => None,
+            },
+        },
+    )
+    .await
+    .map_err(RestrictedRuntimeOwnerError::Keypool)?;
+    crate::clustering::allowlist::prepare_peer_allowlist_owner(
+        owner,
+        identity,
+        &clustering.peer_ids,
+        clustering.allowlist,
+    )
+    .await
+    .map_err(RestrictedRuntimeOwnerError::PeerAllowlist)?;
+    crate::muc_durable::PostgresMucRoomStore::prepare_owner(owner, identity)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::MucRooms)?;
+    Ok(keypool)
+}
+
+/// Refuse while any other client session is connected to the database or a
+/// prepared transaction is pending in it: either could hold or later commit
+/// state the phase is about to adopt or retire. The owner handle's own
+/// sessions are recognised by the `application_name` generated for this run.
+#[cfg(feature = "clustering")]
+async fn require_exclusive_database(
+    owner: &Database,
+    owner_application_name: &str,
+) -> Result<(), RestrictedRuntimeOwnerError> {
+    let inspect = async {
+        let mut tx = owner.begin().await?;
+        let mut tagged = tx
+            .query(
+                "SELECT pg_catalog.current_setting('application_name') = ?",
+                crate::db_params![owner_application_name],
+            )
+            .await?;
+        let tagged = match tagged.next().await? {
+            Some(row) => row.get::<bool>(0)?,
+            None => false,
+        };
+        let counts =
+            crate::clustering::lease::foreign_sessions(&mut tx, owner_application_name).await?;
+        tx.rollback().await?;
+        Ok::<_, DatabaseError>((tagged, counts))
+    };
+    match inspect
+        .await
+        .map_err(RestrictedRuntimeOwnerError::ExclusiveDatabaseInspection)?
+    {
+        (false, _) => Err(RestrictedRuntimeOwnerError::OwnerSessionUntagged),
+        (true, (0, 0)) => Ok(()),
+        (true, (sessions, prepared_transactions)) => {
+            Err(RestrictedRuntimeOwnerError::DatabaseNotExclusive {
+                sessions,
+                prepared_transactions,
+            })
+        }
+    }
 }
 
 /// The MAM initializer autocommits each statement under a session lock, so
@@ -513,19 +871,27 @@ async fn grant_runtime(
 
     // Classify the whole schema before the first grant: a relation this
     // matrix does not name fails the phase rather than receive a default.
+    let matrix = GrantMatrix {
+        clustered: plan_is_clustered(plan),
+    };
     let tables = relation_names(owner, schema_name, &["r", "p", "v", "m", "f"]).await?;
     let sequences = relation_names(owner, schema_name, &["S"]).await?;
     for table in &tables {
-        if !OWNER_GRANTED_TABLES.contains(&table.as_str())
-            && !TABLE_GRANTS.iter().any(|(name, _)| name == table)
-        {
+        if !matrix.clustered && KEYPOOL_TABLES.contains(&table.as_str()) {
+            return Err(
+                RestrictedRuntimeOwnerError::KeypoolEnrolledWithoutClusteringPlan {
+                    relation: table.clone(),
+                },
+            );
+        }
+        if !OWNER_GRANTED_TABLES.contains(&table.as_str()) && matrix.table(table).is_none() {
             return Err(RestrictedRuntimeOwnerError::UnclassifiedRelation {
                 relation: table.clone(),
             });
         }
     }
     for sequence in &sequences {
-        if !SEQUENCE_GRANTS.iter().any(|(name, _)| name == sequence) {
+        if matrix.sequence(sequence).is_none() {
             return Err(RestrictedRuntimeOwnerError::UnclassifiedRelation {
                 relation: sequence.clone(),
             });
@@ -534,7 +900,7 @@ async fn grant_runtime(
     // A privilege the runtime already holds beyond this matrix is reported,
     // not revoked: it was granted outside this phase and needs a decision.
     for (relation, privilege) in runtime_privileges(owner, schema_name, plan).await? {
-        if !privilege_is_classified(&relation, &privilege) {
+        if !matrix.classifies(&relation, &privilege) {
             return Err(RestrictedRuntimeOwnerError::ExcessRuntimePrivilege {
                 relation,
                 privilege,
@@ -543,7 +909,7 @@ async fn grant_runtime(
     }
 
     for table in &tables {
-        let Some((_, privileges)) = TABLE_GRANTS.iter().find(|(name, _)| name == table) else {
+        let Some(privileges) = matrix.table(table) else {
             continue;
         };
         if privileges.is_empty() {
@@ -574,7 +940,7 @@ async fn grant_runtime(
         .await?;
     }
     for sequence in &sequences {
-        let Some((_, privilege)) = SEQUENCE_GRANTS.iter().find(|(name, _)| name == sequence) else {
+        let Some(privilege) = matrix.sequence(sequence) else {
             continue;
         };
         if privilege.is_empty() {
@@ -596,30 +962,6 @@ async fn grant_runtime(
         &format!("GRANT EXECUTE ON FUNCTION {schema}.pubsub_runtime_attach_lock() TO {runtime}"),
     )
     .await
-}
-
-/// Whether the matrix grants `privilege` on `relation`. A column privilege
-/// is spelled `UPDATE(column)`.
-fn privilege_is_classified(relation: &str, privilege: &str) -> bool {
-    if OWNER_GRANTED_TABLES.contains(&relation) {
-        return true;
-    }
-    let granted = TABLE_GRANTS
-        .iter()
-        .chain(SEQUENCE_GRANTS)
-        .find(|(name, _)| *name == relation)
-        .is_some_and(|(_, privileges)| {
-            privileges
-                .split(", ")
-                .any(|candidate| candidate == privilege)
-        });
-    granted
-        || COLUMN_UPDATE_GRANTS.iter().any(|(name, columns)| {
-            *name == relation
-                && columns
-                    .iter()
-                    .any(|column| privilege == format!("UPDATE({column})"))
-        })
 }
 
 /// Every effective privilege the runtime role holds on the schema's tables

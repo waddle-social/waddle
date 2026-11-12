@@ -259,10 +259,15 @@ In dependency order. Sizes are estimates from reading source.
    `verify_attested_push_notification_stores` already composes five of them
    and discards the handles (`S/server/push_notification_runtime.rs:70-120`).
 3. **Clustering under the runtime role (L).** Production runs two clustered
-   replicas. `start_if_enabled` runs schema DDL (`S/clustering/node.rs:1166`);
-   durable MUC `open` refuses attested pools
-   (`S/muc_durable/implementation.rs:400`); clustered SM refuses
-   (`S/server/http.rs:2118-2120`).
+   replicas. The owner phase prepares and adopts the claim, allowlist,
+   keypair-pool and durable room relations
+   (`S/server/runtime_owner.rs`, `prepare_clustering`). Under the attested
+   pool `start_if_enabled` verifies the claim authority once and attaches
+   the claim store, the keypair lease and the durable room store
+   (`S/clustering/node.rs`, `S/clustering/swarm.rs`), and startup attaches
+   fenced stream management, MAM and pending delivery with the live claim
+   pair (`S/server/http.rs`). `restricted_clustered_startup` runs two real
+   binaries under the runtime role.
 4. **Remaining startup writes and DDL (M).** `EnsureSchema`
    (`S/server/lifecycle.rs:180`), extension grant sync (`http.rs:1254`),
    account reconcile (`:1293`), notification ancestry adoption (`:1447`) and
@@ -293,11 +298,11 @@ In dependency order. Sizes are estimates from reading source.
    ingress modules call `attest_transaction` directly; the `*_raw`
    descendant repositories in `S/ingress_uow/effect_descendants.rs` accept
    any transaction, and their callers in the notification and push outboxes
-   are outside what the source check scans; and the clustered stores have no
-   entry. See D2.
-7. **Replace the refusal with the attach (S).** `S/main.rs:94` calls
-   `attach_verified_global_runtime_with_control_plane`, which clustering
-   needs, and takes the pool; delete `S/server/lifecycle.rs:95-97`.
+   are outside what the source check scans; and the clustered stores open
+   their own transactions outside the entry. See D2.
+7. **Replace the refusal with the attach (S).** `S/main.rs` attaches the
+   serving pool with a control-plane pool when clustering is enabled, and
+   startup has no clustering refusal under the attested pool.
 8. **Deployment (M).** CNPG creates only the owner role
    (`infrastructure/waddle.cloud/gitops/waddle-server/postgresql-cluster.yaml:9-12`)
    and the chart has no owner job, runtime credential or attestation variable.
