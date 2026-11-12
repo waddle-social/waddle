@@ -687,6 +687,19 @@ async fn mailbox_transport_relays_no_groupchat_payload() {
 /// and no occupant receives a copy.
 #[tokio::test]
 async fn owner_refusal_is_answered_from_the_frozen_error() {
+    owner_refusal_is_answered_once(Some(uuid::Uuid::new_v4())).await;
+}
+
+/// The same refusal for a stanza without an XEP-0359 origin-id. The owner
+/// has no alias to find the origin's canonical message by, so it must record
+/// its refusal against the message the entry names: a refusal recorded
+/// against a message of the owner's own would leave the entry undecided.
+#[tokio::test]
+async fn owner_refusal_without_an_origin_id_decides_the_origins_message() {
+    owner_refusal_is_answered_once(None).await;
+}
+
+async fn owner_refusal_is_answered_once(origin: Option<uuid::Uuid>) {
     let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
     let leave = Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
         .attr(
@@ -700,9 +713,15 @@ async fn owner_refusal_is_answered_from_the_frozen_error() {
     scenario.witness.drain(Duration::from_secs(1)).await;
     let (before, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
 
-    let body = scenario
-        .send_groupchat("refused", uuid::Uuid::new_v4())
-        .await;
+    let body = match origin {
+        Some(origin) => scenario.send_groupchat("refused", origin).await,
+        None => {
+            let body = format!("refused-{}", uuid::Uuid::new_v4());
+            let stanza = fanout_message(&scenario.room, "refused", Some(&body));
+            scenario.sender.send(&stanza).await;
+            body
+        }
+    };
     let frames = scenario
         .sender
         .until(Duration::from_secs(30), "owner refusal", |frame| {
