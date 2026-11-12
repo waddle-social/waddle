@@ -744,6 +744,59 @@ async fn owner_transfer_recovers_occupancy_and_refuses_unrecorded_senders() {
     );
 }
 
+/// One lane whose head the owner is still working does not delay another
+/// lane. The owner is held after it committed an occupant's groupchat
+/// stanza, which keeps that lane's worker until the attempt's receiver
+/// budget of six seconds ends. A join committed meanwhile sits on the lane
+/// of the joining connection and is decided by another worker well inside
+/// that budget.
+#[tokio::test]
+async fn held_lane_does_not_delay_a_join_on_another_lane() {
+    let scenario = Scenario::start().await;
+    let mut seated = scenario.origin_client("seated").await;
+    join_fanout_room(&mut seated, &scenario.room, "seated").await;
+    scenario.seams.arm(HOLD_AFTER_COMMIT);
+    seated
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "held",
+            Some("held on its lane"),
+        )))
+        .await
+        .expect("send the held stanza");
+    scenario
+        .seams
+        .wait_for("held after-commit held", Duration::from_secs(10))
+        .await;
+
+    let mut joiner = scenario.origin_client("joiner").await;
+    let started = tokio::time::Instant::now();
+    joiner
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send join");
+    let frames = tokio::time::timeout(
+        Duration::from_secs(30),
+        joiner.recv_until(|frame| frame.contains("<subject")),
+    )
+    .await
+    .expect("the join is decided")
+    .expect("join replies");
+    let waited = started.elapsed();
+    scenario.seams.release(HOLD_AFTER_COMMIT);
+    let own = scenario.occupant("joiner");
+    assert!(
+        parse(&frames)
+            .iter()
+            .any(|frame| is_self_presence(frame, &own)),
+        "the joiner is admitted: {frames:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(4),
+        "a join on its own lane does not wait for the held lane's attempt; waited {waited:?}"
+    );
+}
+
 /// The origin node's orphan reaper takes the room's claim when the owner is
 /// killed and no replacement starts. An occupant connected to the origin was
 /// seated by the killed owner and is known to the origin only through the

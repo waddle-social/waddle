@@ -101,8 +101,9 @@ an owner transfer does, and what must hold before the relay path is deleted.
   appended to; its copy stays owed until the session resumes or its seat is
   removed.
 - **Lost hint.** The owner's poller scans its backlog every second. A pass
-  works its lanes two at a time and waits for both, so one lane held for
-  its receiver budget delays every other lane of the node by that long.
+  hands each lane to one of two workers and does not wait for them, so a
+  lane held for its receiver budget occupies one worker while the other
+  keeps draining the node's other lanes.
 - **Owner transfer.** The successor adopts the lane once it holds the claim
   and has seated the room's durable occupancy in its room actor, then
   decides the head entry from canonical rows. An occupant without a row in
