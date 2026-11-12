@@ -548,7 +548,10 @@ async fn binding_the_resource_again_replaces_its_detached_session() {
     let mut late = authenticate(&fixture.server, 0).await;
     send_element(&mut late, resume(&token, 0)).await;
     let failed = recv_sm(&mut late, "failed").await;
-    assert!(failed
-        .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
-        .is_some());
+    assert!(
+        failed
+            .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some(),
+        "resume of a replaced session: {failed:?}"
+    );
 }

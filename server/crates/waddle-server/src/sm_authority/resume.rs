@@ -8,7 +8,7 @@ use waddle_xmpp::ownership::{BindingRef, SmSessionKey};
 use waddle_xmpp::stream_management::durable::{
     authorize_resume, transition, DurableSessionView, DurableSmEvent, DurableSmState,
     HandledDecision, OwnerFence, PrincipalStanding, ResumeAttempt, ResumeDenial, SmOperationId,
-    SmOrdinal, SmResumeToken, SmResumeTokenError,
+    SmOrdinal, SmResumeToken, SmResumeTokenError, TerminalReason,
 };
 use waddle_xmpp::stream_management::persistence::{PersistedSession, SmClaimFence};
 use waddle_xmpp::stream_management::SmResumed;
@@ -55,6 +55,11 @@ pub struct ResumeCandidate {
     pub full_jid: FullJid,
     /// The stored principal reference.
     pub principal: AuthenticatedPrincipalRef,
+    /// Why the session ended, if it has. A terminal session never leaves
+    /// that state, so this unlocked read is enough to refuse the resume
+    /// before any claim or ingress checkpoint is consulted for a session
+    /// whose stream state has already been released.
+    pub terminal: Option<TerminalReason>,
 }
 
 /// What the resuming connection presents.
@@ -251,6 +256,10 @@ impl DurableSmStore {
             session: stored.session,
             full_jid: stored.full_jid,
             principal: stored.principal,
+            terminal: match stored.state {
+                DurableSmState::Terminal(reason) => Some(reason),
+                _ => None,
+            },
         }))
     }
 

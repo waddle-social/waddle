@@ -1618,6 +1618,13 @@ pub(super) async fn resume(
             candidate.full_jid,
         ));
     }
+    // A closed, replaced or expired session has released its claim and its
+    // ingress checkpoint, so none of the steps below can be answered for
+    // it. It is the same known rejection the commit would decide.
+    if let Some(reason) = candidate.terminal {
+        info!(%stream_id, ?reason, "durable SM resume rejected: the session is terminal");
+        return failed(stream_id, SmResumeOutcome::NotFound);
+    }
 
     // Cleanup, not the fence: a connection on this node that still owns the
     // session detaches so its resource snapshot is stored. Whatever it
