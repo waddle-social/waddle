@@ -249,6 +249,27 @@ impl SettlementRetry {
 }
 
 impl DurableSmLink {
+    /// The session and generation this connection's binding holds at the
+    /// durable authority: the generation it owns, or the one a committed
+    /// resume bound for it. `None` when the connection owns no durable
+    /// session.
+    pub(in crate::server::routes::websocket) fn session_binding(
+        &self,
+    ) -> Option<waddle_xmpp::ownership::joint_identity::SmBinding> {
+        let fence = match self {
+            Self::Owner(owner) => &owner.fence,
+            Self::Hydrating(hydrating) => hydrating.commit.fence(),
+            Self::Unbound
+            | Self::EnableUnresolved(_)
+            | Self::ResumeUnresolved(_)
+            | Self::Superseded => return None,
+        };
+        Some(waddle_xmpp::ownership::joint_identity::SmBinding {
+            session: fence.session,
+            generation: fence.generation,
+        })
+    }
+
     /// When the live loop must next try to settle an operation whose commit
     /// outcome is unknown.
     pub(in crate::server::routes::websocket) fn settlement_due(
@@ -1573,6 +1594,12 @@ pub(super) async fn resume(
     #[cfg(test)]
     resume_binding_attempts.push(attempt_binding.clone());
 
+    // Only a session the durable authority enabled can be resumed here. A
+    // `previd` the legacy registry issued before this authority was
+    // selected names no durable session: it is answered `<failed/>` with
+    // item-not-found, the client binds afresh, and the legacy session's
+    // rows are expired by the stream-management expiry janitor, which
+    // still restores and ages every session the authority does not hold.
     let Ok(operation) = ResumeOperation::for_previd(&resume.previd) else {
         return failed(unnamed_session(), SmResumeOutcome::NotFound);
     };

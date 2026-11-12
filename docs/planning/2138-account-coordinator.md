@@ -229,13 +229,97 @@ the admin channel command. They read a connection entry together with its
 outbound endpoint, or belong to code that writes the registry, and move
 with the switch of the writers.
 
-No connection sends the binding messages yet, so a selected coordinator
-has no bindings and reads as an account without resources.
+### What a connection sends when the coordinator is selected
+
+With `WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` every `/ws` connection
+drives the coordinator's slot for its resource
+(`W/account_binding.rs`, `W/registration.rs`; `W` is
+`waddle-server/src/server/routes/websocket`):
+
+| Event | Calls |
+| --- | --- |
+| Bind, and a fresh bind after a failed resume | `slot_status`, `Bind`, `PublishEndpoint` before the registry entry is registered; `RegisterActor` and `bind_success` after the account's actor confirmed it, before stream-management finalization and the reply |
+| Resume | The durable session commits the resume first, which binds the new generation. `SuccessfulResume` names the slot's detached binding and both generations, then `PublishEndpoint`, `RegisterActor`, `bind_success` |
+| Presence, priority, carbons, roster or block-list interest changed, stream management enabled | `slot_status`, `UpdateSnapshot`, after the frame that changed it is handled and before the next one is read |
+| Offline flush, pending-subscription flush | `mark_presented`; the flush runs only on `true` |
+| Teardown that stored a resumable session | `Detach` |
+| Any other teardown, a failed resume, a rebind on the same socket | `unregister`, then `repair` with the teardown dispositions |
+
+Decisions this wiring makes:
+
+- **Pending replacement.** The existing bind preparation force-detaches a
+  local incumbent and waits for it to stop before the coordinator is
+  asked, so a bind normally finds the slot free. When the coordinator
+  still answers `ReplacementPending`, the replacing connection
+  force-detaches the displaced binding if a local connection holds it,
+  retires it itself if the coordinator reports it expired, and re-reads
+  the slot every 50 ms until it is free or the bind-retirement budget of
+  ten seconds ends. It then binds again, which is a new operation. A
+  timeout fails the bind as an authoritative-registration failure, the
+  stanza error a replacement timeout has always produced.
+- **A resume without a detached slot.** When the slot holds no detached
+  binding of the resumed session (the session was detached before the
+  coordinator was selected, or its binding was retired after a resume that
+  failed late), the binding is recorded with `Bind` instead. The durable
+  session committed the resume and is the authority on it; a slot that
+  holds any other binding refuses.
+- **Order with the registry.** The coordinator records the binding before
+  the registry registers its endpoint, and before the occupancy
+  authority's publication guard takes a database connection. A registry
+  or actor-tree refusal retires the coordinator's record.
+- **Teardown is reported once, at its end.** The coordinator learns of a
+  detach or a retirement after the connection's teardown ran, because only
+  then is it known whether a resumable session was stored. Until then the
+  slot still lists the resource; a stanza selected for it finds no
+  endpoint and takes the detached-session or offline path, as it does for
+  a stale registry entry. A detach the slot refuses falls back to
+  retirement.
+- **Teardown evidence.** The connection states that accepted work has a
+  recovery owner (stream-management custody or offline delivery), that
+  directed presence is retracted by the recovery paths, and that pending
+  presentations belong to recovery. A binding that never entered the
+  routing index states that it accepted nothing.
+- **The bind-success receipt** is read when the binding is confirmed, not
+  again when the reply is written.
+- **A node that does not own the account** cannot record the binding: the
+  coordinator refuses with the claim error and the bind fails. The
+  coordinator can be selected only where a socket's node owns the claim of
+  its account.
+
+### What still writes the registry and the mirrors
+
+The coordinator decides which resources receive a stanza. It does not
+deliver one: delivery resolves the outbound endpoint through the
+connection registry and the account's `UserActor`. Both are therefore
+written under either selection, and with the coordinator selected a
+binding is recorded in all three. The reads that need the legacy writes:
+
+- full-JID delivery (`deliver_one_via_actor_at`, `deliver_peer_to_live_only`
+  in `server/routes/interpret/routing.rs`), which asks the `UserActor` for
+  the resource's endpoint;
+- the inbox-update push and the group-DM leave
+  (`groupchat_archive.rs`, `admin/channels.rs`);
+- stream-management promotion (`sm_promotion/live.rs`);
+- the cluster route bridge's receiver, registration snapshots and
+  side effects (`clustering/route_bridge`);
+- direct sends through the connection registry: presence probe answers and
+  directed presence, block-list pushes, MUC invites, PubSub fan-out, Muji;
+- connection cleanup and registration, pending-delivery flush and
+  recovery, the extension host's presence query and the admin channel
+  command.
+
+The registry's presence state, last activity and pending subscription
+stanzas are still written by the presence handlers for the same readers.
 
 ## The binding publisher
 
-`CoordinatorBindingPublisher` (`account_coordinator/publisher.rs`) has the
-four steps of the websocket `BindingPublisher` trait and maps them onto the
+A connection publishes its bindings through one trait, `BindingPublisher`
+(`W/connection/binding.rs`, `W` being
+`waddle-server/src/server/routes/websocket`). Two publishers implement it:
+`RegistryBindingPublisher` (`W/registration.rs`), which writes the
+connection registry and its mirrors, and `CoordinatorBindingPublisher`
+(`account_coordinator/publisher.rs`, trait implementation in
+`W/connection/coordinator_publisher.rs`), which maps the steps onto the
 coordinator:
 
 | Step | Coordinator calls |
@@ -243,39 +327,31 @@ coordinator:
 | `publish` | `slot_status`, `Bind`, `PublishEndpoint` |
 | `publish_resumed` | `slot_status`, `SuccessfulResume`, `PublishEndpoint` |
 | `confirm` | `slot_status`, `RegisterActor`, `bind_success` |
+| `withdraw` | none: the coordinator holds no outbound endpoint |
 | `retire`, `retire_remote` | `unregister`, then `repair` with the connection's teardown evidence |
 
 Each step reads the slot first and skips what the binding's state shows as
 done, so a repeat after a lost reply is safe.
 
-It does not implement the trait, which cannot express it as it stands. The
-trait needs these changes before the connection can select the publisher
-through it:
+The trait is shaped by what the coordinator needs:
 
-1. **Visibility.** The trait is `pub(in crate::server::routes::websocket)`
-   and reachable only inside that module. Either it becomes `pub(crate)`,
-   or the implementation moves to a file under `routes/websocket`.
-2. **`publish` must be asynchronous and fallible.** It is synchronous and
-   returns `Option<Published>`. Recording a binding commits a row, and the
-   outcome has three shapes the caller acts on differently: published, a
-   pending replacement naming the displaced `BindingRef`, and a typed
-   refusal. It returns a future of `Result<PublishOutcome, _>`.
-3. **`publish` takes the binding, not a registry entry.** It receives a
-   `ConnectionEntry`. The coordinator needs the `BindingRef` and the
-   resource's `ResourceLifetime`; the outbound endpoint stays in the
-   transport index and is not the coordinator's.
-4. **`Published` must be `Clone`, not `Copy`.** What identifies a published
-   binding to the coordinator is its `BindingRef` with the claim identity
-   and revision from `slot_status`, none of which is `Copy`.
-5. **`confirm` returns a typed outcome.** `Option<Confirmation>` cannot
-   tell "no longer the current binding" from a refusal or a store failure.
-   The `resumed` flag is not needed: a resumed binding is published by a
-   separate step that carries the `SuccessfulResumeReceipt` and the
-   previous `BindingRef`, and is confirmed like any other.
-6. **`retire` and `retire_remote` take evidence and return an outcome.**
-   They return `()`. The coordinator completes a retirement only with the
-   custody and teardown dispositions, and the caller must learn whether
-   the binding was retired, was stale, or was refused.
+- `publish` is asynchronous and fallible. It answers published, a pending
+  replacement naming the displaced `BindingRef` and the slot revision, or a
+  typed refusal; an error means the outcome is unknown.
+- `publish` takes the `BindingRef` and the resource's `ResourceLifetime`.
+  The outbound endpoint belongs to the transport index, so the registry
+  publisher is handed the entry it registers when it is constructed.
+- `Published` is `Clone`: the coordinator's value is the `BindingRef` with
+  the claim identity and revision from `slot_status`.
+- A resumed binding is published by its own step, which carries what the
+  publisher needs about the committed resume (for the coordinator the
+  `SuccessfulResumeReceipt` and the previous `BindingRef`), and is confirmed
+  like any other. `confirm` answers confirmed with a receipt, not current,
+  or refused.
+- Retirement has three steps. `withdraw` takes the binding out of the
+  routing index and returns what the index held. `retire` and
+  `retire_remote` take the custody and teardown dispositions and report
+  whether the binding was retired, was not the current one, or was refused.
 
 ## Session reference and release order
 

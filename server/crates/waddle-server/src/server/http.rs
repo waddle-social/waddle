@@ -2171,6 +2171,9 @@ async fn create_sm_session_registry(
     #[cfg(feature = "clustering")]
     if let Some(local_claims) = &clustering.local_claims {
         local_claims.wire(Arc::clone(&sm_session_registry));
+        if let Some(store) = state.durable_sm().store() {
+            local_claims.wire_durable_sm(store.clone());
+        }
     }
     Ok(sm_session_registry)
 }

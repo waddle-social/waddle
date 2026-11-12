@@ -5,35 +5,9 @@ use waddle_xmpp::registry::DeferredPendingFlushWakeups;
 use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
 
 use super::super::cleanup::cleanup_invalidated_detached_session;
+use super::super::registration::{retire_binding, retire_remote_binding, withdraw_binding};
 use super::super::state::WsConnState;
 use super::super::WebSocketState;
-
-#[cfg(feature = "clustering")]
-async fn unregister_remote_user_resource_if_owner(
-    state: &WebSocketState,
-    jid: &FullJid,
-    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) {
-    if let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    {
-        bridge
-            .unregister_remote_user_resource_if_owner(jid, owner)
-            .await;
-    }
-}
-
-#[cfg(not(feature = "clustering"))]
-async fn unregister_remote_user_resource_if_owner(
-    _state: &WebSocketState,
-    _jid: &FullJid,
-    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) {
-}
 
 /// Finish the XEP-0198 side effects that become safe only after the resumed
 /// or freshly-bound resource has been published to the connection registry.
@@ -515,7 +489,7 @@ async fn reset_resume_attempt(
         if let Some(entry) = current {
             if let Some(binding) = entry.binding_ref().cloned() {
                 if entry.seal_binding_for_failed_resume(*owner, &binding, failed_resume_wakeups) {
-                    if let Some(removed) = registry.unregister_if_owner(jid, owner) {
+                    if let Some(removed) = withdraw_binding(state, jid, owner) {
                         removed_owner = true;
                         exact_binding_match = failed_binding.as_ref() == Some(&binding);
                         if exact_binding_match {
@@ -581,13 +555,8 @@ async fn reset_resume_attempt(
                     conn.resume_endpoint_handoff_blocked,
                 );
             }
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                jid,
-                Some(*owner),
-            )
-            .await;
-            unregister_remote_user_resource_if_owner(state, jid, owner).await;
+            retire_binding(state, jid, owner).await;
+            retire_remote_binding(state, jid, owner).await;
         } else {
             // Ownership moved or its exact binding could not be sealed. Do not
             // reuse any sender from this socket for a successor attempt.
@@ -599,6 +568,7 @@ async fn reset_resume_attempt(
         }
     }
     conn.registry_owner = None;
+    super::super::account_binding::retire_current(state, conn).await;
     // The adopted detached generation is rolled back too: the detached
     // session is restored and will be invalidated with ITS generation, so a
     // fresh bind on this connection must not share it (#1703).
@@ -660,26 +630,17 @@ async fn close_registered_resume_attempt(
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     conn.retire_binding_ref();
-    let removed = state
-        .deps
-        .protocol
-        .connection_registry
-        .unregister_if_owner(jid, owner)
-        .is_some();
+    let removed = withdraw_binding(state, jid, owner).is_some();
     if removed {
         // ADR-0017 Phase 1: mirror the DashMap unregister into the actor
         // tree so the resource the bind mirror-registered does not leak when
         // a resume attempt is closed out. Owner-gated on the same token so a
         // superseding newcomer is not clobbered.
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            jid,
-            Some(*owner),
-        )
-        .await;
-        unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        retire_binding(state, jid, owner).await;
+        retire_remote_binding(state, jid, owner).await;
     }
     conn.registry_owner = None;
+    super::super::account_binding::retire_current(state, conn).await;
     conn.phase = ConnectionPhase::closing(Some(jid.clone()));
 }
 

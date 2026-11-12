@@ -195,6 +195,25 @@ impl AccountBindingStore for InMemoryAccountBindingStore {
             .collect())
     }
 
+    async fn bound_accounts(
+        &self,
+        after: Option<&BareJid>,
+        limit: u32,
+    ) -> Result<Vec<BareJid>, AccountBindingStoreError> {
+        let accounts: std::collections::BTreeSet<BareJid> = self
+            .state()?
+            .resources
+            .iter()
+            .filter(|(_, (stored, _))| stored.image.binding.is_some())
+            .map(|(jid, _)| jid.to_bare())
+            .filter(|account| after.is_none_or(|after| account > after))
+            .collect();
+        Ok(accounts
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .collect())
+    }
+
     async fn load_account(
         &self,
         account: &BareJid,

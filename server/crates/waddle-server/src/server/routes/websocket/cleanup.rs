@@ -1,4 +1,5 @@
 use super::frame::ResponseBatch;
+use super::registration::{retire_binding, retire_remote_binding, withdraw_binding};
 use super::replay::{
     drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
     ReplayDrainSink, TerminalDrainContext,
@@ -18,8 +19,6 @@ use crate::clustering::ordered_relay::MucProxyOrigin;
 use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::MucProxyRouteDecision;
-#[cfg(feature = "clustering")]
-use crate::clustering::route_bridge::RemoteResourceUnregisterOutcome;
 #[cfg(feature = "clustering")]
 use crate::clustering::ClusteringHandles;
 use crate::pending_delivery::FlushOutcome;
@@ -91,34 +90,6 @@ where
         return outcome;
     }
     unreachable!("force-detach busy retry loop always returns")
-}
-
-#[cfg(feature = "clustering")]
-async fn unregister_remote_user_resource_if_owner(
-    state: &WebSocketState,
-    jid: &FullJid,
-    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) -> RemoteResourceUnregisterOutcome {
-    if let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    {
-        return bridge
-            .unregister_remote_user_resource_if_owner(jid, owner)
-            .await;
-    }
-    RemoteResourceUnregisterOutcome::NotRegistered
-}
-
-#[cfg(not(feature = "clustering"))]
-async fn unregister_remote_user_resource_if_owner(
-    _state: &WebSocketState,
-    _jid: &FullJid,
-    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) -> () {
 }
 
 fn muji_reflection_rank(muji: &Muji) -> u8 {
@@ -789,14 +760,111 @@ pub(super) async fn cleanup_connection_shutdown(
     conn: &mut WsConnState,
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
-    Box::pin(cleanup_connection_shutdown_inner(
+    let ending = EndingConnection::of(conn);
+    #[cfg(feature = "clustering")]
+    let occupant = EndingOccupant::of(conn);
+    let teardown = Box::pin(cleanup_connection_shutdown_inner(
         state,
         outbound_rx,
         conn,
         superseded,
         None,
-    ))
-    .await
+    ));
+    #[cfg(feature = "clustering")]
+    let teardown = ENDING_OCCUPANT.scope(occupant, teardown);
+    let outcome = teardown.await;
+    ending.finish(state, outcome).await;
+    outcome
+}
+
+/// What a connection's end reports once its teardown has run: its binding
+/// at the account coordinator.
+struct EndingConnection {
+    account_binding: Option<super::account_binding::AccountBindingLink>,
+}
+
+impl EndingConnection {
+    fn of(conn: &mut WsConnState) -> Self {
+        Self {
+            account_binding: conn.account_binding.take(),
+        }
+    }
+
+    async fn finish(self, state: &WebSocketState, outcome: ConnectionShutdownOutcome) {
+        super::account_binding::finish_teardown(state, self.account_binding, outcome).await;
+    }
+}
+
+/// The identity an ending connection leaves its remote rooms under.
+#[cfg(feature = "clustering")]
+#[derive(Clone)]
+struct EndingOccupant {
+    principal: waddle_xmpp::auth::AuthenticatedPrincipalRef,
+    occupancy: waddle_xmpp_core::OccupancySessionGeneration,
+}
+
+#[cfg(feature = "clustering")]
+impl EndingOccupant {
+    fn of(conn: &WsConnState) -> Option<Self> {
+        let principal = conn
+            .authenticated_session
+            .as_ref()?
+            .authenticated_principal_ref()
+            .ok()?;
+        Some(Self {
+            principal,
+            occupancy: conn.occupancy_session,
+        })
+    }
+}
+
+#[cfg(feature = "clustering")]
+tokio::task_local! {
+    // Set for the teardown of one connection. The remote-room sweep is
+    // reached from that teardown and from janitors that act for no
+    // connection; only the former has a principal to leave a room under.
+    static ENDING_OCCUPANT: Option<EndingOccupant>;
+}
+
+/// Leave one remote room through the room-request mailbox, as the ending
+/// connection. `true` means the mailbox carries the leave (or refused it
+/// with the requester's answer), so the relayed replay is not sent.
+#[cfg(feature = "clustering")]
+async fn commit_room_leave_for_ending_connection(
+    state: &WebSocketState,
+    jid: &FullJid,
+    room: &BareJid,
+    nick: &str,
+    connection_generation: MembershipGenerationFilter,
+) -> bool {
+    use crate::ingress::room_request::RoomRequestCommit;
+    let Ok(Some(ending)) = ENDING_OCCUPANT.try_with(Clone::clone) else {
+        return false;
+    };
+    if !matches!(connection_generation, MembershipGenerationFilter::Only(generation) if generation == ending.occupancy)
+    {
+        return false;
+    }
+    match state
+        .deps
+        .protocol
+        .ingress
+        .commit_room_leave_at_connection_end(
+            room.clone(),
+            jid.clone(),
+            nick,
+            ending.occupancy,
+            ending.principal,
+        )
+        .await
+    {
+        Ok(RoomRequestCommit::Committed(_) | RoomRequestCommit::Refused(_)) => true,
+        Ok(RoomRequestCommit::NotCarried) => false,
+        Err(error) => {
+            warn!(%room, %jid, %error, "room leave was not committed to the mailbox; relaying it");
+            false
+        }
+    }
 }
 
 /// Force-detach cleanup has a stricter completion boundary than ordinary
@@ -818,14 +886,21 @@ pub(super) async fn cleanup_force_detach_connection_shutdown(
             conn.phase = ConnectionPhase::closing(Some(jid));
         }
     }
-    Box::pin(cleanup_connection_shutdown_inner(
+    let ending = EndingConnection::of(conn);
+    #[cfg(feature = "clustering")]
+    let occupant = EndingOccupant::of(conn);
+    let teardown = Box::pin(cleanup_connection_shutdown_inner(
         state,
         outbound_rx,
         conn,
         superseded,
         Some(origin),
-    ))
-    .await
+    ));
+    #[cfg(feature = "clustering")]
+    let teardown = ENDING_OCCUPANT.scope(occupant, teardown);
+    let outcome = teardown.await;
+    ending.finish(state, outcome).await;
+    outcome
 }
 
 async fn cleanup_connection_shutdown_inner(
@@ -1148,13 +1223,7 @@ async fn cleanup_connection_shutdown_inner(
                             cleanup_invalidated_detached_session(state, dead, None).await;
                         }
                     }
-                    if state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .unregister_if_owner(&jid, owner)
-                        .is_none()
-                    {
+                    if withdraw_binding(state, &jid, owner).is_none() {
                         // Ownership moved: the same client fresh-bound on a
                         // newer connection before this cleanup stored its
                         // detached session, so the newer bind's
@@ -1248,12 +1317,7 @@ async fn cleanup_connection_shutdown_inner(
                     // this receiver is never drained or promoted again, so
                     // every stanza routing could still enqueue during the
                     // drain would be silently dropped on task exit.
-                    let detach_fail_removed = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .unregister_if_owner(&jid, owner)
-                        .is_some();
+                    let detach_fail_removed = withdraw_binding(state, &jid, owner).is_some();
                     // The failed fenced store has already inserted the
                     // detached session into the in-memory registry (the
                     // durable snapshot rolled back), so a fence check that
@@ -1375,13 +1439,8 @@ async fn cleanup_connection_shutdown_inner(
                         // resource leaks in the actor tree forever. Owner-gated
                         // (the same token that owned the DashMap slot) so a
                         // superseding newcomer's actor-tree entry is not clobbered.
-                        crate::server::dual_registration::mirror_unregister(
-                            &state.deps.protocol.user_registry,
-                            &jid,
-                            Some(*owner),
-                        )
-                        .await;
-                        unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+                        retire_binding(state, &jid, owner).await;
+                        retire_remote_binding(state, &jid, owner).await;
                     }
                     // PR #438 review (Copilot): when SM detachment
                     // fails we fall back to a full unregister, so the
@@ -1415,14 +1474,10 @@ async fn cleanup_connection_shutdown_inner(
         }
     }
 
-    let removed = conn.registry_owner.as_ref().and_then(|owner| {
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister_if_owner(&jid, owner)
-            .map(|entry| (entry, *owner))
-    });
+    let removed = conn
+        .registry_owner
+        .as_ref()
+        .and_then(|owner| withdraw_binding(state, &jid, owner).map(|entry| (entry, *owner)));
     if let Some((removed_entry, owner)) = removed {
         // Capture presence availability from the entry we just owned and
         // removed — NOT from a fresh registry lookup, which after the
@@ -1456,13 +1511,8 @@ async fn cleanup_connection_shutdown_inner(
         // the dominant disconnect teardown path. Owner-gated (the same token
         // that owned the DashMap entry) so a superseding newcomer that
         // already replaced this FullJid's actor-tree entry is not clobbered.
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            &jid,
-            Some(owner),
-        )
-        .await;
-        unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
+        retire_binding(state, &jid, &owner).await;
+        retire_remote_binding(state, &jid, &owner).await;
     } else {
         cleanup_terminal_muc_presence(state, &jid, conn).await;
         debug!(jid = %jid, "Skipped registry cleanup for non-owned registry entry");
@@ -1519,18 +1569,12 @@ async fn finish_detached_route(
     // `mirror_register`, so pruning here does not affect resume.
     // Owner-gated so a superseding newcomer is untouched.
     if !force_detach {
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            &jid,
-            Some(*owner),
-        )
-        .await;
+        retire_binding(state, &jid, owner).await;
     }
     #[cfg(feature = "clustering")]
-    let remote_unregister_outcome =
-        unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+    let remote_unregister_outcome = retire_remote_binding(state, &jid, owner).await;
     #[cfg(not(feature = "clustering"))]
-    unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+    retire_remote_binding(state, &jid, owner).await;
     outbound_rx.close();
     // Second detach drain: anything that arrived
     // between the first drain and the registry
@@ -1915,12 +1959,7 @@ async fn promote_terminal_recovery_inner(
     // The owner token keeps a same-FullJID replacement untouched.
     let terminal_route_removed = conn.registry_owner.as_ref().and_then(|owner| {
         conn.sm_recovery_required.then(|| {
-            state
-                .deps
-                .protocol
-                .connection_registry
-                .unregister_if_owner(jid, owner)
-                .map(|entry| (entry.is_presence_available(), *owner))
+            withdraw_binding(state, jid, owner).map(|entry| (entry.is_presence_available(), *owner))
         })?
     });
     // Settle released rows BEFORE any incremental promotion can run: the
@@ -2691,11 +2730,7 @@ async fn refuse_detach_without_principal(
     let terminal_removed = match terminal_route_removal {
         TerminalRouteRemoval::NotAttempted => conn.registry_owner.as_ref().and_then(|owner| {
             conn.sm_recovery_required.then(|| {
-                state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .unregister_if_owner(jid, owner)
+                withdraw_binding(state, jid, owner)
                     .map(|entry| (entry.is_presence_available(), *owner))
             })?
         }),
@@ -2827,7 +2862,7 @@ async fn refuse_detach_without_principal(
         .await;
         if !replacement_took_over {
             state.deps.protocol.caps_resolver.drop_resource(jid);
-            unregister_remote_user_resource_if_owner(state, jid, &owner).await;
+            retire_remote_binding(state, jid, &owner).await;
         } else {
             debug!(
                 jid = %jid,
@@ -2838,12 +2873,7 @@ async fn refuse_detach_without_principal(
         // not mean that the replacement has advertised presence. The helper
         // performs the required presence-aware suppression check.
         broadcast_unavailable_if_no_replacement(state, jid, was_presence_available).await;
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            jid,
-            Some(owner),
-        )
-        .await;
+        retire_binding(state, jid, &owner).await;
         outbound_rx.close();
         return ConnectionShutdownOutcome::NotPersisted;
     }
@@ -3524,6 +3554,21 @@ async fn cleanup_remote_muc_presence(
             waddle_sfu::UnboundOccupantPolicy::Keep,
             None,
         );
+        // An ending connection leaves through the room-request mailbox
+        // where the mailbox carries the room; the relayed replay below is
+        // for every other case.
+        if commit_room_leave_for_ending_connection(
+            state,
+            jid,
+            &room_jid,
+            &nick,
+            connection_generation,
+        )
+        .await
+        {
+            custody.forget();
+            continue;
+        }
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));
@@ -3937,14 +3982,8 @@ pub(super) async fn cleanup_invalidated_detached_session(
                 &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
             );
         if let Some(entry) = removed_entry {
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                &detached.jid,
-                Some(entry.binding_id()),
-            )
-            .await;
-            unregister_remote_user_resource_if_owner(state, &detached.jid, &entry.binding_id())
-                .await;
+            retire_binding(state, &detached.jid, &entry.binding_id()).await;
+            retire_remote_binding(state, &detached.jid, &entry.binding_id()).await;
         }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an

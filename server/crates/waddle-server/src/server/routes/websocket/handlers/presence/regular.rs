@@ -16,6 +16,7 @@ use crate::pending_delivery::MamArchiveResolver;
 use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use tracing::Instrument as _;
+use waddle_xmpp::ownership::account_coordinator::Presentation;
 use waddle_xmpp::Stanza;
 
 /// Handle a broadcast (undirected) presence update from a live connection.
@@ -86,7 +87,7 @@ pub(super) async fn handle_regular_presence_update(
             // handed to a spawned task below so a backlog larger than the
             // outbound mpsc can't self-deadlock this connection (issue #1220).
             let flush_plan = if priority >= 0 {
-                plan_offline_flush(state, sender_jid, owner)
+                plan_offline_flush(state, sender_jid, owner).await
             } else {
                 None
             };
@@ -126,12 +127,27 @@ pub(super) async fn handle_regular_presence_update(
             // `handle_subscription_presence`'s live path; the queue exists for the
             // next fresh session until the request is answered. Owner-gated so a
             // superseded connection cannot consume the replacement's claim.
-            let first_available = state
+            let first_available = match state
                 .deps
                 .protocol
                 .connection_registry
                 .entry_if_owner(sender_jid, owner)
-                .is_some_and(|entry| entry.claim_pending_subscribes_flush());
+                .filter(|entry| entry.claim_pending_subscribes_flush())
+            {
+                // The selected account authority records the presentation
+                // before it is made, and a resumed session is not presented
+                // to again.
+                Some(entry) => {
+                    crate::server::routes::websocket::account_binding::mark_presented(
+                        state,
+                        sender_jid,
+                        &entry,
+                        Presentation::PendingSubscriptions,
+                    )
+                    .await
+                }
+                None => false,
+            };
             let subscribe_stanzas = if first_available {
                 state
                     .deps
@@ -270,7 +286,7 @@ struct OfflineFlushPlan {
 /// Owner-gated (issue #1208): the entry lookup uses `entry_if_owner` so a
 /// superseded same-JID connection cannot consume the replacement's
 /// once-per-session `claim_offline_flush` CAS.
-fn plan_offline_flush(
+async fn plan_offline_flush(
     state: &WebSocketState,
     sender_jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
@@ -281,6 +297,19 @@ fn plan_offline_flush(
         .connection_registry
         .entry_if_owner(sender_jid, owner)?;
     if !entry.claim_offline_flush() {
+        return None;
+    }
+    // The selected account authority records the flush before it runs. A
+    // resumed session, whose earlier binding already received its backlog,
+    // is not flushed to again.
+    if !crate::server::routes::websocket::account_binding::mark_presented(
+        state,
+        sender_jid,
+        &entry,
+        Presentation::OfflineMessages,
+    )
+    .await
+    {
         return None;
     }
     Some(OfflineFlushPlan {

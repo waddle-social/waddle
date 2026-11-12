@@ -97,6 +97,14 @@ pub trait AccountBindingStore: Send + Sync + 'static {
         session: SmSessionKey,
     ) -> Result<Vec<FullJid>, AccountBindingStoreError>;
 
+    /// Up to `limit` accounts that have a resource holding a binding, in
+    /// bare-JID order, starting after `after`.
+    async fn bound_accounts(
+        &self,
+        after: Option<&BareJid>,
+        limit: u32,
+    ) -> Result<Vec<BareJid>, AccountBindingStoreError>;
+
     /// Read every resource row of an account, ordered by full JID.
     async fn load_account(
         &self,

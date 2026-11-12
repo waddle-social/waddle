@@ -20,10 +20,10 @@ use super::super::replay::load_terminal_recovery_blocklist;
 use super::super::stream_management::{selected_store, DurableSmOwner, OwnerRelease};
 use super::{
     cleanup_invalidated_detached_session, debug, drain_outbound_into_replay, finish_detached_route,
-    mpsc, redrive_terminal_pending_rows_to_live_resource, retire_ingress_stream, sm_show_from_name,
-    unregister_remote_user_resource_if_owner, warn, ConnectionPhase, ConnectionShutdownOutcome,
-    DetachedRoute, FullJid, OutboundStanza, PendingRowDrainPolicy, ReplayDrainSink, WebSocketState,
-    WsConnState,
+    mpsc, redrive_terminal_pending_rows_to_live_resource, retire_binding, retire_ingress_stream,
+    retire_remote_binding, sm_show_from_name, warn, withdraw_binding, ConnectionPhase,
+    ConnectionShutdownOutcome, DetachedRoute, FullJid, OutboundStanza, PendingRowDrainPolicy,
+    ReplayDrainSink, WebSocketState, WsConnState,
 };
 use crate::sm_authority::{DurableSmError, DurableSmStore, LifecycleError, LifecycleRejection};
 
@@ -174,13 +174,7 @@ pub(super) async fn settle_owned_session(
     let tail_admitted = owner.admit_unwritten_tail(&conn.sm_state).await;
     match owner.detach(&conn.sm_state, resource).await {
         OwnerRelease::Committed => {
-            if state
-                .deps
-                .protocol
-                .connection_registry
-                .unregister_if_owner(&jid, &owner_token)
-                .is_none()
-            {
+            if withdraw_binding(state, &jid, &owner_token).is_none() {
                 // A newer bind of the resource holds the route. It replaces
                 // the resource's sessions, this one included.
                 debug!(jid = %jid, %stream_id, "detached durable SM session lost its route to a newer bind");
@@ -277,20 +271,9 @@ async fn leave_session_to_its_owner(
     conn: &mut WsConnState,
 ) -> ConnectionShutdownOutcome {
     if let (Some(jid), Some(owner)) = (conn.phase.cleanup_jid().cloned(), conn.registry_owner) {
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister_if_owner(&jid, &owner)
-            .is_some()
-        {
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                &jid,
-                Some(owner),
-            )
-            .await;
-            unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
+        if withdraw_binding(state, &jid, &owner).is_some() {
+            retire_binding(state, &jid, &owner).await;
+            retire_remote_binding(state, &jid, &owner).await;
         }
     }
     ConnectionShutdownOutcome::NotPersisted
@@ -445,6 +428,9 @@ pub(super) async fn settle_terminal_session(
     {
         warn!(%stream_id, %error, "terminal durable SM transfer receipts were not confirmed");
     }
+    // The session is terminal and holds nothing: the account bindings that
+    // name it are released now, so its row can be deleted later.
+    let _ = super::super::account_binding::release_session_bindings(state, session).await;
     if resource.is_some() {
         // The session ended while detached: its resource is still shown as
         // present and still occupies its rooms.
@@ -473,11 +459,20 @@ pub(crate) async fn run_durable_sm_sweep(state: &WebSocketState) {
     match store.due_for_expiry(now, SWEEP_LIMIT).await {
         Ok(due) => {
             for session in due {
-                let claim = state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .current_sm_claim_fence(&session.as_uuid().to_string());
+                let stream_id = session.as_uuid().to_string();
+                let registry = &state.deps.protocol.sm_session_registry;
+                // A session whose owner's node was lost is detached without
+                // a claim holder. A clustered store expires it only under
+                // the session claim, which this node takes if it is free;
+                // a claim another node holds leaves the expiry to it.
+                let _claim_publication = if store.is_clustered()
+                    && registry.current_sm_claim_fence(&stream_id).is_none()
+                {
+                    registry.ensure_session_claim(&stream_id).await
+                } else {
+                    None
+                };
+                let claim = registry.current_sm_claim_fence(&stream_id);
                 match store.expire(session, claim.as_ref(), now).await {
                     Ok(_) => {}
                     // A resume committed first; the session is not due.
@@ -506,8 +501,32 @@ pub(crate) async fn run_durable_sm_sweep(state: &WebSocketState) {
     else {
         return;
     };
-    if let Err(error) = store.purge_terminal(purge_before).await {
-        warn!(%error, "durable SM tombstone purge failed");
+    if super::super::account_binding::selected_coordinators(state).is_none() {
+        if let Err(error) = store.purge_terminal(purge_before).await {
+            warn!(%error, "durable SM tombstone purge failed");
+        }
+        return;
+    }
+    // With the account coordinator selected a resource row may name a
+    // session. The resource row releases first and the session row is
+    // deleted last, one session at a time, so one referenced session does
+    // not hold back the others.
+    let purgeable = match store.purgeable_terminal(purge_before, SWEEP_LIMIT).await {
+        Ok(purgeable) => purgeable,
+        Err(error) => {
+            warn!(%error, "durable SM tombstone scan failed");
+            return;
+        }
+    };
+    for session in purgeable {
+        if !super::super::account_binding::release_session_bindings(state, session).await {
+            continue;
+        }
+        if let Err(error) = store.purge_terminal_session(session, purge_before).await {
+            // A row that still names the session fails the delete at
+            // commit; the next sweep releases it and deletes again.
+            debug!(session = ?session, %error, "durable SM tombstone kept: still referenced or not deleted");
+        }
     }
 }
 
