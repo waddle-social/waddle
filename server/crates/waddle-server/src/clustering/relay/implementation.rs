@@ -488,7 +488,11 @@ pub(in crate::clustering::relay) fn is_idempotent_join_presence_envelope(
 // mailbox (#2174). The kinds stay in the envelope: the relay serves them
 // below that epoch, and the leave replayed when a connection ends is still
 // relayed at every epoch.
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v15")]
+// v16: at the mailbox protocol epoch a peer sends no `MujiJingleIq` payload;
+// a relayed Muji `session-initiate` or `session-terminate` is a room request
+// on the room's Muji lane (#2175). The kind stays in the envelope for the
+// relay below that epoch.
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v16")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
