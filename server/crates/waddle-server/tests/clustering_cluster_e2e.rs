@@ -2451,8 +2451,41 @@ async fn muc_join_routes_to_foreign_room_owner() {
 
 /// #1749: both local-owner fan-out and relayed ingress must deliver the
 /// XEP-0045 §7.4 reflection and receipt every canonical obligation.
+///
+/// Runs at whatever ingress protocol epoch the database has reached: the
+/// relay carries the stanza and the canonical envelope has no manifest
+/// below the mailbox epoch, and the mailbox carries it with a sealed
+/// manifest from that epoch on.
 #[tokio::test]
 async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
+    groupchat_fanout_terminalizes(false).await;
+}
+
+/// The same exchange at the mailbox epoch: every copy of a sealed room
+/// message, the copy for the occupant on the other node included, is
+/// receipted, so the canonical rows become terminal.
+#[tokio::test]
+async fn groupchat_fanout_terminalizes_at_the_mailbox_epoch() {
+    groupchat_fanout_terminalizes(true).await;
+}
+
+/// Advance the shared database's ingress protocol epoch to 2. Each statement
+/// is one step of the epoch guard; a database already there is left alone.
+async fn activate_mailbox_epoch(db: &Database) {
+    let conn = db.guard().await.expect("epoch guard");
+    for _ in 0..2 {
+        conn.execute(
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
+             lineage_uuid = (SELECT lineage_uuid::uuid FROM _lineage WHERE id = 1) \
+             WHERE id = 1 AND epoch < 2",
+            (),
+        )
+        .await
+        .expect("activate the mailbox epoch");
+    }
+}
+
+async fn groupchat_fanout_terminalizes(mailbox_epoch: bool) {
     let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping groupchat fan-out regression: WADDLE_TEST_POSTGRES_URL not set");
         return;
@@ -2470,6 +2503,9 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+    if mailbox_epoch {
+        activate_mailbox_epoch(&db).await;
+    }
 
     // Use the database clock, preserving sub-millisecond precision. Never
     // include old non-terminal rows left by another test in the shared DB.
@@ -2564,7 +2600,7 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
     {
         failures.push(format!("B receives bodyless composing: {error}"));
     }
-    if let Err(error) = wait_for_fanout_receipts(&db, &started_at).await {
+    if let Err(error) = wait_for_fanout_receipts(&db, &started_at, mailbox_epoch).await {
         failures.push(error);
     }
     for (client, label) in [(&mut client_a, "A"), (&mut client_b, "B")] {
@@ -3058,7 +3094,38 @@ async fn receive_fanout_copy(
     Ok(())
 }
 
-async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(), String> {
+/// Wait until every canonical row since `started_at` is terminal with all
+/// its receipts. Each row must carry the envelope of the epoch it was
+/// committed at: version 1 below the mailbox epoch and version 2, which
+/// holds the sealed room manifest, from it on. `require_mailbox_epoch`
+/// refuses a database that has not reached the mailbox epoch.
+async fn wait_for_fanout_receipts(
+    db: &Database,
+    started_at: &str,
+    require_mailbox_epoch: bool,
+) -> Result<(), String> {
+    let epoch: i64 = {
+        let conn = db.guard().await.expect("epoch read guard");
+        let mut rows = conn
+            .query(
+                "SELECT epoch::bigint FROM ingress_protocol_epoch WHERE id = 1",
+                (),
+            )
+            .await
+            .expect("ingress protocol epoch");
+        rows.next()
+            .await
+            .expect("epoch query")
+            .expect("epoch row")
+            .get(0)
+            .expect("epoch")
+    };
+    if require_mailbox_epoch && epoch < 2 {
+        return Err(format!(
+            "the database is at ingress protocol epoch {epoch}, not the mailbox epoch"
+        ));
+    }
+    let envelope_version: i64 = if epoch >= 2 { 2 } else { 1 };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut diagnostic = Vec::new();
     loop {
@@ -3079,10 +3146,10 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
                        AND NOT EXISTS (SELECT 1 FROM ingress_effect_receipts r
                          WHERE r.message_key = i.message_key AND r.kind = i.kind
                            AND r.semantic_identity_hash = i.semantic_identity_hash)),
-                    m.envelope_version = 1
+                    m.envelope_version = ?
                  FROM ingress_messages m WHERE m.created_at >= CAST(? AS timestamptz)
                  ORDER BY m.created_at, m.message_key",
-                    waddle_server::db_params![started_at.to_string()],
+                    waddle_server::db_params![envelope_version, started_at.to_string()],
                 )
                 .await
                 .expect("scoped canonical receipt snapshot");
@@ -3097,11 +3164,11 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
                 let routes: i64 = row.get(3).expect("route intent count");
                 let missing: i64 = row.get(4).expect("missing receipt count");
                 let pending: String = row.get(5).expect("pending kinds");
-                let legacy: bool = row.get(6).expect("legacy envelope flag");
+                let envelope: bool = row.get(6).expect("envelope version flag");
                 count += 1;
                 route_rows += usize::from(routes > 0);
-                complete &= terminal && missing == 0 && legacy;
-                details.push(format!("{key} created_at={created} terminal={terminal} legacy={legacy} route_intents={routes} missing={missing} pending kinds=[{pending}]"));
+                complete &= terminal && missing == 0 && envelope;
+                details.push(format!("{key} created_at={created} terminal={terminal} envelope_v{envelope_version}={envelope} route_intents={routes} missing={missing} pending kinds=[{pending}]"));
             }
             // All three sends, including the bodyless state, must have a
             // canonical route row; zero rows is never success.
