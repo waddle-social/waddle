@@ -1,0 +1,218 @@
+# Direct lanes: bare-JID and full-JID delivery through the durable mailbox
+
+Decision record for moving delivery to a user whose account is owned by
+another node ([#2173](https://github.com/waddle-social/waddle/issues/2173))
+from the ordered relay to the durable mailbox. It fills the "Full-JID and
+bare-JID delivery" row of
+[`2046-relay-lane-responsibilities.md`](2046-relay-lane-responsibilities.md)
+and follows the mailbox model of
+[`p2-2-durable-mailbox-core.md`](p2-2-durable-mailbox-core.md) and the
+request pattern of [`2174-room-request-lanes.md`](2174-room-request-lanes.md).
+`S/` is `server/crates/waddle-server/src/`, `X/` is
+`server/crates/waddle-xmpp/src/`, `W/` is `S/server/routes/websocket/`.
+
+Status: see [Build state](#build-state) at the end.
+
+## What the relay does for a user recipient
+
+Every send to a `BareJid` or `FullJid` recipient is built in
+`S/clustering/route_bridge/delivery/ordered.rs` as a `RemoteDeliverySeed`
+and sent by `deliver_seeded_remote` (`ordered_send.rs`). Its callers are
+`S/clustering/addressing.rs`, `route_to_connection`, the immediate delivery
+effects (`RelayFullJid`, `RelayBareJid`, `RelayCarbons`), the carbon relay
+(`interpret/carbons.rs`) and the ingress executor's relay copy
+(`S/ingress/execute_relay_copy.rs`). The seed carries:
+
+- the channel: an origin (a stream-management session or an entity), the
+  recipient, the origin's claim epoch and the epoch of the recipient
+  account's `UserActor` claim;
+- the payload: `ProcessedDirectMessage` (a frozen recipient copy that skips
+  the recipient pipeline), `Message`, `Iq` or `Presence`, and for a message
+  that an ingress transaction owns, the recorded append obligation
+  (`IngressAppendObligationRef`: the canonical message key and the copy's
+  receipt key).
+
+The receiver (`delivery/local.rs`, `receiver.rs`) runs the payload on the
+node that holds the account's `UserActor` claim: a full JID through the
+local connection or the stream-management registry, a bare JID through the
+recipient pipeline. It answers `TargetUnavailable` when nothing took the
+stanza, and the origin then runs its own fallback (offline storage, a
+bounce, an IQ error). An uncertain outcome (`MaybeCommitted`) suppresses
+that fallback and is not retried.
+
+A send whose origin is a resource that is itself hosted through a remote
+channel mirror (`route_remote_resource_origin`) does not use an ordered
+channel to the account owner. It is not a direct lane and stays as it is
+until the mirrors are retired (retirement inventory, "Remote channel
+mirrors").
+
+## Decisions
+
+| # | Question | Decision |
+| --- | --- | --- |
+| D1 | Operation identity | `MailboxOperationKey::Direct(DirectRequestKey)`. The key of a copy that an ingress transaction owns is derived from the canonical message key, the copy's receipt key and the recipient JID, so every attempt and every recovery of that copy is the same operation. Any other copy (an IQ, a presence, a message outside an ingress transaction) mints its key before the first attempt. |
+| D2 | Where the work is stored | A sibling table, `ingress_direct_requests`, holding what the relay envelope would have carried. `ingress_room_requests` is not generalised: its kinds, its occupancy and its frozen responses stay room-only. The pattern is reused: the request is the parent of its mailbox entry, the owner latches a decision once, the origin settles it. |
+| D3 | The lane | Origin: the relay channel's origin (`MailboxLaneOrigin::SmSession` or `Entity`). Recipient: `MailboxLaneRecipient::FullJid` or `BareJid`, both already part of lane encoding version 1. |
+| D4 | The owner | The node that holds the `UserActor` claim of the recipient's bare JID, for both recipient kinds. It is the claim the relay channel already names as its target. |
+| D5 | What acceptance commits | Custody of the stanza by the recipient's session path, then the decision. See [Acceptance](#acceptance). |
+| D6 | Refusal | `Rejected` means nothing took the stanza. The origin reads it as it reads a `TargetUnavailable` refusal and runs the fallback it runs today. |
+| D7 | Gate | Protocol epoch 2 or later under the `mailbox` selector **and** `WADDLE_XMPP_DURABLE_SM=durable`, read on the origin when it sends. Otherwise the relay carries the stanza. |
+| D8 | Wire | No change to `RemoteStanzaEnvelope` or the reply types. A receiver keeps accepting `BareJid` and `FullJid` payloads, because the relay still serves the cases listed under [What stays on the relay](#what-stays-on-the-relay). `deliver_ordered` stays at `v16`. |
+
+## The request
+
+`ingress_direct_requests`, PostgreSQL only, under the epoch guard
+(migration V1033):
+
+| Column | Meaning |
+| --- | --- |
+| `request_key UUID PRIMARY KEY` | The `DirectRequestKey`. |
+| `recipient_jid TEXT` | The lane's recipient, bare or full. |
+| `sender_entity TEXT` | The entity whose claim the origin presented as sender; the target resolves an append obligation against it, as the relay receiver does with the envelope's sender claim. |
+| `payload BYTEA` | The `OrderedRelayPayload` the relay would have sent, serialised once at this boundary with the relay's codec and parsed back by the repository. At most the frame size limit plus the envelope overhead. |
+| `message_key UUID NULL REFERENCES ingress_messages ON DELETE CASCADE` | Set for a copy an ingress transaction owns, so the request leaves with its canonical message. |
+| `owner_decision SMALLINT` | 0 undecided, 1 accepted, 2 rejected. Moves once, from 0. |
+| `settled_at TIMESTAMPTZ NULL` | Set by the origin when it has read the decision. |
+| `created_at TIMESTAMPTZ` | For retention and monitoring. |
+
+`ingress_mailbox_entries` gains a nullable `direct_key UUID REFERENCES
+ingress_direct_requests ON DELETE CASCADE`, operation kind 6, a parent check
+that requires exactly `direct_key` for kind 6, and a partial unique index on
+`direct_key`.
+
+- **Origin commit.** One ingress transaction locks the lane, inserts the
+  request and appends the entry `Pending`. A retry with the same key finds
+  both and writes nothing. The existing per-lane and per-node pending caps
+  apply; a refused append is reported to the caller as backpressure, which
+  is what a full relay channel reports today.
+- **Retention.** As for room requests: collected with its entry once the
+  entry is `Consumed` and `settled_at` is an hour old. A request that
+  refers to a canonical message also leaves with that message.
+- **Dead letters.** The entry stays `Pending` at its lane head. The origin's
+  wait has already ended as uncertain.
+
+## Acceptance
+
+The target's worker runs the stored payload through the code the relay
+receiver runs (`deliver_processed_resource`, `deliver_reserved_full_jid`,
+`deliver_reserved_bare_jid`), then commits one ingress transaction that
+asserts the account's `UserActor` claim, locks the lane as its target,
+latches the request's decision and moves the cursor.
+
+Custody is taken before or after that transaction depending on what makes a
+repeated attempt safe:
+
+| Recipient state on the target | Custody | Order | A repeated attempt |
+| --- | --- | --- | --- |
+| Durable session, detached | `DurableSmStore::admit` with `AdmissionAuthority::Detached { session, generation }` and an operation id derived from the request key | admit, then decide | Returns the ordinal of the first admission; appends nothing. |
+| Durable session, live, copy owned by an ingress transaction | The connection admits the frame on its own `Owner` fence when it takes it from its endpoint, and records the copy's ingress receipt with it | hand over, then decide | The receipt marks the copy as delivered (`live_delivery_status`); nothing is handed over twice. |
+| Durable session, live, any other copy | The connection's `Owner` admission, which mints its own operation id | decide, then hand over | Not repeated. A crash between the two loses the copy, as an uncertain relay outcome does today. |
+| No stream management | A write attempt on the connection's endpoint | decide, then hand over | Not repeated; this is the non-SM attempted-uncertain outcome the relay has. |
+| Not present, or a bare JID for which the recipient pipeline produced only local fallback replies | none | decide `Rejected` | — |
+
+Why the worker does not admit on the `Owner` authority itself: the live
+connection holds the only projection of the session's outbound window
+(`DurableSmLink` in `W/stream_management/durable.rs`) and checks that each
+admission it makes is the next sequence. A second admitter on the same
+fence would desynchronise that projection. The worker therefore uses the
+`Owner` authority only through the connection, and the `Detached` authority
+directly.
+
+### Resolving a full JID
+
+The worker needs `(session, generation)` for a detached admission. The
+store exposes `DurableSmStore::session(SmSessionKey)` and no lookup by full
+JID. The read lives with the direct-lane code
+(`S/ingress/direct_sessions.rs`): one statement on `sm_durable_sessions` by
+`full_jid` returns the session keys, and each is read through
+`DurableSmStore::session`. A detached session whose `sm_session:<key>` claim
+this node holds is admitted against; the worker builds the claim fence from
+the claim store's row for that entity. A session whose claim another node
+holds is not this node's to admit to: the entry is decided `Rejected` with
+the reason "hosted elsewhere", and the origin keeps the relay for that copy.
+
+### Bare JID
+
+The account owner freezes the resource selection when it accepts: the
+recipient pipeline runs once on the target, as it does for a relayed
+bare-JID stanza, and its fan-out to the account's resources is local. A
+retry after an uncertain attempt does not run the pipeline again: bare-JID
+entries are decided before the pipeline runs, except for a copy owned by an
+ingress transaction, whose per-resource receipts make the repeat safe.
+
+## Consumption by the origin
+
+The sender waits for the decision with the budget it gives a relay ask.
+One transaction locks the lane as origin, checks the entry's disposition
+against the request's `owner_decision`, consumes the entry and settles the
+request. The outcome maps onto what the relay's callers already handle:
+
+| Mailbox outcome | Caller sees |
+| --- | --- |
+| Accepted | `Delivered` |
+| Rejected | `Unavailable`: the caller runs its local fallback |
+| Rejected, hosted elsewhere | the relay is used for this copy |
+| No decision within the budget, dead letter, storage failure after the commit | `MaybeCommitted`: no fallback, no second send. The entry stays; the target's poller decides it, and a copy owned by an ingress transaction is also covered by that message's receipts and the ingress maintenance pass. |
+| Nothing committed (not gated, no `UserActor` claim, storage failure before the commit) | the relay is used |
+
+There is never a local fallback or a relay send after a commit whose
+decision is unknown.
+
+## Lost hint, adoption, carbons, offline
+
+- **Lost hint.** The origin hints the target node after its commit; the
+  target's poller scans its backlog every second regardless.
+- **Adoption.** A lane records the owner incarnation its origin last
+  proved. The adoption pass reads the `UserActor` claim of the recipient's
+  bare JID for a lane with a `BareJid` or `FullJid` recipient and writes
+  that claim onto the lane when this node holds it. There is no seating
+  step: the account's sessions are read from durable stream management and
+  the local registries when an entry is worked.
+- **Carbons.** Unchanged. `RelayCarbons` addresses the carbon owner's
+  account; the account owner selects the carbon-enabled resources and
+  records the per-resource carbon receipts (`S/ingress_uow/carbon_receipts.rs`)
+  exactly as it does for a relayed carbon. Only the transport of the request
+  to the account owner changes.
+- **Offline storage and bounces.** Unchanged. They run on the origin, from
+  a `Rejected` decision instead of a `TargetUnavailable` refusal.
+- **Call setup tickets and deferred handoff.** The caller-side handling in
+  `ordered.rs` (`defer_until_relay_completion`, `call_setup`) wraps
+  `deliver_seeded_remote` and is not changed: the mailbox path returns the
+  same outcome type from inside it.
+
+## What stays on the relay
+
+- Every send when the gate is off: epoch below 2, the `relay` selector, or
+  `WADDLE_XMPP_DURABLE_SM=legacy`.
+- A send whose origin resource is hosted through a remote channel mirror
+  (`route_remote_resource_origin`).
+- A copy whose recipient session is claimed by a node other than the
+  account owner.
+- A send for which the origin could not commit a request.
+
+## Deletion precondition for the `BareJid` and `FullJid` relay lanes
+
+1. Every clustered deployment at protocol epoch 2 or later with the
+   `mailbox` selector and durable stream management, and the `relay`
+   selector and the `legacy` mode removed.
+2. Remote channel mirrors retired, so that the account owner is the node
+   that hosts every session of the account, or direct lanes targeted at the
+   session's node instead of the account owner.
+3. Then: remove the `BareJid` and `FullJid` recipients and the
+   `ProcessedDirectMessage`, `Message`, `Iq` and `Presence` payloads with a
+   `deliver_ordered` version bump, and delete `ordered.rs`,
+   `ordered_send.rs` and the receiver.
+
+## Build order
+
+1. V1033, the repository, the operation and parent variants. Dark.
+2. Target: resolve, take custody, decide; worker dispatch by parent;
+   adoption of user lanes.
+3. Origin: commit, hint, wait, consume, map the outcome; the gate.
+4. Two-node tests.
+
+## Build state
+
+Not built. The decisions above are made; no code for them is in the tree,
+and every `BareJid` and `FullJid` send uses the relay in every
+configuration.
