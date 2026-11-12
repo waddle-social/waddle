@@ -444,6 +444,15 @@ impl IngressAuthority {
         self.uow.room_occupancy_seated(room, epoch)
     }
 
+    /// This node's current identity, when the ingress authority is fenced
+    /// by cluster claims.
+    pub fn node_identity(&self) -> Option<NodeIdentity> {
+        match self.uow.fencing() {
+            crate::ingress_uow::IngressFencing::Clustered(identity) => Some(identity.current()),
+            crate::ingress_uow::IngressFencing::SingleNode => None,
+        }
+    }
+
     /// Record that `room`'s durable occupancy was seated under `epoch`.
     pub fn mark_room_occupancy_seated(&self, room: BareJid, epoch: ClaimEpoch) {
         self.uow.mark_room_occupancy_seated(room, epoch);

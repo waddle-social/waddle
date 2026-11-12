@@ -387,6 +387,47 @@ async fn seat_room_occupancy(
     room: &BareJid,
     target: &NodeIdentity,
 ) -> bool {
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return false;
+    };
+    seat_room_occupancy_in(&state, authority, room, target).await
+}
+
+/// Seat `room`'s durable occupancy before this node serves a stanza of one
+/// of its own connections from the room's actor under claim `epoch`.
+///
+/// The mailbox poller seats a room when it works an entry for it. A node
+/// that took the room's claim another way (its orphan reaper, a steal, a
+/// restart) has an actor that holds none of the recorded occupants until
+/// then, and would refuse a groupchat stanza of an occupant connected to
+/// it. Every path that reads the roster to decide a stanza therefore calls
+/// this first; it costs one map lookup once the room is seated under the
+/// claim. `true` when the room is seated, or when this deployment keeps no
+/// durable occupancy.
+pub(crate) async fn ensure_room_occupancy_seated(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+    epoch: waddle_xmpp::ownership::ClaimEpoch,
+) -> bool {
+    let authority = &state.deps.protocol.ingress;
+    if !authority.mailbox_acceptance_enabled() || authority.room_occupancy_seated(room, epoch) {
+        return true;
+    }
+    if !authority.room_requests_carried_now().await {
+        return true;
+    }
+    let Some(target) = authority.node_identity() else {
+        return true;
+    };
+    seat_room_occupancy_in(state, authority, room, &target).await
+}
+
+async fn seat_room_occupancy_in(
+    state: &crate::server::routes::websocket::WebSocketState,
+    authority: &Arc<crate::ingress::IngressAuthority>,
+    room: &BareJid,
+    target: &NodeIdentity,
+) -> bool {
     let (load, claim) = match authority.load_room_occupancy(room).await {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -410,9 +451,6 @@ async fn seat_room_occupancy(
             "durable occupancy rows that cannot be parsed were not seated"
         );
     }
-    let Some(state) = services.web_socket_state.upgrade() else {
-        return false;
-    };
     let restored = state
         .deps
         .protocol

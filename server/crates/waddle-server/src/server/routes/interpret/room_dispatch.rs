@@ -402,6 +402,57 @@ pub(super) async fn dispatch_to_room(
             return outcome;
         }
     };
+    // The roster below decides whether the sender occupies the room and who
+    // receives the message. An actor that took the room's claim without the
+    // mailbox poller holds no recorded occupant until the room's durable
+    // occupancy is seated, so that is done before the roster is trusted.
+    #[cfg(feature = "clustering")]
+    let snapshot = match (snapshot.claim_fence.as_ref(), deps.web_socket_state) {
+        (Some(fence), Some(state))
+            if !state
+                .deps
+                .protocol
+                .ingress
+                .room_occupancy_seated(&room_jid, fence.epoch) =>
+        {
+            let seated = crate::clustering::route_bridge::ensure_room_occupancy_seated(
+                state,
+                &room_jid,
+                fence.epoch,
+            )
+            .await;
+            let reread = room_actor
+                .ask(GetRoomSnapshot {
+                    sender_jid: sender_full.clone(),
+                })
+                .reply_timeout(std::time::Duration::from_secs(5))
+                .await;
+            match reread {
+                Ok(reread) if seated || reread.sender_nick.is_some() => reread,
+                // The occupancy could not be loaded and the sender is not
+                // in the actor's roster: whether it occupies the room is
+                // unknown, which is not a refusal.
+                _ => {
+                    warn!(
+                        room = %room_jid,
+                        "DispatchToRoom: durable occupancy not seated; bouncing internal-server-error"
+                    );
+                    deps.effects
+                        .fail_plan(super::effects::PlanFailure::RoomSnapshotUnavailable);
+                    push_sender_error_reply(
+                        deps,
+                        &mut outcome,
+                        &incoming,
+                        &room_jid,
+                        &sender_full,
+                        room_lookup_internal_error(),
+                    );
+                    return outcome;
+                }
+            }
+        }
+        _ => snapshot,
+    };
     if deps.effects.is_planning() {
         deps.effects
             .set_room_execution(super::effects::RoomExecutionPath::Local {

@@ -147,13 +147,16 @@ an owner transfer does, and what must hold before the relay path is deleted.
   any entry of the room; lanes are adopted only after that load. Voice
   requests, pending mediated invitations, call and Muji session state and
   rate-limit state are not stored and are not recovered.
-- **Seating only from the poller.** Durable occupancy is seated by the
-  mailbox poller, when it adopts a lane with a backlog or works an entry.
-  A node that takes a room's claim another way (its orphan reaper hydrates
-  the room) serves stanzas of its own connections from an unseated actor
-  until an entry for the room arrives: an occupant connected to that node
-  is refused with `not-acceptable` and must join again. The two-node suite
-  pins the claim to the replacement owner and does not cover this.
+- **Seating on any takeover.** A node seats a room's durable occupancy
+  once per claim epoch (`seat_room_occupancy_in` in
+  `S/clustering/route_bridge/mailbox.rs`) before it decides a mailbox entry
+  of the room and before it reads the roster for a groupchat stanza of one
+  of its own connections (`ensure_room_occupancy_seated`, called by
+  `dispatch_to_room` in `S/server/routes/interpret/room_dispatch.rs`). A
+  node that took the claim through its orphan reaper, a steal or a restart
+  therefore serves an occupant connected to it without a new join. When the
+  occupancy cannot be loaded and the sender is not in the actor's roster,
+  the stanza is answered with `internal-server-error`, not `not-acceptable`.
 - **Occupancy writer.** The room actor records every seat it grants or
   removes in `ingress_room_occupants` under the room claim, including a
   resource connected to the owner itself and removals by kick, ban,
