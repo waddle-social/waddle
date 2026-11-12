@@ -101,6 +101,12 @@ impl AccountCoordinators {
         }
     }
 
+    /// The durable rows the coordinators commit to. Reads of it are not
+    /// decisions: every mutation goes through a coordinator.
+    pub fn store(&self) -> &Arc<dyn AccountBindingStore> {
+        &self.store
+    }
+
     /// The running coordinator of `account`, created under the account's
     /// current claim when there is none.
     async fn coordinator(

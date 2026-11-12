@@ -568,6 +568,7 @@ async fn reset_resume_attempt(
         }
     }
     conn.registry_owner = None;
+    super::super::account_binding::retire_current(state, conn).await;
     // The adopted detached generation is rolled back too: the detached
     // session is restored and will be invalidated with ITS generation, so a
     // fresh bind on this connection must not share it (#1703).
@@ -639,6 +640,7 @@ async fn close_registered_resume_attempt(
         retire_remote_binding(state, jid, owner).await;
     }
     conn.registry_owner = None;
+    super::super::account_binding::retire_current(state, conn).await;
     conn.phase = ConnectionPhase::closing(Some(jid.clone()));
 }
 

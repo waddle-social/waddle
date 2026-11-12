@@ -65,6 +65,7 @@ pub(super) use binding::{
 };
 #[cfg(test)]
 pub(super) use binding_messages::ConnectionActorOperationId;
+pub(super) use coordinator_publisher::CoordinatorResume;
 
 pub(super) use retirement::{
     fence_unjoined_transfer, observe_pump_termination, PumpTermination, RetirementCause,
@@ -2806,6 +2807,11 @@ where
     // go through the recipient pipeline even though the legacy phase
     // tracker has marked the connection Closing.
     conn.sync_state_machine_phase();
+
+    // What the frame changed of the resource's presence, interests or
+    // stream-management reference reaches the account coordinator before
+    // the next frame is read.
+    super::account_binding::sync_snapshot(state.as_ref(), conn).await;
 
     // Register the connection after successful authentication and
     // resource binding. This keeps the transport loop focused on

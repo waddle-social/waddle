@@ -1765,6 +1765,9 @@ pub(super) struct WsConnState {
     /// Mints every binding identity of this socket and records how far the
     /// current one has come.
     pub(super) bindings: super::connection::BindingLedger,
+    /// This connection's binding at the account coordinator, when the
+    /// coordinator is the selected account authority and holds one.
+    pub(super) account_binding: Option<super::account_binding::AccountBindingLink>,
     #[cfg(test)]
     pub(super) resume_binding_attempts: Vec<waddle_xmpp::ownership::BindingRef>,
     pub(super) phase: ConnectionPhase,
@@ -1974,6 +1977,7 @@ impl WsConnState {
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ),
             bindings: super::connection::BindingLedger::new(connection_ref.clone()),
+            account_binding: None,
             connection_ref,
             local_io_relinquishment: None,
             binding_ref: None,

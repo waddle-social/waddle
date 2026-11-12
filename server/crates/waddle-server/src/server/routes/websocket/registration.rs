@@ -1,3 +1,4 @@
+use super::connection::CoordinatorResume;
 use super::connection::{
     BindingConfirmation, BindingPublication, BindingPublisher, BindingRetirement, BindingStage,
 };
@@ -8,7 +9,9 @@ use super::stream_management::{
     SmRegistrationFinalization,
 };
 use super::{error, info, Blocklist, FullJid, WebSocketState};
-use crate::account_coordinator::RetireEvidence;
+use crate::account_coordinator::{
+    AccountCoordinatorError, CoordinatorBindingPublisher, PublishedBinding, RetireEvidence,
+};
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceRegisterOutcome;
 use crate::clustering::NodeAdmissionPermit;
@@ -17,6 +20,9 @@ use crate::server::dual_registration::MirrorRegisterOutcome;
 use crate::sm_promotion::DisplacedPromotionDeps;
 #[cfg(test)]
 use std::sync::Arc;
+use waddle_xmpp::ownership::account_resource_transition::{
+    AccountResourceBindSuccessReceipt, AccountResourceTransitionError,
+};
 use waddle_xmpp::registry::{
     DeferredPendingFlushWakeups, SocketOutboundEndpoint, SocketOutboundReceiver,
 };
@@ -296,6 +302,22 @@ pub(super) enum RemoteBindingRetirement {
     Relay(crate::clustering::route_bridge::RemoteResourceUnregisterOutcome),
 }
 
+impl RemoteBindingRetirement {
+    /// The retirement of a binding whose publisher did not answer.
+    fn unknown() -> Self {
+        #[cfg(feature = "clustering")]
+        {
+            Self::Relay(
+                crate::clustering::route_bridge::RemoteResourceUnregisterOutcome::NotRegistered,
+            )
+        }
+        #[cfg(not(feature = "clustering"))]
+        {
+            Self::NoRemoteOwner
+        }
+    }
+}
+
 #[cfg(feature = "clustering")]
 impl RemoteBindingRetirement {
     /// Whether a detached session's force-detach may be acknowledged after
@@ -369,10 +391,321 @@ impl<'a> RegistryBindingPublisher<'a> {
     }
 }
 
-/// The publisher every binding of this server goes through. Substituting the
-/// account coordinator means returning its publisher here.
-pub(super) fn binding_publisher(state: &WebSocketState) -> RegistryBindingPublisher<'_> {
-    RegistryBindingPublisher::new(state)
+/// A binding as the selected publisher holds it.
+#[derive(Debug, Clone)]
+pub(super) struct PublishedRoute {
+    pub(super) registry: RegistryPublication,
+    /// The binding at the account coordinator, when the coordinator is the
+    /// selected account authority.
+    pub(super) account: Option<PublishedBinding>,
+}
+
+impl PublishedRoute {
+    /// The route of an entry the registry holds under `owner`, without the
+    /// account coordinator's side. A connection reports the end of its
+    /// coordinator binding once, after its teardown
+    /// (`super::account_binding::finish_teardown`).
+    pub(super) fn of_owner(owner: waddle_xmpp::registry::LocalConnectionBindingId) -> Self {
+        Self {
+            registry: RegistryPublication::of_owner(owner),
+            account: None,
+        }
+    }
+}
+
+/// Why the selected publisher refused a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(super) enum PublisherRefusal {
+    #[error(transparent)]
+    Registry(#[from] RegistryRefusal),
+    #[error("the account coordinator refused the binding: {0:?}")]
+    Account(AccountResourceTransitionError),
+}
+
+/// The publisher the selected account authority requires.
+///
+/// The connection registry is written under both selections: it holds the
+/// outbound endpoint of every binding, and full-JID delivery, the cluster
+/// route bridge, pending-delivery flush and stream-management promotion
+/// read it and the `UserActor` mirror regardless of the selection. With
+/// the account coordinator selected, each binding is also recorded there
+/// first, and the coordinator's decision gates the registry's: a binding
+/// the coordinator does not publish is not registered, and one it does not
+/// confirm is not acknowledged.
+pub(super) struct SelectedBindingPublisher<'a> {
+    registry: RegistryBindingPublisher<'a>,
+    coordinator: Option<CoordinatorBindingPublisher>,
+}
+
+/// The publisher every binding of this server goes through, chosen by
+/// `AppState::account_authority`.
+pub(super) fn binding_publisher(state: &WebSocketState) -> SelectedBindingPublisher<'_> {
+    SelectedBindingPublisher {
+        registry: RegistryBindingPublisher::new(state),
+        coordinator: selected_coordinator_publisher(state),
+    }
+}
+
+/// The selected publisher, whose next publish registers `entry`.
+fn binding_publisher_with_endpoint(
+    state: &WebSocketState,
+    entry: waddle_xmpp::registry::ConnectionEntry,
+) -> SelectedBindingPublisher<'_> {
+    SelectedBindingPublisher {
+        registry: RegistryBindingPublisher::with_endpoint(state, entry),
+        coordinator: selected_coordinator_publisher(state),
+    }
+}
+
+fn selected_coordinator_publisher(state: &WebSocketState) -> Option<CoordinatorBindingPublisher> {
+    super::account_binding::selected_coordinators(state).map(CoordinatorBindingPublisher::new)
+}
+
+fn infallible<T>(result: Result<T, std::convert::Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
+/// What retiring a binding states when nothing was routed to it: it was
+/// recorded at the coordinator and never entered the routing index.
+fn unpublished_retirement() -> RetireEvidence {
+    use waddle_xmpp::ownership::account_resource_transition::{
+        AccountResourceOperationId, BindingRetirementDisposition,
+        DirectedPresenceTeardownDisposition, PresentationFlushDisposition,
+    };
+    RetireEvidence {
+        begin: AccountResourceOperationId::fresh(),
+        complete: AccountResourceOperationId::fresh(),
+        custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+        directed_presence: DirectedPresenceTeardownDisposition::NoDirectedRecipients,
+        presentation_flush: PresentationFlushDisposition::NoPendingPresentation,
+    }
+}
+
+impl SelectedBindingPublisher<'_> {
+    /// The coordinator's half of a publication: record the binding in the
+    /// resource's slot. `None` when the connection registry is the selected
+    /// account authority.
+    async fn record_account(
+        &self,
+        jid: &FullJid,
+        binding: &waddle_xmpp::ownership::BindingRef,
+        lifetime: waddle_xmpp::ownership::joint_identity::ResourceLifetime,
+        resume: Option<CoordinatorResume>,
+    ) -> Result<
+        BindingPublication<Option<PublishedBinding>, PublisherRefusal>,
+        AccountCoordinatorError,
+    > {
+        let Some(coordinator) = &self.coordinator else {
+            return Ok(BindingPublication::Published(None));
+        };
+        let publication = match resume {
+            Some(resume) => {
+                BindingPublisher::publish_resumed(coordinator, jid, binding, resume).await?
+            }
+            None => BindingPublisher::publish(coordinator, jid, binding, lifetime).await?,
+        };
+        Ok(match publication {
+            BindingPublication::Published(account) => BindingPublication::Published(Some(account)),
+            BindingPublication::ReplacementPending {
+                displaced,
+                revision,
+            } => BindingPublication::ReplacementPending {
+                displaced,
+                revision,
+            },
+            BindingPublication::Refused(error) => {
+                BindingPublication::Refused(PublisherRefusal::Account(error))
+            }
+        })
+    }
+
+    /// The registry's half of a publication: register the staged endpoint
+    /// for a binding the coordinator recorded (or, without a coordinator,
+    /// for the binding alone). It does not wait: registration runs it under
+    /// the occupancy authority's publication guard, which holds a database
+    /// connection the coordinator's commits must not queue behind.
+    fn register_route(
+        &self,
+        jid: &FullJid,
+        binding: &waddle_xmpp::ownership::BindingRef,
+        resumed: bool,
+        account: Option<PublishedBinding>,
+    ) -> BindingPublication<PublishedRoute, PublisherRefusal> {
+        match self.registry.register(jid, binding, resumed) {
+            BindingPublication::Published(registry) => {
+                BindingPublication::Published(PublishedRoute { registry, account })
+            }
+            BindingPublication::ReplacementPending {
+                displaced,
+                revision,
+            } => BindingPublication::ReplacementPending {
+                displaced,
+                revision,
+            },
+            BindingPublication::Refused(refusal) => BindingPublication::Refused(refusal.into()),
+        }
+    }
+
+    /// Both halves of a publication. A binding the registry refuses after
+    /// the coordinator recorded it is retired there.
+    async fn publish_both(
+        &self,
+        jid: &FullJid,
+        binding: &waddle_xmpp::ownership::BindingRef,
+        lifetime: waddle_xmpp::ownership::joint_identity::ResourceLifetime,
+        resume: Option<CoordinatorResume>,
+        resumed: bool,
+    ) -> Result<BindingPublication<PublishedRoute, PublisherRefusal>, AccountCoordinatorError> {
+        let account = match self.record_account(jid, binding, lifetime, resume).await? {
+            BindingPublication::Published(account) => account,
+            BindingPublication::ReplacementPending {
+                displaced,
+                revision,
+            } => {
+                return Ok(BindingPublication::ReplacementPending {
+                    displaced,
+                    revision,
+                })
+            }
+            BindingPublication::Refused(refusal) => {
+                return Ok(BindingPublication::Refused(refusal))
+            }
+        };
+        let publication = self.register_route(jid, binding, resumed, account.clone());
+        if let (BindingPublication::Refused(_), Some(coordinator), Some(account)) =
+            (&publication, &self.coordinator, &account)
+        {
+            report_retirement(
+                jid,
+                BindingPublisher::retire(coordinator, jid, account, unpublished_retirement()).await,
+            );
+        }
+        Ok(publication)
+    }
+}
+
+impl BindingPublisher for SelectedBindingPublisher<'_> {
+    type Published = PublishedRoute;
+    type Resume = Option<CoordinatorResume>;
+    type Receipt = Option<Box<AccountResourceBindSuccessReceipt>>;
+    type Refusal = PublisherRefusal;
+    type Withdrawn = waddle_xmpp::registry::ConnectionEntry;
+    type RemoteRetirement = RemoteBindingRetirement;
+    type Error = AccountCoordinatorError;
+
+    async fn publish(
+        &self,
+        jid: &FullJid,
+        binding: &waddle_xmpp::ownership::BindingRef,
+        lifetime: waddle_xmpp::ownership::joint_identity::ResourceLifetime,
+    ) -> Result<BindingPublication<Self::Published, Self::Refusal>, Self::Error> {
+        self.publish_both(jid, binding, lifetime, None, false).await
+    }
+
+    /// With the coordinator selected a resume needs its evidence; without
+    /// it nothing is published.
+    async fn publish_resumed(
+        &self,
+        jid: &FullJid,
+        binding: &waddle_xmpp::ownership::BindingRef,
+        resume: Self::Resume,
+    ) -> Result<BindingPublication<Self::Published, Self::Refusal>, Self::Error> {
+        if self.coordinator.is_some() && resume.is_none() {
+            return Ok(BindingPublication::Refused(PublisherRefusal::Account(
+                AccountResourceTransitionError::ResumeRequiresStreamManagement,
+            )));
+        }
+        // The lifetime of a resumed resource is the one its slot already
+        // holds; the registry has no use for one.
+        let lifetime = waddle_xmpp::ownership::joint_identity::ResourceLifetime::fresh();
+        self.publish_both(jid, binding, lifetime, resume, true)
+            .await
+    }
+
+    /// The registry's owner confirms first, then the coordinator activates
+    /// the binding and hands back the authorization to answer the client.
+    /// A binding the coordinator no longer holds as current is refused: the
+    /// client must not be answered for it.
+    async fn confirm(
+        &self,
+        jid: &FullJid,
+        published: &Self::Published,
+    ) -> Result<BindingConfirmation<Self::Receipt, Self::Refusal>, Self::Error> {
+        match infallible(self.registry.confirm(jid, &published.registry).await) {
+            BindingConfirmation::Confirmed(()) => {}
+            BindingConfirmation::NotCurrent => return Ok(BindingConfirmation::NotCurrent),
+            BindingConfirmation::Refused(refusal) => {
+                return Ok(BindingConfirmation::Refused(refusal.into()))
+            }
+        }
+        let (Some(coordinator), Some(account)) = (&self.coordinator, &published.account) else {
+            return Ok(BindingConfirmation::Confirmed(None));
+        };
+        Ok(
+            match BindingPublisher::confirm(coordinator, jid, account).await? {
+                BindingConfirmation::Confirmed(receipt) => {
+                    BindingConfirmation::Confirmed(Some(receipt))
+                }
+                BindingConfirmation::NotCurrent => BindingConfirmation::Refused(
+                    PublisherRefusal::Account(AccountResourceTransitionError::BindingMismatch),
+                ),
+                BindingConfirmation::Refused(error) => {
+                    BindingConfirmation::Refused(PublisherRefusal::Account(error))
+                }
+            },
+        )
+    }
+
+    fn withdraw(&self, jid: &FullJid, published: &Self::Published) -> Option<Self::Withdrawn> {
+        self.registry.withdraw(jid, &published.registry)
+    }
+
+    async fn retire(
+        &self,
+        jid: &FullJid,
+        published: &Self::Published,
+        evidence: RetireEvidence,
+    ) -> Result<BindingRetirement<Self::Refusal>, Self::Error> {
+        let registry = match infallible(
+            self.registry
+                .retire(jid, &published.registry, evidence)
+                .await,
+        ) {
+            BindingRetirement::Retired => BindingRetirement::Retired,
+            BindingRetirement::NotCurrent { current } => BindingRetirement::NotCurrent { current },
+            BindingRetirement::Refused(refusal) => BindingRetirement::Refused(refusal.into()),
+        };
+        let (Some(coordinator), Some(account)) = (&self.coordinator, &published.account) else {
+            return Ok(registry);
+        };
+        Ok(
+            match BindingPublisher::retire(coordinator, jid, account, evidence).await? {
+                BindingRetirement::Retired => registry,
+                BindingRetirement::NotCurrent { current } => {
+                    BindingRetirement::NotCurrent { current }
+                }
+                BindingRetirement::Refused(error) => {
+                    BindingRetirement::Refused(PublisherRefusal::Account(error))
+                }
+            },
+        )
+    }
+
+    async fn retire_remote(
+        &self,
+        jid: &FullJid,
+        published: &Self::Published,
+        evidence: RetireEvidence,
+    ) -> Result<Self::RemoteRetirement, Self::Error> {
+        Ok(infallible(
+            self.registry
+                .retire_remote(jid, &published.registry, evidence)
+                .await,
+        ))
+    }
 }
 
 impl BindingPublisher for RegistryBindingPublisher<'_> {
@@ -532,7 +865,7 @@ pub(super) fn recovery_owned_retirement() -> RetireEvidence {
 async fn rollback_registered_connection(
     state: &WebSocketState,
     jid: &FullJid,
-    published: &RegistryPublication,
+    published: &PublishedRoute,
     conn: &mut WsConnState,
 ) {
     conn.retire_binding_ref();
@@ -548,6 +881,7 @@ async fn rollback_registered_connection(
         .retire_remote(jid, published, recovery_owned_retirement())
         .await;
     conn.registry_owner = None;
+    conn.account_binding = None;
 }
 
 /// Take the binding the registry holds under `owner` out of the routing
@@ -557,7 +891,7 @@ pub(super) fn withdraw_binding(
     jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> Option<waddle_xmpp::registry::ConnectionEntry> {
-    binding_publisher(state).withdraw(jid, &RegistryPublication::of_owner(*owner))
+    binding_publisher(state).withdraw(jid, &PublishedRoute::of_owner(*owner))
 }
 
 /// Retire the binding the registry held under `owner` with the account's
@@ -572,7 +906,7 @@ pub(super) async fn retire_binding(
         binding_publisher(state)
             .retire(
                 jid,
-                &RegistryPublication::of_owner(*owner),
+                &PublishedRoute::of_owner(*owner),
                 recovery_owned_retirement(),
             )
             .await,
@@ -589,13 +923,16 @@ pub(super) async fn retire_remote_binding(
     match binding_publisher(state)
         .retire_remote(
             jid,
-            &RegistryPublication::of_owner(*owner),
+            &PublishedRoute::of_owner(*owner),
             recovery_owned_retirement(),
         )
         .await
     {
         Ok(retirement) => retirement,
-        Err(never) => match never {},
+        Err(error) => {
+            tracing::warn!(%jid, %error, "a remote binding retirement has an unknown outcome");
+            RemoteBindingRetirement::unknown()
+        }
     }
 }
 
@@ -790,6 +1127,66 @@ pub(super) fn publish_stream_id_and_presence(
     }
 }
 
+/// Record the connection's binding at the account coordinator, when it is
+/// the selected account authority; `Ok(None)` otherwise.
+///
+/// A resume moves the resource's slot from the detached binding to this
+/// one. Where the slot holds no detached binding of the resumed session the
+/// binding is recorded as a new one: the durable session, which committed
+/// the resume, is the authority on it.
+///
+/// A bind that displaces another binding waits, within the bind-retirement
+/// budget, for that binding to retire, and then binds again; each attempt
+/// is a new operation at the coordinator. The error is the detail of a
+/// failed session initialization.
+async fn record_account_binding(
+    state: &WebSocketState,
+    conn: &WsConnState,
+    jid: &FullJid,
+    binding: &waddle_xmpp::ownership::BindingRef,
+    resumed: bool,
+) -> Result<Option<PublishedBinding>, String> {
+    let Some(coordinators) = super::account_binding::selected_coordinators(state) else {
+        return Ok(None);
+    };
+    let lifetime = waddle_xmpp::ownership::joint_identity::ResourceLifetime {
+        logical: waddle_xmpp::ownership::endpoint_transition::LogicalResourceGeneration::fresh(),
+        occupancy: conn.occupancy_session,
+    };
+    let resume = if resumed {
+        super::account_binding::resume_evidence(&coordinators, conn, jid, binding).await
+    } else {
+        None
+    };
+    let publisher = binding_publisher(state);
+    let deadline = tokio::time::Instant::now() + BIND_RETIREMENT_TIMEOUT;
+    loop {
+        match publisher
+            .record_account(jid, binding, lifetime, resume.clone())
+            .await
+        {
+            Ok(BindingPublication::Published(account)) => return Ok(account),
+            Ok(BindingPublication::ReplacementPending { displaced, .. }) => {
+                if !super::account_binding::await_displaced_retirement(
+                    state,
+                    &coordinators,
+                    jid,
+                    &displaced,
+                    deadline,
+                )
+                .await
+                {
+                    return Err("occupancy retirement timed out: displaced binding".to_owned());
+                }
+            }
+            Ok(BindingPublication::Refused(refusal)) => {
+                return Err(format!("binding was not recorded: {refusal}"))
+            }
+            Err(error) => return Err(format!("binding record has an unknown outcome: {error}")),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) async fn register_bound_connection_after_frame<E>(
     state: &WebSocketState,
@@ -870,6 +1267,10 @@ where
             }
         }
     } else {
+        // A binding this socket still holds at the account coordinator (a
+        // resume that failed after it was recorded) is retired before the
+        // next one is minted, so the new bind does not wait on it.
+        super::account_binding::retire_current(state, conn).await;
         conn.retire_binding_ref();
         match conn.bindings.prepare_next() {
             Ok(prepared) => prepared.attempt.binding_ref,
@@ -955,6 +1356,27 @@ where
     if let Ok((entered, release)) = PREPARED_BIND_GATE.try_with(Clone::clone) {
         entered.notify_one();
         release.notified().await;
+    }
+
+    // The account coordinator records the binding before the routing index
+    // holds it, and before the publication guard below takes a database
+    // connection. A binding recorded here and not published is retired when
+    // the connection ends or binds again.
+    match record_account_binding(state, conn, &jid, &binding_ref, resumed).await {
+        Ok(account) => {
+            conn.account_binding = account.map(|account| {
+                super::account_binding::AccountBindingLink::new(jid.clone(), account)
+            });
+        }
+        Err(detail) => {
+            record_session_init_failure(
+                waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+                &jid,
+                conn.sm_state.stream_id.as_deref(),
+                Some(detail),
+            );
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        }
     }
 
     let publication = tokio::select! {
@@ -1046,38 +1468,28 @@ where
         conn.blocklist_interested,
         std::sync::atomic::Ordering::Relaxed,
     );
-    let publisher = RegistryBindingPublisher::with_endpoint(state, entry);
-    let publication = if resumed {
-        publisher
-            .publish_resumed(&jid, &published_binding, ())
-            .await
-    } else {
-        publisher
-            .publish(
-                &jid,
-                &published_binding,
-                waddle_xmpp::ownership::joint_identity::ResourceLifetime {
-                    logical: waddle_xmpp::ownership::endpoint_transition::LogicalResourceGeneration::fresh(),
-                    occupancy: conn.occupancy_session,
-                },
-            )
-            .await
-    };
-    let published = match publication {
-        Ok(BindingPublication::Published(published)) => published,
-        Ok(BindingPublication::ReplacementPending { .. }) => {
+    let publisher = binding_publisher_with_endpoint(state, entry);
+    let published = match publisher.register_route(
+        &jid,
+        &published_binding,
+        resumed,
+        conn.account_binding
+            .as_ref()
+            .map(|link| link.published().clone()),
+    ) {
+        BindingPublication::Published(published) => published,
+        BindingPublication::ReplacementPending { .. } => {
             error!(jid = %jid, "the connection registry reported a pending replacement");
             conn.retire_binding_ref();
             return RegistrationAfterFrame::SessionInitializationFailed;
         }
-        Ok(BindingPublication::Refused(refusal)) => {
+        BindingPublication::Refused(refusal) => {
             tracing::debug!(jid = %jid, %refusal, "binding was not published");
             conn.retire_binding_ref();
             return RegistrationAfterFrame::SessionInitializationFailed;
         }
-        Err(never) => match never {},
     };
-    let owner = published.owner;
+    let owner = published.registry.owner;
     let _ = conn.bindings.install_binding(&published_binding);
     conn.registry_owner = Some(owner);
     if let Some(entry) = state
@@ -1152,7 +1564,19 @@ where
     // docs/adrs/0017-phase1-completion-authoritative-registration.md.
     let confirmation = match binding_publisher(state).confirm(&jid, &published).await {
         Ok(confirmation) => confirmation,
-        Err(never) => match never {},
+        Err(error) => {
+            // The account coordinator's answer is unknown, so the client is
+            // not answered for this binding.
+            error!(jid = %jid, %error, "binding confirmation has an unknown outcome");
+            rollback_registered_connection(state, &jid, &published, conn).await;
+            record_session_init_failure(
+                waddle_xmpp::telemetry::attributes::SessionInitFailureReason::AuthoritativeRegistration,
+                &jid,
+                conn.sm_state.stream_id.as_deref(),
+                None,
+            );
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        }
     };
     if !matches!(confirmation, BindingConfirmation::NotCurrent) {
         if !registration_authoritative(permit, shutdown) {
@@ -1160,7 +1584,7 @@ where
             return RegistrationAfterFrame::AuthorityRevoked;
         }
         match confirmation {
-            BindingConfirmation::Confirmed(()) | BindingConfirmation::NotCurrent => {
+            BindingConfirmation::Confirmed(_) | BindingConfirmation::NotCurrent => {
                 bind_guard.complete_actor_retirements_after_registration();
             }
             BindingConfirmation::Refused(refusal) => {
@@ -1174,6 +1598,7 @@ where
                         .await,
                 );
                 conn.registry_owner = None;
+                conn.account_binding = None;
                 // The rollback ran and the client gets a stream error; this
                 // record is the server-side trace of it (#1454).
                 record_session_init_failure(
@@ -1184,9 +1609,9 @@ where
                 );
                 return if matches!(
                     refusal,
-                    RegistryRefusal::Mirror(
+                    PublisherRefusal::Registry(RegistryRefusal::Mirror(
                         MirrorRegisterOutcome::Busy | MirrorRegisterOutcome::ForeignOwner
-                    )
+                    ))
                 ) {
                     RegistrationAfterFrame::RegistrationTemporarilyUnavailable
                 } else {

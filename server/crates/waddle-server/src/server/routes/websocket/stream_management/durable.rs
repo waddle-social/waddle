@@ -249,6 +249,27 @@ impl SettlementRetry {
 }
 
 impl DurableSmLink {
+    /// The session and generation this connection's binding holds at the
+    /// durable authority: the generation it owns, or the one a committed
+    /// resume bound for it. `None` when the connection owns no durable
+    /// session.
+    pub(in crate::server::routes::websocket) fn session_binding(
+        &self,
+    ) -> Option<waddle_xmpp::ownership::joint_identity::SmBinding> {
+        let fence = match self {
+            Self::Owner(owner) => &owner.fence,
+            Self::Hydrating(hydrating) => hydrating.commit.fence(),
+            Self::Unbound
+            | Self::EnableUnresolved(_)
+            | Self::ResumeUnresolved(_)
+            | Self::Superseded => return None,
+        };
+        Some(waddle_xmpp::ownership::joint_identity::SmBinding {
+            session: fence.session,
+            generation: fence.generation,
+        })
+    }
+
     /// When the live loop must next try to settle an operation whose commit
     /// outcome is unknown.
     pub(in crate::server::routes::websocket) fn settlement_due(

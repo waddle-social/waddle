@@ -760,14 +760,45 @@ pub(super) async fn cleanup_connection_shutdown(
     conn: &mut WsConnState,
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
-    Box::pin(cleanup_connection_shutdown_inner(
+    let ending = EndingConnection::of(conn);
+    let outcome = Box::pin(cleanup_connection_shutdown_inner(
         state,
         outbound_rx,
         conn,
         superseded,
         None,
     ))
-    .await
+    .await;
+    ending.finish(state, outcome).await;
+    outcome
+}
+
+/// What a connection's end reports once its teardown has run: its binding
+/// at the account coordinator and the occupancy generation that left.
+struct EndingConnection {
+    account_binding: Option<super::account_binding::AccountBindingLink>,
+    jid: Option<FullJid>,
+    occupancy: waddle_xmpp_core::OccupancySessionGeneration,
+}
+
+impl EndingConnection {
+    fn of(conn: &mut WsConnState) -> Self {
+        Self {
+            account_binding: conn.account_binding.take(),
+            jid: conn.phase.cleanup_jid().cloned(),
+            occupancy: conn.occupancy_session,
+        }
+    }
+
+    async fn finish(self, state: &WebSocketState, outcome: ConnectionShutdownOutcome) {
+        super::account_binding::finish_teardown(state, self.account_binding, outcome).await;
+        // A detached session keeps its occupancy; its rooms are left when
+        // the session ends.
+        if let (Some(jid), ConnectionShutdownOutcome::NotPersisted) = (&self.jid, outcome) {
+            super::account_binding::append_room_leave_at_connection_end(state, jid, self.occupancy)
+                .await;
+        }
+    }
 }
 
 /// Force-detach cleanup has a stricter completion boundary than ordinary
@@ -789,14 +820,17 @@ pub(super) async fn cleanup_force_detach_connection_shutdown(
             conn.phase = ConnectionPhase::closing(Some(jid));
         }
     }
-    Box::pin(cleanup_connection_shutdown_inner(
+    let ending = EndingConnection::of(conn);
+    let outcome = Box::pin(cleanup_connection_shutdown_inner(
         state,
         outbound_rx,
         conn,
         superseded,
         Some(origin),
     ))
-    .await
+    .await;
+    ending.finish(state, outcome).await;
+    outcome
 }
 
 async fn cleanup_connection_shutdown_inner(

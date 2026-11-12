@@ -229,8 +229,87 @@ the admin channel command. They read a connection entry together with its
 outbound endpoint, or belong to code that writes the registry, and move
 with the switch of the writers.
 
-No connection sends the binding messages yet, so a selected coordinator
-has no bindings and reads as an account without resources.
+### What a connection sends when the coordinator is selected
+
+With `WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` every `/ws` connection
+drives the coordinator's slot for its resource
+(`W/account_binding.rs`, `W/registration.rs`; `W` is
+`waddle-server/src/server/routes/websocket`):
+
+| Event | Calls |
+| --- | --- |
+| Bind, and a fresh bind after a failed resume | `slot_status`, `Bind`, `PublishEndpoint` before the registry entry is registered; `RegisterActor` and `bind_success` after the account's actor confirmed it, before stream-management finalization and the reply |
+| Resume | The durable session commits the resume first, which binds the new generation. `SuccessfulResume` names the slot's detached binding and both generations, then `PublishEndpoint`, `RegisterActor`, `bind_success` |
+| Presence, priority, carbons, roster or block-list interest changed, stream management enabled | `slot_status`, `UpdateSnapshot`, after the frame that changed it is handled and before the next one is read |
+| Offline flush, pending-subscription flush | `mark_presented`; the flush runs only on `true` |
+| Teardown that stored a resumable session | `Detach` |
+| Any other teardown, a failed resume, a rebind on the same socket | `unregister`, then `repair` with the teardown dispositions |
+
+Decisions this wiring makes:
+
+- **Pending replacement.** The existing bind preparation force-detaches a
+  local incumbent and waits for it to stop before the coordinator is
+  asked, so a bind normally finds the slot free. When the coordinator
+  still answers `ReplacementPending`, the replacing connection
+  force-detaches the displaced binding if a local connection holds it,
+  retires it itself if the coordinator reports it expired, and re-reads
+  the slot every 50 ms until it is free or the bind-retirement budget of
+  ten seconds ends. It then binds again, which is a new operation. A
+  timeout fails the bind as an authoritative-registration failure, the
+  stanza error a replacement timeout has always produced.
+- **A resume without a detached slot.** When the slot holds no detached
+  binding of the resumed session (the session was detached before the
+  coordinator was selected, or its binding was retired after a resume that
+  failed late), the binding is recorded with `Bind` instead. The durable
+  session committed the resume and is the authority on it; a slot that
+  holds any other binding refuses.
+- **Order with the registry.** The coordinator records the binding before
+  the registry registers its endpoint, and before the occupancy
+  authority's publication guard takes a database connection. A registry
+  or actor-tree refusal retires the coordinator's record.
+- **Teardown is reported once, at its end.** The coordinator learns of a
+  detach or a retirement after the connection's teardown ran, because only
+  then is it known whether a resumable session was stored. Until then the
+  slot still lists the resource; a stanza selected for it finds no
+  endpoint and takes the detached-session or offline path, as it does for
+  a stale registry entry. A detach the slot refuses falls back to
+  retirement.
+- **Teardown evidence.** The connection states that accepted work has a
+  recovery owner (stream-management custody or offline delivery), that
+  directed presence is retracted by the recovery paths, and that pending
+  presentations belong to recovery. A binding that never entered the
+  routing index states that it accepted nothing.
+- **The bind-success receipt** is read when the binding is confirmed, not
+  again when the reply is written.
+- **A node that does not own the account** cannot record the binding: the
+  coordinator refuses with the claim error and the bind fails. The
+  coordinator can be selected only where a socket's node owns the claim of
+  its account.
+
+### What still writes the registry and the mirrors
+
+The coordinator decides which resources receive a stanza. It does not
+deliver one: delivery resolves the outbound endpoint through the
+connection registry and the account's `UserActor`. Both are therefore
+written under either selection, and with the coordinator selected a
+binding is recorded in all three. The reads that need the legacy writes:
+
+- full-JID delivery (`deliver_one_via_actor_at`, `deliver_peer_to_live_only`
+  in `server/routes/interpret/routing.rs`), which asks the `UserActor` for
+  the resource's endpoint;
+- the inbox-update push and the group-DM leave
+  (`groupchat_archive.rs`, `admin/channels.rs`);
+- stream-management promotion (`sm_promotion/live.rs`);
+- the cluster route bridge's receiver, registration snapshots and
+  side effects (`clustering/route_bridge`);
+- direct sends through the connection registry: presence probe answers and
+  directed presence, block-list pushes, MUC invites, PubSub fan-out, Muji;
+- connection cleanup and registration, pending-delivery flush and
+  recovery, the extension host's presence query and the admin channel
+  command.
+
+The registry's presence state, last activity and pending subscription
+stanzas are still written by the presence handlers for the same readers.
 
 ## The binding publisher
 

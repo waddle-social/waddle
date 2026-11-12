@@ -413,11 +413,14 @@ been written. Registration publishes only the attempt the ledger last
 prepared, and every step names its exact attempt. The actor handles prepare,
 install, confirm and retire (`W/connection/binding_messages.rs`) as
 synchronous ledger steps fenced on the connection generation; nothing sends
-them until the account coordinator exists, and a message cannot retire an
-installed binding, which still retires with its connection. Publication
-reaches the routing state through one trait, `BindingPublisher`, whose only
-implementation publishes into the connection registry and its mirrors
-(`W/registration.rs`, `binding_publisher`).
+them, because the connection drives its ledger and its publisher from its
+own turn, and a message cannot retire an installed binding, which still
+retires with its connection. Publication reaches the routing state through
+one trait, `BindingPublisher`. `binding_publisher` in `W/registration.rs`
+returns the publisher the selected account authority requires: the
+connection registry with its mirrors, and, when
+`WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator`, the account coordinator ahead
+of them ([`2138-account-coordinator.md`](2138-account-coordinator.md)).
 
 The pump queues are bounded in bytes: one frame of the largest WebSocket
 message inbound (64 MiB, which the upgrade states explicitly), and that plus

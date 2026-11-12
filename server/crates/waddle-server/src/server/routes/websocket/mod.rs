@@ -55,6 +55,7 @@ use crate::server::AppState;
 use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
 
+mod account_binding;
 mod batch_write;
 mod call_signaling_telemetry;
 #[cfg(feature = "test-support")]
