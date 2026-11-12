@@ -29,6 +29,14 @@ pub use mailbox::{
     LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal, MailboxDeadLetterReason,
     MailboxError, MailboxLaneId, MailboxRepository, MailboxTargetFence, StoredMailboxEntry,
 };
+mod room_requests;
+pub use room_requests::{
+    LatchedRoomDecision, NewRoomRequest, RoomDecisionLatch, RoomOccupancyLoad, RoomOccupantLookup,
+    RoomOccupantRecord, RoomOccupantRepository, RoomRequestError, RoomRequestInsert,
+    RoomRequestRepository, RoomRequestSource, RoomResponseRepository, StoredRoomRequest,
+    ROOM_OCCUPANT_PRESENCE_MAX_BYTES, ROOM_REQUEST_SETTLED_RETENTION,
+    ROOM_REQUEST_STANZA_MAX_BYTES, ROOM_RESPONSE_MAX_STANZAS,
+};
 mod room_observation;
 pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{

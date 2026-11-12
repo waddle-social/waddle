@@ -2,9 +2,9 @@
   "version": 2,
   "postgres_major": 17,
   "source_sha256": {
-    "candidate": "a780f04a93bd562d952a2b1087bb6eb137f9491b74609c52362441534c959a43",
+    "candidate": "e101b25be4ee8c62fa82c7234ebfe83cd77b4178e7fb3319594c4d5ad8e53529",
     "relation": "2a66930709b7cd08b6ba4d20da97992f16766d2708739f6d5c54cde82c167a35",
-    "waddle": "e48aebec578a3fefa20585ac12243020b0c1c82ff0109b3750f02a63784bb378",
+    "waddle": "eb45d09b1df41d02d471a4c8f755761418b346f817bbcc01e6cceeea07b1d554",
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
     "pending_schema": "695365ed95f025b36ece6839c0635dab14d0df83d98271c648177f0a89a956fe",
     "pending_recovery": "4376a57a2c8d5212140449832966ba818230556c93b3046db052e3a6cd5450fc",
@@ -4749,6 +4749,168 @@
       }
     },
     {
+      "table": "ingress_room_occupants",
+      "function": "waddle_ingress_definer_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_occupants_definer_api_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_occupants",
+      "function": "waddle_ingress_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_occupants_epoch_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_occupants",
+      "function": "waddle_ingress_truncate_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_occupants_epoch_guard_truncate",
+        "tgqual": null,
+        "tgtype": 34,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_requests",
+      "function": "waddle_ingress_definer_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_requests_definer_api_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_requests",
+      "function": "waddle_ingress_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_requests_epoch_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_requests",
+      "function": "waddle_ingress_truncate_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_requests_epoch_guard_truncate",
+        "tgqual": null,
+        "tgtype": 34,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_responses",
+      "function": "waddle_ingress_definer_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_responses_definer_api_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_responses",
+      "function": "waddle_ingress_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_responses_epoch_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_room_responses",
+      "function": "waddle_ingress_truncate_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_room_responses_epoch_guard_truncate",
+        "tgqual": null,
+        "tgtype": 34,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
       "table": "ingress_send_attempts",
       "function": "waddle_ingress_definer_epoch_guard",
       "properties": {
@@ -8873,7 +9035,7 @@
             "atthasdef": false,
             "atttypmod": -1,
             "attislocal": true,
-            "attnotnull": true,
+            "attnotnull": false,
             "attoptions": null,
             "attstorage": "p",
             "attidentity": "",
@@ -9075,9 +9237,69 @@
             "attmissingval": null,
             "attcompression": ""
           }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 12,
+            "attname": "request_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
         }
       ],
       "indexes": [
+        {
+          "name": "ingress_mailbox_entries_message_operation",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_entries_message_operation ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (message_key) WHERE (message_key IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              4
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
         {
           "name": "ingress_mailbox_entries_nonterminal",
           "options": null,
@@ -9100,43 +9322,6 @@
             "indnkeyatts": 1,
             "indcheckxmin": false,
             "indcollation": [
-              "0"
-            ],
-            "indimmediate": true,
-            "indisprimary": false,
-            "indisclustered": false,
-            "indisexclusion": false,
-            "indisreplident": false,
-            "indnullsnotdistinct": false
-          },
-          "tablespace": "0"
-        },
-        {
-          "name": "ingress_mailbox_entries_operation_key",
-          "options": null,
-          "definition": "CREATE UNIQUE INDEX ingress_mailbox_entries_operation_key ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (message_key, operation_kind)",
-          "properties": {
-            "indkey": [
-              4,
-              3
-            ],
-            "indclass": [
-              "10065",
-              "1979"
-            ],
-            "indnatts": 2,
-            "indislive": true,
-            "indoption": [
-              0,
-              0
-            ],
-            "indisready": true,
-            "indisvalid": true,
-            "indisunique": true,
-            "indnkeyatts": 2,
-            "indcheckxmin": false,
-            "indcollation": [
-              "0",
               "0"
             ],
             "indimmediate": true,
@@ -9178,6 +9363,39 @@
             ],
             "indimmediate": true,
             "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_mailbox_entries_request_operation",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_entries_request_operation ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (request_key) WHERE (request_key IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              12
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
             "indisclustered": false,
             "indisexclusion": false,
             "indisreplident": false,
@@ -9280,6 +9498,54 @@
           },
           "function_args": "",
           "related_table": "ingress_messages",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_mailbox_entries_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_mailbox_entries_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_requests",
           "related_schema": "__SCHEMA_NAME__",
           "function_schema": "pg_catalog"
         },
@@ -9566,7 +9832,7 @@
         {
           "index": null,
           "parent": false,
-          "definition": "CHECK ((operation_kind = 1))",
+          "definition": "CHECK (((operation_kind >= 1) AND (operation_kind <= 5)))",
           "properties": {
             "conkey": [
               3
@@ -9594,17 +9860,18 @@
           "foreign_schema": null
         },
         {
-          "index": "ingress_mailbox_entries_operation_key",
+          "index": null,
           "parent": false,
-          "definition": "UNIQUE (message_key, operation_kind)",
+          "definition": "CHECK ((((operation_kind = 1) AND (message_key IS NOT NULL) AND (request_key IS NULL)) OR (((operation_kind >= 2) AND (operation_kind <= 5)) AND (message_key IS NULL) AND (request_key IS NOT NULL))))",
           "properties": {
             "conkey": [
+              3,
               4,
-              3
+              12
             ],
             "confkey": null,
-            "conname": "ingress_mailbox_entries_operation_key",
-            "contype": "u",
+            "conname": "ingress_mailbox_entries_parent_check",
+            "contype": "c",
             "contypid": "0",
             "conexclop": null,
             "conffeqop": null,
@@ -9615,7 +9882,7 @@
             "confdeltype": " ",
             "confupdtype": " ",
             "coninhcount": 0,
-            "connoinherit": true,
+            "connoinherit": false,
             "convalidated": true,
             "condeferrable": false,
             "confmatchtype": " ",
@@ -9654,6 +9921,44 @@
           },
           "foreign_table": null,
           "foreign_schema": null
+        },
+        {
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (request_key) REFERENCES __SCHEMA_NAME__.ingress_room_requests(request_key) ON DELETE CASCADE",
+          "properties": {
+            "conkey": [
+              12
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_mailbox_entries_request_key_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "c",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_room_requests",
+          "foreign_schema": "__SCHEMA_NAME__"
         },
         {
           "index": null,
@@ -13302,6 +13607,2027 @@
             "confupdtype": " ",
             "coninhcount": 0,
             "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        }
+      ],
+      "inheritance_edges": 0
+    },
+    {
+      "name": "ingress_room_occupants",
+      "rules": 0,
+      "columns": [
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 1,
+            "attname": "room_jid",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 2,
+            "attname": "occupant_jid",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 3,
+            "attname": "nick",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 4,
+            "attname": "role",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 5,
+            "attname": "affiliation",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 6,
+            "attname": "occupancy_generation",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 7,
+            "attname": "join_request",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 8,
+            "attname": "presence",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "17",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 9,
+            "attname": "room_epoch",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "20",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ingress_room_occupants_join_request",
+          "options": null,
+          "definition": "CREATE INDEX ingress_room_occupants_join_request ON __SCHEMA_NAME__.ingress_room_occupants USING btree (join_request) WHERE (join_request IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              7
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_room_occupants_pkey",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_room_occupants_pkey ON __SCHEMA_NAME__.ingress_room_occupants USING btree (room_jid, occupant_jid)",
+          "properties": {
+            "indkey": [
+              1,
+              2
+            ],
+            "indclass": [
+              "3126",
+              "3126"
+            ],
+            "indnatts": 2,
+            "indislive": true,
+            "indoption": [
+              0,
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 2,
+            "indcheckxmin": false,
+            "indcollation": [
+              "100",
+              "100"
+            ],
+            "indimmediate": true,
+            "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_room_occupants_join_request_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_room_occupants_join_request_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "ingress_room_occupants_definer_api_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_definer_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_room_occupants_epoch_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_room_occupants_epoch_guard_truncate",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_truncate_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 34,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        }
+      ],
+      "properties": {
+        "of_type": "0",
+        "options": null,
+        "has_rules": false,
+        "tablespace": "0",
+        "access_method": "heap",
+        "replica_identity": "d"
+      },
+      "constraints": [
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((room_epoch >= 0))",
+          "properties": {
+            "conkey": [
+              9
+            ],
+            "confkey": null,
+            "conname": "ingress_room_occupants_epoch_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((room_jid <> ''::text) AND (octet_length(room_jid) <= 3071) AND (occupant_jid <> ''::text) AND (octet_length(occupant_jid) <= 3071) AND (nick <> ''::text) AND (octet_length(nick) <= 1023) AND (occupancy_generation <> ''::text) AND (octet_length(occupancy_generation) <= 64)))",
+          "properties": {
+            "conkey": [
+              1,
+              2,
+              3,
+              6
+            ],
+            "confkey": null,
+            "conname": "ingress_room_occupants_jid_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (join_request) REFERENCES __SCHEMA_NAME__.ingress_room_requests(request_key) ON DELETE SET NULL",
+          "properties": {
+            "conkey": [
+              7
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_room_occupants_join_request_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "n",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_room_requests",
+          "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "index": "ingress_room_occupants_pkey",
+          "parent": false,
+          "definition": "PRIMARY KEY (room_jid, occupant_jid)",
+          "properties": {
+            "conkey": [
+              1,
+              2
+            ],
+            "confkey": null,
+            "conname": "ingress_room_occupants_pkey",
+            "contype": "p",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((presence IS NULL) OR ((octet_length(presence) >= 1) AND (octet_length(presence) <= 16384))))",
+          "properties": {
+            "conkey": [
+              8
+            ],
+            "confkey": null,
+            "conname": "ingress_room_occupants_presence_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((((role >= 0) AND (role <= 3)) AND ((affiliation >= 0) AND (affiliation <= 4))))",
+          "properties": {
+            "conkey": [
+              4,
+              5
+            ],
+            "confkey": null,
+            "conname": "ingress_room_occupants_role_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        }
+      ],
+      "inheritance_edges": 0
+    },
+    {
+      "name": "ingress_room_requests",
+      "rules": 0,
+      "columns": [
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 1,
+            "attname": "request_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 2,
+            "attname": "request_kind",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 3,
+            "attname": "room_jid",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 4,
+            "attname": "occupant_jid",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 5,
+            "attname": "occupancy_generation",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 6,
+            "attname": "source_binding_version",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 7,
+            "attname": "source_bare_jid",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 8,
+            "attname": "source_auth_context_id",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 9,
+            "attname": "source_auth_context_version",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "1700",
+            "atthasdef": false,
+            "atttypmod": 1310724,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "m",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 10,
+            "attname": "source_auth_epoch",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "1700",
+            "atthasdef": false,
+            "atttypmod": 1310724,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "m",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 11,
+            "attname": "source_sm_ingress_id",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 12,
+            "attname": "source_ingress_ordinal",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "1700",
+            "atthasdef": false,
+            "atttypmod": 1310724,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "m",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 13,
+            "attname": "stanza",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "17",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "0",
+          "properties": {
+            "attlen": 2,
+            "attnum": 14,
+            "attname": "owner_decision",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 15,
+            "attname": "settled_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "now()",
+          "properties": {
+            "attlen": 8,
+            "attnum": 16,
+            "attname": "created_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ingress_room_requests_pkey",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_room_requests_pkey ON __SCHEMA_NAME__.ingress_room_requests USING btree (request_key)",
+          "properties": {
+            "indkey": [
+              1
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_room_requests_settled",
+          "options": null,
+          "definition": "CREATE INDEX ingress_room_requests_settled ON __SCHEMA_NAME__.ingress_room_requests USING btree (settled_at) WHERE (settled_at IS NOT NULL)",
+          "properties": {
+            "indkey": [
+              15
+            ],
+            "indclass": [
+              "3127"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_room_requests_unsettled",
+          "options": null,
+          "definition": "CREATE INDEX ingress_room_requests_unsettled ON __SCHEMA_NAME__.ingress_room_requests USING btree (created_at) WHERE (settled_at IS NULL)",
+          "properties": {
+            "indkey": [
+              16
+            ],
+            "indclass": [
+              "3127"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_cascade_del",
+          "constraint": "ingress_mailbox_entries_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_cascade_del",
+          "constraint": "ingress_room_responses_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_responses",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_mailbox_entries_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_room_occupants_join_request_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_occupants",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_room_responses_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_responses",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_setnull_del",
+          "constraint": "ingress_room_occupants_join_request_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_occupants",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "ingress_room_requests_definer_api_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_definer_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_room_requests_epoch_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_room_requests_epoch_guard_truncate",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_truncate_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 34,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        }
+      ],
+      "properties": {
+        "of_type": "0",
+        "options": null,
+        "has_rules": false,
+        "tablespace": "0",
+        "access_method": "heap",
+        "replica_identity": "d"
+      },
+      "constraints": [
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((owner_decision = ANY (ARRAY[0, 1, 2])))",
+          "properties": {
+            "conkey": [
+              14
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_decision_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((room_jid <> ''::text) AND (octet_length(room_jid) <= 3071) AND (occupant_jid <> ''::text) AND (octet_length(occupant_jid) <= 3071) AND (occupancy_generation <> ''::text) AND (octet_length(occupancy_generation) <= 64)))",
+          "properties": {
+            "conkey": [
+              3,
+              4,
+              5
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_jid_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((request_kind >= 1) AND (request_kind <= 4)))",
+          "properties": {
+            "conkey": [
+              2
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_kind_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "definition": "PRIMARY KEY (request_key)",
+          "properties": {
+            "conkey": [
+              1
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_pkey",
+            "contype": "p",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((settled_at IS NULL) OR (owner_decision <> 0)))",
+          "properties": {
+            "conkey": [
+              15,
+              14
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_settled_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((source_binding_version = 1) AND (source_bare_jid <> ''::text) AND (octet_length(source_bare_jid) <= 3071) AND ((source_auth_context_version >= (1)::numeric) AND (source_auth_context_version <= '18446744073709551615'::numeric)) AND ((source_auth_epoch >= (1)::numeric) AND (source_auth_epoch <= '18446744073709551615'::numeric)) AND (((source_sm_ingress_id IS NULL) AND (source_ingress_ordinal IS NULL)) OR ((source_sm_ingress_id IS NOT NULL) AND (source_ingress_ordinal IS NOT NULL) AND ((source_ingress_ordinal >= (1)::numeric) AND (source_ingress_ordinal <= '18446744073709551615'::numeric))))))",
+          "properties": {
+            "conkey": [
+              6,
+              7,
+              9,
+              10,
+              11,
+              12
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_source_binding_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((octet_length(stanza) >= 1) AND (octet_length(stanza) <= 1048576)))",
+          "properties": {
+            "conkey": [
+              13
+            ],
+            "confkey": null,
+            "conname": "ingress_room_requests_stanza_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        }
+      ],
+      "inheritance_edges": 0
+    },
+    {
+      "name": "ingress_room_responses",
+      "rules": 0,
+      "columns": [
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 1,
+            "attname": "request_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 4,
+            "attnum": 2,
+            "attname": "position",
+            "attalign": "i",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "23",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 3,
+            "attname": "stanza",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "17",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ingress_room_responses_pkey",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_room_responses_pkey ON __SCHEMA_NAME__.ingress_room_responses USING btree (request_key, \"position\")",
+          "properties": {
+            "indkey": [
+              1,
+              2
+            ],
+            "indclass": [
+              "10065",
+              "1978"
+            ],
+            "indnatts": 2,
+            "indislive": true,
+            "indoption": [
+              0,
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 2,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0",
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_room_responses_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_room_responses_request_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_room_requests",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "ingress_room_responses_definer_api_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_definer_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_room_responses_epoch_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_room_responses_epoch_guard_truncate",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_truncate_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 34,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        }
+      ],
+      "properties": {
+        "of_type": "0",
+        "options": null,
+        "has_rules": false,
+        "tablespace": "0",
+        "access_method": "heap",
+        "replica_identity": "d"
+      },
+      "constraints": [
+        {
+          "index": "ingress_room_responses_pkey",
+          "parent": false,
+          "definition": "PRIMARY KEY (request_key, \"position\")",
+          "properties": {
+            "conkey": [
+              1,
+              2
+            ],
+            "confkey": null,
+            "conname": "ingress_room_responses_pkey",
+            "contype": "p",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((\"position\" >= 0))",
+          "properties": {
+            "conkey": [
+              2
+            ],
+            "confkey": null,
+            "conname": "ingress_room_responses_position_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_room_requests_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (request_key) REFERENCES __SCHEMA_NAME__.ingress_room_requests(request_key) ON DELETE CASCADE",
+          "properties": {
+            "conkey": [
+              1
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_room_responses_request_key_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "c",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_room_requests",
+          "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((octet_length(stanza) >= 1) AND (octet_length(stanza) <= 1048576)))",
+          "properties": {
+            "conkey": [
+              3
+            ],
+            "confkey": null,
+            "conname": "ingress_room_responses_stanza_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
             "convalidated": true,
             "condeferrable": false,
             "confmatchtype": " ",

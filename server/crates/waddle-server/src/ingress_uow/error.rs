@@ -118,6 +118,8 @@ pub enum IngressUowError {
     ClaimFenceMissing,
     #[error(transparent)]
     Mailbox(#[from] super::MailboxError),
+    #[error(transparent)]
+    RoomRequest(#[from] super::RoomRequestError),
 }
 
 impl IngressUowError {

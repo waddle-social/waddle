@@ -904,9 +904,11 @@ async fn check_guarded_relation_acls(
 ) -> Result<(), DarkMigrationOwnerError> {
     for table in EPOCH_GUARDED_TABLES {
         let (select, insert, update, delete) = match table {
-            "ingress_messages" | "ingress_sm_streams" | "ingress_send_attempts" => {
-                (true, true, true, true)
-            }
+            "ingress_messages"
+            | "ingress_sm_streams"
+            | "ingress_send_attempts"
+            | "ingress_room_requests"
+            | "ingress_room_occupants" => (true, true, true, true),
             "ingress_origin_aliases" | "ingress_sm_refs" | "ingress_deliveries" => {
                 (true, true, false, true)
             }
@@ -918,7 +920,8 @@ async fn check_guarded_relation_acls(
             | "ingress_carbon_receipts"
             | "ingress_delivery_receipts"
             | "ingress_archive_dispatch"
-            | "ingress_owner_rejections" => (true, true, false, false),
+            | "ingress_owner_rejections"
+            | "ingress_room_responses" => (true, true, false, false),
             _ => return Err(DarkMigrationOwnerError::EpochCatalogDrift),
         };
         // V1011 grants pg_monitor SELECT on the first six guarded tables;

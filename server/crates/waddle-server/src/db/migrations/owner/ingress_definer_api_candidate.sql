@@ -2946,3 +2946,21 @@ CREATE TRIGGER ingress_mailbox_entries_definer_api_guard_dml
 BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_mailbox_entries
 FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
 ALTER TABLE __SCHEMA__.ingress_mailbox_entries ENABLE ALWAYS TRIGGER ingress_mailbox_entries_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_room_requests_definer_api_guard_dml ON __SCHEMA__.ingress_room_requests;
+CREATE TRIGGER ingress_room_requests_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_room_requests
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_room_requests ENABLE ALWAYS TRIGGER ingress_room_requests_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_room_responses_definer_api_guard_dml ON __SCHEMA__.ingress_room_responses;
+CREATE TRIGGER ingress_room_responses_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_room_responses
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_room_responses ENABLE ALWAYS TRIGGER ingress_room_responses_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_room_occupants_definer_api_guard_dml ON __SCHEMA__.ingress_room_occupants;
+CREATE TRIGGER ingress_room_occupants_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_room_occupants
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_room_occupants ENABLE ALWAYS TRIGGER ingress_room_occupants_definer_api_guard_dml;

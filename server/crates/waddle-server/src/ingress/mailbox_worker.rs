@@ -149,7 +149,11 @@ impl IngressAuthority {
         {
             return Ok(MailboxLaneHead::Idle);
         }
-        let key = entry.operation.message_key();
+        // This claim prepares a room acceptance. A head entry that carries a
+        // room request is left for the request worker.
+        let Some(key) = entry.operation.message_key() else {
+            return Ok(MailboxLaneHead::Idle);
+        };
         let room = match locked.key().encoding().decode() {
             Ok(MailboxLaneIdentity {
                 recipient:
@@ -209,6 +213,11 @@ impl IngressAuthority {
     /// rows.
     pub async fn deliver_owner_obligations(&self, operation: MailboxOperationKey) -> bool {
         const BUDGET: Duration = Duration::from_secs(5);
+        // A room request leaves no obligation on a canonical message: its
+        // response is frozen with the decision and read by its origin.
+        let Some(message_key) = operation.message_key() else {
+            return true;
+        };
         let Some(environment) = self.recovery.environment() else {
             return false;
         };
@@ -220,7 +229,7 @@ impl IngressAuthority {
                 &self.database,
                 &self.uow,
                 &deps,
-                operation.message_key(),
+                message_key,
                 deadline,
             ),
         )
@@ -431,7 +440,7 @@ impl IngressAuthority {
         let full_page = entries.len() >= MAILBOX_SCAN_LIMIT as usize;
         sweep.resume_after = entries
             .last()
-            .map(|entry| entry.operation.message_key())
+            .and_then(|entry| entry.operation.message_key())
             .filter(|_| full_page);
         Ok(sweep)
     }

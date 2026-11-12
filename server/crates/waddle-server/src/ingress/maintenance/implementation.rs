@@ -255,9 +255,13 @@ pub(in crate::ingress) async fn run_maintenance_pass_with_cursor(
         } else {
             MaintenanceOutcome::Complete
         };
+        let room_requests = collect_settled_room_requests(database, uow, budget).await;
         combine(
-            combine(combine(terminalization, recovery), retention),
-            observer,
+            combine(
+                combine(combine(terminalization, recovery), retention),
+                observer,
+            ),
+            room_requests,
         )
     })
     .await
@@ -309,6 +313,61 @@ pub(crate) async fn collect_observer_history(
     tokio::time::timeout(budget.hard_deadline, run)
         .await
         .unwrap_or(MaintenanceOutcome::TimedOut)
+}
+
+/// Room requests one maintenance pass deletes at most.
+const ROOM_REQUEST_GC_BATCH_LIMIT: u32 = 512;
+
+/// Delete room requests whose entry is consumed and whose origin settled
+/// them at least an hour ago, with their entries and frozen responses.
+///
+/// Room requests exist only where the mailbox carries room traffic: on
+/// PostgreSQL with the mailbox selected. Elsewhere the phase does nothing.
+/// A full batch reports `Partial`, so the next pass continues promptly.
+async fn collect_settled_room_requests(
+    database: &Database,
+    uow: &IngressUnitOfWork,
+    budget: MaintenanceBudget,
+) -> MaintenanceOutcome {
+    use crate::ingress_uow::{
+        RoomRequestError, RoomRequestRepository, ROOM_REQUEST_SETTLED_RETENTION,
+    };
+    if database.driver() != crate::db::DatabaseDriver::Postgres || !uow.mailbox_acceptance_enabled()
+    {
+        return MaintenanceOutcome::Complete;
+    }
+    let collected = async {
+        let mut tx = uow
+            .begin_with_timeouts(
+                budget.retention.lock_timeout,
+                budget.retention.statement_timeout,
+            )
+            .await?;
+        let deleted = RoomRequestRepository::collect_settled(
+            &mut tx,
+            ROOM_REQUEST_SETTLED_RETENTION,
+            ROOM_REQUEST_GC_BATCH_LIMIT,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok::<_, IngressUowError>(deleted)
+    }
+    .await;
+    match collected {
+        Ok(deleted) if deleted >= u64::from(ROOM_REQUEST_GC_BATCH_LIMIT) => {
+            MaintenanceOutcome::Partial
+        }
+        Ok(_) => MaintenanceOutcome::Complete,
+        // The definer-API candidate has no room request function, so nothing
+        // writes a request under it and there is nothing to collect.
+        Err(IngressUowError::RoomRequest(RoomRequestError::DefinerApiUnsupported)) => {
+            MaintenanceOutcome::Complete
+        }
+        Err(error) => {
+            tracing::warn!(%error, "room request retention failed");
+            failure_outcome(&error)
+        }
+    }
 }
 
 pub(in crate::ingress::maintenance) async fn observer_retention_batch(

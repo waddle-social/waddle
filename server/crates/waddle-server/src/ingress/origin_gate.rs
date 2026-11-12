@@ -36,6 +36,8 @@ use crate::ingress_uow::{
 pub enum RoomAcceptanceUnresolved {
     #[error("the mailbox entry is gone")]
     EntryMissing,
+    #[error("the mailbox entry carries a room request, not a room acceptance")]
+    NotARoomAcceptance,
     #[error("the mailbox entry is dead-lettered and awaits operator repair")]
     DeadLettered,
     #[error("the entry's decision and the canonical owner decision disagree")]
@@ -141,7 +143,9 @@ pub(super) async fn consume_proven_decision(
     operation: MailboxOperationKey,
     decision: MailboxOwnerDecision,
 ) -> Result<Option<RoomAcceptanceUnresolved>, IngressUowError> {
-    let key = operation.message_key();
+    let Some(key) = operation.message_key() else {
+        return Ok(Some(RoomAcceptanceUnresolved::NotARoomAcceptance));
+    };
     if !CanonicalMessageRepository::lock(tx, key).await? {
         return Ok(Some(RoomAcceptanceUnresolved::EntryMissing));
     }
@@ -175,7 +179,11 @@ async fn read_frozen_refusal(
 ) -> Result<Option<xmpp_parsers::message::Message>, IngressUowError> {
     use crate::ingress_uow::{EffectIntentRepository, EffectReceiptRepository};
     use waddle_xmpp::ingress::IngressEffectIntent;
-    let key = operation.message_key();
+    // Only a room acceptance has a rejection child; the refusal of a room
+    // request is one of its frozen responses.
+    let Some(key) = operation.message_key() else {
+        return Ok(None);
+    };
     let mut tx = uow
         .begin_with_timeouts(Duration::from_millis(250), Duration::from_millis(500))
         .await?;

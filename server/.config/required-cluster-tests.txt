@@ -641,3 +641,19 @@ waddle-server::xep0045_xep0198_remote_acceptance membership_change_between_accep
 waddle-server::xep0045_xep0198_remote_acceptance mailbox_transport_relays_no_groupchat_payload
 waddle-server::xep0045_xep0198_remote_acceptance owner_refusal_is_answered_from_the_frozen_error
 waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_after_commit_delivers_the_frozen_reflection_once
+
+# #2174 room requests, durable occupancy and response custody: a request must
+# hold one mailbox entry across lanes and name only its request, the owner's
+# decision must move once and commit with its ordered responses, the origin
+# must receive those responses in exactly one consuming transaction, occupancy
+# must be written per connection generation and recovered by a successor
+# without seating an unparseable row, retention must take only consumed
+# requests settled for the retention period, and all three tables must refuse
+# a statement without the live epoch proof. An image that can hand a response
+# over twice, lose a join's order or seat a stale connection must not ship.
+waddle-server::room_requests_postgres request_has_one_entry_across_lanes_and_names_only_its_request
+waddle-server::room_requests_postgres decision_freezes_ordered_responses_and_the_origin_consumes_them_once
+waddle-server::room_requests_postgres decision_moves_once_and_responses_need_the_latching_transaction
+waddle-server::room_requests_postgres occupancy_is_written_by_generation_and_recovered_by_a_successor
+waddle-server::room_requests_postgres collector_takes_only_consumed_requests_settled_for_the_retention
+waddle-server::room_requests_postgres guarded_room_tables_reject_unproven_writes

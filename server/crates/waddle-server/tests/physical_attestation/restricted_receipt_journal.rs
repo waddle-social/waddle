@@ -60,12 +60,15 @@ pub(super) async fn exercise(
     // Reapply V1030 through the registered runner with hostile default ACLs.
     // This is a disposable, exclusively owned schema with an empty journal.
     // The ledger refuses an applied version above a missing one, so the
-    // later mailbox migration is undone and reapplied with it.
+    // later mailbox and room request migrations are undone and reapplied
+    // with it.
     super::execute(&fixture.admin, &format!(
         "ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
-         DELETE FROM {s}.ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries'); \
+         DELETE FROM {s}.ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries', 'ingress_room_requests', 'ingress_room_responses', 'ingress_room_occupants'); \
          ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row; \
+         DROP TABLE {s}.ingress_room_occupants; DROP TABLE {s}.ingress_room_responses; \
          DROP TABLE {s}.ingress_mailbox_entries; DROP TABLE {s}.ingress_mailbox_lanes; \
+         DROP TABLE {s}.ingress_room_requests; \
          DROP FUNCTION {function}; DROP TABLE {journal}; DELETE FROM {s}._migrations WHERE version>=1030; \
          ALTER DEFAULT PRIVILEGES IN SCHEMA {s} GRANT ALL ON TABLES TO {r}; \
          ALTER DEFAULT PRIVILEGES IN SCHEMA {s} GRANT EXECUTE ON FUNCTIONS TO {r}"
@@ -83,8 +86,8 @@ pub(super) async fn exercise(
         MigrationRunner::single()
             .run(&owner)
             .await
-            .expect("registered V1030 and V1031"),
-        vec![1030, 1031]
+            .expect("registered V1030 through V1032"),
+        vec![1030, 1031, 1032]
     );
     drop(owner);
     super::execute(

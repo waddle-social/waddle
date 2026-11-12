@@ -1748,6 +1748,14 @@ SELECT 1;
 "#;
 pub const V1031_INGRESS_MAILBOX_POSTGRES: &str = include_str!("mailbox_postgres.sql");
 
+/// Canonical room requests, durable room occupancy and frozen responses for
+/// the mailbox. Like the lanes they travel on, they are written only by
+/// clustered PostgreSQL deployments, so SQLite records the version alone.
+pub const V1032_INGRESS_ROOM_REQUESTS: &str = r#"
+SELECT 1;
+"#;
+pub const V1032_INGRESS_ROOM_REQUESTS_POSTGRES: &str = include_str!("room_requests_postgres.sql");
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1940,6 +1948,12 @@ pub fn all() -> Vec<Migration> {
             description: "Create durable ordered mailbox lanes and entries".to_string(),
             sql_sqlite: V1031_INGRESS_MAILBOX,
             sql_postgres: V1031_INGRESS_MAILBOX_POSTGRES,
+        },
+        Migration {
+            version: 1032,
+            description: "Create room requests, durable occupancy and frozen responses".to_string(),
+            sql_sqlite: V1032_INGRESS_ROOM_REQUESTS,
+            sql_postgres: V1032_INGRESS_ROOM_REQUESTS_POSTGRES,
         },
     ]
 }

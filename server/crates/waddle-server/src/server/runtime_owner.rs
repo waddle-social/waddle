@@ -367,6 +367,14 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // entry leaves only through its canonical message's cascade.
     ("ingress_mailbox_lanes", READ_INSERT_UPDATE),
     ("ingress_mailbox_entries", READ_INSERT_UPDATE),
+    // A room request is inserted by its origin, row-locked and decided by the
+    // room owner, settled by its origin and deleted by the retention pass;
+    // its entry and responses leave through that delete's cascade. Responses
+    // are inserted with the decision and only read afterwards. Occupancy is
+    // upserted on a join or presence update and deleted on a leave.
+    ("ingress_room_requests", READ_WRITE),
+    ("ingress_room_responses", READ_INSERT),
+    ("ingress_room_occupants", READ_WRITE),
     // Inbox, stream management and pending delivery.
     ("inbox_entries", READ_INSERT_UPDATE),
     ("groupchat_notification_recovery", READ_WRITE),

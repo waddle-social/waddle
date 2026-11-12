@@ -7,7 +7,7 @@ can coexist with binaries that do not know this feature.
 ## Epoch-proof contract
 
 At a nonzero epoch, writes to every guarded table require two
-transaction-local GUCs. The guarded set is the 15 tables enrolled in
+transaction-local GUCs. The guarded set is the 18 tables enrolled in
 `ingress_epoch_guard_manifest`; it is mirrored by `EPOCH_GUARDED_TABLES` in
 `server/crates/waddle-server/src/ingress_substrate/substrate.rs`, and a catalog
 test (which runs only against PostgreSQL, i.e. when `WADDLE_TEST_POSTGRES_URL` is set)
@@ -24,6 +24,7 @@ fails if the manifest, that list, or the live `ingress_*` tables diverge:
 | `ingress_effect_descendants` | V1025 |
 | `ingress_owner_rejections` | V1028 |
 | `ingress_mailbox_lanes`, `ingress_mailbox_entries` | V1031 |
+| `ingress_room_requests`, `ingress_room_responses`, `ingress_room_occupants` | V1032 |
 
 The two GUCs are:
 

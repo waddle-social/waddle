@@ -753,7 +753,13 @@ impl Fixture {
              retention_eligible_at = '2000-01-01' WHERE message_key = $1::uuid",
             self.schema
         ))
-        .bind(operation.message_key().to_storage().to_string())
+        .bind(
+            operation
+                .message_key()
+                .expect("room acceptance")
+                .to_storage()
+                .to_string(),
+        )
         .execute(&self.admin)
         .await
         .expect("expire canonical message");
@@ -764,7 +770,13 @@ impl Fixture {
             "SELECT count(*) FROM {}.ingress_messages WHERE message_key = $1::uuid",
             self.schema
         ))
-        .bind(operation.message_key().to_storage().to_string())
+        .bind(
+            operation
+                .message_key()
+                .expect("room acceptance")
+                .to_storage()
+                .to_string(),
+        )
         .fetch_one(&self.admin)
         .await
         .expect("count canonical message")
@@ -960,7 +972,13 @@ async fn appender_behind_a_collector_neither_deadlocks_nor_allocates() {
          AND terminal_at IS NOT NULL FOR UPDATE SKIP LOCKED",
         fixture.schema
     ))
-    .bind(operation.message_key().to_storage().to_string())
+    .bind(
+        operation
+            .message_key()
+            .expect("room acceptance")
+            .to_storage()
+            .to_string(),
+    )
     .fetch_optional(&mut *collector)
     .await
     .expect("collector locks the canonical message");
@@ -978,7 +996,13 @@ async fn appender_behind_a_collector_neither_deadlocks_nor_allocates() {
         "DELETE FROM {}.ingress_messages WHERE message_key = $1::uuid",
         fixture.schema
     ))
-    .bind(operation.message_key().to_storage().to_string())
+    .bind(
+        operation
+            .message_key()
+            .expect("room acceptance")
+            .to_storage()
+            .to_string(),
+    )
     .execute(&mut *collector)
     .await
     .expect("collector deletes without a lane lock");
@@ -1172,7 +1196,7 @@ async fn unconsumed_decisions_are_found_after_the_grace_and_consumed_once() {
         MailboxRepository::scan_unconsumed_decisions(
             &mut tx,
             Duration::ZERO,
-            Some(decided.message_key()),
+            decided.message_key(),
             16
         )
         .await

@@ -364,7 +364,12 @@ pub(super) async fn decide_owner(
     acceptance: &mut OwnerAcceptance,
     outcome: OwnerOutcome<'_>,
 ) -> Result<MailboxEntryDisposition, IngressUowError> {
-    let key = acceptance.operation.message_key();
+    // A room acceptance is the only operation this commit decides; an entry
+    // whose parent is a room request has no canonical message to latch.
+    let key = acceptance
+        .operation
+        .message_key()
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
     let state = CanonicalMessageRepository::room_owner_state(tx, key)
         .await?
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
