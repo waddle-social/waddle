@@ -194,7 +194,8 @@ async fn assert_shutdown_order(cancel_cleanup: bool, timing: RequestTiming) {
             .expect("queue force detach");
     }
     let mut pending_force_detach = Vec::new();
-    let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let (handoff_tx, mut handoff_rx) =
+        crate::server::routes::interpret::ordered_relay_handoff_channel();
     if timing == RequestTiming::DuringSettlement {
         let ping = xmpp_parsers::iq::Iq::from_get("parked-ping", xmpp_parsers::ping::Ping);
         conn.deferred_inbound.push_back(
@@ -254,7 +255,7 @@ async fn assert_shutdown_order(cancel_cleanup: bool, timing: RequestTiming) {
     }
     let finish_handoff = || {
         handoff_tx
-            .send(
+            .try_send(
                 crate::server::routes::interpret::OrderedRelayHandoffCompletion {
                     inbound_sequence,
                     replies: Vec::new(),

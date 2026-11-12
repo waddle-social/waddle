@@ -215,11 +215,14 @@ use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
     resource_constraint_error, validate_groupchat_rich_targets,
 };
-#[cfg(feature = "clustering")]
-pub use handoff::OrderedRelayHandoffHandle;
+#[cfg(all(test, feature = "clustering"))]
+pub use handoff::ORDERED_RELAY_HANDOFF_CAPACITY;
 pub use handoff::{
-    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
+    ordered_relay_handoff_channel, OrderedRelayHandoffCompletion, OrderedRelayHandoffReceiver,
+    OrderedRelayHandoffSender, OrderedRelayInboundSequence, SmInboundCompletionTracker,
 };
+#[cfg(feature = "clustering")]
+pub use handoff::{OrderedRelayHandoffHandle, OrderedRelayHandoffRefusal};
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use message_plan::ownership_plan_tests::PlanningClaims;
 use offline_delivery::queue_offline_delivery;

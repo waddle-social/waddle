@@ -138,13 +138,30 @@ pub(super) trait WebSocketWriteError: std::fmt::Display {
     fn is_detached(&self) -> bool {
         false
     }
+
+    /// The typed attempt evidence this failure carries, when its sink keeps
+    /// a receipt for the frame. `None` is a sink that cannot say.
+    ///
+    /// The evidence does not change what a failed write means to its caller.
+    /// With stream management the recorded stanza is recovered from the
+    /// unacknowledged queue whatever the stage. Without it, only a completed
+    /// write is acceptance: a not-attempted and an uncertain attempt both
+    /// leave the producer its retry, so an uncertain frame may reach the
+    /// client twice and is never silently lost.
+    fn attempt_stage(&self) -> Option<waddle_xmpp::registry::ActorOutboundStage> {
+        None
+    }
 }
 
 impl WebSocketWriteError for axum::Error {}
 
 impl WebSocketWriteError for std::io::Error {}
 
-impl WebSocketWriteError for crate::websocket_transport::OutputError<axum::Error> {}
+impl WebSocketWriteError for crate::websocket_transport::OutputError<axum::Error> {
+    fn attempt_stage(&self) -> Option<waddle_xmpp::registry::ActorOutboundStage> {
+        Some(crate::websocket_transport::OutputError::attempt_stage(self))
+    }
+}
 
 #[cfg(test)]
 impl WebSocketWriteError for &'static str {}
@@ -152,17 +169,28 @@ impl WebSocketWriteError for &'static str {}
 #[cfg(test)]
 impl WebSocketWriteError for std::convert::Infallible {}
 
-impl<E: std::fmt::Display> WebSocketWriteError for InterruptedWrite<E> {
+impl<E: WebSocketWriteError> WebSocketWriteError for InterruptedWrite<E> {
     fn is_detached(&self) -> bool {
         matches!(self, Self::Detached | Self::Retired(_))
+    }
+
+    fn attempt_stage(&self) -> Option<waddle_xmpp::registry::ActorOutboundStage> {
+        match self {
+            // The fence refuses in `start_send`, before the frame is handed on.
+            Self::Retired(_) => Some(waddle_xmpp::registry::ActorOutboundStage::NotAttempted),
+            // A detach interrupts readiness, the enqueue or the flush alike.
+            Self::Detached => None,
+            Self::Transport(error) => error.attempt_stage(),
+        }
     }
 }
 
 fn log_write_failure(error: &impl WebSocketWriteError, failure_message: &'static str) {
+    let attempt = error.attempt_stage();
     if error.is_detached() {
-        debug!(error = %error, "{failure_message}");
+        debug!(error = %error, ?attempt, "{failure_message}");
     } else {
-        error!(error = %error, "{failure_message}");
+        error!(error = %error, ?attempt, "{failure_message}");
     }
 }
 

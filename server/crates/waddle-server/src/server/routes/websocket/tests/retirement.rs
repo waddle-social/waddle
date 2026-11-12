@@ -318,7 +318,8 @@ async fn settle(transfer: &mut Transfer, cause: RetirementCause) {
         .admit()
         .expect("permit");
     let shutdown = CancellationToken::new();
-    let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let (_handoff_tx, mut handoff_rx) =
+        crate::server::routes::interpret::ordered_relay_handoff_channel();
     let mut pending_force_detach = Vec::new();
     timeout(
         Duration::from_secs(30),

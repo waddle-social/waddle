@@ -31,7 +31,9 @@ use super::{
 };
 use crate::clustering::NodeAdmissionPermit;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
-use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
+use crate::server::routes::interpret::{
+    OrderedRelayHandoffCompletion, OrderedRelayHandoffReceiver,
+};
 use crate::websocket_transport::{
     InputError, IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits,
     LiveSocketCleanup, LiveSocketTransport, PumpStop, SocketAdmissionError, StopReason,
@@ -49,13 +51,19 @@ use waddle_xmpp::protocol::TimerId;
 use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint, SocketOutboundReceiver};
 use waddle_xmpp::stream_management::SmRequest;
 
-#[expect(
-    dead_code,
-    reason = "the binding messages have no handler until the actor owns the outbound endpoint"
-)]
+mod binding;
 mod binding_messages;
 mod live_actor;
 mod retirement;
+
+#[cfg(test)]
+pub(super) use binding::PreparedBinding;
+pub(super) use binding::{
+    BindingLedger, BindingPublisher, BindingRefusal, BindingStage, BindingStepReply,
+    InstallOutcome, PrepareBindingReply,
+};
+#[cfg(test)]
+pub(super) use binding_messages::ConnectionActorOperationId;
 
 pub(super) use retirement::{
     fence_unjoined_transfer, observe_pump_termination, PumpTermination, RetirementCause,
@@ -173,57 +181,59 @@ async fn xmpp_websocket_handler(
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
-    ws.protocols(["xmpp"]).on_upgrade(move |socket| {
-        #[cfg(feature = "test-support")]
-        let waiter_control = state
-            .deps
-            .app_state
-            .websocket_admission_test_barriers
-            .callback_waiter
-            .clone();
-        let waiter = LiveWebSocketConnection {
-            socket: Box::new(socket),
-            state,
-            admission,
-            _connection_guard: connection_guard,
-        }
-        .spawn();
-        #[cfg(feature = "test-support")]
-        let waiter = if waiter_control
-            .as_ref()
-            .is_some_and(|control| control.drop_before_poll)
-        {
-            drop(waiter);
-            if let Some(control) = &waiter_control {
-                control.waiter_dropped.cancel();
-            }
-            None
-        } else {
-            Some(waiter)
-        };
-        #[cfg(not(feature = "test-support"))]
-        let waiter = Some(waiter);
-
-        async move {
+    ws.protocols(["xmpp"])
+        .max_message_size(WEBSOCKET_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
             #[cfg(feature = "test-support")]
-            if let Some(control) = waiter_control {
-                if let Some(waiter) = waiter {
-                    let mut waiter = Box::pin(waiter);
-                    tokio::select! {
-                        _ = control.drop_waiter.cancelled() => {
-                            drop(waiter);
-                            control.waiter_dropped.cancel();
-                        }
-                        _ = &mut waiter => {}
-                    }
+            let waiter_control = state
+                .deps
+                .app_state
+                .websocket_admission_test_barriers
+                .callback_waiter
+                .clone();
+            let waiter = LiveWebSocketConnection {
+                socket: Box::new(socket),
+                state,
+                admission,
+                _connection_guard: connection_guard,
+            }
+            .spawn();
+            #[cfg(feature = "test-support")]
+            let waiter = if waiter_control
+                .as_ref()
+                .is_some_and(|control| control.drop_before_poll)
+            {
+                drop(waiter);
+                if let Some(control) = &waiter_control {
+                    control.waiter_dropped.cancel();
                 }
-                return;
+                None
+            } else {
+                Some(waiter)
+            };
+            #[cfg(not(feature = "test-support"))]
+            let waiter = Some(waiter);
+
+            async move {
+                #[cfg(feature = "test-support")]
+                if let Some(control) = waiter_control {
+                    if let Some(waiter) = waiter {
+                        let mut waiter = Box::pin(waiter);
+                        tokio::select! {
+                            _ = control.drop_waiter.cancelled() => {
+                                drop(waiter);
+                                control.waiter_dropped.cancel();
+                            }
+                            _ = &mut waiter => {}
+                        }
+                    }
+                    return;
+                }
+                if let Some(waiter) = waiter {
+                    waiter.await;
+                }
             }
-            if let Some(waiter) = waiter {
-                waiter.await;
-            }
-        }
-    })
+        })
 }
 
 /// Size of the outbound message channel buffer
@@ -366,16 +376,35 @@ type LiveSocketIo = LocalSocketIo<
     WebSocketInput<axum::Error>,
 >;
 
+/// The largest WebSocket message the upgrade accepts from a peer. The
+/// WebSocket layer refuses a larger one before the reader pump sees it. The
+/// value is the layer's own default, stated here because the pump queue
+/// bounds below are derived from it.
+const WEBSOCKET_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Outbound pump queue for one connection. The loop writes one frame and
 /// waits for its flush, so the count only has to cover a frame in flight plus
-/// the short terminal sequence. Outbound frames have no byte cap of their own.
+/// the short terminal sequence.
 const TRANSPORT_OUTBOUND_FRAMES: usize = 4;
+/// Byte bound of the outbound pump queue, which is also the largest single
+/// frame it admits. One data frame is in flight at a time, and a serialized
+/// stanza larger than the largest message a peer endpoint with the same
+/// WebSocket limit accepts could not be delivered. The other slots carry the
+/// terminal sequence (a stream error, the framing close and the WebSocket
+/// close), each far smaller than the protocol's frame limit, which is what
+/// they are allowed here. A frame that does not fit the remaining budget
+/// waits for it; only a frame larger than the whole budget is refused, with
+/// `AdmissionError::Overloaded`, and that ends the connection as a failed
+/// write, leaving a recorded stanza in the stream-management queue.
+const TRANSPORT_OUTBOUND_QUEUE_BYTES: usize =
+    WEBSOCKET_MAX_MESSAGE_BYTES + (TRANSPORT_OUTBOUND_FRAMES - 1) * super::MAX_FRAME_SIZE;
 /// Inbound pump queue for one connection. The reader pump reads on demand, so
-/// at most one frame waits here. The byte bound stays above anything the
-/// WebSocket layer can deliver, so oversized stanzas still reach the protocol
-/// handler's own limit and stream error.
+/// at most one frame waits here.
 const TRANSPORT_INBOUND_FRAMES: usize = 1;
-const TRANSPORT_QUEUE_BYTES: usize = u32::MAX as usize;
+/// Byte bound of the inbound pump queue: its one frame at the largest size
+/// the WebSocket layer delivers. The protocol's own frame limit is far lower,
+/// but a frame between the two must still reach the protocol handler, which
+/// answers it with a stream error.
+const TRANSPORT_INBOUND_QUEUE_BYTES: usize = TRANSPORT_INBOUND_FRAMES * WEBSOCKET_MAX_MESSAGE_BYTES;
 /// How long the owner task waits, once the owner has finished, for the pump
 /// custodian to report both pumps joined before leaving the inventory slot in
 /// place.
@@ -411,7 +440,7 @@ struct LiveSocketState {
     // only this connection's occupancy generation.
     superseded: bool,
     timers: TransportTimers,
-    handoff_rx: mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
+    handoff_rx: OrderedRelayHandoffReceiver,
     socket_io: Option<LiveSocketIo>,
     _transport_cleanup: LiveSocketCleanup,
     _live_resume_owner_guard: LiveResumeOwnerGuard,
@@ -774,8 +803,8 @@ impl LiveWebSocketConnection {
             return OwnerExit::Settled;
         }
         let limits = match (
-            Limits::new(TRANSPORT_INBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
-            Limits::new(TRANSPORT_OUTBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
+            Limits::new(TRANSPORT_INBOUND_FRAMES, TRANSPORT_INBOUND_QUEUE_BYTES),
+            Limits::new(TRANSPORT_OUTBOUND_FRAMES, TRANSPORT_OUTBOUND_QUEUE_BYTES),
         ) {
             (Ok(inbound), Ok(outbound)) => TransportLimits::new(inbound, outbound),
             _ => unreachable!("the transport queue bounds are positive and within range"),
@@ -837,7 +866,8 @@ impl LiveWebSocketConnection {
                 transport_observer.local_io_relinquishment().completion(),
             ),
         );
-        let (handoff_tx, handoff_rx) = mpsc::unbounded_channel::<OrderedRelayHandoffCompletion>();
+        let (handoff_tx, handoff_rx) =
+            crate::server::routes::interpret::ordered_relay_handoff_channel();
         conn.ordered_relay_handoff_tx = Some(handoff_tx);
         // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
         // in the per-connection sans-io machine, so one must exist from
@@ -1530,6 +1560,16 @@ impl LiveSocketState {
         ControlFlow::Continue(())
     }
 
+    /// The binding ledger, for a step that names `generation`. A step for a
+    /// retired or foreign generation is refused.
+    fn binding_ledger(
+        &mut self,
+        generation: &waddle_xmpp::ownership::ConnectionRef,
+    ) -> Result<&mut BindingLedger, BindingRefusal> {
+        self.retirement.admit(generation)?;
+        Ok(&mut self.conn.bindings)
+    }
+
     /// Retire the connection: the one way its live loop ends.
     ///
     /// The first call latches the cause, counts it and writes the close the
@@ -1702,7 +1742,7 @@ fn record_transport_retirement(observer: &IoCustodianObserver, joined: bool, own
 /// Channel state carried from the live loop into its connection-owned shutdown.
 pub(super) struct ConnectionShutdownChannels<'a> {
     pub(super) outbound_rx: &'a mut mpsc::Receiver<OutboundStanza>,
-    pub(super) handoff_rx: &'a mut mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
+    pub(super) handoff_rx: &'a mut OrderedRelayHandoffReceiver,
     pub(super) force_detach_rx:
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
     pub(super) pending_force_detach: &'a mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
@@ -2741,6 +2781,9 @@ where
         BatchWriteOutcome::Continue => {
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
+            // The batch that carried a bind result or `<resumed/>` is on the
+            // wire, so the binding it answered is acknowledged.
+            conn.confirm_installed_binding();
             let accepted_frame_indices: Vec<_> = (0..responses.frames.len()).collect();
             settle_batch_completions(
                 state,
@@ -2885,7 +2928,7 @@ where
 }
 
 async fn drain_ordered_relay_handoffs_before_cleanup(
-    handoff_rx: &mut mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
+    handoff_rx: &mut OrderedRelayHandoffReceiver,
     conn: &mut WsConnState,
 ) {
     if !conn.sm_inbound_completion.has_pending() {
@@ -3336,6 +3379,28 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::sync::oneshot;
     use waddle_xmpp::stream_management::SmSessionRegistry;
+
+    /// The pump queues are bounded by the frame limits the connection
+    /// already has, and every bound is one the pump accepts.
+    #[test]
+    fn pump_queue_byte_bounds_follow_the_frame_limits() {
+        let inbound = Limits::new(TRANSPORT_INBOUND_FRAMES, TRANSPORT_INBOUND_QUEUE_BYTES)
+            .expect("inbound bound");
+        let outbound = Limits::new(TRANSPORT_OUTBOUND_FRAMES, TRANSPORT_OUTBOUND_QUEUE_BYTES)
+            .expect("outbound bound");
+        // One frame of the largest message the WebSocket layer delivers.
+        assert_eq!(inbound.max_count(), 1);
+        assert_eq!(inbound.max_bytes(), WEBSOCKET_MAX_MESSAGE_BYTES);
+        // One data frame of that size, and room for the terminal sequence.
+        assert_eq!(
+            outbound.max_bytes(),
+            WEBSOCKET_MAX_MESSAGE_BYTES
+                + (outbound.max_count() - 1) * crate::server::routes::websocket::MAX_FRAME_SIZE
+        );
+        // The pump charges a frame's bytes as a 32-bit permit count.
+        assert!(u32::try_from(inbound.max_bytes()).is_ok());
+        assert!(u32::try_from(outbound.max_bytes()).is_ok());
+    }
 
     #[tokio::test]
     async fn panic_fence_signals_stop_before_waiting_for_admission_lock() {
@@ -4284,7 +4349,7 @@ mod tests {
 
         // Keep the sender alive: the abandoned sequence itself must not remain
         // pending and make cleanup wait for a completion that cannot arrive.
-        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_tx, mut rx) = crate::server::routes::interpret::ordered_relay_handoff_channel();
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
             drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn),
@@ -4311,7 +4376,8 @@ mod tests {
         };
         let mut sender = UpgradeCloseSink::default();
         let mut receiver = futures::stream::pending::<Result<Message, &'static str>>();
-        let (handoff_tx, mut handoff_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (handoff_tx, mut handoff_rx) =
+            crate::server::routes::interpret::ordered_relay_handoff_channel();
         conn.ordered_relay_handoff_tx = Some(handoff_tx);
         lifecycle.begin_fenced_recovery();
 
@@ -4348,14 +4414,15 @@ mod tests {
         let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
         conn.sm_inbound_completion.abandon(abandoned);
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::server::routes::interpret::ordered_relay_handoff_channel();
         let completion = crate::server::routes::interpret::OrderedRelayHandoffCompletion {
             inbound_sequence: earlier,
             replies: Vec::new(),
         };
         tokio::spawn(async move {
             tokio::task::yield_now().await;
-            tx.send(completion).expect("cleanup receiver remains open");
+            tx.try_send(completion)
+                .expect("cleanup receiver remains open");
         });
 
         drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
@@ -5202,7 +5269,7 @@ mod tests {
 
         // The connection itself still owns a sender in production, so keep
         // this one alive to prove cleanup cannot rely on channel closure.
-        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_tx, mut rx) = crate::server::routes::interpret::ordered_relay_handoff_channel();
         let mut drain = Box::pin(drain_ordered_relay_handoffs_before_cleanup(
             &mut rx, &mut conn,
         ));
@@ -5220,11 +5287,14 @@ mod tests {
         let mut conn = WsConnState::new();
         conn.sm_state
             .enable("stream-timeout".to_string(), true, Some(300));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // A queue wider than a connection's own bound, so the drain's work cap
+        // is what stops it.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel(ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS + 1);
 
         for _ in 0..=ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS {
             let sequence = conn.sm_inbound_completion.reserve(&conn.sm_state);
-            tx.send(
+            tx.try_send(
                 crate::server::routes::interpret::OrderedRelayHandoffCompletion {
                     inbound_sequence: sequence,
                     replies: Vec::new(),

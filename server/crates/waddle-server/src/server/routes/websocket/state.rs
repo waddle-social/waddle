@@ -25,7 +25,6 @@ use crate::server::extension_host_adapter::BotRoomLocks;
 use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
 use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
 use crate::server::routes::interpret::effects::ClientRoomOrigin;
-use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -1763,6 +1762,9 @@ pub(super) struct WsConnState {
     pub(super) local_io_relinquishment: Option<waddle_xmpp::registry::LocalIoRelinquishment>,
     /// The current bind or resume attempt, separate from registry ownership.
     pub(super) binding_ref: Option<waddle_xmpp::ownership::BindingRef>,
+    /// Mints every binding identity of this socket and records how far the
+    /// current one has come.
+    pub(super) bindings: super::connection::BindingLedger,
     #[cfg(test)]
     pub(super) resume_binding_attempts: Vec<waddle_xmpp::ownership::BindingRef>,
     pub(super) phase: ConnectionPhase,
@@ -1791,7 +1793,7 @@ pub(super) struct WsConnState {
     /// as unhandled because its serving generation was revoked.
     pub(super) inbound_frame_terminal: Option<InboundFrameTerminal>,
     pub(super) ordered_relay_handoff_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
+        Option<crate::server::routes::interpret::OrderedRelayHandoffSender>,
     /// Per-connection XEP-0280 opt-in state. Updated when this resource
     /// sends `<enable/>` / `<disable/>` and restored from detached SM state
     /// on resume so re-registration preserves carbons behavior.
@@ -1963,6 +1965,7 @@ impl WsConnState {
             ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ),
+            bindings: super::connection::BindingLedger::new(connection_ref.clone()),
             connection_ref,
             local_io_relinquishment: None,
             binding_ref: None,
@@ -2020,6 +2023,16 @@ impl WsConnState {
     pub(super) fn retire_binding_ref(&mut self) {
         if let Some(binding) = self.binding_ref.take() {
             self.write_interruption.retire_binding(&binding);
+            self.bindings.retire(&binding);
+        }
+    }
+
+    /// Record that the client was sent the result of the installed binding.
+    /// Called after a response batch is fully written; a binding that is not
+    /// installed, or is already confirmed, is left as it is.
+    pub(super) fn confirm_installed_binding(&mut self) {
+        if let Some(binding) = self.binding_ref.as_ref() {
+            let _ = self.bindings.confirm_binding(binding);
         }
     }
 

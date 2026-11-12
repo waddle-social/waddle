@@ -200,13 +200,15 @@ mod ingress_handoff_tests {
 
     #[tokio::test]
     async fn committed_message_never_defers_but_iq_keeps_completion_notification() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::server::routes::interpret::ordered_relay_handoff_channel();
         let message_handoff =
-            OrderedRelayHandoffHandle::new(OrderedRelayInboundSequence(1), tx.clone());
+            OrderedRelayHandoffHandle::reserve(OrderedRelayInboundSequence(1), &tx)
+                .expect("message handoff slot");
         let message = Stanza::Message(xmpp_parsers::message::Message::new(None));
         assert!(!defer_until_relay_completion(&message_handoff, &message));
         assert!(!message_handoff.was_deferred());
-        let iq_handoff = OrderedRelayHandoffHandle::new(OrderedRelayInboundSequence(2), tx);
+        let iq_handoff = OrderedRelayHandoffHandle::reserve(OrderedRelayInboundSequence(2), &tx)
+            .expect("IQ handoff slot");
         let iq = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Result {
             from: None,
             to: None,

@@ -48,7 +48,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{
     ConnectionRef, NodeIdentityStamp, NodeLeaseIdentity, SharedNodeIdentity,
 };
-use waddle_xmpp::registry::{ActorOutboundCustody, ActorOutboundId};
+use waddle_xmpp::registry::{ActorOutboundCustody, ActorOutboundId, ActorOutboundStage};
 
 pub use crate::server::routes::websocket::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, CustodianSummary, InboundTerminal,
@@ -83,6 +83,41 @@ pub enum OutputError<E> {
     WrongConnection,
     #[error("frame is not valid in the current transport phase")]
     InvalidFrame,
+}
+
+/// The custody stage that a frame's local write progress is evidence for.
+///
+/// The progress comes from the pump's receipt for the exact frame bytes it
+/// was given, so the evidence is about those bytes and nothing is serialized
+/// again to produce it. No stage says the peer handled the frame: `Flushed`
+/// is a completed local flush, `AttemptedUncertain` means the sink's
+/// `start_send` began and the frame may or may not have left, and only
+/// `NotAttempted` proves that it did not.
+pub fn attempt_stage(progress: WriteProgress) -> ActorOutboundStage {
+    match progress {
+        WriteProgress::Admitted => ActorOutboundStage::Queued,
+        WriteProgress::Attempted => ActorOutboundStage::Attempting,
+        WriteProgress::Completed => ActorOutboundStage::Flushed,
+        WriteProgress::Uncertain => ActorOutboundStage::AttemptedUncertain,
+        WriteProgress::NotAttempted => ActorOutboundStage::NotAttempted,
+    }
+}
+
+impl<E> OutputError<E> {
+    /// The attempt evidence a failed write leaves behind.
+    ///
+    /// A refusal before queue admission proves the frame was not attempted.
+    /// A transport error or a failed retirement is reported without the
+    /// frame's own receipt, so it cannot prove that and stays uncertain.
+    pub fn attempt_stage(&self) -> ActorOutboundStage {
+        match self {
+            Self::Admission(_) | Self::Closing | Self::WrongConnection | Self::InvalidFrame => {
+                ActorOutboundStage::NotAttempted
+            }
+            Self::Interrupted(progress) => attempt_stage(*progress),
+            Self::Transport(_) | Self::RetirementFailed => ActorOutboundStage::AttemptedUncertain,
+        }
+    }
 }
 
 /// Input preserves all raw WebSocket frames and their original read error.
@@ -1802,6 +1837,11 @@ impl WebSocketWriteReceipt {
     /// Wait for a final local write outcome.
     pub async fn wait_for_terminal(&self) -> WriteProgress {
         self.receipt.wait_for_terminal().await
+    }
+
+    /// The custody stage this receipt is currently evidence for.
+    pub fn attempt_stage(&self) -> ActorOutboundStage {
+        attempt_stage(self.progress())
     }
 }
 

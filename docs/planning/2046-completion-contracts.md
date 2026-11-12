@@ -401,24 +401,55 @@ observation is the pumps' relinquishment witness: the custodian reports
 settlement. An actor that panics or is killed is retired by its hosting
 task.
 
-What the later slices build on is kept without a user: the typed binding
-messages (`W/connection/binding_messages.rs`: prepare, install, confirm and
-retire, each naming its exact attempt), the actor outbound endpoint and its
-custody stages in the registry (`ActorSocketOutboundEndpoint`,
-`ActorOutboundStage`), the retained-input and actor data-frame paths of the
-transport (`S/websocket_transport.rs`), and the custodian's retirement
-listener and physical-stop handoff (`W/supervised_io.rs`). Each carries a
-dead-code expectation with its reason.
+The connection mints every binding identity. `BindingLedger`
+(`W/connection/binding.rs`, held in `WsConnState`) mints a new `BindingRef`
+for each bind, each resume attempt and a fresh bind after a failed resume,
+and records the current attempt as prepared, installed when it is published,
+and confirmed when the batch carrying the bind result or `<resumed/>` has
+been written. Registration publishes only the attempt the ledger last
+prepared, and every step names its exact attempt. The actor handles prepare,
+install, confirm and retire (`W/connection/binding_messages.rs`) as
+synchronous ledger steps fenced on the connection generation; nothing sends
+them until the account coordinator exists, and a message cannot retire an
+installed binding, which still retires with its connection. Publication
+reaches the routing state through one trait, `BindingPublisher`, whose only
+implementation publishes into the connection registry and its mirrors
+(`W/registration.rs`, `binding_publisher`).
+
+The pump queues are bounded in bytes: one frame of the largest WebSocket
+message inbound (64 MiB, which the upgrade states explicitly), and that plus
+the terminal sequence outbound (`W/connection.rs`). The ordered-relay
+handoff queue holds at most 256 completions, one reserved slot per
+outstanding handoff; a stanza that cannot reserve one is routed without a
+deferred handoff and its handler waits for the relay
+(`S/server/routes/interpret/handoff.rs`). A failed write carries typed
+attempt evidence: the pump's `WriteProgress` maps to `ActorOutboundStage`
+(`attempt_stage` in `S/websocket_transport.rs`). The evidence is logged and
+does not change what a failed write means: without stream management only a
+completed write is acceptance, so a not-attempted and an uncertain attempt
+both leave the producer its retry (`W/outbound.rs`,
+[`2046-supervised-io-lab.md`](2046-supervised-io-lab.md)).
+
+What the later slices build on is kept without a user: the actor outbound
+endpoint and its custody stages in the registry
+(`ActorSocketOutboundEndpoint`, `ActorOutboundCustody`), the retained-input
+and actor data-frame paths of the transport (`S/websocket_transport.rs`),
+and the custodian's retirement listener and physical-stop handoff
+(`W/supervised_io.rs`). Each carries a dead-code expectation with its
+reason.
 
 | # | Slice | Deletes | Proof | Size | Gate |
 | --- | --- | --- | --- | --- | --- |
-| S5 | Actor-owned endpoint: the actor mints `BindingRef`; prepare, install, confirm and retire are mailbox messages; sink receipts map to typed attempt evidence; pump queues get real byte bounds | `pending_tx`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ingress_generation` | `characterization_bind`, `characterization_routing`, `xep0198_attached_resume_ws`, `xep0198_replay_bytes` | L | Selector, then flip |
+| S5 | Actor-owned endpoint: the session's outbound queue is `ActorSocketOutboundEndpoint::channel`, written through `actor_data_frame` so custody stages follow the pump's receipts; publication is provisional until the durable row commits, on every local and remote enqueue path | `pending_tx`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ingress_generation` | `characterization_bind`, `characterization_routing`, `xep0198_attached_resume_ws`, `xep0198_replay_bytes` | L | Selector, then flip |
 | S6 | The D5 rows owned by the connection actor move out of `WsConnState` | `LiveSocketState` scaffolding | All suites | M | Behaviour-neutral |
 
-Open before S5:
-`TRANSPORT_QUEUE_BYTES` is `u32::MAX`, which is no byte bound; the
-ordered-relay handoff receiver is unbounded; and how a terminal write receipt
-maps to an uncertain attempt without stream management.
+Open before S5: the legacy outbound handlers and cleanup consume owned
+`OutboundStanza` values from an `mpsc` receiver, while actor custody leases
+them by reference until a terminal stage, so the handlers' stream-management
+recording, write acceptance and detach drain need a custody-aware form; and
+a provisional binding needs a typed retry-before-enqueue outcome on the
+remote resource proxy and ordered relay, which is a `deliver_ordered`
+version bump.
 
 The regression for publication order
 (`server/crates/waddle-server/tests/xep0198_attached_resume_ws.rs`) is ignored

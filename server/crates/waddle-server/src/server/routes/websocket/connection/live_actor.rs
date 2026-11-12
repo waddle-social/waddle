@@ -13,7 +13,13 @@
 //! peer, a store or another actor belongs in the turn loop, where every wait
 //! races the control sources.
 
-use super::{CommandTurn, LiveOwnerCtx, LiveSocketState, OwnerExit, TurnEvent};
+use super::binding_messages::{
+    ConfirmBindingInstall, InstallBinding, PrepareBinding, RetireBinding,
+};
+use super::{
+    BindingLedger, BindingRefusal, BindingStepReply, CommandTurn, InstallOutcome, LiveOwnerCtx,
+    LiveSocketState, OwnerExit, PrepareBindingReply, TurnEvent,
+};
 use crate::server::routes::websocket::WebSocketState;
 use crate::websocket_transport::LegacySocketAdmission;
 use kameo::actor::{Actor, ActorRef, Spawn, WeakActorRef};
@@ -182,6 +188,99 @@ impl LiveConnectionActor {
                     }
                 }
             }
+        }
+    }
+}
+
+impl LiveConnectionActor {
+    /// The binding ledger, for a step that names `generation`.
+    fn binding_ledger(
+        &mut self,
+        generation: &waddle_xmpp::ownership::ConnectionRef,
+    ) -> Result<&mut BindingLedger, BindingRefusal> {
+        self.live
+            .as_mut()
+            .ok_or(BindingRefusal::ConnectionStopped)?
+            .binding_ledger(generation)
+    }
+}
+
+// Each binding message is one synchronous step of the ledger, fenced on the
+// connection generation, so it meets this actor's rule for handlers. The
+// steps record; publication stays with the turn that handles the bind or
+// resume, through `BindingPublisher`.
+
+impl kameo::message::Message<PrepareBinding> for LiveConnectionActor {
+    type Reply = PrepareBindingReply;
+
+    async fn handle(
+        &mut self,
+        message: PrepareBinding,
+        _: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let generation = self.owner.admission.connection_ref().clone();
+        match self
+            .binding_ledger(&generation)
+            .and_then(|ledger| ledger.prepare(message.operation_id))
+        {
+            Ok(prepared) => PrepareBindingReply::Prepared(Box::new(prepared)),
+            Err(refusal) => PrepareBindingReply::Refused(refusal),
+        }
+    }
+}
+
+impl kameo::message::Message<InstallBinding> for LiveConnectionActor {
+    type Reply = BindingStepReply;
+
+    async fn handle(
+        &mut self,
+        message: InstallBinding,
+        _: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let attempt = message.attempt;
+        match self
+            .binding_ledger(&attempt.connection_ref)
+            .and_then(|ledger| ledger.install(&attempt))
+        {
+            Ok(InstallOutcome::Installed) => BindingStepReply::Applied,
+            Ok(InstallOutcome::AlreadyInstalled) => BindingStepReply::AlreadyApplied,
+            Err(refusal) => BindingStepReply::Refused(refusal),
+        }
+    }
+}
+
+impl kameo::message::Message<ConfirmBindingInstall> for LiveConnectionActor {
+    type Reply = BindingStepReply;
+
+    async fn handle(
+        &mut self,
+        ConfirmBindingInstall(attempt): ConfirmBindingInstall,
+        _: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match self
+            .binding_ledger(&attempt.connection_ref)
+            .and_then(|ledger| ledger.confirm(&attempt))
+        {
+            Ok(()) => BindingStepReply::Applied,
+            Err(refusal) => BindingStepReply::Refused(refusal),
+        }
+    }
+}
+
+impl kameo::message::Message<RetireBinding> for LiveConnectionActor {
+    type Reply = BindingStepReply;
+
+    async fn handle(
+        &mut self,
+        RetireBinding(binding): RetireBinding,
+        _: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match self
+            .binding_ledger(binding.connection_ref())
+            .and_then(|ledger| ledger.retire_prepared(&binding))
+        {
+            Ok(()) => BindingStepReply::Applied,
+            Err(refusal) => BindingStepReply::Refused(refusal),
         }
     }
 }

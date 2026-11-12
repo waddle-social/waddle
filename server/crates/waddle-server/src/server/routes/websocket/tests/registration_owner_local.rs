@@ -117,7 +117,8 @@ where
 
     // Leave the request queued: the production shutdown tail must identify
     // fresh replacement and retire, rather than preserve, the old SM state.
-    let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let (_handoff_tx, mut handoff_rx) =
+        crate::server::routes::interpret::ordered_relay_handoff_channel();
     let mut pending_force_detach = Vec::new();
     let (socket_io, _) = LocalSocketIo::new(sink, reader);
     timeout(

@@ -332,10 +332,10 @@ pub(in crate::server::routes::websocket::stream_management) fn max_resume_secs_f
 /// Passed through `handle_sm_stanza` and its helpers so each signature stays
 /// below the clippy too-many-arguments threshold.
 pub(in crate::server::routes::websocket) struct SmCtx<'a> {
-    pub(in crate::server::routes::websocket) connection_ref:
-        &'a waddle_xmpp::ownership::ConnectionRef,
     pub(in crate::server::routes::websocket) binding_ref:
         &'a mut Option<waddle_xmpp::ownership::BindingRef>,
+    pub(in crate::server::routes::websocket) bindings:
+        &'a mut crate::server::routes::websocket::connection::BindingLedger,
     #[cfg(test)]
     pub(in crate::server::routes::websocket) resume_binding_attempts:
         &'a mut Vec<waddle_xmpp::ownership::BindingRef>,
@@ -948,8 +948,8 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     use waddle_xmpp::stream_management::CrossNodeResumeOutcome;
 
     let SmCtx {
-        connection_ref,
         binding_ref,
+        bindings,
         #[cfg(test)]
         resume_binding_attempts,
         phase,
@@ -992,7 +992,16 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     // An early failed attempt drops it; a successful one carries it to the
     // registration path. Neither case reuses the token on a later attempt.
     *binding_ref = None;
-    let attempt_binding = waddle_xmpp::ownership::BindingRef::fresh(connection_ref.clone());
+    let attempt_binding = match bindings.prepare_next() {
+        Ok(prepared) => prepared.attempt.binding_ref,
+        Err(refusal) => {
+            tracing::error!(%refusal, "resume attempt could not mint a binding identity");
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Internal,
+            );
+        }
+    };
     #[cfg(test)]
     resume_binding_attempts.push(attempt_binding.clone());
 
