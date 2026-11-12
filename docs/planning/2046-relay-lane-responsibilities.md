@@ -96,10 +96,11 @@ an owner transfer does, and what must hold before the relay path is deleted.
   The manifest does not record the generation that held the seat when it
   was sealed, so a resource that left and joined the room again on the same
   connection before a recovery pass receives the copy.
-- **Not covered.** A target whose only session is a detached
-  stream-management session on a node without the sealing actor is not
-  appended to; its copy stays owed until the session resumes or its seat is
-  removed.
+- **Detached sessions.** A target whose session is detached is appended
+  to through the stream-management registry under the child's key. Without
+  the sealing actor the append requires that the recorded seat is held by
+  the generation the occupancy authority (`xmpp_occupancy_authority`) holds
+  as current for the full JID.
 - **Lost hint.** The owner's poller scans its backlog every second. A pass
   hands each lane to one of two workers and does not wait for them, so a
   lane held for its receiver budget occupies one worker while the other

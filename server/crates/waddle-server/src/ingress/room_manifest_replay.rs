@@ -685,6 +685,53 @@ pub(super) async fn release_transient_reflection(
     Ok(Some(released))
 }
 
+/// Append a frozen child to the target's detached stream-management session
+/// on a node that does not run the actor the manifest was sealed by.
+///
+/// A detached session has no connection to compare with the recorded seat.
+/// The session belongs to the connection that last bound the full JID, so
+/// the copy is appended while the room's durable occupancy seats the target
+/// under the generation the occupancy authority holds as current for that
+/// full JID. The append is keyed by the child, so a repeat allocates
+/// nothing.
+async fn queue_detached_at_durable_seat(
+    manifest: &FrozenRoomManifest,
+    uow: &IngressUnitOfWork,
+    sm: &std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    context: &SmIngressAppendContext,
+    target: &FullJid,
+    stanza: &Stanza,
+    key: waddle_xmpp::stream_management::SmIngressAppendKey,
+) -> Result<FullJidDeliveryOutcome, IngressUowError> {
+    use crate::ingress_uow::RoomOccupantLookup;
+    let RoomOccupantLookup::Seated(seat) = durable_seat(uow, manifest, target).await? else {
+        return Ok(FullJidDeliveryOutcome::Unavailable);
+    };
+    let current = crate::occupancy_authority::is_current(uow.database(), target, seat.generation)
+        .await
+        .map_err(|_| IngressUowError::RoomGenerationStale)?;
+    if !current {
+        return Ok(FullJidDeliveryOutcome::Unavailable);
+    }
+    let received_at = context.received_at.unwrap_or_else(chrono::Utc::now);
+    match sm
+        .record_keyed_stanza_for_detached_bound_resource(target, stanza, received_at, key)
+        .await
+    {
+        Ok(outcome)
+            if outcome.is_allocated()
+                || matches!(
+                    outcome,
+                    waddle_xmpp::stream_management::SmKeyedAppendOutcome::Suppressed
+                ) =>
+        {
+            Ok(FullJidDeliveryOutcome::QueuedDetached)
+        }
+        Ok(_) => Ok(FullJidDeliveryOutcome::Unavailable),
+        Err(_) => Err(IngressUowError::EffectIntentConflict),
+    }
+}
+
 /// Keep a new detached allocation in the same serialized occupancy turn as its
 /// proof. The existing SM key remains the only durable acceptance ledger.
 pub(super) async fn queue_detached(
@@ -706,19 +753,6 @@ pub(super) async fn queue_detached(
         .child(&context.receipt, Some(target))
         .and_then(|child| child.occupancy)
         .ok_or(IngressUowError::EffectIntentConflict)?;
-    let (actor, fence) = match current_actor(manifest, deps.room_registry, target).await {
-        Ok(current) => current,
-        // Without the sealing actor nothing proves the occupancy of a
-        // detached session. A connection bound to the target is proven
-        // against the room's durable occupancy when the copy is written to
-        // it, so the caller goes on to that path.
-        Err(IngressUowError::RoomGenerationStale) if durable_occupancy_applies(uow, manifest) => {
-            return Ok(FullJidDeliveryOutcome::Unavailable);
-        }
-        Err(error) => return Err(error),
-    };
-    let uow = uow.clone();
-    let room = manifest.room.clone();
     let key = waddle_xmpp::stream_management::SmIngressAppendKey {
         message_key: context.message_key,
         kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
@@ -727,6 +761,18 @@ pub(super) async fn queue_detached(
         semantic_identity_hash: context.receipt.semantic_identity_hash,
         resource: target.clone(),
     };
+    let (actor, fence) = match current_actor(manifest, deps.room_registry, target).await {
+        Ok(current) => current,
+        Err(IngressUowError::RoomGenerationStale) if durable_occupancy_applies(uow, manifest) => {
+            return queue_detached_at_durable_seat(
+                manifest, uow, &sm, context, target, stanza, key,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
+    let uow = uow.clone();
+    let room = manifest.room.clone();
     let target_owned = target.clone();
     let stanza = stanza.clone();
     let received_at = context.received_at.unwrap_or_else(chrono::Utc::now);
