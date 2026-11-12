@@ -67,6 +67,9 @@ at startup; progress outcomes are not.
 | `waddle.relay.ordered.queue.oldest_age` | histogram | `s` | — | `waddle_relay_ordered_queue_oldest_age_seconds_bucket / _sum / _count` | Age of the oldest delivery queued on an ordered relay channel when sampled; zero when empty. |
 | `waddle.restricted_runtime.attach.failures` | counter | `{failure}` | `store` | `waddle_restricted_runtime_attach_failures_total` | Store attachments that failed verification under the restricted database role, by store. |
 | `waddle.restricted_runtime.startup.refusals` | counter | `{refusal}` | `stage` | `waddle_restricted_runtime_startup_refusals_total` | Starts under the restricted database role that refused to serve, by stage. |
+| `xmpp.account_coordinator.mailbox.rejected` | counter | `{message}` | `reason` | `xmpp_account_coordinator_mailbox_rejected_total` | Messages an account coordinator mailbox refused, by reason. |
+| `xmpp.account_coordinator.operations` | counter | `{operation}` | `mutation`, `outcome` | `xmpp_account_coordinator_operations_total` | Account coordinator operations by mutation and bounded outcome. |
+| `xmpp.account_coordinator.slots` | histogram | `{slot}` | — | `xmpp_account_coordinator_slots_bucket / _sum / _count` | Resource slots held by an account, sampled after each committed mutation. |
 | `xmpp.sm.enable.results` | counter | `{request}` | `outcome` | `xmpp_sm_enable_results_total` | XEP-0198 enable requests, by outcome. |
 | `xmpp.sm.resume.replayed` | histogram | `{stanza}` | — | `xmpp_sm_resume_replayed_bucket / _sum / _count` | Unacknowledged stanzas replayed by a successful XEP-0198 resumption. |
 | `xmpp.sm.unacked.depth` | histogram | `{stanza}` | — | `xmpp_sm_unacked_depth_bucket / _sum / _count` | Stanzas still unacknowledged on a stream after an acknowledgement was processed. |

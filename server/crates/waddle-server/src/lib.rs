@@ -3,6 +3,10 @@
 /// Durable account-resource rows: one fenced row per full JID and the
 /// committed outcome of each operation identity.
 pub mod account_bindings;
+/// The account coordinator: one authority per bare JID over the pure slot
+/// state and the durable binding rows. Routing reads it only through its
+/// typed selector.
+pub mod account_coordinator;
 pub mod admin;
 pub mod auth;
 pub mod call_teardown_outbox;

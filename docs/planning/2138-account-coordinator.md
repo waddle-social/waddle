@@ -160,7 +160,7 @@ are written in the same transaction in either order.
 
 The pure state lives in `waddle-xmpp/src/ownership/account_coordinator.rs`
 (`AccountResources`) over the per-resource slot model. Every call is
-`AccountResources::execute(full_jid, operation)`, where the operation has an
+`AccountBindingAuthority::execute(full_jid, operation)`, where the operation has an
 identity the caller keeps for retries and a mutation that names the claim
 identity, the slot revision the caller last saw and the `BindingRef`. The
 reply is `Applied` or `Replayed` with either `Committed { revision }` or a
@@ -185,9 +185,71 @@ replaced in the meantime is not acknowledged. Offline and
 pending-subscription flushes call `AccountResources::mark_presented` first
 and present only when it returns `true`.
 
-No actor or service wraps this state yet, no durable rows back it, and
-nothing in the server calls it. The module is compiled only for tests and
-with the `test-utils` feature, like the slot model it builds on.
+## What is built
+
+- **Rows.** `account_resource_bindings` holds one row per full JID and
+  `account_resource_operations` the committed outcome of each operation
+  identity (`waddle-server/src/account_bindings`). An owner initializer
+  creates them in the owner phase; the runtime role attaches and verifies.
+  `AccountBindingStore::execute` rebuilds the slot from the row under its
+  lock, applies the pure transition and writes the result, so the store
+  and the coordinator share one set of rules.
+- **Service.** `AccountCoordinators` (`waddle-server/src/account_coordinator`)
+  runs one actor per bare JID with a bounded mailbox, created on demand
+  under the account's current claim and stopped when the account holds no
+  binding and has been idle. It commits a mutation in the store first and
+  applies it to its in-memory slots second. A store failure that leaves a
+  commit outcome unknown drops the in-memory slots, which are reloaded from
+  the rows before the next request.
+- **Connection contract.** A connection actor calls the trait
+  `AccountBindingAuthority`: `slot_status`, `execute`, `bind_success`,
+  `mark_presented` and `unregister`.
+- **Selector.** `AppState::account_authority()` returns the
+  `AccountAuthoritySelection` chosen by `WADDLE_XMPP_ACCOUNT_AUTHORITY`
+  (`registry` by default, `coordinator`; any other value fails startup).
+  The coordinator is selectable only together with the durable
+  stream-management authority, because a binding's session reference
+  points at the durable session relation. When it is selected, the
+  recipient inventory, bare-JID target selection and the roster and
+  block-list push sets are read from the coordinator.
+
+No connection sends the binding messages yet, so a selected coordinator
+has no bindings and reads as an account without resources.
+
+## Decisions the service makes
+
+- **Pending replacement.** A bind for a resource that has a binding is
+  answered `ReplacementPending` with the displaced `BindingRef` and the
+  slot revision. The resource is reserved for that binding until a
+  deadline; a third binding is refused meanwhile. When the displaced
+  binding has retired, the replacing connection binds again under a new
+  operation identity. The coordinator does not start the displaced
+  binding's retirement, because only its connection knows what became of
+  the work it accepted.
+- **Rejections are not stored.** The store records committed operations.
+  A rejected operation is recorded in the coordinator's journal only, and
+  is decided afresh after a reload, which is safe because it changed
+  nothing.
+- **Free rows.** A row whose retirement completed is kept while its
+  coordinator runs and deleted when the account needs the slot, when the
+  coordinator is reclaimed and when a coordinator loads the account.
+- **Repair evidence.** Repair completes a retirement only with the
+  repairer's statement of the directed-presence and presentation-flush
+  outcome. An unknown outcome is refused and the binding stays
+  non-routable.
+- **Takeover.** A coordinator that loads rows written under a previous
+  claim identity replaces the claim on every row and adopts a prepared,
+  published or active binding whose connection is live. Liveness is local:
+  a connection is live when it was accepted under this node's current
+  lease. Every other binding stays under its previous binding claim, is
+  not a destination, and is reported so it can be retired. A detached
+  binding is among them: the slot model has no adoption for a detached
+  binding, so a session detached under a previous claim cannot resume.
+- **Presence payloads.** A row stores the selection metadata, not the
+  presence extension payloads. They live in the coordinator's memory and
+  are empty after a reload until the resource updates its snapshot.
+- **Presentation marks.** A presentation mark whose commit outcome is
+  unknown resolves to "already presented" when it is repeated.
 
 ## Choices where the notes differ
 

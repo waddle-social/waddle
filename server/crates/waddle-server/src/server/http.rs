@@ -2078,8 +2078,21 @@ async fn create_sm_session_registry(
             );
         }
     }
+    // The account coordinator's binding rows reference durable sessions, so
+    // it is selectable only together with the durable session authority.
+    let account_authority = crate::account_coordinator::AccountAuthoritySelection::open(
+        crate::account_coordinator::AccountAuthorityMode::from_env()?,
+        global_db,
+        clustering,
+        server_config.clustering.enabled,
+        durable_sm.store().is_some(),
+    )
+    .await?;
     if !state.publish_durable_sm(durable_sm) {
         warn!("a stream-management authority was already selected; keeping the first selection");
+    }
+    if !state.publish_account_authority(account_authority) {
+        warn!("an account-resource authority was already selected; keeping the first selection");
     }
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(

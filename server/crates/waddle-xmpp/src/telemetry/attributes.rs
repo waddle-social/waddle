@@ -49,6 +49,8 @@ mod tests {
 }
 
 mod authority;
+pub use authority::AccountMutationKind;
+pub use authority::AccountOperationOutcome;
 pub use authority::ActorLane;
 pub use authority::ActorRetirementCause;
 pub use authority::ActorTurnEvent;

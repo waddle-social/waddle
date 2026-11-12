@@ -1,3 +1,4 @@
+use crate::account_coordinator::AccountAuthoritySelection;
 use crate::channel_space_links::ChannelSpaceLinkStore;
 #[cfg(any(test, feature = "test-support"))]
 use crate::channel_space_links::InMemoryChannelSpaceLinkStore;
@@ -126,6 +127,10 @@ pub struct AppState {
     /// the ingress database's SM stores exist. Read it through
     /// [`Self::durable_sm`].
     durable_sm: OnceLock<DurableSmSelection>,
+    /// The account-resource authority selected at startup, published with
+    /// the stream-management authority. Read it through
+    /// [`Self::account_authority`].
+    account_authority: OnceLock<AccountAuthoritySelection>,
 }
 
 impl AppState {
@@ -235,6 +240,7 @@ impl AppState {
             lineage_adopt_matched: Mutex::new(HashSet::new()),
             runtime_progress: Arc::new(RuntimeProgress::new()),
             durable_sm: OnceLock::new(),
+            account_authority: OnceLock::new(),
         }
     }
 }
@@ -299,6 +305,20 @@ impl AppState {
     /// published; the first selection stays in force.
     pub(crate) fn publish_durable_sm(&self, selection: DurableSmSelection) -> bool {
         self.durable_sm.set(selection).is_ok()
+    }
+
+    /// The selected account-resource authority. Before startup publishes a
+    /// selection this is the connection registry, which is also the
+    /// default.
+    pub fn account_authority(&self) -> &AccountAuthoritySelection {
+        static REGISTRY: AccountAuthoritySelection = AccountAuthoritySelection::Registry;
+        self.account_authority.get().unwrap_or(&REGISTRY)
+    }
+
+    /// Publish the startup selection. Returns false if one was already
+    /// published; the first selection stays in force.
+    pub(crate) fn publish_account_authority(&self, selection: AccountAuthoritySelection) -> bool {
+        self.account_authority.set(selection).is_ok()
     }
 
     pub fn register_lineage_database(&self, store: DurableStore, database: Database) {

@@ -14,10 +14,12 @@
 //! Selection here follows the rules `UserActor` implements, so the two
 //! agree on the same resources.
 //!
-//! Only a binding in [`AccountResourceBindingState::Active`] is a
-//! destination. A prepared or published binding is recorded but not
-//! routable, a detached one is resumable but has no endpoint, and a retiring
-//! or retired one is on its way out.
+//! Only a binding in [`AccountResourceBindingState::Active`] that is held
+//! under the account's claim identity is a destination. A prepared or
+//! published binding is recorded but not routable, a detached one is
+//! resumable but has no endpoint, and a retiring or retired one is on its
+//! way out. A binding the account's current claim has not adopted belongs
+//! to a previous owner's connection and is not routable either.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -417,7 +419,8 @@ impl AccountResources {
     fn active(&self) -> impl Iterator<Item = (&FullJid, &AccountResourceSnapshot)> {
         self.slots.iter().filter_map(|(jid, slot)| {
             let binding = slot.binding_receipt()?;
-            (binding.state() == AccountResourceBindingState::Active)
+            (binding.state() == AccountResourceBindingState::Active
+                && binding.binding_claim_identity() == &self.claim_identity)
                 .then(|| (jid, binding.snapshot()))
         })
     }

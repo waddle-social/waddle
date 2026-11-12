@@ -81,6 +81,7 @@
 //! the in-memory seams in [`test_support`] (gated behind
 //! `test`/`test-utils`).
 
+pub mod account_coordinator;
 pub mod attributes;
 pub mod authority;
 pub mod call;
