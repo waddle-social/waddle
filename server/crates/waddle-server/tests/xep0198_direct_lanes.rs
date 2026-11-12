@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use cluster_support::{
     cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db, reset_and_enroll,
-    reset_node_lease_tables, spawn_cluster_server_with_envs, wait_for_readiness, EnrolledPool,
-    CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    reset_node_lease_tables, spawn_cluster_server_with_envs, wait_for_cross_node_registration,
+    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
@@ -37,14 +37,22 @@ const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
 const DURABLE_SM_ENV: &str = "WADDLE_XMPP_DURABLE_SM";
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 
-const REQUESTS: &str = "SELECT count(*) FROM ingress_direct_requests";
+// Each query takes one parameter, a `LIKE` pattern for the recipient full
+// JIDs of one scenario: the ingress relations are shared by every scenario
+// of the database and cannot be emptied between them.
+const REQUESTS: &str = "SELECT count(*) FROM ingress_direct_requests WHERE recipient_jid LIKE ?";
 const SETTLED_ACCEPTED: &str = "SELECT count(*) FROM ingress_direct_requests \
-     WHERE owner_decision = 1 AND settled_at IS NOT NULL";
+     WHERE recipient_jid LIKE ? AND owner_decision = 1 AND settled_at IS NOT NULL";
 const SETTLED_REJECTED: &str = "SELECT count(*) FROM ingress_direct_requests \
-     WHERE owner_decision = 2 AND refusal = 1 AND settled_at IS NOT NULL";
-const UNDECIDED: &str = "SELECT count(*) FROM ingress_direct_requests WHERE owner_decision = 0";
-const CONSUMED_ENTRIES: &str =
-    "SELECT count(*) FROM ingress_mailbox_entries WHERE operation_kind = 6 AND disposition >= 3";
+     WHERE recipient_jid LIKE ? AND owner_decision = 2 AND refusal = 1 AND settled_at IS NOT NULL";
+const UNDECIDED: &str = "SELECT count(*) FROM ingress_direct_requests \
+     WHERE recipient_jid LIKE ? AND owner_decision = 0";
+const CONSUMED_ENTRIES: &str = "SELECT count(*) FROM ingress_mailbox_entries e \
+     JOIN ingress_direct_requests r ON r.request_key = e.direct_key \
+     WHERE r.recipient_jid LIKE ? AND e.operation_kind = 6 AND e.disposition >= 3";
+const LANES: &str = "SELECT count(DISTINCT e.lane_id) FROM ingress_mailbox_entries e \
+     JOIN ingress_direct_requests r ON r.request_key = e.direct_key \
+     WHERE r.recipient_jid LIKE ? AND e.operation_kind = 6";
 
 /// Advance the shared database to the mailbox protocol epoch.
 async fn activate_mailbox_epoch(db: &Database) {
@@ -61,9 +69,12 @@ async fn activate_mailbox_epoch(db: &Database) {
     }
 }
 
-async fn scalar(db: &Database, sql: &str) -> i64 {
+async fn scalar(db: &Database, recipients: &str, sql: &str) -> i64 {
     let conn = db.guard().await.expect("database guard");
-    let mut rows = conn.query(sql, ()).await.expect("scalar query");
+    let mut rows = conn
+        .query(sql, waddle_server::db_params![recipients.to_owned()])
+        .await
+        .expect("scalar query");
     rows.next()
         .await
         .expect("scalar row")
@@ -72,10 +83,16 @@ async fn scalar(db: &Database, sql: &str) -> i64 {
         .expect("scalar value")
 }
 
-async fn wait_for_scalar(db: &Database, sql: &str, expected: i64, budget: Duration) {
+async fn wait_for_scalar(
+    db: &Database,
+    recipients: &str,
+    sql: &str,
+    expected: i64,
+    budget: Duration,
+) {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        let value = scalar(db, sql).await;
+        let value = scalar(db, recipients, sql).await;
         if value == expected {
             return;
         }
@@ -127,6 +144,8 @@ struct Scenario {
     server_a: TestServer,
     server_b: Option<TestServer>,
     seams: PathBuf,
+    /// Suffix of every recipient resource this scenario binds or addresses.
+    tag: String,
     _pool: EnrolledPool,
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -168,12 +187,16 @@ impl Scenario {
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+        // The origin carries a stanza as a direct request only for a
+        // resource it knows another node hosts, which needs the mesh.
+        wait_for_cross_node_registration(&server_a, &server_b).await;
         activate_mailbox_epoch(&db).await;
         Self {
             db,
             server_a,
             server_b: Some(server_b),
             seams,
+            tag: uuid::Uuid::new_v4().simple().to_string(),
             _pool: pool,
             _serial: serial,
         }
@@ -192,16 +215,35 @@ impl Scenario {
     }
 
     /// A resource of the recipient account bound on `server`.
+    ///
+    /// Every node seeds the shared recipient account with its own generated
+    /// password when it starts, so the stored credential is the one of the
+    /// node that started last, node B.
     async fn recipient_on(&self, server: &TestServer, resource: &str) -> WsXmppClient {
         WsXmppClient::connect_and_auth(
             &server.ws_url(),
             DOMAIN,
             RECIPIENT,
-            server.fixed_account_password(),
-            resource,
+            self.server_b().fixed_account_password(),
+            &self.resource(resource),
         )
         .await
         .expect("recipient binds")
+    }
+
+    /// The resource name `name` stands for in this scenario.
+    fn resource(&self, name: &str) -> String {
+        format!("{name}-{}", self.tag)
+    }
+
+    /// The full JID of the recipient's resource `name`.
+    fn recipient(&self, name: &str) -> String {
+        format!("{RECIPIENT}@{DOMAIN}/{}", self.resource(name))
+    }
+
+    /// `LIKE` pattern matching the recipient full JIDs of this scenario.
+    fn recipients(&self) -> String {
+        format!("%-{}", self.tag)
     }
 
     fn server_b(&self) -> &TestServer {
@@ -224,7 +266,7 @@ async fn message_to_a_remote_full_jid_is_delivered_once() {
     let mut sender = scenario.sender().await;
     sender
         .send(&String::from(&chat(
-            &format!("{RECIPIENT}@{DOMAIN}/desk"),
+            &scenario.recipient("desk"),
             "direct-1",
             "to the desk",
         )))
@@ -247,9 +289,22 @@ async fn message_to_a_remote_full_jid_is_delivered_once() {
         1,
         "the copy is delivered exactly once: {frames:?}"
     );
-    wait_for_scalar(&scenario.db, SETTLED_ACCEPTED, 1, Duration::from_secs(20)).await;
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1);
-    assert_eq!(scalar(&scenario.db, CONSUMED_ENTRIES).await, 1);
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.recipients(),
+        SETTLED_ACCEPTED,
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(
+        scalar(&scenario.db, &scenario.recipients(), REQUESTS).await,
+        1
+    );
+    assert_eq!(
+        scalar(&scenario.db, &scenario.recipients(), CONSUMED_ENTRIES).await,
+        1
+    );
 }
 
 /// Messages from one sender to one remote resource arrive in the order
@@ -262,7 +317,7 @@ async fn messages_on_one_lane_arrive_in_order() {
     for index in 0..5 {
         sender
             .send(&String::from(&chat(
-                &format!("{RECIPIENT}@{DOMAIN}/desk"),
+                &scenario.recipient("desk"),
                 &format!("ordered-{index}"),
                 &format!("ordered {index}"),
             )))
@@ -286,14 +341,7 @@ async fn messages_on_one_lane_arrive_in_order() {
             .map(|index| format!("ordered {index}"))
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        scalar(
-            &scenario.db,
-            "SELECT count(DISTINCT lane_id) FROM ingress_mailbox_entries WHERE operation_kind = 6"
-        )
-        .await,
-        1
-    );
+    assert_eq!(scalar(&scenario.db, &scenario.recipients(), LANES).await, 1);
 }
 
 /// A chat message to a bare JID whose account has a resource on each node
@@ -333,29 +381,60 @@ async fn message_to_a_bare_jid_reaches_resources_on_both_nodes_once() {
     }
 }
 
-/// A full JID that is not bound on the account's node is rejected by the
-/// account owner, the request records that nothing took the stanza, and no
-/// entry stays pending.
+/// A full JID that is no longer bound when the account owner works its
+/// request is rejected by the owner, the request records that nothing took
+/// the stanza, and no entry stays pending.
+///
+/// The resource is bound when the origin commits the request and ends its
+/// connection while the owner is held before its hand-over: a chat message
+/// to a full JID that is already unbound is never a request for that JID,
+/// because the origin routes it to the account's available resources
+/// (RFC 6121 section 8.5.3.2.1).
 #[tokio::test]
 async fn absent_resource_is_rejected_and_left_to_the_origins_fallback() {
     let scenario = Scenario::start().await;
     // Keeps the account's claim on node B.
     let _present = scenario.recipient_on(scenario.server_b(), "desk").await;
+    let leaving = scenario.recipient_on(scenario.server_b(), "absent").await;
+    std::fs::write(scenario.seams.join(HOLD_BEFORE_COMMIT), b"").expect("arm seam");
     let mut sender = scenario.sender().await;
     sender
         .send(&String::from(&chat(
-            &format!("{RECIPIENT}@{DOMAIN}/absent"),
+            &scenario.recipient("absent"),
             "absent-1",
             "to nobody",
         )))
         .await
         .expect("send chat");
-    wait_for_scalar(&scenario.db, UNDECIDED, 0, Duration::from_secs(30)).await;
-    assert_eq!(scalar(&scenario.db, SETTLED_ACCEPTED).await, 0);
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.recipients(),
+        REQUESTS,
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    leaving
+        .close()
+        .await
+        .expect("the addressed resource leaves");
+    std::fs::remove_file(scenario.seams.join(HOLD_BEFORE_COMMIT)).expect("release seam");
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.recipients(),
+        UNDECIDED,
+        0,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(
+        scalar(&scenario.db, &scenario.recipients(), SETTLED_ACCEPTED).await,
+        0
+    );
     let _ = drain(&mut sender, Duration::from_secs(2)).await;
     assert_eq!(
-        scalar(&scenario.db, SETTLED_REJECTED).await,
-        scalar(&scenario.db, REQUESTS).await,
+        scalar(&scenario.db, &scenario.recipients(), SETTLED_REJECTED).await,
+        scalar(&scenario.db, &scenario.recipients(), REQUESTS).await,
         "every request for the absent resource is rejected as not delivered"
     );
 }
@@ -371,13 +450,20 @@ async fn owner_killed_before_its_decision_leaves_one_undecided_request() {
     let mut sender = scenario.sender().await;
     sender
         .send(&String::from(&chat(
-            &format!("{RECIPIENT}@{DOMAIN}/desk"),
+            &scenario.recipient("desk"),
             "held-1",
             "held at the owner",
         )))
         .await
         .expect("send chat");
-    wait_for_scalar(&scenario.db, REQUESTS, 1, Duration::from_secs(20)).await;
+    wait_for_scalar(
+        &scenario.db,
+        &scenario.recipients(),
+        REQUESTS,
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
     let before = drain(&mut recipient, Duration::from_secs(2)).await;
     assert!(
         !bodies(&before)
@@ -390,6 +476,12 @@ async fn owner_killed_before_its_decision_leaves_one_undecided_request() {
     // The origin's wait ends without a decision; it reports the delivery as
     // uncertain and commits nothing further for the stanza.
     tokio::time::sleep(Duration::from_secs(12)).await;
-    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1);
-    assert_eq!(scalar(&scenario.db, UNDECIDED).await, 1);
+    assert_eq!(
+        scalar(&scenario.db, &scenario.recipients(), REQUESTS).await,
+        1
+    );
+    assert_eq!(
+        scalar(&scenario.db, &scenario.recipients(), UNDECIDED).await,
+        1
+    );
 }

@@ -386,6 +386,46 @@ pub async fn wait_for_node_lease_lapse(db: &Database, node_id: &str) {
     }
 }
 
+/// Wait until `second` can register a resource of an account whose claim
+/// `first` holds, which it does through `first`'s relay: the two nodes are
+/// then connected. A node reports ready before the mesh has formed, and
+/// until it has, neither node knows the resources the other hosts.
+pub async fn wait_for_cross_node_registration(first: &TestServer, second: &TestServer) {
+    let holder = WsXmppClient::connect_and_auth(
+        &first.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("mesh-probe-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("mesh probe binds on the first node");
+    let resource = format!("mesh-probe-{}", uuid::Uuid::new_v4());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match WsXmppClient::connect_and_auth(
+            &second.ws_url(),
+            "localhost",
+            CLUSTER_PEER_USERNAME,
+            CLUSTER_PEER_PASSWORD,
+            &resource,
+        )
+        .await
+        {
+            Ok(probe) => {
+                probe.close().await.expect("close the remote mesh probe");
+                break;
+            }
+            Err(error) => assert!(
+                Instant::now() < deadline,
+                "the nodes did not connect: {error}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    holder.close().await.expect("close the local mesh probe");
+}
+
 pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
     client
         .send(&String::from(&muc_join_presence(&room.to_string(), nick)))
