@@ -11,12 +11,17 @@
 //! `sm_unacked` rows, both keyed by the session key and written only inside
 //! the transaction that holds the authority row lock.
 
+mod enable;
 mod error;
+mod operations;
 mod record;
 mod schema;
 mod selection;
 mod store;
 
+pub use enable::{
+    EnableError, EnableOperation, EnableRejection, EnableRequest, EnableResolution, EnabledCommit,
+};
 pub use error::DurableSmError;
 pub use record::{DurableSessionRecord, RecordedClaim};
 pub use schema::bootstrap_schema_owner as bootstrap_durable_sm_owner_schema;

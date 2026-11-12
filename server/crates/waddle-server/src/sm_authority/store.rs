@@ -1,12 +1,20 @@
 //! Construction of the durable session store and its transaction entry.
 
-use waddle_xmpp::ownership::SmSessionKey;
+use std::time::Duration;
+
+use waddle_xmpp::ownership::{Entity, EntityType, SmSessionKey};
 use waddle_xmpp::stream_management::durable::ExposureBounds;
+use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 use super::error::DurableSmError;
 use super::record::{self, DurableSessionRecord};
 use super::schema::bootstrap_schema_owner;
-use crate::db::{Database, DatabaseDriver};
+use crate::db::{Database, DatabaseDriver, Transaction};
+
+/// Longest a store transaction waits for a row or relation lock.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest any one statement of a store transaction runs.
+const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The durable XEP-0198 session authority over one database.
 ///
@@ -68,6 +76,71 @@ impl DurableSmStore {
     /// Whether every write asserts the session's claim row.
     pub fn is_clustered(&self) -> bool {
         self.clustered
+    }
+
+    /// Begin a write transaction. SQLite takes its write lock immediately,
+    /// which serializes every store transaction. PostgreSQL runs READ
+    /// COMMITTED with bounded lock and statement waits, so a transaction that
+    /// meets a held row lock fails as a known rejection instead of waiting
+    /// without limit.
+    pub(super) async fn begin_write(&self) -> Result<Transaction<'_>, DurableSmError> {
+        let mut tx = match self.db.driver() {
+            DatabaseDriver::Sqlite => self.db.begin_immediate().await?,
+            DatabaseDriver::Postgres => self.db.begin().await?,
+        };
+        if self.db.driver() == DatabaseDriver::Postgres {
+            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                .await?;
+            if !crate::ingress_substrate::set_local_transaction_timeouts(
+                &mut tx,
+                LOCK_TIMEOUT,
+                STATEMENT_TIMEOUT,
+            )
+            .await?
+            {
+                return Err(DurableSmError::BoundsUnproven);
+            }
+        }
+        Ok(tx)
+    }
+
+    /// The claim a write must assert: the one supplied on a clustered store,
+    /// none otherwise. A clustered write without a claim is refused.
+    pub(super) fn write_claim<'c>(
+        &self,
+        claim: Option<&'c SmClaimFence>,
+    ) -> Result<Option<&'c SmClaimFence>, DurableSmError> {
+        match (self.clustered, claim) {
+            (false, _) => Ok(None),
+            (true, Some(claim)) => Ok(Some(claim)),
+            (true, None) => Err(DurableSmError::ClaimRequired),
+        }
+    }
+
+    /// Whether the exact claim row `(sm_session:<session>, node, node epoch,
+    /// claim epoch)` exists. The row is share-locked for the rest of the
+    /// transaction, so the claim cannot be stolen or released before the
+    /// write it authorizes commits. It is taken before the session row lock.
+    pub(super) async fn claim_is_held(
+        &self,
+        tx: &mut Transaction<'_>,
+        session: SmSessionKey,
+        claim: &SmClaimFence,
+    ) -> Result<bool, DurableSmError> {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? \
+                 AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    Entity::new(EntityType::SmSession, record::stream_id(session).as_str())
+                        .to_string(),
+                    claim.owner().node_id.clone(),
+                    claim.owner().node_epoch.clone(),
+                    claim.epoch().0,
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
     }
 
     /// Read a session's stored record without locking it.

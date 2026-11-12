@@ -9,12 +9,15 @@ use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
 use waddle_xmpp::ownership::{BindingRef, SessionGeneration, SmSessionKey};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::durable::{
-    DurableSmState, OutboundWindow, SmOperationId, SmOrdinal, TerminalReason,
+    DurableSmState, OutboundWindow, OwnerFence, SmOperationId, SmOrdinal, SmResumeTokenDigest,
+    TerminalReason,
 };
+use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 use super::error::DurableSmError;
-use crate::db::{Row, Transaction};
+use crate::db::{Row, Transaction, Value};
 
 pub(super) const COLUMNS: &str = "session_id, full_jid, state, terminal_reason, generation, \
     binding, bare_jid, auth_context_id, auth_context_version, principal_auth_epoch, \
@@ -56,6 +59,27 @@ pub struct DurableSessionRecord {
     pub detached_at: Option<DateTime<Utc>>,
     pub enable_operation: SmOperationId,
     pub last_operation: SmOperationId,
+}
+
+impl RecordedClaim {
+    pub(super) fn from_fence(claim: &SmClaimFence) -> Self {
+        Self {
+            node_id: claim.owner().node_id.clone(),
+            node_epoch: claim.owner().node_epoch.clone(),
+            claim_epoch: claim.epoch().0,
+        }
+    }
+}
+
+impl DurableSessionRecord {
+    /// The owner fence the stored generation requires.
+    pub fn fence(&self) -> OwnerFence {
+        OwnerFence {
+            session: self.session,
+            generation: self.generation,
+            binding: self.binding.clone(),
+        }
+    }
 }
 
 fn decode_state(state: i64, reason: Option<i64>) -> Result<DurableSmState, DurableSmError> {
@@ -164,4 +188,117 @@ pub(super) async fn load(
         )
         .await?;
     rows.next().await?.as_ref().map(decode).transpose()
+}
+
+/// The `stream_id` under which a session's `sm_sessions` and `sm_unacked`
+/// rows are stored, and the id of its `sm_session` claim.
+pub(super) fn stream_id(session: SmSessionKey) -> SmSessionId {
+    SmSessionId::new(session.as_uuid().to_string())
+}
+
+fn digest_column(digest: &SmResumeTokenDigest) -> String {
+    hex::encode(digest.as_bytes())
+}
+
+fn state_columns(state: DurableSmState) -> Result<(i64, Option<i64>), DurableSmError> {
+    Ok(match state {
+        // `Enabling` precedes the commit that inserts the row.
+        DurableSmState::Enabling => return Err(corrupt("state")),
+        DurableSmState::Live => (1, None),
+        DurableSmState::Detached => (2, None),
+        DurableSmState::TransferHydrating => (3, None),
+        DurableSmState::Terminal(reason) => (
+            4,
+            Some(match reason {
+                TerminalReason::EnableAbandoned => 1,
+                TerminalReason::Expired => 2,
+                TerminalReason::Replaced => 3,
+                TerminalReason::Closed => 4,
+            }),
+        ),
+    })
+}
+
+fn signed(value: u64, field: &'static str) -> Result<i64, DurableSmError> {
+    i64::try_from(value).map_err(|_| corrupt(field))
+}
+
+/// The mutable columns of a record, in the order `insert` and `update` bind
+/// them.
+fn mutable_params(
+    stored: &DurableSessionRecord,
+    now: DateTime<Utc>,
+) -> Result<Vec<Value>, DurableSmError> {
+    let (state, terminal_reason) = state_columns(stored.state)?;
+    let binding = serde_json::to_string(&stored.binding).map_err(|_| corrupt("binding"))?;
+    Ok(crate::db_params![
+        state,
+        terminal_reason,
+        signed(stored.generation.value(), "generation")?,
+        binding,
+        stored.principal.bare_jid().to_string(),
+        stored.principal.auth_context_id().as_uuid().to_string(),
+        signed(
+            stored.principal.auth_context_version().get(),
+            "auth_context_version"
+        )?,
+        signed(stored.principal.auth_epoch().get(), "principal_auth_epoch")?,
+        stored.claim.as_ref().map(|claim| claim.node_id.clone()),
+        stored.claim.as_ref().map(|claim| claim.node_epoch.clone()),
+        stored.claim.as_ref().map(|claim| claim.claim_epoch),
+        signed(stored.inbound_handled, "inbound_handled")?,
+        signed(stored.window.acked().value(), "outbound_acked")?,
+        signed(
+            stored.window.exposure_ceiling().value(),
+            "outbound_exposure_ceiling"
+        )?,
+        signed(stored.window.appended().value(), "outbound_appended")?,
+        signed(stored.unacked_bytes, "outbound_unacked_bytes")?,
+        signed(stored.max_resume.as_secs(), "max_resume_secs")?,
+        stored.detached_at.map(|at| at.timestamp_millis()),
+        stored.last_operation.as_uuid().to_string(),
+        now.timestamp_millis(),
+    ])
+}
+
+/// Insert a new session row. The unique digest index rejects a token that
+/// is already stored.
+pub(super) async fn insert(
+    tx: &mut Transaction<'_>,
+    stored: &DurableSessionRecord,
+    digest: &SmResumeTokenDigest,
+    now: DateTime<Utc>,
+) -> Result<(), DurableSmError> {
+    let mut params = crate::db_params![
+        stored.session.as_uuid().to_string(),
+        digest_column(digest),
+        stored.full_jid.to_string(),
+        stored.enable_operation.as_uuid().to_string(),
+    ];
+    params.extend(mutable_params(stored, now)?);
+    tx.execute(
+        "INSERT INTO sm_durable_sessions (session_id, resume_token_sha256, full_jid, \
+         enable_operation, state, terminal_reason, generation, binding, bare_jid, \
+         auth_context_id, auth_context_version, principal_auth_epoch, owner_node_id, \
+         owner_node_epoch, claim_epoch, inbound_handled, outbound_acked, \
+         outbound_exposure_ceiling, outbound_appended, outbound_unacked_bytes, \
+         max_resume_secs, detached_at_ms, last_operation, updated_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params,
+    )
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn token_exists(
+    tx: &mut Transaction<'_>,
+    digest: &SmResumeTokenDigest,
+) -> Result<bool, DurableSmError> {
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM sm_durable_sessions WHERE resume_token_sha256 = ?",
+            crate::db_params![digest_column(digest)],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
