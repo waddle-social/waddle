@@ -1271,6 +1271,7 @@ schema.#Project & {
 					  .image.digest = strenv(SAMPLE_DIGEST) |
 					  .cutoverGuard = {"enabled": true, "allowedRevisions": [strenv(SAMPLE_GIT_SHA)]} |
 					  .containerExtraEnv = ((.containerExtraEnv // []) | map(select(.name != "WADDLE_GIT_SHA"))) + [{"name": "WADDLE_GIT_SHA", "value": strenv(SAMPLE_GIT_SHA)}] |
+					  .restrictedRuntime.releaseGitSha = strenv(SAMPLE_GIT_SHA) |
 					  .extensions.enabled = true |
 					  .extensions.modules = load(strenv(MODULES_YAML))
 					' "${published_values}"
@@ -1492,10 +1493,13 @@ schema.#Project & {
 					python3 scripts/cutover_revisions.py > "${cutover_revisions}"
 					CUTOVER_REVISIONS="${cutover_revisions}" yq -i '.spec.values.cutoverGuard = {"enabled": true, "allowedRevisions": load(strenv(CUTOVER_REVISIONS))}' ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 
-					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
+					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.restrictedRuntime.releaseGitSha = strenv(FULL_SHA) | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e ".spec.values.image.digest == \"${digest}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -e ".spec.values.containerExtraEnv[] | select(.name == \"WADDLE_GIT_SHA\") | .value == \"${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
+					# The restricted runtime's handoff is composed with the same SHA
+					# the pod reports; the two are published together.
+					yq -e ".spec.values.restrictedRuntime.releaseGitSha == \"${FULL_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					yq -i ".spec.values.extensions.modules = load(\"${modules_yaml}\")" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.extensions.enabled == true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
 					if grep -R "${placeholder_digest}" ../infrastructure/waddle.cloud/gitops/waddle-server; then

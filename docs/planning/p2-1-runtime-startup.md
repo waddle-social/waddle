@@ -942,6 +942,61 @@ credential, fence the old writers, or decide the cutover record. It has no
 read-only status subcommand; a repeated `owner-phase` on a prepared database
 changes nothing and reports the same result.
 
+### Deployment
+
+The chart and the GitOps directory carry the cutover, switched off. With
+both chart switches off and neither component listed, the rendered objects
+contain nothing of it.
+
+- **Chart** (`server/charts/waddle-server`). `restrictedRuntime.ownerJob.enabled`
+  renders a ServiceAccount, a Role limited to the handoff ConfigMap, the
+  Job's inputs and a CronJob that is suspended and scheduled for a date
+  that does not occur. An operator creates a Job from it. Its pod runs
+  `owner-phase`, `install-attestor` and `emit-handoff` from the release
+  image as init containers, each with its own login's URL
+  (`sslmode=verify-full`, the CA mounted from a Secret) and, for
+  `emit-handoff`, the runtime URL so the pinned preflight runs; a last
+  container publishes the emitted document as the ConfigMap
+  `<release>-runtime-handoff-pins` with `kubectl apply -k`. The Job's
+  `podFailurePolicy` fails it at once on exit codes 2 and 4 and counts 1
+  and 3 against `backoffLimit`, so a pending keypair-pool generation is
+  retried by the Job controller's backoff. It is not a Helm hook: the
+  clustered owner phase needs the server at zero replicas.
+- `restrictedRuntime.enabled` gives the server `WADDLE_DATABASE_URL` for the
+  runtime login (verified TLS, `options=-c search_path=<schema>`, the
+  read-write Service), `WADDLE_DB_MIGRATOR_LOGIN`,
+  `WADDLE_XMPP_MAM_SCHEMA_OWNER`, `WADDLE_XMPP_MAM_CLAIM_SCHEMA` and
+  `WADDLE_DB_RUNTIME_ATTESTATION` from the ConfigMap
+  `<release>-runtime-handoff`. The chart renders that ConfigMap from the
+  published pins, or from `restrictedRuntime.handoff.document` when the
+  document is kept in values, replacing `release_git_sha` with
+  `restrictedRuntime.releaseGitSha`. Reading the published ConfigMap uses
+  Helm's `lookup`, so an offline render needs the document in values. The
+  chart refuses to render when the SHA differs from the `WADDLE_GIT_SHA` in
+  `containerExtraEnv`, when a variable it sets is also set there, or when a
+  lineage action is configured.
+- **Release automation** (`server/env.cue`, `server/deployment.cue`) writes
+  `restrictedRuntime.releaseGitSha` in the same step as `WADDLE_GIT_SHA` and
+  the published-values schema requires it, so the handoff is composed for
+  every release.
+- **GitOps**
+  (`infrastructure/waddle.cloud/gitops/waddle-server/restricted-runtime/`).
+  Two kustomize components that `kustomization.yaml` does not list.
+  `prepare` adds the six roles to the CloudNativePG cluster's
+  `managed.roles` with `inherit: false`, the two memberships and a
+  PostgreSQL 17 image, and sets the chart's connection, role, credential
+  and owner Job values. `serve` sets `restrictedRuntime.enabled` and removes
+  the old `WADDLE_DATABASE_URL`. The three password Secrets are referenced
+  by name and are not in the repository.
+
+The procedure, with its rollback boundary, is
+[the cutover runbook](../runbooks/restricted-runtime-cutover.md).
+
+Not established: none of this has been applied to a cluster. The
+operator's handling of `inRoles` and `inherit: false` is taken from its
+documentation, not observed. A release that changes owner preparation needs
+the owner Job again at zero replicas, which is a manual step.
+
 ## Typed ingress transaction entry
 
 On the serving pool every ingress transaction that attests its connection

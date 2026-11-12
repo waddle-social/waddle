@@ -1,0 +1,33 @@
+# Restricted PostgreSQL runtime, serving half (#2116).
+#
+# Not referenced by ../../kustomization.yaml. An operator adds
+#
+#   components:
+#     - restricted-runtime/prepare
+#     - restricted-runtime/serve
+#
+# only after the owner Job has succeeded and published the handoff, as the
+# cutover runbook (docs/runbooks/restricted-runtime-cutover.md) directs. From
+# then on the server connects as the runtime login and starts from the
+# handoff.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: helmrelease-serve.yaml
+    target:
+      group: helm.toolkit.fluxcd.io
+      kind: HelmRelease
+      name: waddle-server
+  # The chart sets WADDLE_DATABASE_URL from the runtime credential and
+  # refuses a second definition. The `test` makes this patch fail, rather
+  # than remove another variable, if the list has been reordered.
+  - target:
+      group: helm.toolkit.fluxcd.io
+      kind: HelmRelease
+      name: waddle-server
+    patch: |-
+      - op: test
+        path: /spec/values/containerExtraEnv/9/name
+        value: WADDLE_DATABASE_URL
+      - op: remove
+        path: /spec/values/containerExtraEnv/9

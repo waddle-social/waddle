@@ -312,12 +312,24 @@ In dependency order. Sizes are estimates from reading source.
 7. **Replace the refusal with the attach (S).** `S/main.rs` attaches the
    serving pool with a control-plane pool when clustering is enabled, and
    startup has no clustering refusal under the attested pool.
-8. **Deployment (M).** CNPG creates only the owner role
-   (`infrastructure/waddle.cloud/gitops/waddle-server/postgresql-cluster.yaml:9-12`)
-   and the chart has no owner job, runtime credential or attestation variable.
-   The image's entrypoint is the server binary, so a job runs the
-   subcommands of gap 1 from the release image; the provisioning procedure,
-   the three credentials and the job are not yet in the chart or GitOps.
+8. **Deployment (M).** The chart (`server/charts/waddle-server`, 0.4.11) and
+   the GitOps directory carry everything the cutover needs, switched off:
+   `restrictedRuntime.ownerJob.enabled` renders a suspended owner CronJob
+   that runs the subcommands of gap 1 from the release image and publishes
+   the handoff as a ConfigMap; `restrictedRuntime.enabled` makes the server
+   connect as the runtime login over verified TLS and start from the handoff,
+   which the chart recomposes with each release's Git SHA. The CNPG roles,
+   the PostgreSQL 17 pin and the production values are kustomize components
+   under
+   `infrastructure/waddle.cloud/gitops/waddle-server/restricted-runtime/`
+   that `kustomization.yaml` does not reference. The release automation
+   publishes `restrictedRuntime.releaseGitSha` next to `WADDLE_GIT_SHA`
+   (`server/env.cue`). The procedure is
+   [the cutover runbook](../runbooks/restricted-runtime-cutover.md). None of
+   it has been applied to a cluster or rehearsed: production still serves as
+   the login that owns its database, the three password Secrets do not
+   exist, and a release whose owner preparation changed has no automated
+   sequencing of the owner Job.
 
 Exit test:
 `restricted_startup_runs_pinned_preflight_then_refuses_unprepared_stores`

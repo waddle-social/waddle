@@ -1,0 +1,24 @@
+# Restricted PostgreSQL runtime, preparation half (#2116).
+#
+# Not referenced by ../../kustomization.yaml, so it changes nothing until an
+# operator adds
+#
+#   components:
+#     - restricted-runtime/prepare
+#
+# there, as the cutover runbook (docs/runbooks/restricted-runtime-cutover.md)
+# directs. It declares the PostgreSQL roles and renders the suspended owner
+# CronJob. The server keeps serving under its current login.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: postgresql-cluster-roles.yaml
+    target:
+      group: postgresql.cnpg.io
+      kind: Cluster
+      name: postgresql
+  - path: helmrelease-owner-job.yaml
+    target:
+      group: helm.toolkit.fluxcd.io
+      kind: HelmRelease
+      name: waddle-server

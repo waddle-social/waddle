@@ -1,0 +1,240 @@
+{{- if .Values.restrictedRuntime.ownerJob.enabled }}
+{{- /*
+  The owner entrypoint for the restricted runtime, run by an operator during
+  a cutover and never by Helm or a schedule. The CronJob is suspended and its
+  schedule never fires; `kubectl create job --from=cronjob/<name>` starts a
+  run. A Helm hook cannot be used: the clustered owner phase requires that
+  no other session is connected to the database, so the server must already
+  be scaled to zero.
+
+  Each step is the release image's own subcommand under its own login. Exit
+  codes 2 (invalid input) and 4 (a verifier refused the database) fail the
+  Job at once. Exit codes 1 (a database error or an unknown outcome) and 3
+  (keypair-pool generation pending) start a new pod under the Job's backoff,
+  which reruns every step; each step is repeatable.
+*/}}
+{{- $restricted := .Values.restrictedRuntime }}
+{{- $runtimeSecretName := include "waddle-server.runtimeSecretName" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "waddle-server.ownerJobName" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "waddle-server.ownerJobName" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+rules:
+  # `create` cannot be limited to a name; the other verbs are.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "waddle-server.handoffPinsConfigMapName" . | quote }}]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "waddle-server.ownerJobName" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "waddle-server.ownerJobName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "waddle-server.ownerJobName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "waddle-server.ownerJobName" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+data:
+  cutover.json: {{ $restricted.ownerJob.cutover | toJson | quote }}
+  # Publishes the emitted handoff as a ConfigMap with `kubectl apply -k`,
+  # which needs no shell and replaces an earlier publication.
+  kustomization.yaml: |
+    apiVersion: kustomize.config.k8s.io/v1beta1
+    kind: Kustomization
+    namespace: {{ .Release.Namespace }}
+    generatorOptions:
+      disableNameSuffixHash: true
+    configMapGenerator:
+      - name: {{ include "waddle-server.handoffPinsConfigMapName" . }}
+        files:
+          - handoff.json
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddle-server.ownerJobName" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+spec:
+  # 31 February never occurs, and the CronJob is suspended as well.
+  schedule: "0 0 31 2 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/component: owner-job
+    spec:
+      backoffLimit: {{ int $restricted.ownerJob.backoffLimit }}
+      podFailurePolicy:
+        rules:
+          - action: FailJob
+            onExitCodes:
+              operator: In
+              values: [2, 4]
+          - action: Count
+            onExitCodes:
+              operator: In
+              values: [1, 3]
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ include "waddle-server.name" . }}-owner
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: owner-job
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "waddle-server.ownerJobName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          initContainers:
+            - name: owner-phase
+              image: {{ include "waddle-server.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              args:
+                - owner-phase
+                - --identity-output
+                - /work/identity.json
+                {{- if .Values.clustering.enabled }}
+                - --keypool-generation
+                - {{ $restricted.ownerJob.keypoolGeneration | quote }}
+                {{- end }}
+                {{- range $restricted.ownerJob.ownerPhaseExtraArgs }}
+                - {{ . | quote }}
+                {{- end }}
+              envFrom:
+                {{- include "waddle-server.ownerJobEnvFrom" . | nindent 16 }}
+              env:
+                - name: WADDLE_SESSION_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $runtimeSecretName | quote }}
+                      key: WADDLE_SESSION_KEY
+                - name: WADDLE_OWNER_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $restricted.credentials.migrator.secretName | quote }}
+                      key: {{ $restricted.credentials.migrator.passwordKey | quote }}
+                - name: WADDLE_DATABASE_URL
+                  value: {{ include "waddle-server.restrictedDatabaseUrl" (dict "root" . "login" $restricted.roles.migratorLogin "passwordVariable" "WADDLE_OWNER_DB_PASSWORD") | quote }}
+                {{- include "waddle-server.ownerJobRoleEnv" . | nindent 16 }}
+              volumeMounts:
+                {{- include "waddle-server.ownerJobVolumeMounts" . | nindent 16 }}
+            - name: install-attestor
+              image: {{ include "waddle-server.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              args:
+                - install-attestor
+                - --identity
+                - /work/identity.json
+                - --operation-id
+                - {{ $restricted.ownerJob.installationOperationId | quote }}
+              env:
+                - name: WADDLE_OWNER_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $restricted.credentials.attestorInstaller.secretName | quote }}
+                      key: {{ $restricted.credentials.attestorInstaller.passwordKey | quote }}
+                - name: WADDLE_DATABASE_URL
+                  value: {{ include "waddle-server.restrictedDatabaseUrl" (dict "root" . "login" $restricted.roles.attestorInstallerLogin "passwordVariable" "WADDLE_OWNER_DB_PASSWORD") | quote }}
+                {{- include "waddle-server.ownerJobRoleEnv" . | nindent 16 }}
+              volumeMounts:
+                {{- include "waddle-server.ownerJobVolumeMounts" . | nindent 16 }}
+            - name: emit-handoff
+              image: {{ include "waddle-server.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              args:
+                - emit-handoff
+                - --installation-operation-id
+                - {{ $restricted.ownerJob.installationOperationId | quote }}
+                - --cutover
+                - /inputs/cutover.json
+                - --output
+                - /work/handoff.json
+              env:
+                - name: WADDLE_DEPLOYMENT_UUID
+                  value: {{ .Values.deployment.uuid | quote }}
+                - name: WADDLE_GIT_SHA
+                  value: {{ $restricted.releaseGitSha | quote }}
+                - name: WADDLE_OWNER_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $restricted.credentials.migrator.secretName | quote }}
+                      key: {{ $restricted.credentials.migrator.passwordKey | quote }}
+                - name: WADDLE_DATABASE_URL
+                  value: {{ include "waddle-server.restrictedDatabaseUrl" (dict "root" . "login" $restricted.roles.migratorLogin "passwordVariable" "WADDLE_OWNER_DB_PASSWORD") | quote }}
+                # With the runtime URL the handoff must also pass the
+                # server's pinned preflight before it is published.
+                - name: WADDLE_RUNTIME_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $restricted.credentials.runtime.secretName | quote }}
+                      key: {{ $restricted.credentials.runtime.passwordKey | quote }}
+                - name: WADDLE_RUNTIME_DATABASE_URL
+                  value: {{ include "waddle-server.restrictedRuntimeDatabaseUrl" . | quote }}
+                {{- include "waddle-server.ownerJobRoleEnv" . | nindent 16 }}
+              volumeMounts:
+                {{- include "waddle-server.ownerJobVolumeMounts" . | nindent 16 }}
+          containers:
+            - name: publish-handoff
+              image: {{ $restricted.ownerJob.publishImage | quote }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              args:
+                - apply
+                - --kustomize
+                - /work
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                - name: inputs
+                  mountPath: /work/kustomization.yaml
+                  subPath: kustomization.yaml
+                  readOnly: true
+          volumes:
+            - name: work
+              emptyDir: {}
+            - name: inputs
+              configMap:
+                name: {{ include "waddle-server.ownerJobName" . }}
+            - name: postgres-ca
+              secret:
+                secretName: {{ $restricted.database.caSecret.name | quote }}
+{{- end }}
