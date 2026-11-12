@@ -4,8 +4,9 @@
 //! Two real `waddle-server` processes share one PostgreSQL control plane.
 //! The sender binds on node A with stream management enabled; the room is
 //! owned by node B. A groupchat message from the sender is committed on A,
-//! relayed to B, committed again by B as the room owner, and answered with
-//! the sender's reflection. The suite stops B at fixed points of that
+//! handed to B (through the mailbox entry at protocol epoch 2, through the
+//! ordered relay below it), committed again by B as the room owner, and
+//! answered with the sender's reflection. The suite stops B at fixed points of that
 //! exchange through the file-armed seams in `clustering/acceptance_seams.rs`
 //! and observes the sender's XEP-0198 `h`, the room archive and the
 //! reflections occupants receive.
@@ -563,11 +564,11 @@ async fn h_does_not_advance_while_owner_commit_paused() {
     assert_eq!(h, Some(1), "h covers the stanza once the owner accepted it");
 }
 
-/// The relay's delivery of a groupchat message is lost: the owner is stopped
-/// before its commit until its receiver budget has ended, so the relayed
-/// stanza and the hint that accompanied it are both spent without a commit.
-/// Nothing then tells the owner about the message except its own mailbox
-/// poll. The owner still accepts it exactly once, from the canonical rows,
+/// The first delivery of a groupchat message is lost: the owner is stopped
+/// before its commit until its delivery budget has ended, so the attempt the
+/// origin's hint started is spent without a commit. The origin relays no
+/// payload at the mailbox epoch, so nothing then tells the owner about the
+/// message except its own mailbox poll. The owner still accepts it exactly once, from the canonical rows,
 /// and only then does the sender's handled count cover the stanza.
 #[tokio::test]
 async fn lost_delivery_and_hint_are_repaired_by_the_owner_poller() {
@@ -620,6 +621,171 @@ async fn lost_delivery_and_hint_are_repaired_by_the_owner_poller() {
         archived_ids(&scenario.db, &scenario.room, &body).await,
         archived,
         "later poll passes do not accept it again"
+    );
+}
+
+/// At the mailbox epoch the origin relays no groupchat payload: the owner
+/// reads the stanza from the canonical row its mailbox entry refers to. The
+/// `drop-reply` seam is consumed only by an acknowledged groupchat relay
+/// reply, so it stays armed and records nothing while the message is
+/// accepted once, reflected once to each occupant with the archived stanza
+/// id, and counted by the sender's `h`.
+#[tokio::test]
+async fn mailbox_transport_relays_no_groupchat_payload() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    scenario.seams.arm(DROP_REPLY);
+    let body = scenario
+        .send_groupchat("mailbox-only", uuid::Uuid::new_v4())
+        .await;
+    let mut sender_frames = scenario
+        .sender
+        .until(Duration::from_secs(30), "sender reflection", |frame| {
+            is_groupchat(frame, "mailbox-only")
+        })
+        .await;
+    let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+    assert_eq!(archived.len(), 1, "accepted once: {archived:?}");
+    // Long enough for a second copy from a retry or a recovery pass to show.
+    sender_frames.extend(scenario.sender.drain(Duration::from_secs(5)).await);
+    let witness_frames = scenario.witness.drain(Duration::from_secs(1)).await;
+    scenario.assert_one_reflection("sender", &sender_frames, "mailbox-only", &archived[0]);
+    scenario.assert_one_reflection("witness", &witness_frames, "mailbox-only", &archived[0]);
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+    assert_eq!(h, Some(1), "h covers the stanza the owner accepted");
+    assert_eq!(
+        scenario.seams.events(),
+        Vec::<String>::new(),
+        "no groupchat relay reply exists to drop at the mailbox epoch"
+    );
+    scenario.seams.release(DROP_REPLY);
+}
+
+/// The owner refuses a groupchat message from a sender who has left the
+/// room. No relay reply carries the refusal at the mailbox epoch: the origin
+/// reads the owner's decision from the mailbox, answers the sender with the
+/// owner's frozen error and only then counts the stanza. Nothing is archived
+/// and no occupant receives a copy.
+#[tokio::test]
+async fn owner_refusal_is_answered_from_the_frozen_error() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    let leave = Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(
+            xml_ncname!("to").to_owned(),
+            scenario.sender_occupant.to_string(),
+        )
+        .attr(xml_ncname!("type").to_owned(), "unavailable")
+        .build();
+    scenario.sender.send(&leave).await;
+    scenario.sender.drain(Duration::from_secs(2)).await;
+    scenario.witness.drain(Duration::from_secs(1)).await;
+    let (before, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+
+    let body = scenario
+        .send_groupchat("refused", uuid::Uuid::new_v4())
+        .await;
+    let frames = scenario
+        .sender
+        .until(Duration::from_secs(30), "owner refusal", |frame| {
+            is_error(frame, "refused")
+        })
+        .await;
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| is_error(frame, "refused"))
+            .count(),
+        1,
+        "the refusal is answered once: {frames:?}"
+    );
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &body).await,
+        Vec::<String>::new(),
+        "a refused message is not archived"
+    );
+    let (disposition, _, _) = newest_mailbox_entry(&scenario.db)
+        .await
+        .expect("the origin appended an entry");
+    assert_eq!(disposition, 4, "the entry records a consumed refusal");
+    let (h, later) = scenario.sender.request_h(Duration::from_secs(10)).await;
+    assert_eq!(
+        h,
+        before.map(|before| before + 1),
+        "h covers the stanza together with its refusal"
+    );
+    assert!(
+        !later.iter().any(|frame| is_error(frame, "refused")),
+        "the refusal is not repeated: {later:?}"
+    );
+    let witness_frames = scenario.witness.drain(Duration::from_secs(1)).await;
+    assert!(
+        !witness_frames
+            .iter()
+            .any(|frame| is_groupchat(frame, "refused")),
+        "no occupant receives a refused message: {witness_frames:?}"
+    );
+}
+
+/// The owner process is killed after it has committed a groupchat message
+/// and before it executes any effect. The acceptance is durable, so the
+/// origin reads it from the mailbox and the sender's `h` covers the stanza
+/// while no owner is running. The replacement owner delivers the frozen
+/// copies from canonical rows: the sender receives exactly one reflection
+/// carrying the archived stanza id, and the message stays archived once.
+#[tokio::test]
+async fn owner_sigkill_after_commit_delivers_the_frozen_reflection_once() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    scenario.seams.arm(HOLD_AFTER_COMMIT);
+    let body = scenario
+        .send_groupchat("after-commit", uuid::Uuid::new_v4())
+        .await;
+    scenario
+        .seams
+        .wait_for("held after-commit after-commit", Duration::from_secs(10))
+        .await;
+    let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+    assert_eq!(archived.len(), 1, "the owner accepted once: {archived:?}");
+    // Dropping the handle SIGKILLs the owner before any copy is delivered.
+    drop(scenario.server_b.take());
+    scenario.seams.release(HOLD_AFTER_COMMIT);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+        if h == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "h covers a durably accepted stanza without a running owner; got {h:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let port_b = free_tcp_port();
+    let (server_b, _, _) = spawn_cluster_server_with_envs(
+        &scenario.postgres_url,
+        &scenario.pool.pool_env,
+        port_b,
+        &[scenario.port_a],
+        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
+    )
+    .await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
+    scenario.server_b = Some(server_b);
+    // The ingress maintenance pass repairs unreceipted copies once they are
+    // a minute old.
+    let mut frames = scenario
+        .sender
+        .until(Duration::from_secs(180), "recovered reflection", |frame| {
+            is_groupchat(frame, "after-commit")
+        })
+        .await;
+    frames.extend(scenario.sender.drain(Duration::from_secs(10)).await);
+    scenario.assert_one_reflection("sender", &frames, "after-commit", &archived[0]);
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &body).await,
+        archived,
+        "recovery delivers the accepted message, it does not accept another"
     );
 }
 

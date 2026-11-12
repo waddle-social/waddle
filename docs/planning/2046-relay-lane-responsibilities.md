@@ -44,7 +44,11 @@ an owner transfer does, and what must hold before the relay path is deleted.
 
 ### Groupchat transport
 
-- **Status.** Decided. The relay still carries the stanza at every epoch.
+- **Status.** Cut over. In a transaction at protocol epoch 2 or later that
+  appends or finds the mailbox entry, the origin sends no relay payload
+  (`without_relayed_dispatch` in `S/ingress/commit_mailbox.rs`). Below that
+  epoch, under the `relay` selector, and for a message without a source
+  binding, the relay carries the stanza as before.
 - **Identity.** `MailboxOperationKey::RoomAcceptance(MessageKey)`, unique
   across lanes. The canonical request is the `ingress_messages` row the origin
   committed, with its source binding.
@@ -59,9 +63,13 @@ an owner transfer does, and what must hold before the relay path is deleted.
   language from the entry, and runs its ordinary owner commit. The origin
   sends no payload. The origin reads the decision from the entry, proves it
   against `owner_decision`, consumes the entry and only then counts the
-  stanza. A refusal is answered by the origin from the rejection child; an
-  acceptance's reflection is the owner's own frozen obligation and travels
-  the sender's keyed route.
+  stanza. A refusal is answered by the origin from the rejection child
+  (`frozen_room_refusal`), which also receipts the source's `ErrorReply`
+  obligation. An acceptance's reflection is the owner's own frozen
+  obligation: the owner's worker repairs the message's unreceipted
+  obligations as soon as its commit has executed
+  (`deliver_owner_obligations`), and the ingress maintenance pass repeats
+  that for anything still owed after a minute.
 - **Lost hint.** The owner's poller scans its backlog every second.
 - **Owner transfer.** The successor adopts the lane once it holds the claim
   and decides the head entry from canonical rows. Occupancy is in room-actor
@@ -192,7 +200,9 @@ no replacement.
 ## Wire version
 
 `deliver_ordered` stays at `v14`: no lane's variant has been removed and
-neither the envelope nor the reply changed. Removing a variant bumps the
+neither the envelope nor the reply changed. The groupchat cutover removes a
+sender, not a variant: `GroupchatMessage` is still sent below epoch 2 and
+under the `relay` selector, and a node at any version still accepts it. Removing a variant bumps the
 suffix in `S/clustering/relay/implementation.rs`; a peer that still registers
 the old id then answers an unknown-message error before it admits anything,
 and the sender treats that as no effect.
@@ -201,7 +211,7 @@ and the sender treats that as no effect.
 
 | Configuration | Groupchat | Join, presence, Muji | Bare and full JID |
 | --- | --- | --- | --- |
-| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox` | relay payload beside the mailbox entry | relay | relay |
+| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox` | mailbox; relay only for a message committed without a source binding below epoch 2 | relay | relay |
 | Clustered PostgreSQL, epoch ≥ 2, selector `relay` | relay | relay | relay |
 | Clustered PostgreSQL, epoch < 2 (no restricted owner phase) | relay | relay | relay |
 | Single node | none | none | none |

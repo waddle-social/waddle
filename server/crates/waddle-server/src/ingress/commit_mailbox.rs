@@ -382,6 +382,7 @@ pub(super) async fn decide_owner(
         (None, _) => return Err(MailboxError::EntryMissing.into()),
     };
     if state.decision == Some(RoomOwnerDecision::Undecided) {
+        record_dispatch_arrival(tx, key, acceptance).await?;
         match outcome {
             OwnerOutcome::Accepted => {
                 CanonicalMessageRepository::decide_room_owner(tx, key, RoomOwnerDecision::Accepted)
@@ -409,6 +410,81 @@ pub(super) async fn decide_owner(
         MailboxDispositionChange::Applied(disposition)
         | MailboxDispositionChange::Unchanged(disposition) => disposition,
     })
+}
+
+/// Receipt the origin's dispatch of `key` to this room.
+///
+/// With the mailbox as transport the origin sends no relay payload, so no
+/// relay reply ever completes its `DispatchToRoomRemote` obligation. The
+/// obligation is to bring the request to the room's owner, and the owner's
+/// first decision is the proof that it arrived: the receipt is written in
+/// the transaction that latches that decision, whichever way it goes.
+async fn record_dispatch_arrival(
+    tx: &mut IngressUowTransaction<'_>,
+    key: MessageKey,
+    acceptance: &OwnerAcceptance,
+) -> Result<(), IngressUowError> {
+    use crate::ingress_uow::{EffectIntentRepository, EffectReceiptRepository};
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    let room = match acceptance.lane.key().encoding().decode() {
+        Ok(MailboxLaneIdentity {
+            recipient: MailboxLaneRecipient::Room { room, .. },
+            ..
+        }) => room,
+        _ => return Err(MailboxError::InvalidStored.into()),
+    };
+    for intent in EffectIntentRepository::load(tx, key).await? {
+        if matches!(&intent,
+            IngressEffectIntent::DispatchToRoomRemote { room: recorded, .. } if *recorded == room)
+        {
+            let receipt = super::durable::receipt_key(&intent)?;
+            EffectReceiptRepository::record_receipt(
+                tx,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Drop the relayed dispatch from the origin's external effects when the
+/// mailbox entry carries the stanza to its room owner.
+///
+/// `dependencies` is parallel to `external`. The owner reads the stanza from
+/// the canonical row its entry refers to, woken by the hint or found by its
+/// poller, so executing the relay as well would hand it the same request
+/// twice and make a relay reply look like evidence. The recorded
+/// `DispatchToRoomRemote` intent stays; the owner's decision receipts it.
+#[cfg(feature = "clustering")]
+pub(super) fn without_relayed_dispatch(
+    external: Vec<super::ExternalEffect>,
+    dependencies: Vec<Vec<crate::server::routes::interpret::effects::PlanEffectDependency>>,
+    mailbox_transport: bool,
+) -> (
+    Vec<super::ExternalEffect>,
+    Vec<Vec<crate::server::routes::interpret::effects::PlanEffectDependency>>,
+) {
+    use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+    use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+    if !mailbox_transport {
+        return (external, dependencies);
+    }
+    external
+        .into_iter()
+        .zip(dependencies)
+        .filter(|(effect, _)| {
+            !matches!(
+                effect,
+                super::ExternalEffect::Room(ExternalRoomEffect::RelayMucProxy {
+                    kind: OrderedRelayMucProxyKind::GroupchatMessage,
+                    ..
+                })
+            )
+        })
+        .unzip()
 }
 
 /// Store the owner's frozen error as its own canonical message. It carries

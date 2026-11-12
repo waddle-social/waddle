@@ -573,16 +573,24 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     // The origin's dispatch intent is recorded now, so the same transaction
     // opens the owner decision and appends the pending mailbox entry.
     let mut awaiting_owner = None;
+    // Whether the mailbox entry is the transport of this stanza to its room
+    // owner. The owner then reads the stanza from the canonical row, so the
+    // origin sends no relay payload for it.
+    let mut mailbox_transport = false;
     if rejection.is_none() {
         if let Some(acceptance) = origin_acceptance.as_mut() {
-            if let super::super::commit_mailbox::OriginEntry::Awaiting(entry) =
-                super::super::commit_mailbox::record_origin(&mut tx, acceptance, key).await?
-            {
-                awaiting_owner = Some((
-                    entry,
-                    acceptance.origin_epoch(),
-                    acceptance.target_owner().clone(),
-                ));
+            use super::super::commit_mailbox::OriginEntry;
+            match super::super::commit_mailbox::record_origin(&mut tx, acceptance, key).await? {
+                OriginEntry::Awaiting(entry) => {
+                    mailbox_transport = true;
+                    awaiting_owner = Some((
+                        entry,
+                        acceptance.origin_epoch(),
+                        acceptance.target_owner().clone(),
+                    ));
+                }
+                OriginEntry::Settled => mailbox_transport = true,
+                OriginEntry::None => {}
             }
         }
     }
@@ -1053,6 +1061,14 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     .into_iter()
     .map(|index| plan.plan[index].dependencies.clone())
     .collect();
+    #[cfg(feature = "clustering")]
+    let (external, external_dependencies) = super::super::commit_mailbox::without_relayed_dispatch(
+        external,
+        external_dependencies,
+        mailbox_transport,
+    );
+    #[cfg(not(feature = "clustering"))]
+    let _ = mailbox_transport;
     let mut pending = Vec::new();
     for intent in &intents {
         let receipt = super::super::durable::receipt_key(intent)?;

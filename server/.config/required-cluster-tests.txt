@@ -632,3 +632,12 @@ waddle-server::xep0045_xep0198_remote_acceptance owner_transfer_before_commit_is
 # decision must receive no live copy. An image whose audience can change
 # after acceptance must not ship.
 waddle-server::xep0045_xep0198_remote_acceptance membership_change_between_acceptance_and_ack
+# #2174 groupchat transport from the mailbox. At the mailbox epoch the
+# origin relays no groupchat payload: the owner reads the stanza from the
+# canonical row, the origin answers a refusal from the owner's frozen error,
+# and a killed owner's successor delivers the frozen reflection exactly once.
+# An image that still needs the relay payload to accept, or that loses or
+# duplicates the sender's answer, must not ship.
+waddle-server::xep0045_xep0198_remote_acceptance mailbox_transport_relays_no_groupchat_payload
+waddle-server::xep0045_xep0198_remote_acceptance owner_refusal_is_answered_from_the_frozen_error
+waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_after_commit_delivers_the_frozen_reflection_once

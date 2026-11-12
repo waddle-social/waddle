@@ -36,6 +36,9 @@ const MAILBOX_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAILBOX_ADOPTION_PASSES: u32 = 5;
 /// Poll passes between two sweeps of unconsumed decisions.
 const MAILBOX_SWEEP_PASSES: u32 = 30;
+/// Entries of one lane a worker decides before it returns the lane to the
+/// next pass: the lane's pending cap, so one visit can drain a full lane.
+const MAILBOX_LANE_DRAIN_LIMIT: u32 = 64;
 /// Budget of one hint. A hint that does not arrive is not retried.
 const MAILBOX_HINT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -194,46 +197,67 @@ async fn poll_once(
     lanes.last().copied().filter(|_| full_page)
 }
 
-/// Work the head entry of one lane and record how the attempt ended.
+/// Work one lane from its head and record how each attempt ended.
+///
+/// The mailbox is the only transport of a stanza to its room owner, so a
+/// sender's burst sits on one lane behind one coalesced hint. The worker
+/// therefore keeps going while each head is decided, up to
+/// [`MAILBOX_LANE_DRAIN_LIMIT`] entries, and leaves the lane at the first
+/// head that is idle, deferred or dead-lettered.
 async fn work_lane(
     services: &Arc<OrderedRelayDeliveryServices>,
     authority: &Arc<crate::ingress::IngressAuthority>,
     lane: MailboxLaneId,
     target: &NodeIdentity,
 ) {
-    let outcome = match authority.claim_room_acceptance(lane, target).await {
-        Ok(MailboxLaneHead::Idle) => return,
-        Ok(MailboxLaneHead::DeadLettered) => MailboxDeliveryOutcome::DeadLettered,
-        Ok(MailboxLaneHead::Ready(claimed)) => {
-            if accept(services, &claimed).await {
-                MailboxDeliveryOutcome::Decided
-            } else {
-                match authority
-                    .record_room_acceptance_failure(claimed.lane, claimed.operation, target)
-                    .await
-                {
-                    Ok(MailboxAttemptRecord::DeadLettered) => MailboxDeliveryOutcome::DeadLettered,
-                    Ok(MailboxAttemptRecord::Settled) => MailboxDeliveryOutcome::Decided,
-                    Ok(MailboxAttemptRecord::Deferred { .. }) | Err(_) => {
-                        MailboxDeliveryOutcome::Retried
+    for _ in 0..MAILBOX_LANE_DRAIN_LIMIT {
+        let outcome = match authority.claim_room_acceptance(lane, target).await {
+            Ok(MailboxLaneHead::Idle) => return,
+            Ok(MailboxLaneHead::DeadLettered) => MailboxDeliveryOutcome::DeadLettered,
+            Ok(MailboxLaneHead::Ready(claimed)) => {
+                if accept(services, &claimed).await {
+                    authority.deliver_owner_obligations(claimed.operation).await;
+                    MailboxDeliveryOutcome::Decided
+                } else {
+                    match authority
+                        .record_room_acceptance_failure(claimed.lane, claimed.operation, target)
+                        .await
+                    {
+                        Ok(MailboxAttemptRecord::DeadLettered) => {
+                            MailboxDeliveryOutcome::DeadLettered
+                        }
+                        // The commit landed although the attempt did not
+                        // finish; its effects were not executed here.
+                        Ok(MailboxAttemptRecord::Settled) => {
+                            authority.deliver_owner_obligations(claimed.operation).await;
+                            MailboxDeliveryOutcome::Decided
+                        }
+                        Ok(MailboxAttemptRecord::Deferred { .. }) | Err(_) => {
+                            MailboxDeliveryOutcome::Retried
+                        }
                     }
                 }
             }
+            Err(error) => {
+                tracing::warn!(%error, "mailbox poller could not read a lane head");
+                MailboxDeliveryOutcome::Retried
+            }
+        };
+        waddle_xmpp::telemetry::reliability::increment_mailbox_delivery(outcome);
+        if outcome != MailboxDeliveryOutcome::Decided {
+            return;
         }
-        Err(error) => {
-            tracing::warn!(%error, "mailbox poller could not read a lane head");
-            MailboxDeliveryOutcome::Retried
-        }
-    };
-    waddle_xmpp::telemetry::reliability::increment_mailbox_delivery(outcome);
+    }
 }
 
 /// Run the owner's relayed-groupchat commit for one entry. `true` when the
 /// owner committed a decision.
 ///
 /// Frames the owner produces for the sender are not written here: their
-/// receipts stay pending, so ingress recovery delivers them through the
-/// sender's keyed route.
+/// receipts stay pending, and [`IngressAuthority::deliver_owner_obligations`]
+/// delivers them through the sender's keyed route right after this returns.
+///
+/// [`IngressAuthority::deliver_owner_obligations`]: crate::ingress::IngressAuthority::deliver_owner_obligations
 async fn accept(
     services: &Arc<OrderedRelayDeliveryServices>,
     claimed: &ClaimedRoomAcceptance,

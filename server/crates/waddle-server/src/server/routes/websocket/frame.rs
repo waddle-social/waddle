@@ -1786,24 +1786,30 @@ async fn dispatch_authoritative_message(
     // nor counted early: this handler waits for the owner's decision itself,
     // which also stops the connection from reading further frames. Without a
     // proven decision the stanza stays an unhandled hole.
+    // The owner's refusal read by that wait is answered in this handler's
+    // own response, because no relay reply carries it.
     #[cfg(feature = "clustering")]
-    let disposition = match (&decision.remote_acceptance, &acceptance_slot, sequence) {
-        (Some(pending), None, Some(_)) => {
-            match state
-                .deps
-                .protocol
-                .ingress
-                .await_room_acceptance_inline(pending)
-                .await
-            {
-                Ok(_) => InboundDisposition::Handled,
-                Err(_) => InboundDisposition::Unhandled,
+    let (disposition, inline_refusal) =
+        match (&decision.remote_acceptance, &acceptance_slot, sequence) {
+            (Some(pending), None, Some(_)) => {
+                use waddle_xmpp::ingress::mailbox::MailboxOwnerDecision;
+                let ingress = &state.deps.protocol.ingress;
+                match ingress.await_room_acceptance_inline(pending).await {
+                    Ok(MailboxOwnerDecision::Rejected) => (
+                        InboundDisposition::Handled,
+                        ingress
+                            .frozen_room_refusal(pending)
+                            .await
+                            .map(Stanza::Message),
+                    ),
+                    Ok(MailboxOwnerDecision::Accepted) => (InboundDisposition::Handled, None),
+                    Err(_) => (InboundDisposition::Unhandled, None),
+                }
             }
-        }
-        _ => InboundDisposition::Handled,
-    };
+            _ => (InboundDisposition::Handled, None),
+        };
     #[cfg(not(feature = "clustering"))]
-    let disposition = InboundDisposition::Handled;
+    let (disposition, inline_refusal): (_, Option<Stanza>) = (InboundDisposition::Handled, None);
     if resumable {
         if let (Some(seq), Some(checkpoint)) = (sequence, checkpoint) {
             // The commit persisted a checkpoint that excludes a stanza still
@@ -1856,7 +1862,7 @@ async fn dispatch_authoritative_message(
     }
     // Phase C owns its budget, including admission waits; cancellation cannot
     // revoke the disposition that was settled immediately after commit.
-    execute_committed_message(
+    let mut batch = execute_committed_message(
         state
             .deps
             .protocol
@@ -1864,7 +1870,11 @@ async fn dispatch_authoritative_message(
             .execute(&decision, &ImmediateSink, &deps),
         std::time::Duration::from_secs(5),
     )
-    .await
+    .await;
+    if let Some(refusal) = inline_refusal {
+        batch.frames.push(refusal.into());
+    }
+    batch
 }
 
 pub(super) async fn execute_committed_message(
