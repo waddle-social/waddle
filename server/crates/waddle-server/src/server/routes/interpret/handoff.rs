@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 #[cfg(feature = "clustering")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "clustering")]
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
@@ -52,6 +51,8 @@ pub struct OrderedRelayHandoffHandle {
     inbound_sequence: OrderedRelayInboundSequence,
     // The queue slot this handoff reserved. The first completion uses it.
     slot: Arc<Mutex<Option<mpsc::OwnedPermit<OrderedRelayHandoffCompletion>>>>,
+    // The connection's queue, kept to observe that its receiver is gone.
+    queue: OrderedRelayHandoffSender,
     deferred: Arc<AtomicBool>,
 }
 
@@ -73,6 +74,7 @@ impl OrderedRelayHandoffHandle {
         Ok(Self {
             inbound_sequence,
             slot: Arc::new(Mutex::new(Some(slot))),
+            queue: tx.clone(),
             deferred: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -102,6 +104,54 @@ impl OrderedRelayHandoffHandle {
             });
         }
     }
+
+    /// Settle the reserved slot without counting its stanza as handled.
+    ///
+    /// The completion goes through the queue slot this handoff has held
+    /// since its stanza was routed, so it is delivered whatever else is
+    /// outstanding. The connection is woken through that channel, and
+    /// its tracker turns the completion of a withheld slot into a permanent
+    /// hole in the handled count: responsibility for the stanza stays with
+    /// the sender, and nothing later is acknowledged past it.
+    pub fn withhold(&self, withheld: &WithheldInbound) {
+        withheld.insert(self.inbound_sequence);
+        self.complete(Vec::new());
+    }
+
+    /// Whether the connection that reserved the slot is gone.
+    pub fn is_closed(&self) -> bool {
+        self.queue.is_closed()
+    }
+}
+
+/// Reserved inbound slots whose stanza must not be counted as handled when
+/// their completion arrives. Shared between a connection's tracker and the
+/// tasks that settle its deferred slots.
+#[derive(Debug, Clone, Default)]
+pub struct WithheldInbound(Arc<Mutex<BTreeSet<u32>>>);
+
+impl WithheldInbound {
+    #[cfg(feature = "clustering")]
+    fn insert(&self, sequence: OrderedRelayInboundSequence) {
+        self.0
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .insert(sequence.0);
+    }
+
+    fn take(&self, sequence: OrderedRelayInboundSequence) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .remove(&sequence.0)
+    }
+
+    fn clear(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clear();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +163,7 @@ pub struct SmInboundCompletionTracker {
     last_flushed: Option<u32>,
     checkpoint_dirty: bool,
     first_unhandled: Option<u32>,
+    withheld: WithheldInbound,
 }
 
 impl SmInboundCompletionTracker {
@@ -152,11 +203,23 @@ impl SmInboundCompletionTracker {
         }
     }
 
+    /// The set a deferred slot's settling task marks to keep its stanza out
+    /// of the handled count.
+    #[cfg(feature = "clustering")]
+    pub fn withheld(&self) -> WithheldInbound {
+        self.withheld.clone()
+    }
+
     pub fn complete(
         &mut self,
         sequence: OrderedRelayInboundSequence,
         sm_state: &mut StreamManagementState,
     ) {
+        // A withheld slot settles as an unhandled hole, not as a completion.
+        if self.withheld.take(sequence) {
+            self.abandon(sequence);
+            return;
+        }
         if !self.pending.remove(&sequence.0) {
             return;
         }
@@ -199,7 +262,14 @@ impl SmInboundCompletionTracker {
         self.first_unhandled.is_some()
     }
     pub fn reset(&mut self) {
-        *self = Self::default();
+        // Settling tasks keep their clone of the withheld set, so the set is
+        // emptied in place and stays shared.
+        let withheld = self.withheld.clone();
+        withheld.clear();
+        *self = Self {
+            withheld,
+            ..Self::default()
+        };
     }
 }
 
@@ -211,6 +281,53 @@ mod tests {
         sm.enable("stream".to_owned(), true, Some(300));
         sm
     }
+    #[test]
+    fn deferred_slot_holds_the_handled_count_until_it_completes() {
+        let mut sm = state();
+        let mut tracker = SmInboundCompletionTracker::default();
+        let awaiting_owner = tracker.reserve(&sm);
+        // The stanza is committed without counting itself: the persisted
+        // checkpoint stays at the prefix before it.
+        tracker.mark_committed(awaiting_owner, 0);
+        let later = tracker.reserve(&sm);
+        assert_eq!(tracker.checkpoint_for(later), 0);
+        tracker.mark_committed(later, 0);
+        tracker.complete(later, &mut sm);
+        assert_eq!(sm.inbound_count(), 0, "h cannot cross the unresolved slot");
+        tracker.complete(awaiting_owner, &mut sm);
+        assert_eq!(sm.inbound_count(), 2);
+        assert!(tracker.checkpoint_dirty());
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn withheld_slot_becomes_a_permanent_hole() {
+        let mut sm = state();
+        let mut tracker = SmInboundCompletionTracker::default();
+        let (tx, mut rx) = ordered_relay_handoff_channel();
+        let unresolved = tracker.reserve(&sm);
+        let later = tracker.reserve(&sm);
+        tracker.complete(later, &mut sm);
+        OrderedRelayHandoffHandle::reserve(unresolved, &tx)
+            .expect("a free completion slot")
+            .withhold(&tracker.withheld());
+        let completion = rx.try_recv().expect("the connection is woken");
+        assert!(completion.replies.is_empty());
+        tracker.complete(completion.inbound_sequence, &mut sm);
+        assert_eq!(
+            sm.inbound_count(),
+            0,
+            "a withheld stanza is never acknowledged"
+        );
+        assert!(tracker.has_unhandled_hole());
+        assert!(!tracker.has_pending());
+        // Reset keeps the shared set and empties it.
+        let shared = tracker.withheld();
+        tracker.reset();
+        assert!(!shared.take(unresolved));
+        assert!(!tracker.has_unhandled_hole());
+    }
+
     #[test]
     fn deferred_iq_completion_dirties_checkpoint_after_committed_messages() {
         let mut sm = state();

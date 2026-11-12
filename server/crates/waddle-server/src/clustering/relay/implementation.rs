@@ -1306,6 +1306,35 @@ impl Message<RelayResourcePresence> for RelayActor {
     }
 }
 
+/// Wake-up for the durable mailbox: the sender appended an entry this node
+/// may be the target of. It carries no payload and no lane, and it confers
+/// no authority. The receiver's poller reads the database to find its work,
+/// and finds the same work on its next interval when a hint is lost.
+///
+/// It is a message of its own so that the ordered-relay wire format is not
+/// involved: a peer that predates it answers with an unknown-message error,
+/// which the sender ignores.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayMailboxHint;
+
+/// Reply to [`RelayMailboxHint`]: the hint reached the node's poller.
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayMailboxHintAck;
+
+#[kameo::remote_message("waddle.clustering.relay.mailbox_hint.v1")]
+impl Message<RelayMailboxHint> for RelayActor {
+    type Reply = RelayMailboxHintAck;
+
+    async fn handle(
+        &mut self,
+        _msg: RelayMailboxHint,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> RelayMailboxHintAck {
+        self.ordered_delivery_bridge.wake_mailbox_poller();
+        RelayMailboxHintAck
+    }
+}
+
 /// Harness fault injection: crash the relay actor (simulating an unexpected
 /// stop, so the supervised respawn + same-name re-registration and the
 /// sender-side stale-ref recovery can be asserted cross-node). Inert unless
@@ -2437,6 +2466,41 @@ impl RelayHandle {
     }
 
     /// #1803: ask the account's claim owner whether it knows one exact full
+    /// Wake the peer's mailbox poller. The hint has no effect a retry could
+    /// duplicate, so a stale reference is refreshed and retried once; any
+    /// error only means the peer finds its work on its next poll interval.
+    pub async fn mailbox_hint(&mut self) -> Result<RelayMailboxHintAck, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.mailbox_hint_inner() => result,
+        }
+    }
+
+    async fn mailbox_hint_inner(&mut self) -> Result<RelayMailboxHintAck, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&RelayMailboxHint)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_stale_ref_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&RelayMailboxHint)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
     /// JID. Strictly read-only on the receiver, so it shares
     /// [`Self::demote`]'s stale-ref refresh-and-retry-once behaviour and
     /// `stop_token`-raced cancellation-safety. Every `Err` — including the

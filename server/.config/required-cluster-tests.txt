@@ -496,13 +496,9 @@ waddle-server::restricted_runtime_startup owner_phase_is_idempotent_and_fails_cl
 waddle-server::restricted_runtime_startup owner_phase_refuses_a_schema_public_can_use
 
 # #1948 remote-room acceptance fault harness: two real nodes, the sender's
-# XEP-0198 handled count against the room owner's durable acceptance. The
-# `*_characterizes_*` tests pin the current early acknowledgement and are
-# replaced by their `#[ignore]`d contract tests when the origin gates `h` on
-# owner acceptance; the other two already hold and guard reply-loss and
-# origin-restart recovery against a second acceptance.
-waddle-server::xep0045_xep0198_remote_acceptance h_while_owner_commit_paused_characterizes_current_early_ack
-waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit_characterizes_current_silent_loss
+# XEP-0198 handled count against the room owner's durable acceptance. These
+# two run under the relay selector and guard reply-loss and origin-restart
+# recovery against a second acceptance.
 waddle-server::xep0045_xep0198_remote_acceptance reply_loss_recovers_same_acceptance
 waddle-server::xep0045_xep0198_remote_acceptance origin_sigkill_after_owner_commit
 
@@ -560,3 +556,79 @@ waddle-server clustering::claims::tests::schema_bootstrap_on_a_current_schema_do
 # ship.
 waddle-server::clustering_cluster_e2e room_destroy_reply_survives_janitor_ticks_between_commit_and_inline_claim
 waddle-server::clustering_cluster_e2e consecutive_room_destroys_are_each_answered_with_a_result
+
+# #1986 durable mailbox core: lane sequences must stay gap-free and unique
+# under concurrent appenders, one operation key must hold one responsibility
+# across lanes and across a replan to a new room owner, the owner must
+# disposition only the lane head, admission must refuse before any write, and
+# both mailbox tables must refuse a statement without the live epoch proof.
+# An image whose mailbox can allocate twice for one operation, skip a
+# sequence or accept an unproven write must not ship.
+waddle-server::mailbox_core_postgres allocator_is_gap_free_and_monotonic_under_concurrency
+waddle-server::mailbox_core_postgres lane_counter_covers_the_unsigned_range_and_reports_exhaustion
+waddle-server::mailbox_core_postgres operation_key_is_idempotent_across_lanes
+waddle-server::mailbox_core_postgres replan_from_owner_a_to_owner_b_keeps_one_responsibility
+waddle-server::mailbox_core_postgres owner_decides_only_the_lane_head_and_the_cursor_is_exclusive
+waddle-server::mailbox_core_postgres full_lane_and_full_node_refuse_before_any_write
+waddle-server::mailbox_core_postgres guarded_tables_reject_unproven_and_unsupported_epoch_writes
+
+# #1986 mailbox retention: a canonical message with a mailbox entry that is
+# not consumed must survive collection, a consumed entry must leave with its
+# message, and the collector and an appender must not deadlock in either lock
+# schedule. An image that can collect a message an owner still has to accept,
+# or stall the collector behind a lane, must not ship.
+waddle-server::mailbox_core_postgres unconsumed_entry_retains_its_message_and_a_consumed_entry_leaves_with_it
+waddle-server::mailbox_core_postgres collector_skips_a_message_an_appender_holds
+waddle-server::mailbox_core_postgres appender_behind_a_collector_neither_deadlocks_nor_allocates
+
+# #1948 owner acceptance transaction: with the mailbox selected the origin's
+# commit must append the pending entry, and the owner's commit must latch its
+# decision on the canonical message and the entry together, for an acceptance
+# and for a refusal. A commit below protocol epoch 2, and a commit under the
+# relay selector, must write no lane, and a message committed below the epoch
+# must get no entry when it is retransmitted after the activation. An image
+# whose owner can accept without recording it, or which gives a relay-era
+# message a mailbox entry, must not ship.
+waddle-server::ingress_commit mailbox_acceptance::origin_appends_pending_entry_and_owner_accepts_in_one_transaction
+waddle-server::ingress_commit mailbox_acceptance::owner_rejection_records_its_child_and_decides_the_entry
+waddle-server::ingress_commit mailbox_acceptance::commits_below_the_mailbox_epoch_or_under_the_relay_selector_write_no_entry
+
+# #1948 origin handled count: under the mailbox selector the origin must not
+# count a groupchat stanza before it has read its room owner's decision, an
+# elapsed budget must not count as acceptance, a repeated lookup must answer
+# the same decision, and a retransmission after the decision must not wait
+# again. An image whose `h` can cover a stanza no owner accepted must not
+# ship.
+waddle-server::ingress_commit mailbox_acceptance::origin_reads_the_owner_decision_before_counting_the_stanza
+waddle-server::ingress_commit mailbox_acceptance::retransmission_after_the_owner_decided_consumes_in_its_own_commit
+waddle-server::xep0045_xep0198_remote_acceptance h_does_not_advance_while_owner_commit_paused
+waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit
+
+# #2118 mailbox reconciliation: the owner's poller must find a pending entry
+# without any hint, rebuild the request from canonical rows, defer after a
+# failure, end its retry budget in a dead letter that keeps the lane head, and
+# resume only after an operator repair; and a delivery whose relay and hint
+# were both lost must still be accepted exactly once. An image that can skip
+# a pending entry or lose an accepted submission to a lost hint must not ship.
+waddle-server::ingress_commit mailbox_acceptance::poller_works_the_lane_head_from_canonical_rows_and_parks_it_after_its_retries
+waddle-server::xep0045_xep0198_remote_acceptance lost_delivery_and_hint_are_repaired_by_the_owner_poller
+
+# #2118 owner transfer and unread decisions: a lane recorded for a
+# predecessor must be adopted only by the node that holds the room's later
+# claim, after which that node decides the one existing entry; and a decided
+# entry no origin read must be consumed once past its grace while its decision
+# stays readable. An image whose successor owner never sees a predecessor's
+# pending entry, whose bystander can take a lane, or whose unread decision
+# retains its message indefinitely must not ship.
+waddle-server::mailbox_core_postgres successor_owner_adopts_a_backlogged_lane_only_with_a_later_claim
+waddle-server::mailbox_core_postgres unconsumed_decisions_are_found_after_the_grace_and_consumed_once
+waddle-server::ingress_commit mailbox_acceptance::successor_owner_adopts_the_lane_of_a_room_it_now_owns
+waddle-server::ingress_commit mailbox_acceptance::sweep_consumes_a_decision_no_origin_read_and_keeps_it_readable
+waddle-server::xep0045_xep0198_remote_acceptance owner_transfer_before_commit_is_decided_once_by_the_successor
+
+# #1948 frozen audience: `h` must not cover a groupchat stanza before the
+# room owner's decision, must cover it once that decision is durable even
+# though no copy has been delivered, and an occupant who joins after the
+# decision must receive no live copy. An image whose audience can change
+# after acceptance must not ship.
+waddle-server::xep0045_xep0198_remote_acceptance membership_change_between_acceptance_and_ack

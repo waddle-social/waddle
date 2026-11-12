@@ -24,6 +24,11 @@ pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transact
 mod error;
 pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
+mod mailbox;
+pub use mailbox::{
+    LockedMailboxLane, MailboxAppendOutcome, MailboxCutoverRefusal, MailboxDeadLetterReason,
+    MailboxError, MailboxLaneId, MailboxRepository, MailboxTargetFence, StoredMailboxEntry,
+};
 mod room_observation;
 pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
@@ -66,7 +71,6 @@ pub use error::IngressUowError;
 pub use extension_grants::{
     ConfiguredPluginGrants, GrantAssertion, GrantAssertionFailure, GrantSync,
 };
-#[allow(unused_imports)] // exported for dark tests and the future activation slice.
 pub(crate) use repositories::RoomOwnerDecision;
 pub use repositories::{
     CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
@@ -115,7 +119,6 @@ use crate::ingress_substrate::{
     IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest,
     IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };
-#[cfg(feature = "clustering")]
 use uuid::Uuid;
 use waddle_xmpp::ingress::ProtocolEpoch;
 #[cfg(feature = "clustering")]
@@ -129,6 +132,34 @@ pub enum IngressFencing {
     SingleNode,
 }
 
+/// How a groupchat message for a room owned by another node reaches the
+/// owner's acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemoteRoomAcceptance {
+    /// The origin relays the stanza and counts it handled when its own
+    /// commit succeeds; the owner's acceptance is not recorded for it.
+    OrderedRelay,
+    /// The origin appends a durable mailbox entry with its commit, the owner
+    /// records its decision on that entry in the transaction that seals the
+    /// room manifest, and the origin counts the stanza handled only after
+    /// reading that decision. It takes effect on clustered PostgreSQL once
+    /// the protocol epoch reaches
+    /// [`crate::ingress_substrate::mailbox_acceptance_epoch`].
+    #[default]
+    DurableMailbox,
+}
+
+impl RemoteRoomAcceptance {
+    /// Parse the deployment configuration value.
+    pub fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "relay" => Some(Self::OrderedRelay),
+            "mailbox" => Some(Self::DurableMailbox),
+            _ => None,
+        }
+    }
+}
+
 /// Dialect-aware factory for ingress transactions bound to one lineage policy.
 #[derive(Clone)]
 pub struct IngressUnitOfWork {
@@ -136,6 +167,7 @@ pub struct IngressUnitOfWork {
     db: Arc<Database>,
     standalone_receipt_writer: StandaloneReceiptWriter,
     lineage: LineageConfig,
+    remote_room_acceptance: RemoteRoomAcceptance,
     /// Optional full-identity writer capability retained by the exact
     /// physically attested pool.
     attested_pg_writer: Option<AttestedPostgresWriterCapability>,
@@ -208,8 +240,38 @@ impl IngressUnitOfWork {
             standalone_receipt_writer,
             lineage,
             attested_pg_writer,
+            remote_room_acceptance: RemoteRoomAcceptance::default(),
             fencing: IngressFencing::SingleNode,
         })
+    }
+
+    /// Select how remote room acceptance is carried. The mailbox applies
+    /// only where lanes exist: clustered fencing on PostgreSQL.
+    pub fn with_remote_room_acceptance(mut self, selected: RemoteRoomAcceptance) -> Self {
+        self.remote_room_acceptance = selected;
+        self
+    }
+
+    /// Whether this unit of work selects remote room acceptance through the
+    /// durable mailbox and can carry it. A single-node deployment seals a
+    /// room acceptance in its own transaction and SQLite has no lanes, so
+    /// both keep the relay. Whether a given transaction uses the mailbox
+    /// also depends on its protocol epoch; see
+    /// [`Self::mailbox_acceptance_active`].
+    pub fn mailbox_acceptance_enabled(&self) -> bool {
+        self.remote_room_acceptance == RemoteRoomAcceptance::DurableMailbox
+            && self.db.driver() == DatabaseDriver::Postgres
+            && !matches!(self.fencing, IngressFencing::SingleNode)
+    }
+
+    /// Whether `transaction` carries remote room acceptance through the
+    /// durable mailbox: the deployment selects and supports it, and the
+    /// protocol epoch the transaction locked has reached the mailbox epoch.
+    /// A transaction at an earlier epoch keeps the relay's behaviour and
+    /// writes no mailbox row.
+    pub fn mailbox_acceptance_active(&self, transaction: &IngressUowTransaction<'_>) -> bool {
+        self.mailbox_acceptance_enabled()
+            && transaction.protocol_epoch() >= crate::ingress_substrate::mailbox_acceptance_epoch()
     }
 
     /// Enable the full-identity writer path using the capability retained
@@ -399,7 +461,6 @@ impl IngressUnitOfWork {
             observations: self.observations.load(std::sync::atomic::Ordering::Acquire),
             entry,
             lineage,
-            #[cfg(feature = "clustering")]
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
             #[cfg(feature = "clustering")]
@@ -433,9 +494,8 @@ pub struct IngressUowTransaction<'a> {
     entry: IngressEntryTransaction<'a>,
     lineage: IngressLineage,
     /// Private capability identity that binds an in-transaction claim fence
-    /// to this exact transaction, not merely another transaction sharing the
-    /// same pool lifetime.
-    #[cfg(feature = "clustering")]
+    /// or locked mailbox lane to this exact transaction, not merely another
+    /// transaction sharing the same pool lifetime.
     identity: Uuid,
     /// The canonical identity source bound at [`IngressUnitOfWork`]
     /// construction; single-node transactions cannot mint claim fences.
@@ -629,7 +689,6 @@ impl<'a> IngressUowTransaction<'a> {
         }
     }
 
-    #[cfg(feature = "clustering")]
     fn identity(&self) -> Uuid {
         self.identity
     }

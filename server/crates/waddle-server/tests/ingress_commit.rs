@@ -105,6 +105,9 @@ mod canonical;
 mod execution;
 #[path = "ingress_cases/fencing.rs"]
 mod fencing;
+#[cfg(feature = "clustering")]
+#[path = "ingress_cases/mailbox_acceptance.rs"]
+mod mailbox_acceptance;
 #[path = "ingress_cases/moderation.rs"]
 mod moderation;
 #[path = "ingress_cases/projections.rs"]

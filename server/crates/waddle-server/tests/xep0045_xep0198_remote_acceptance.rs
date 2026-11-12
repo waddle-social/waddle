@@ -12,10 +12,11 @@
 //!
 //! The contract under test: `h` covers a groupchat stanza only once the room
 //! owner has durably accepted it, and a lost reply or a restart recovers that
-//! one acceptance instead of producing a second. Tests named for the contract
-//! are `#[ignore]`d while the server does not meet it; each has a
-//! `*_characterizes_*` twin that pins what the server does instead and is
-//! deleted when the contract test is enabled.
+//! one acceptance instead of producing a second. Remote room acceptance runs
+//! through the durable mailbox from protocol epoch 2 on, so the scenarios
+//! that test the handled count activate that epoch on the shared database.
+//! The scenarios that only test recovery of one acceptance after a lost
+//! reply or an origin restart select the ordered relay explicitly.
 //!
 //! The binary needs PostgreSQL and fails without `WADDLE_TEST_POSTGRES_URL`:
 //! every scenario is about durable state shared by two processes.
@@ -29,9 +30,8 @@ use std::time::Duration;
 
 use cluster_support::{
     cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
-    open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server,
-    spawn_cluster_server_with_envs, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
-    CLUSTER_PEER_USERNAME,
+    open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
+    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
@@ -43,6 +43,46 @@ use waddle_xmpp::stream_management::SM_NS;
 
 const DOMAIN: &str = "localhost";
 const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
+/// Selects how both nodes carry remote room acceptance.
+const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
+
+/// How the nodes of a scenario carry remote room acceptance.
+#[derive(Clone, Copy)]
+enum Acceptance {
+    /// The origin counts the stanza when its own commit succeeds.
+    Relay,
+    /// The server's default at the mailbox epoch: the origin counts the
+    /// stanza only after reading the owner's decision from the durable
+    /// mailbox.
+    Mailbox,
+}
+
+/// Advance the shared database's ingress protocol epoch to 2, where remote
+/// room acceptance uses the mailbox. Each statement is one step of the
+/// epoch guard; a database already there is left alone. Running nodes read
+/// the epoch at the start of every ingress transaction.
+async fn activate_mailbox_epoch(db: &Database) {
+    let conn = db.guard().await.expect("epoch guard");
+    for _ in 0..2 {
+        conn.execute(
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
+             lineage_uuid = (SELECT lineage_uuid::uuid FROM _lineage WHERE id = 1) \
+             WHERE id = 1 AND epoch < 2",
+            (),
+        )
+        .await
+        .expect("activate the mailbox epoch");
+    }
+}
+
+impl Acceptance {
+    fn value(self) -> &'static str {
+        match self {
+            Self::Relay => "relay",
+            Self::Mailbox => "mailbox",
+        }
+    }
+}
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
 const DROP_REPLY: &str = "drop-reply";
@@ -313,11 +353,16 @@ struct Scenario {
     sender: SmClient,
     sender_occupant: jid::FullJid,
     witness: SmClient,
+    acceptance: Acceptance,
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Scenario {
     async fn start() -> Self {
+        Self::start_with(Acceptance::Relay).await
+    }
+
+    async fn start_with(acceptance: Acceptance) -> Self {
         let postgres_url = waddle_ws_test_support::require_test_postgres_url()
             .expect("the remote acceptance suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
         let serial = cluster_e2e_serial_lock().lock().await;
@@ -328,18 +373,30 @@ impl Scenario {
         let seams = OwnerSeams::new();
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
-        let (server_a, _node_a, _) =
-            spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+        let (server_a, _node_a, _) = spawn_cluster_server_with_envs(
+            &postgres_url,
+            &pool.pool_env,
+            port_a,
+            &[port_b],
+            &[(ACCEPTANCE_ENV, acceptance.value())],
+        )
+        .await;
         let (server_b, node_b, _) = spawn_cluster_server_with_envs(
             &postgres_url,
             &pool.pool_env,
             port_b,
             &[port_a],
-            &[(SEAM_DIRECTORY_ENV, &seams.directory())],
+            &[
+                (SEAM_DIRECTORY_ENV, &seams.directory()),
+                (ACCEPTANCE_ENV, acceptance.value()),
+            ],
         )
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+        if matches!(acceptance, Acceptance::Mailbox) {
+            activate_mailbox_epoch(&db).await;
+        }
 
         let room: jid::BareJid = format!("acceptance-{}@muc.{DOMAIN}", uuid::Uuid::new_v4())
             .parse()
@@ -396,6 +453,7 @@ impl Scenario {
             sender,
             sender_occupant,
             witness,
+            acceptance,
             _serial: serial,
         }
     }
@@ -482,9 +540,8 @@ async fn request_h_while_owner_commit_paused(scenario: &mut Scenario) -> PausedO
 /// commit, `<r/>` is still answered and the answer excludes the stanza. Once
 /// the owner commits, the stanza is archived once, reflected, and counted.
 #[tokio::test]
-#[ignore = "#1948: origin handled count advances before owner acceptance"]
 async fn h_does_not_advance_while_owner_commit_paused() {
-    let mut scenario = Scenario::start().await;
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
     let paused = request_h_while_owner_commit_paused(&mut scenario).await;
     assert_eq!(
         paused.h,
@@ -506,21 +563,64 @@ async fn h_does_not_advance_while_owner_commit_paused() {
     assert_eq!(h, Some(1), "h covers the stanza once the owner accepted it");
 }
 
-/// Characterizes the defect `h_does_not_advance_while_owner_commit_paused`
-/// is ignored for: the origin answers `<r/>` with a handled count that
-/// already includes the groupchat stanza while the room owner is stopped
-/// before its commit and the room archive is empty. Deleted when the origin
-/// gates `h` on owner acceptance and the contract test is enabled.
+/// The relay's delivery of a groupchat message is lost: the owner is stopped
+/// before its commit until its receiver budget has ended, so the relayed
+/// stanza and the hint that accompanied it are both spent without a commit.
+/// Nothing then tells the owner about the message except its own mailbox
+/// poll. The owner still accepts it exactly once, from the canonical rows,
+/// and only then does the sender's handled count cover the stanza.
 #[tokio::test]
-async fn h_while_owner_commit_paused_characterizes_current_early_ack() {
-    let mut scenario = Scenario::start().await;
-    let paused = request_h_while_owner_commit_paused(&mut scenario).await;
+async fn lost_delivery_and_hint_are_repaired_by_the_owner_poller() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    scenario.seams.arm(HOLD_BEFORE_COMMIT);
+    let body = scenario
+        .send_groupchat("lost-hint", uuid::Uuid::new_v4())
+        .await;
+    scenario
+        .seams
+        .wait_for("held before-commit lost-hint", Duration::from_secs(10))
+        .await;
+    // Past the owner's six-second receiver budget the held delivery is
+    // abandoned with nothing committed.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+    assert_eq!(h, Some(0), "an abandoned delivery is not an acceptance");
     assert_eq!(
-        paused.h,
-        Some(1),
-        "the origin counts the stanza before the owner has accepted it"
+        archived_ids(&scenario.db, &scenario.room, &body).await,
+        Vec::<String>::new()
     );
+
     scenario.seams.release(HOLD_BEFORE_COMMIT);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let archived = loop {
+        let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+        if !archived.is_empty() {
+            break archived;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owner's poller must accept the pending entry"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(archived.len(), 1, "accepted once: {archived:?}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+        if h == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "h covers the stanza once the origin has read the acceptance; got {h:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &body).await,
+        archived,
+        "later poll passes do not accept it again"
+    );
 }
 
 /// The owner commits and executes a groupchat message but its relay reply
@@ -618,11 +718,12 @@ async fn origin_sigkill_after_owner_commit() {
     );
 
     let port_a = free_tcp_port();
-    let (server_a, _, _) = spawn_cluster_server(
+    let (server_a, _, _) = spawn_cluster_server_with_envs(
         &scenario.postgres_url,
         &scenario.pool.pool_env,
         port_a,
         &[scenario.port_b],
+        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
     )
     .await;
     wait_for_readiness(&server_a, true, Duration::from_secs(30)).await;
@@ -732,7 +833,10 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
         &scenario.pool.pool_env,
         port_b,
         &[scenario.port_a],
-        &[(SEAM_DIRECTORY_ENV, &scenario.seams.directory())],
+        &[
+            (SEAM_DIRECTORY_ENV, &scenario.seams.directory()),
+            (ACCEPTANCE_ENV, scenario.acceptance.value()),
+        ],
     )
     .await;
     wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
@@ -768,9 +872,8 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
 /// handled count may cover the stanza only if the sender was also sent the
 /// error that refuses it; otherwise the stanza is still pending.
 #[tokio::test]
-#[ignore = "#1948: origin handled count covers a stanza the dead owner never accepted, with no error to the sender"]
 async fn owner_sigkill_before_commit() {
-    let mut scenario = Scenario::start().await;
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
     let observed = observe_owner_killed_before_commit(&mut scenario).await;
     assert_eq!(
         observed.archived,
@@ -784,51 +887,61 @@ async fn owner_sigkill_before_commit() {
     );
 }
 
-/// Characterizes the defect `owner_sigkill_before_commit` is ignored for:
-/// after the owner dies before its commit, the origin reports the stanza as
-/// handled, the room archive never receives it, and the sender is sent no
-/// error. Deleted when the origin gates `h` on owner acceptance and the
-/// contract test is enabled.
-#[tokio::test]
-async fn owner_sigkill_before_commit_characterizes_current_silent_loss() {
-    let mut scenario = Scenario::start().await;
-    let observed = observe_owner_killed_before_commit(&mut scenario).await;
-    assert_eq!(observed.archived, Vec::<String>::new());
-    assert_eq!(
-        observed.h,
-        Some(1),
-        "the origin counted the stanza the owner never accepted"
-    );
-    assert!(!observed.refused, "the sender is told nothing");
-}
-
 /// Room membership changes between the owner's acceptance of a groupchat
-/// message and the origin's acknowledgement of it.
+/// message and the delivery of its copies.
 ///
-/// The owner commits the message while `witness` and `sender` are the only
-/// occupants, and is stopped before it executes effects or replies. A third
-/// occupant, `latecomer`, then joins. When the owner continues, the audience
-/// is the one frozen at acceptance: `witness` and `sender` each receive one
-/// live copy carrying the archived stanza id, `latecomer` receives no live
-/// copy (history delivered on join carries XEP-0203 `<delay/>` and is not a
-/// live copy), the archive still holds one message, and only then does the
-/// sender's `h` cover the stanza.
+/// Before the owner's decision the sender's `h` excludes the stanza. The
+/// owner then commits it while `witness` and `sender` are the only
+/// occupants, and is stopped before it executes effects or replies. From
+/// that commit on the acceptance is durable: the origin reads it from the
+/// mailbox and `h` covers the stanza although no copy has been delivered. A
+/// third occupant, `latecomer`, joins while the owner is still stopped. When
+/// the owner continues, the audience is the one frozen at acceptance:
+/// `witness` and `sender` each receive one live copy carrying the archived
+/// stanza id, `latecomer` receives no live copy (history delivered on join
+/// carries XEP-0203 `<delay/>` and is not a live copy), and the archive
+/// still holds one message.
 #[tokio::test]
-#[ignore = "requires remote child settlement"]
 async fn membership_change_between_acceptance_and_ack() {
-    let mut scenario = Scenario::start().await;
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    let paused = request_h_while_owner_commit_paused(&mut scenario).await;
+    assert_eq!(
+        paused.h,
+        Some(0),
+        "h must not cover the stanza before the owner's decision"
+    );
+
     scenario.seams.arm(HOLD_AFTER_COMMIT);
-    let body = scenario
-        .send_groupchat("membership", uuid::Uuid::new_v4())
-        .await;
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
     scenario
         .seams
-        .wait_for("held after-commit membership", Duration::from_secs(10))
+        .wait_for("held after-commit paused", Duration::from_secs(30))
         .await;
-    let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+    let archived = archived_ids(&scenario.db, &scenario.room, &paused.body).await;
     assert_eq!(archived.len(), 1, "the owner accepted once: {archived:?}");
-    let (h, _) = scenario.sender.request_h(Duration::from_secs(7)).await;
-    assert_eq!(h, Some(0), "the origin has not learned of the acceptance");
+
+    // The decision is durable, so the origin may count the stanza while the
+    // owner has delivered nothing.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut before_release = Vec::new();
+    loop {
+        let (h, frames) = scenario.sender.request_h(Duration::from_secs(10)).await;
+        before_release.extend(frames);
+        if h == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "h covers the stanza once the owner's decision is recorded; got {h:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        !before_release
+            .iter()
+            .any(|frame| is_groupchat(frame, "paused")),
+        "the owner is stopped before it delivers any copy: {before_release:?}"
+    );
 
     let server_a = scenario.server_a.as_ref().expect("origin node");
     let mut latecomer = WsXmppClient::connect_and_auth(
@@ -847,25 +960,197 @@ async fn membership_change_between_acceptance_and_ack() {
     let sender_frames = scenario
         .sender
         .until(Duration::from_secs(30), "sender reflection", |frame| {
-            is_groupchat(frame, "membership")
+            is_groupchat(frame, "paused")
         })
         .await;
-    scenario.assert_one_reflection("sender", &sender_frames, "membership", &archived[0]);
+    scenario.assert_one_reflection("sender", &sender_frames, "paused", &archived[0]);
     let witness_frames = scenario.witness.drain(Duration::from_secs(5)).await;
-    scenario.assert_one_reflection("witness", &witness_frames, "membership", &archived[0]);
+    scenario.assert_one_reflection("witness", &witness_frames, "paused", &archived[0]);
     let late_frames = latecomer.drain(Duration::from_secs(5)).await;
     assert!(
         !late_frames.iter().any(|frame| {
-            is_groupchat(frame, "membership")
-                && frame.get_child("delay", "urn:xmpp:delay").is_none()
+            is_groupchat(frame, "paused") && frame.get_child("delay", "urn:xmpp:delay").is_none()
         }),
         "an occupant who joined after acceptance is outside the frozen audience: {late_frames:?}"
     );
     let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
-    assert_eq!(h, Some(1), "h covers the stanza after owner acceptance");
+    assert_eq!(h, Some(1), "the stanza is counted once");
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &paused.body).await,
+        archived,
+        "membership changes do not create another acceptance"
+    );
+}
+
+/// The newest mailbox entry: its disposition as stored and the node
+/// incarnation its lane records as target.
+async fn newest_mailbox_entry(db: &Database) -> Option<(i64, String, String)> {
+    let conn = db.guard().await.expect("mailbox guard");
+    let mut rows = conn
+        .query(
+            "SELECT e.disposition::bigint, l.target_node_id, l.target_node_epoch \
+             FROM ingress_mailbox_entries e \
+             JOIN ingress_mailbox_lanes l ON l.lane_id = e.lane_id \
+             ORDER BY e.appended_at DESC LIMIT 1",
+            (),
+        )
+        .await
+        .expect("mailbox query");
+    let row = rows.next().await.expect("mailbox row")?;
+    Some((
+        row.get::<i64>(0).expect("disposition"),
+        row.get::<String>(1).expect("target node"),
+        row.get::<String>(2).expect("target incarnation"),
+    ))
+}
+
+/// The room's owner dies before it decides a groupchat message, and the
+/// room's claim then moves to another node incarnation.
+///
+/// The origin appended the entry on a lane that names the dead owner. The
+/// successor's backlog scan does not read that lane until the successor
+/// holds the room's claim and has adopted the lane. It then decides the one
+/// entry from canonical rows. Whatever it decides, the decision is made
+/// once: the archive holds the message exactly when the entry records an
+/// acceptance, the lane names the successor, and the sender's `h` covers the
+/// stanza only when the origin has read that decision.
+#[tokio::test]
+async fn owner_transfer_before_commit_is_decided_once_by_the_successor() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    let room_entity = Entity::new(EntityType::RoomActor, scenario.room.to_string());
+    let claims = PostgresClaimStore::new(scenario.db.clone());
+    let first_owner = claims
+        .current_claim(&room_entity)
+        .await
+        .expect("room claim lookup")
+        .expect("live room claim")
+        .owner;
+
+    scenario.seams.arm(HOLD_BEFORE_COMMIT);
+    let body = scenario
+        .send_groupchat("transfer", uuid::Uuid::new_v4())
+        .await;
+    scenario
+        .seams
+        .wait_for("held before-commit transfer", Duration::from_secs(10))
+        .await;
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(7)).await;
+    assert_eq!(h, Some(0), "nothing is decided yet");
+    let (disposition, target_node, target_incarnation) = newest_mailbox_entry(&scenario.db)
+        .await
+        .expect("the origin appended an entry");
+    assert_eq!(disposition, 0, "the entry awaits its owner");
+    assert_eq!(
+        (target_node, target_incarnation),
+        (first_owner.node_id.clone(), first_owner.node_epoch.clone()),
+        "the lane names the owner the origin proved"
+    );
+
+    // Dropping the handle SIGKILLs the owner. Its replacement is a new
+    // incarnation; rejoining the room there makes it take the room's claim.
+    drop(scenario.server_b.take());
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
+    let port_b = free_tcp_port();
+    let (server_b, _, _) = spawn_cluster_server_with_envs(
+        &scenario.postgres_url,
+        &scenario.pool.pool_env,
+        port_b,
+        &[scenario.port_a],
+        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
+    )
+    .await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    // Kept open: an occupant that left would let the room close again.
+    let mut rejoined = Vec::new();
+    let successor = loop {
+        let claim = claims
+            .current_claim(&room_entity)
+            .await
+            .expect("room claim lookup");
+        if let Some(claim) = claim.filter(|claim| claim.owner != first_owner) {
+            break claim.owner;
+        }
+        // A join is refused or times out until the dead owner's claim can
+        // be taken; each attempt asks the replacement to host the room.
+        if let Ok(mut rejoining) = WsXmppClient::connect_and_auth(
+            &server_b.ws_url(),
+            DOMAIN,
+            "admin",
+            server_b.fixed_account_password(),
+            &format!("witness-{}", uuid::Uuid::new_v4()),
+        )
+        .await
+        {
+            let _ = rejoining
+                .send(&String::from(&cluster_support::muc_join_presence(
+                    &scenario.room.to_string(),
+                    "witness",
+                )))
+                .await;
+            rejoined.push(rejoining);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the room's claim must move off the dead owner"
+        );
+    };
+    scenario.server_b = Some(server_b);
+
+    // The successor adopts the lane and decides its head entry.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let (disposition, target_node, target_incarnation) = loop {
+        let entry = newest_mailbox_entry(&scenario.db)
+            .await
+            .expect("the entry outlives the transfer");
+        if entry.0 != 0 {
+            break entry;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the successor's poller must decide the predecessor's entry"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(
+        (target_node, target_incarnation),
+        (successor.node_id.clone(), successor.node_epoch.clone()),
+        "the lane follows the room's claim"
+    );
+    let accepted = matches!(disposition, 1 | 3);
+    let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+    assert_eq!(
+        archived.len(),
+        usize::from(accepted),
+        "the archive holds the message exactly when the entry records an acceptance"
+    );
+
+    // Give the origin's watcher time to read the decision, if it still can.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+    let (disposition, _, _) = newest_mailbox_entry(&scenario.db)
+        .await
+        .expect("the entry is kept with its message");
+    let consumed = matches!(disposition, 3 | 4);
+    assert_eq!(
+        h,
+        Some(u32::from(consumed)),
+        "h covers the stanza only when the origin has read the owner's decision"
+    );
     assert_eq!(
         archived_ids(&scenario.db, &scenario.room, &body).await,
         archived,
-        "membership changes do not create another acceptance"
+        "later poll passes decide nothing again"
+    );
+    drop(rejoined);
+    assert!(
+        !scenario
+            .seams
+            .events()
+            .iter()
+            .any(|event| event.starts_with("released")),
+        "the killed owner never passed its commit hold: {:?}",
+        scenario.seams.events()
     );
 }

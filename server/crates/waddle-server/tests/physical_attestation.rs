@@ -497,22 +497,25 @@ async fn typed_authority_waits_before_read_and_rejects_future_epoch() {
         ProtocolEpoch::from_storage(1)
     );
 
-    let mut transition = fixture.admin.begin().await.expect("second transition");
-    sqlx::query(&format!(
-        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
-        fixture.target
-    ))
-    .execute(&mut *transition)
-    .await
-    .expect("second owner first lock");
-    sqlx::query(&format!(
-        "UPDATE {}.ingress_protocol_epoch SET epoch = 2 WHERE id = 1",
-        fixture.target
-    ))
-    .execute(&mut *transition)
-    .await
-    .expect("future epoch");
-    transition.commit().await.expect("commit future epoch");
+    for epoch in [2_i64, 3] {
+        let mut transition = fixture.admin.begin().await.expect("later transition");
+        sqlx::query(&format!(
+            "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+            fixture.target
+        ))
+        .execute(&mut *transition)
+        .await
+        .expect("later owner first lock");
+        sqlx::query(&format!(
+            "UPDATE {}.ingress_protocol_epoch SET epoch = $1 WHERE id = 1",
+            fixture.target
+        ))
+        .bind(epoch)
+        .execute(&mut *transition)
+        .await
+        .expect("advance toward future epoch");
+        transition.commit().await.expect("commit epoch step");
+    }
     assert!(matches!(
         authority.current_epoch().await,
         Err(DarkIngressAuthorityError::UnsupportedEpoch)
@@ -5833,6 +5836,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         &waddle_server::config::IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
+            remote_room_acceptance: Default::default(),
         },
         &database_pool,
         &lineage,
@@ -5850,6 +5854,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         waddle_server::config::IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
+            remote_room_acceptance: Default::default(),
         },
         database_pool.global().clone(),
         lineage.clone(),
@@ -5878,6 +5883,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
             waddle_server::config::IngressConfig {
                 pool_size: 1,
                 retry_attempts: 1,
+                remote_room_acceptance: Default::default(),
             },
             database_pool.global().clone(),
             LineageConfig {
@@ -5930,6 +5936,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         waddle_server::config::IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
+            remote_room_acceptance: Default::default(),
         },
         ingress.clone(),
         LineageConfig {

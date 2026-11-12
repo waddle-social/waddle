@@ -27,6 +27,7 @@ data:
   WADDLE_DB_LINEAGE_ACTION: {{ .Values.deployment.lineageAction | quote }}
   {{- end }}
   {{ if .Values.clustering.enabled }}
+  WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE: {{ .Values.clustering.remoteRoomAcceptance | quote }}
   WADDLE_CLUSTERING_LISTEN_ADDRS: {{ join "," .Values.clustering.listenAddrs | quote }}
   {{- $bootstrapPeers := .Values.clustering.bootstrapPeers | default (list) -}}
   {{ if eq (len $bootstrapPeers) 0 }}

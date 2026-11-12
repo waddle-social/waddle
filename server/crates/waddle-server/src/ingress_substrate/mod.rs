@@ -16,7 +16,7 @@ pub use maintenance::{
     receipt_complete_nonterminal_keys, recovery_evidence_pooled,
     unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
 };
-pub(crate) use owned_alias::resolve_prepared_origin_in_scope;
+pub(crate) use owned_alias::{resolve_prepared_origin_in_scope, OriginCandidate};
 #[cfg(test)]
 pub(crate) use owned_alias::{
     AliasGate as OwnedAliasGate, SavepointPhase as OwnedAliasSavepointPhase,
@@ -75,14 +75,12 @@ use crate::ingress_uow::DbRetryClass;
 /// Immutable authenticated origin identity stamped with a newly-created
 /// canonical message. The SM occurrence is absent for ephemeral streams.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
 pub(crate) struct CanonicalSourceBinding {
     principal: AuthenticatedPrincipalRef,
     sm_occurrence: Option<(SmIngressId, IngressOrdinal)>,
 }
 
 impl CanonicalSourceBinding {
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
     pub(crate) fn new(
         principal: AuthenticatedPrincipalRef,
         sm_occurrence: Option<(SmIngressId, IngressOrdinal)>,
@@ -120,6 +118,7 @@ use substrate::discard_database_error;
 pub use substrate::gc_expired_aliases;
 use substrate::gc_retained_child_sql;
 pub use substrate::insert_sm_ref;
+pub use substrate::mailbox_acceptance_epoch;
 pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
 pub use substrate::record_message;

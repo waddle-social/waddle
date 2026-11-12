@@ -2,9 +2,9 @@
   "version": 2,
   "postgres_major": 17,
   "source_sha256": {
-    "candidate": "0e7e37574666a6420770aecfa0093e0a82aec7007b4622de0c9ef241b6cf3da8",
+    "candidate": "a780f04a93bd562d952a2b1087bb6eb137f9491b74609c52362441534c959a43",
     "relation": "2a66930709b7cd08b6ba4d20da97992f16766d2708739f6d5c54cde82c167a35",
-    "waddle": "67ea7d23aae7d6922954db61b900d22a46eba4be261059ff34b2676e92f65069",
+    "waddle": "e48aebec578a3fefa20585ac12243020b0c1c82ff0109b3750f02a63784bb378",
     "global": "d33dfdca8d1447ad2ee53f86619d012b8a4413b448db5c96606edfdf0239d6cf",
     "pending_schema": "695365ed95f025b36ece6839c0635dab14d0df83d98271c648177f0a89a956fe",
     "pending_recovery": "4376a57a2c8d5212140449832966ba818230556c93b3046db052e3a6cd5450fc",
@@ -3239,7 +3239,7 @@
       "public_execute": false,
       "source_file": "candidate",
       "source_start": 103625,
-      "source_end": 108018
+      "source_end": 108372
     },
     {
       "name": "waddle_ingress_release_send_attempt",
@@ -3763,8 +3763,8 @@
       },
       "public_execute": false,
       "source_file": "candidate",
-      "source_start": 108810,
-      "source_end": 109959
+      "source_start": 109164,
+      "source_end": 110313
     },
     {
       "name": "waddle_ingress_truncate_guard",
@@ -4341,6 +4341,114 @@
         "tgargs": "\\x",
         "tgattr": [],
         "tgname": "ingress_epoch_guard_manifest_append_only_truncate",
+        "tgqual": null,
+        "tgtype": 34,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_mailbox_entries",
+      "function": "waddle_ingress_definer_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_mailbox_entries_definer_api_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_mailbox_entries",
+      "function": "waddle_ingress_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_mailbox_entries_epoch_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_mailbox_entries",
+      "function": "waddle_ingress_truncate_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_mailbox_entries_epoch_guard_truncate",
+        "tgqual": null,
+        "tgtype": 34,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_mailbox_lanes",
+      "function": "waddle_ingress_definer_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_mailbox_lanes_definer_api_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_mailbox_lanes",
+      "function": "waddle_ingress_epoch_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_mailbox_lanes_epoch_guard_dml",
+        "tgqual": null,
+        "tgtype": 30,
+        "tgnargs": 0,
+        "tgenabled": "A",
+        "tgnewtable": null,
+        "tgoldtable": null,
+        "tgdeferrable": false,
+        "tgisinternal": false,
+        "tginitdeferred": false
+      }
+    },
+    {
+      "table": "ingress_mailbox_lanes",
+      "function": "waddle_ingress_truncate_guard",
+      "properties": {
+        "tgargs": "\\x",
+        "tgattr": [],
+        "tgname": "ingress_mailbox_lanes_epoch_guard_truncate",
         "tgqual": null,
         "tgtype": 34,
         "tgnargs": 0,
@@ -8668,6 +8776,1651 @@
       "inheritance_edges": 0
     },
     {
+      "name": "ingress_mailbox_entries",
+      "rules": 0,
+      "columns": [
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 1,
+            "attname": "lane_id",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 2,
+            "attname": "sequence",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "1700",
+            "atthasdef": false,
+            "atttypmod": 1310724,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "m",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 3,
+            "attname": "operation_kind",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 4,
+            "attname": "message_key",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "0",
+          "properties": {
+            "attlen": 2,
+            "attnum": 5,
+            "attname": "disposition",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "0",
+          "properties": {
+            "attlen": 4,
+            "attnum": 6,
+            "attname": "attempt_count",
+            "attalign": "i",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "23",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 7,
+            "attname": "next_attempt_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 8,
+            "attname": "dead_lettered_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 9,
+            "attname": "dead_letter_reason",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 10,
+            "attname": "request_language",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "now()",
+          "properties": {
+            "attlen": 8,
+            "attnum": 11,
+            "attname": "appended_at",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "1184",
+            "atthasdef": true,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ingress_mailbox_entries_nonterminal",
+          "options": null,
+          "definition": "CREATE INDEX ingress_mailbox_entries_nonterminal ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (message_key) WHERE (disposition < 3)",
+          "properties": {
+            "indkey": [
+              4
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_mailbox_entries_operation_key",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_entries_operation_key ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (message_key, operation_kind)",
+          "properties": {
+            "indkey": [
+              4,
+              3
+            ],
+            "indclass": [
+              "10065",
+              "1979"
+            ],
+            "indnatts": 2,
+            "indislive": true,
+            "indoption": [
+              0,
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 2,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0",
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_mailbox_entries_pkey",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_entries_pkey ON __SCHEMA_NAME__.ingress_mailbox_entries USING btree (lane_id, sequence)",
+          "properties": {
+            "indkey": [
+              1,
+              2
+            ],
+            "indclass": [
+              "10065",
+              "3125"
+            ],
+            "indnatts": 2,
+            "indislive": true,
+            "indoption": [
+              0,
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 2,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0",
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_mailbox_lanes_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_mailbox_entries_lane_id_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_lanes",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_mailbox_lanes_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_mailbox_entries_lane_id_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_lanes",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_ins",
+          "constraint": "ingress_mailbox_entries_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 5,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_messages",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_c_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_check_upd",
+          "constraint": "ingress_mailbox_entries_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_messages",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "ingress_mailbox_entries_definer_api_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_definer_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_mailbox_entries_epoch_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_mailbox_entries_epoch_guard_truncate",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_truncate_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 34,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        }
+      ],
+      "properties": {
+        "of_type": "0",
+        "options": null,
+        "has_rules": false,
+        "tablespace": "0",
+        "access_method": "heap",
+        "replica_identity": "d"
+      },
+      "constraints": [
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((attempt_count >= 0))",
+          "properties": {
+            "conkey": [
+              6
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_attempt_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((((dead_lettered_at IS NULL) AND (dead_letter_reason IS NULL)) OR ((dead_lettered_at IS NOT NULL) AND (dead_letter_reason IS NOT NULL) AND ((dead_letter_reason >= 1) AND (dead_letter_reason <= 3)) AND (disposition = 0))))",
+          "properties": {
+            "conkey": [
+              8,
+              9,
+              5
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_dead_letter_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((disposition >= 0) AND (disposition <= 4)))",
+          "properties": {
+            "conkey": [
+              5
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_disposition_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_mailbox_lanes_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (lane_id) REFERENCES __SCHEMA_NAME__.ingress_mailbox_lanes(lane_id) ON DELETE RESTRICT",
+          "properties": {
+            "conkey": [
+              1
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_mailbox_entries_lane_id_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "r",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_mailbox_lanes",
+          "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((request_language IS NULL) OR ((request_language <> ''::text) AND (octet_length(request_language) <= 64))))",
+          "properties": {
+            "conkey": [
+              10
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_language_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "definition": "FOREIGN KEY (message_key) REFERENCES __SCHEMA_NAME__.ingress_messages(message_key) ON DELETE CASCADE",
+          "properties": {
+            "conkey": [
+              4
+            ],
+            "confkey": [
+              1
+            ],
+            "conname": "ingress_mailbox_entries_message_key_fkey",
+            "contype": "f",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": [
+              "2972"
+            ],
+            "conpfeqop": [
+              "2972"
+            ],
+            "conppeqop": [
+              "2972"
+            ],
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": "c",
+            "confupdtype": "a",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": "s",
+            "confdelsetcols": null
+          },
+          "foreign_table": "ingress_messages",
+          "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((operation_kind = 1))",
+          "properties": {
+            "conkey": [
+              3
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_operation_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_mailbox_entries_operation_key",
+          "parent": false,
+          "definition": "UNIQUE (message_key, operation_kind)",
+          "properties": {
+            "conkey": [
+              4,
+              3
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_operation_key",
+            "contype": "u",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_mailbox_entries_pkey",
+          "parent": false,
+          "definition": "PRIMARY KEY (lane_id, sequence)",
+          "properties": {
+            "conkey": [
+              1,
+              2
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_pkey",
+            "contype": "p",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((sequence >= (1)::numeric) AND (sequence <= '18446744073709551615'::numeric)))",
+          "properties": {
+            "conkey": [
+              2
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_sequence_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        }
+      ],
+      "inheritance_edges": 0
+    },
+    {
+      "name": "ingress_mailbox_lanes",
+      "rules": 0,
+      "columns": [
+        {
+          "default": null,
+          "properties": {
+            "attlen": 16,
+            "attnum": 1,
+            "attname": "lane_id",
+            "attalign": "c",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "2950",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 2,
+            "attname": "digest_version",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 3,
+            "attname": "digest",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "17",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 2,
+            "attnum": 4,
+            "attname": "encoding_version",
+            "attalign": "s",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "21",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 5,
+            "attname": "encoding",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "17",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "0",
+          "properties": {
+            "attlen": -1,
+            "attnum": 6,
+            "attname": "last_sequence",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "1700",
+            "atthasdef": true,
+            "atttypmod": 1310724,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "m",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": "0",
+          "properties": {
+            "attlen": -1,
+            "attnum": 7,
+            "attname": "last_dispositioned",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "1700",
+            "atthasdef": true,
+            "atttypmod": 1310724,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "m",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 8,
+            "attname": "origin_epoch",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "20",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": 8,
+            "attnum": 9,
+            "attname": "target_epoch",
+            "attalign": "d",
+            "attbyval": true,
+            "attndims": 0,
+            "atttypid": "20",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "p",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "0",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 10,
+            "attname": "target_node_id",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 11,
+            "attname": "target_node_epoch",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": true,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ingress_mailbox_lanes_backlog",
+          "options": null,
+          "definition": "CREATE INDEX ingress_mailbox_lanes_backlog ON __SCHEMA_NAME__.ingress_mailbox_lanes USING btree (target_node_id, lane_id) WHERE (last_dispositioned < last_sequence)",
+          "properties": {
+            "indkey": [
+              10,
+              1
+            ],
+            "indclass": [
+              "3126",
+              "10065"
+            ],
+            "indnatts": 2,
+            "indislive": true,
+            "indoption": [
+              0,
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": false,
+            "indnkeyatts": 2,
+            "indcheckxmin": false,
+            "indcollation": [
+              "100",
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_mailbox_lanes_digest_key",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_lanes_digest_key ON __SCHEMA_NAME__.ingress_mailbox_lanes USING btree (digest_version, digest)",
+          "properties": {
+            "indkey": [
+              2,
+              3
+            ],
+            "indclass": [
+              "1979",
+              "10006"
+            ],
+            "indnatts": 2,
+            "indislive": true,
+            "indoption": [
+              0,
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 2,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0",
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": false,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        },
+        {
+          "name": "ingress_mailbox_lanes_pkey",
+          "options": null,
+          "definition": "CREATE UNIQUE INDEX ingress_mailbox_lanes_pkey ON __SCHEMA_NAME__.ingress_mailbox_lanes USING btree (lane_id)",
+          "properties": {
+            "indkey": [
+              1
+            ],
+            "indclass": [
+              "10065"
+            ],
+            "indnatts": 1,
+            "indislive": true,
+            "indoption": [
+              0
+            ],
+            "indisready": true,
+            "indisvalid": true,
+            "indisunique": true,
+            "indnkeyatts": 1,
+            "indcheckxmin": false,
+            "indcollation": [
+              "0"
+            ],
+            "indimmediate": true,
+            "indisprimary": true,
+            "indisclustered": false,
+            "indisexclusion": false,
+            "indisreplident": false,
+            "indnullsnotdistinct": false
+          },
+          "tablespace": "0"
+        }
+      ],
+      "triggers": [
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_mailbox_lanes_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_mailbox_entries_lane_id_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_mailbox_lanes_pkey",
+          "parent": false,
+          "function": "RI_FKey_restrict_del",
+          "constraint": "ingress_mailbox_entries_lane_id_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "ingress_mailbox_lanes_definer_api_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_definer_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_mailbox_lanes_epoch_guard_dml",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_epoch_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 30,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "name": "ingress_mailbox_lanes_epoch_guard_truncate",
+          "when": null,
+          "index": null,
+          "parent": false,
+          "function": "waddle_ingress_truncate_guard",
+          "constraint": null,
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 34,
+            "tgnargs": 0,
+            "tgenabled": "A",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": false,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": null,
+          "related_schema": null,
+          "function_schema": "__SCHEMA_NAME__"
+        }
+      ],
+      "properties": {
+        "of_type": "0",
+        "options": null,
+        "has_rules": false,
+        "tablespace": "0",
+        "access_method": "heap",
+        "replica_identity": "d"
+      },
+      "constraints": [
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((digest_version = 1) AND (octet_length(digest) = 32)))",
+          "properties": {
+            "conkey": [
+              2,
+              3
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_lanes_digest_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_mailbox_lanes_digest_key",
+          "parent": false,
+          "definition": "UNIQUE (digest_version, digest)",
+          "properties": {
+            "conkey": [
+              2,
+              3
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_lanes_digest_key",
+            "contype": "u",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((encoding_version = 1) AND ((octet_length(encoding) >= 3) AND (octet_length(encoding) <= 8192)) AND (get_byte(encoding, 0) = 1)))",
+          "properties": {
+            "conkey": [
+              4,
+              5
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_lanes_encoding_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((origin_epoch >= 0) AND (target_epoch >= 0) AND (target_node_id <> ''::text) AND (octet_length(target_node_id) <= 1024) AND (target_node_epoch <> ''::text) AND (octet_length(target_node_epoch) <= 1024)))",
+          "properties": {
+            "conkey": [
+              8,
+              9,
+              10,
+              11
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_lanes_fence_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": "ingress_mailbox_lanes_pkey",
+          "parent": false,
+          "definition": "PRIMARY KEY (lane_id)",
+          "properties": {
+            "conkey": [
+              1
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_lanes_pkey",
+            "contype": "p",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": true,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK ((((last_sequence >= (0)::numeric) AND (last_sequence <= '18446744073709551615'::numeric)) AND ((last_dispositioned >= (0)::numeric) AND (last_dispositioned <= last_sequence))))",
+          "properties": {
+            "conkey": [
+              6,
+              7
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_lanes_sequence_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
+        }
+      ],
+      "inheritance_edges": 0
+    },
+    {
       "name": "ingress_messages",
       "rules": 0,
       "columns": [
@@ -9300,6 +11053,30 @@
           "index": "ingress_messages_pkey",
           "parent": false,
           "function": "RI_FKey_cascade_del",
+          "constraint": "ingress_mailbox_entries_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 9,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_cascade_del",
           "constraint": "ingress_owner_rejections_child_message_key_fkey",
           "properties": {
             "tgargs": "\\x",
@@ -9459,6 +11236,30 @@
           },
           "function_args": "",
           "related_table": "ingress_effect_intents",
+          "related_schema": "__SCHEMA_NAME__",
+          "function_schema": "pg_catalog"
+        },
+        {
+          "name": "RI_ConstraintTrigger_a_<oid>",
+          "when": null,
+          "index": "ingress_messages_pkey",
+          "parent": false,
+          "function": "RI_FKey_noaction_upd",
+          "constraint": "ingress_mailbox_entries_message_key_fkey",
+          "properties": {
+            "tgargs": "\\x",
+            "tgattr": [],
+            "tgtype": 17,
+            "tgnargs": 0,
+            "tgenabled": "O",
+            "tgnewtable": null,
+            "tgoldtable": null,
+            "tgdeferrable": false,
+            "tgisinternal": true,
+            "tginitdeferred": false
+          },
+          "function_args": "",
+          "related_table": "ingress_mailbox_entries",
           "related_schema": "__SCHEMA_NAME__",
           "function_schema": "pg_catalog"
         },

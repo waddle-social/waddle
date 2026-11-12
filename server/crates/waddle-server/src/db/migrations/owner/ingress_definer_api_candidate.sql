@@ -2735,6 +2735,8 @@ BEGIN
         SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_sm_refs AS r
                           WHERE r.message_key = m.message_key)
+          AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_mailbox_entries AS entry
+                          WHERE entry.message_key = m.message_key AND entry.disposition < 3)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_owner_rejections AS owner_child
                           WHERE owner_child.source_message_key = m.message_key
                             AND (m.owner_decision IS NULL OR m.owner_decision <> 2))
@@ -2764,6 +2766,8 @@ BEGIN
         SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_sm_refs AS r
                           WHERE r.message_key = m.message_key)
+          AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_mailbox_entries AS entry
+                          WHERE entry.message_key = m.message_key AND entry.disposition < 3)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_owner_rejections AS owner_child
                           WHERE owner_child.source_message_key = m.message_key
                             AND (m.owner_decision IS NULL OR m.owner_decision <> 2))
@@ -2930,3 +2934,15 @@ CREATE TRIGGER ingress_owner_rejections_definer_api_guard_dml
 BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_owner_rejections
 FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
 ALTER TABLE __SCHEMA__.ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejections_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_mailbox_lanes_definer_api_guard_dml ON __SCHEMA__.ingress_mailbox_lanes;
+CREATE TRIGGER ingress_mailbox_lanes_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_mailbox_lanes
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_mailbox_lanes ENABLE ALWAYS TRIGGER ingress_mailbox_lanes_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_mailbox_entries_definer_api_guard_dml ON __SCHEMA__.ingress_mailbox_entries;
+CREATE TRIGGER ingress_mailbox_entries_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_mailbox_entries
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_mailbox_entries ENABLE ALWAYS TRIGGER ingress_mailbox_entries_definer_api_guard_dml;

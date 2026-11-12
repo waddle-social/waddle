@@ -236,14 +236,20 @@ async fn postgres_orphan_gc_fences_future_epoch_before_deleting_proofs() {
     assert_eq!(gc_proof_count(&fixture.db).await, 0);
 
     seed_gc_proofs(&fixture.db, MessageKey::new(), 1).await;
-    fixture
-        .db
-        .execute(
-            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
-                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
-        )
-        .await
-        .expect("activate unsupported epoch two");
+    // Each autocommit statement is its own transaction, so every step is a
+    // sanctioned single advance; epoch three is the first unsupported one.
+    for statement in [
+        "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        "UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+    ] {
+        fixture
+            .db
+            .execute(statement)
+            .await
+            .expect("advance one step toward unsupported epoch three");
+    }
     assert!(matches!(
         gc_orphan_proof_batch(&fixture.db, &gc_budget()).await,
         Err(AliasGcError::Substrate(
@@ -984,11 +990,18 @@ fn gc_monitoring_predicate_matches_collector() {
         predicate(GC_CANDIDATES_SQLITE),
         "both collector dialects use the same pair predicate"
     );
+    // The deployed database holds both the mailbox and pending delivery, so
+    // the monitored predicate carries both retained-child subqueries.
     let mut monitored = postgres;
     for alias in ["m", "child"] {
+        let reference =
+            format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key");
         monitored = monitored.replace(
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key"),
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"),
+            &reference,
+            &format!(
+                "{reference}{}",
+                super::substrate::retained_child_unions(alias, true, true)
+            ),
         );
     }
     let monitoring = std::fs::read_to_string(
@@ -1970,13 +1983,15 @@ async fn epoch_advances_at_most_once_per_transaction_and_future_epochs_fence_gc(
     );
     drop(tx);
 
-    // Advance to epoch 2 through two sanctioned transactions; the live
+    // Advance to epoch 3 through three sanctioned transactions; the live
     // epoch now exceeds what this binary supports, so its GC fails
     // closed instead of auto-claiming the future epoch.
     for statement in [
         "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
              lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
         "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        "UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = now(), \
              lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
     ] {
         sqlx::query(statement)

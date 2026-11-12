@@ -88,6 +88,7 @@ BEGIN
         SELECT m.terminal_at IS NOT NULL
           AND NOT pending_delivery
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_sm_refs r WHERE r.message_key = member)
+          AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_mailbox_entries e WHERE e.message_key = member AND e.disposition < 3)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.sm_ingress_appends a WHERE a.message_key = member::text AND a.disposition = 0)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_effect_descendants d WHERE d.message_key = member AND d.settled_at IS NULL)
           AND NOT EXISTS (
@@ -128,6 +129,10 @@ BEGIN
         DELETE FROM __SCHEMA__.ingress_effect_intents WHERE message_key = member;
         DELETE FROM __SCHEMA__.ingress_origin_aliases WHERE message_key = member;
         DELETE FROM __SCHEMA__.ingress_deliveries WHERE message_key = member;
+        -- Only consumed entries remain here; the readiness check above
+        -- retains a message whose entry is not consumed. The lane row is
+        -- never locked or deleted.
+        DELETE FROM __SCHEMA__.ingress_mailbox_entries WHERE message_key = member AND disposition >= 3;
         DELETE FROM __SCHEMA__.muc_invite_claims WHERE message_key = member;
     END LOOP;
 

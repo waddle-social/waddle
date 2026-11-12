@@ -1,20 +1,356 @@
-# P2.2 — durable mailbox core: design gate
+# P2.2 — durable mailbox core
 
-Status: **proposal for review; not implemented or accepted**. This document
-sharpens [#1986](https://github.com/waddle-social/waddle/issues/1986); it does
-not authorize schema, repositories, allocation, a relay cutover or production
-activation. Its code references are to `main@8ecc94bb` unless otherwise noted.
+Status: **active from protocol epoch 2**.
+Migration V1031 creates the lane and entry tables and `MailboxRepository` is
+the only code that writes them. On a clustered PostgreSQL deployment the
+ingress commit appends and decides entries in every transaction whose
+protocol epoch is 2 or later, unless
+`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=relay` is set. The sections from
+"Ownership and boundaries" onward are the design review that preceded the
+implementation and are kept for their failure analysis. Where they describe a
+question as open, the "Implemented contract" section below is the answer in
+force.
 
-[#2116](https://github.com/waddle-social/waddle/issues/2116) is a hard
-prerequisite for mailbox DDL and executable storage work. Its composable,
-main-pool transaction authority and migration-owner/epoch-guard boundary are
-not complete. The [#1986 gate](https://github.com/waddle-social/waddle/issues/1986#issuecomment-6562336267)
-prohibits registering mailbox DDL or allocating through a raw or parallel pool.
-Neither the existing cloneable `IngressUnitOfWork` nor an isolated dark receipt
-operation establishes that prerequisite. Re-review this design against the
-actual #2116 interface and guard migration when they are ready. The three
-contract questions below are also **BLOCKING** before mailbox schema or
-repositories: the test matrix does not resolve them by itself.
+## Implemented contract
+
+### Decisions
+
+| Question | Decision |
+| --- | --- |
+| Tables | Two: `ingress_mailbox_lanes` and `ingress_mailbox_entries`. An entry refers to its canonical `ingress_messages` row and stores no payload; acceptance evidence stays in `ingress_messages.owner_decision`, the sealed manifest and `ingress_owner_rejections`. |
+| Operation identity | `MailboxOperationKey::RoomAcceptance(MessageKey)`, unique across every lane (`UNIQUE (message_key, operation_kind)`). `DispatchToRoomRemote` and delivery keys name one owner-specific attempt and are not identity. |
+| Lane key | The stable logical lane `(origin, recipient, room lane)` from `waddle_xmpp::ingress::mailbox`. The row stores the full canonical encoding and indexes its versioned digest; a lookup that finds a row with the same digest and another encoding fails closed. |
+| Fences | `origin_epoch`, `target_epoch`, `target_node_id` and `target_node_epoch` are columns beside the identity. A caller presents the fence it has proven against its claims in the same transaction. An equal fence is current, a fence whose epochs are nowhere smaller and somewhere larger replaces the stored one, and anything else is stale. |
+| Sequence | `last_sequence` on the lane row, read under `FOR UPDATE` and incremented with the entry insert. Gap-free in committed history, `NUMERIC(20)`, 1 through `u64::MAX`, with a typed exhaustion error. |
+| Cursor | `last_dispositioned` on the lane row: the last sequence the lane's target has dispositioned, exclusive. It moves only to its immediate successor, in the target's transaction. |
+| Dispositions | `Pending → OwnerAccepted \| OwnerRejected → Consumed`. The owner's decision moves the cursor; consumption by the origin does not. A terminal entry keeps which decision it was. |
+| Admission | Per-lane and per-node pending caps, checked after the lane lock and before the counter moves. A refused append writes nothing. |
+| Retention | An entry is removed only by the cascade from its canonical message. |
+| Backends | PostgreSQL only. SQLite records V1031 and creates nothing; a single-node deployment seals in one transaction and writes no lane. |
+| Dead letters | A dead-lettered entry stays `Pending` at its lane head. The cursor never passes it without an operator repair. |
+
+### Lock order
+
+Inside one transaction: lane row, then canonical message, then entry.
+`MailboxRepository::lock_lane` (origin, by identity),
+`lock_lane_for_target`, `lock_lane_for_origin` and `claim_backlogged_lane`
+(by lane id) take the lane and return a `LockedMailboxLane`; `append`,
+`decide`, `consume` and `read_after_cursor` require it and check that it was
+locked by the same transaction. `append` locks the canonical message before
+it looks the operation up, so two appenders that hold different lanes
+serialize on the message and at most one allocates.
+
+Message garbage collection locks the canonical message with `SKIP LOCKED` and
+reaches entries only through the cascade. It never locks a lane, so it cannot
+wait on a lane held by an appender that is waiting for that message.
+
+### Retention
+
+An entry that is not `Consumed` retains its canonical message. On PostgreSQL
+the retention clock (`refresh_retention`), the collector's candidate scan and
+its final delete all treat such an entry like an SM reference
+(`retained_child_unions` in `ingress_substrate/substrate.rs`), and each reads
+it in a fresh READ COMMITTED statement snapshot. The deployed CNPG monitoring
+query carries the same clause, and `gc_monitoring_predicate_matches_collector`
+keeps the two identical. A consumed entry retains nothing and leaves with its
+message through the cascade. Lane rows are not collected.
+
+Lock schedules:
+
+- Appender first: the appender holds its lane and the canonical message. The
+  collector's `SKIP LOCKED` passes over the message and finishes.
+- Collector first: the collector holds the canonical message. The appender
+  holds its lane and waits for the message. The collector needs no lane, so it
+  either skips the message, after which the appender proceeds, or deletes it,
+  after which the appender fails with `MailboxError::ParentMissing` and rolls
+  its lane back.
+
+The unregistered GC pilot (`ingress_gc_fk_transition_v1_candidate.sql`,
+`ingress_gc_api_v1_candidate.sql`) lists the entry foreign key in its FK
+manifest, turns it into `NO ACTION`, refuses a message whose entry is not
+consumed and deletes consumed entries explicitly.
+
+### Remote room acceptance
+
+`RemoteRoomAcceptance` (`ingress_uow`) selects how a groupchat message for a
+room owned by another node reaches the owner's acceptance. `DurableMailbox`
+is the default and is set from `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`
+(`mailbox` or `relay`). It can take effect only with clustered fencing on
+PostgreSQL (`mailbox_acceptance_enabled`), and it does take effect in a
+transaction whose protocol epoch is at least `mailbox_acceptance_epoch()`,
+which is 2 (`mailbox_acceptance_active`). `OrderedRelay` leaves the relay
+path as it is at every epoch.
+
+In a transaction that uses the mailbox (`ingress/commit_mailbox.rs`):
+
+- **Origin commit.** After its stream row and before any canonical row, the
+  origin locks its lane: origin = the stream-management session (or the bound
+  resource for a stream without one), recipient = the room's `MucStanza` lane.
+  The fence is the stream's claim epoch and the room claim read from
+  `clustering_claims` in the same transaction. The canonical message is
+  created with its authenticated source binding, because only a bound message
+  can carry an owner decision and the binding is immutable. Once the
+  `DispatchToRoomRemote` intent is recorded, the same transaction sets
+  `owner_decision = 0` and appends the entry `Pending`. A message that already
+  exists without a source binding keeps the relay's behaviour and gets no
+  entry.
+- **Admission.** Under the lane lock, a lane at 64 or an owner node at 16 384
+  pending entries refuses the stanza: the commit records an ordinary denial
+  with a `resource-constraint` error of type `wait` and appends nothing. A
+  stanza already bound to its wire position is never refused for a backlog it
+  is part of.
+- **Owner commit.** The owner's relayed commit looks the entry up by
+  `RoomAcceptance(MessageKey)`, locks its lane as target with the room claim
+  it has just asserted, and only then locks the canonical message. Clustered
+  rooms seal their manifest in this mode. Before commit the same transaction
+  latches `owner_decision` to accepted, or stores the frozen error as a
+  rejection child, maps it in `ingress_owner_rejections` and latches rejected;
+  then it moves the entry to `OwnerAccepted` or `OwnerRejected` and the lane
+  cursor past it. The owner's first decision may refuse a message even though
+  the origin's row already records its dispatch. On a replay the latched
+  decision is the authority, whatever the replayed plan concluded.
+
+No second acceptance record exists: the entry's disposition and
+`owner_decision` are written together and the manifest or the rejection child
+is the evidence.
+
+### Origin handled count
+
+The origin never counts a stanza as handled on the strength of its own commit
+while its room owner is undecided (`ingress/origin_gate.rs`):
+
+- **Commit.** When the entry is still `Pending`, the origin's commit binds the
+  stanza to its wire position but persists the handled checkpoint of the
+  prefix before it, and the decision carries a `PendingRoomAcceptance`. A
+  retransmission that finds the owner's decision already recorded consumes
+  the entry in its own commit and is counted normally.
+- **Connection.** `frame.rs` leaves the stanza's reserved inbound slot open
+  (the slot mechanism deferred ordered-relay hand-offs already use) and calls
+  `IngressAuthority::watch_room_acceptance`. `h` and every `<a/>` therefore
+  report only the proven prefix, while `<r/>` and later stanzas are still
+  processed. Later stanzas complete their own slots but cannot move `h` past
+  the open one.
+- **No free slot.** A connection holds at most 256 deferred slots, each
+  reserved when its stanza is routed, and a held slot keeps its place in the
+  completion queue until the owner's decision settles it. When no slot can be
+  reserved, or the queue is closed, the stanza is still committed and its
+  entry appended; the handler then waits for the owner's decision itself
+  (`await_room_acceptance_inline`), so the connection reads no further frame
+  and `h` cannot cross the stanza. A proven decision counts it; anything else
+  leaves it an unhandled hole. The stanza is not refused, because the
+  refusal would have to precede a commit that alone knows whether the room
+  is remote.
+- **Authoritative lookup.** The watcher polls `resolve_room_acceptance`: it
+  reads the entry, and for a decided entry locks the lane as origin and the
+  canonical message, requires `owner_decision` to record the same decision
+  (and a refusal to have its rejection child), consumes the entry and
+  commits. The same read serves a lost relay reply and an indeterminate owner
+  commit; a relay reply, a relay failure and a timeout are never evidence.
+- **Settlement.** A read decision completes the slot and `h` advances; the
+  existing checkpoint flush then persists it. If no decision can be proven
+  within 60 seconds, or the entry is missing, dead-lettered, contradicted by
+  the canonical message or fenced by a later stream claim, the watcher
+  withholds the slot: the tracker turns it into a permanent hole, the stanza
+  is never acknowledged on that connection and the sender keeps
+  responsibility for it. A resumed or new session retransmits it and resolves
+  to the same canonical message and entry.
+
+A stream without stream management has no handled count; its watcher only
+consumes the decision. `ingress.mailbox.room_acceptances{outcome}` counts how
+waits end.
+
+Separate registered and handled frontiers are not built: the single
+checkpoint excludes the one open stanza, and the tracker's contiguity rule
+keeps `h` behind it.
+
+### Hints, poller and dead letters
+
+- **Poller** (`clustering/route_bridge/mailbox.rs`). Each clustered node runs
+  one. It wakes on a hint or every second, scans at most 128 lanes that record
+  this node as target and still owe a disposition
+  (`ingress_mailbox_lanes_backlog`), and works them two at a time. The poller
+  is the authority for finding work; it idles while the relay selector is in
+  force.
+- **Work** (`ingress/mailbox_worker.rs`). A worker claims a lane with
+  `SKIP LOCKED`, reads its head entry and rebuilds the request from canonical
+  rows: the message from the canonical envelope, the sender's principal from
+  the source binding, the origin id from the alias and the stanza language
+  from the entry's `request_language`, which the canonical message does not
+  retain. It then runs the owner's ordinary relayed-groupchat commit, which
+  asserts the room claim and records the decision. Claiming a lane proves
+  nothing about the room. Frames the owner produces for the sender are not
+  written by the worker; their receipts stay pending and ingress recovery
+  delivers them.
+- **Hint** (`waddle.clustering.relay.mailbox_hint.v1`). After a commit that
+  leaves a stanza awaiting its owner, the origin sends the node recorded as
+  the lane's target a message with no payload. Its only effect is to wake that
+  node's poller. It is a relay message of its own, so `deliver_ordered` is not
+  touched; a peer without it answers with an unknown-message error, which the
+  sender ignores.
+- **Retry.** A failed attempt is counted on the entry and the next attempt is
+  deferred by 250 ms doubling to 30 s. After eight failures, or when the
+  canonical evidence cannot be read, the entry is dead-lettered: it stays
+  `Pending` at its lane head and the cursor does not move, so nothing behind
+  it on that lane is decided. Only `repair_mailbox_dead_letter`, an operator
+  action, returns it to work.
+- **Telemetry.** `ingress.mailbox.deliveries{outcome}` (`decided`, `retried`,
+  `dead_lettered`) and `ingress.mailbox.room_acceptances{outcome}` are
+  registered at zero. `ingress.mailbox.hints{outcome}` is context only.
+
+### Cutover
+
+The cutover from relay acceptance to mailbox acceptance is the protocol
+epoch, and it is coordinated, not rolling (D1 in
+[`2046-completion-contracts.md`](2046-completion-contracts.md)).
+
+- **Activation.** `supported_protocol_epoch()` is 2. With every server
+  stopped, the owner phase (`prepare_restricted_runtime_owner`) advances
+  `ingress_protocol_epoch` one step per transaction until it reaches 2,
+  stamping each step with the deployment's lineage
+  (`activate_ingress_protocol_epoch`). A binary that implements only epoch 1
+  then fails every ingress transaction it opens with
+  `EpochUnsupported`, inside that transaction, and a guarded write that was
+  blocked behind the activation fails its epoch proof when it continues.
+- **Per-transaction boundary.** Every ingress transaction reads the live
+  epoch under the epoch row lock before it writes. A commit below epoch 2
+  dispatches to the room owner through the ordered relay, records no source
+  binding for that purpose, writes no lane and no entry, seals no clustered
+  manifest and counts the stanza on the origin's commit. A commit at epoch 2
+  or later binds the source, opens the owner decision and appends the entry.
+  Because the activation runs while no server runs, the two kinds never
+  interleave on one stream.
+- **Relay-era rows.** A `DispatchToRoomRemote` intent recorded below epoch 2
+  belongs to a message without a source binding, and the schema allows an
+  owner decision only on a bound message. Such a message was already
+  acknowledged to its sender. It is never given a mailbox entry or a
+  decision, including when its stanza is retransmitted after the activation
+  (`record_origin` returns no entry for an unbound message). Its unreceipted
+  dispatch stays with the ingress maintenance pass, exactly as before the
+  activation. Nothing is adopted from one era into the other.
+- **Startup refusal.** A node that selects the mailbox on clustered
+  PostgreSQL checks the mailbox rows before it serves
+  (`MailboxRepository::verify_cutover_state`, from
+  `IngressAuthority::finish_startup`). It refuses to start, with
+  `MailboxError::Cutover`, when an entry belongs to a message without a
+  source binding or without an owner decision, or when the live epoch is
+  below 2 and an entry is still pending or unconsumed: no commit at that
+  epoch could ever finish it. It does not repair either state.
+- **Deployments without the owner phase.** A PostgreSQL deployment that does
+  not run the restricted-runtime owner phase stays at epoch 0. It keeps the
+  relay's behaviour whatever the selector says, and nothing fences an older
+  binary there.
+- **Selector.** `ingress.remoteRoomAcceptance` in the Helm chart sets
+  `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`. `relay` keeps relay acceptance at
+  every epoch and must be set on every node or none; it exists for the
+  lanes that still depend on the ordered relay and is removed with them.
+
+### Owner transfer and unread decisions
+
+- **Lane adoption.** A lane records the owner incarnation its origin last
+  proved, and a node's backlog scan reads only lanes recorded for itself.
+  Every fifth poll pass a node also reads up to 128 backlogged lanes recorded
+  for another incarnation (`scan_foreign_backlog`), decodes each lane's room
+  and looks its claim up in `clustering_claims`. For a room the claims table
+  assigns to this node, a second transaction reads the claim again, locks the
+  lane and writes the claim onto it (`adopt_backlogged_lane`), provided the
+  claim epoch is later than the one on file. The lane then appears in this
+  node's backlog scan and its head entry is worked like any other. Adoption
+  decides nothing: the owner's commit asserts the room claim again. A lane
+  whose room has no claim, or whose claim is held elsewhere, is left alone,
+  so its entry stays pending until some node owns the room. A restarted owner
+  is a new incarnation and adopts its own earlier lanes the same way, once it
+  holds the room's claim again. The origin still moves the lane itself when
+  it commits the same stanza again under the new claim.
+- **Occupancy after a transfer.** A room's occupants live in the room actor's
+  memory. A successor that does not know the sender as an occupant refuses
+  the stanza through the ordinary groupchat checks; that refusal is the
+  owner's decision and is recorded like any other. No acceptance is derived
+  from the predecessor's state.
+- **Unread decisions.** Every thirtieth poll pass a node reads up to 128
+  decided entries appended at least ten minutes ago
+  (`scan_unconsumed_decisions`) and consumes each one whose canonical message
+  proves the same decision, under the lane and canonical locks
+  (`sweep_unconsumed_decisions`). The origin's watcher gives up after 60
+  seconds, so a live origin has finished with an entry long before. The
+  terminal entry keeps which decision it was until its message is collected,
+  so a retransmission that arrives after the sweep still reads the decision
+  and is counted. An entry whose canonical message does not prove its
+  decision is left in place and logged; it keeps retaining its message.
+
+### Remote copies of a frozen manifest
+
+The owner's commit seals the room manifest: the audience, the child delivery
+keys and the sender's reflection. Delivering those copies does not depend on
+the mailbox entry or on the node that accepted the message:
+
+- The owner's live execution relays each copy to the node that hosts the
+  occupant and records a receipt for each one that lands.
+- A copy whose relay failed, whose reply was lost, or which was never
+  attempted because the owner stopped, leaves its route receipt pending. The
+  ingress maintenance pass of every node reads unreceipted rows from the
+  shared database and rebuilds exactly the frozen copies
+  (`ingress/recovery_muc.rs`): occupants named by the manifest and not yet
+  completed, never the current roster. A rebuilt copy for an occupant this
+  node does not host goes through the detached-delivery effect
+  (`QueueDetached`) addressed to the frozen resource. It stays pending, and a
+  later pass retries it, while the node that owns the occupant cannot be
+  reached.
+- Because the rebuild reads only canonical rows, it gives the same result
+  after a restart and after the room's claim has moved. An occupant who
+  joined after the acceptance is not in the manifest and receives no live
+  copy.
+
+The poller does not write the frames the owner produces for the sender;
+their receipts stay pending and the same recovery delivers them.
+
+### Limits of the current implementation
+
+These hold today and bound what the mailbox selector may be used for.
+
+- **Relay still carries the stanza.** The origin still relays the groupchat
+  stanza through `deliver_ordered`; the mailbox entry and the poller make the
+  owner's acceptance durable and recoverable beside it. No ordered-relay kind
+  is removed and its wire id is unchanged.
+- **Lane rows.** Lane rows are never deleted. A lane exists per
+  stream-management session and room, so the table grows with sessions.
+- **Refusal after a lost reply.** The owner's refusal reaches the sender in
+  the relay reply. When that reply is lost, the origin's lookup still counts
+  the stanza as handled once it reads the refusal, and the error stanza is
+  re-emitted only when ingress recovery repairs the owner's recorded
+  `ErrorReply` obligation.
+- **Other lanes.** Only `RoomAcceptance(MessageKey)` exists as an operation.
+  MUC joins and occupant presence, Muji signaling and the bare-JID and
+  full-JID lanes have no canonical request to refer to and are still served
+  by the ordered relay alone.
+
+### Guard, roles and manifest
+
+Both tables are in `EPOCH_GUARDED_TABLES` and in
+`ingress_epoch_guard_manifest`, with the statement-level DML guard and the
+truncate guard enabled `ALWAYS`. The owner phase grants the runtime `SELECT,
+INSERT, UPDATE` on both (`TABLE_GRANTS` in `server/runtime_owner.rs`): rows
+are inserted, locked and updated, and deleted only by the cascade, which runs
+as the table owner. The restricted-ingress manifest pins their structure and
+triggers. The definer-API candidate installs its guard trigger on both and
+exposes no mailbox function, so the repository refuses with
+`MailboxError::DefinerApiUnsupported` on a transaction that uses that
+candidate.
+
+### Tests
+
+`crates/waddle-server/tests/mailbox_core_postgres.rs` covers, against real
+PostgreSQL: a blocked second appender behind a held lane lock, unique
+contiguous sequences under concurrent appenders, no gap after a rollback, the
+full unsigned range and exhaustion, one entry for one operation across lanes
+(sequential and raced), a replan from owner A to owner B that returns the
+first entry and fences A out, head-only owner decisions with an exclusive
+cursor, admission refusal before any write, and refusal of unproven,
+stale-proof and unsupported-epoch writes. It also runs the real collector
+against a pending, a decided and a consumed entry, and drives both lock
+schedules with an observed blocked backend. The binary runs in nextest's
+`postgres` group and its tests are in `required-cluster-tests.txt`.
+`tests/ingress_relation_guard_lab/gc_pilot.rs` covers the same retention rule
+in the GC pilot.
 
 ## Ownership and boundaries
 

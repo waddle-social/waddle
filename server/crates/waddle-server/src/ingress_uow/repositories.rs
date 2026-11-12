@@ -271,15 +271,24 @@ impl InboxRepository {
 pub struct CanonicalMessageRepository;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
 pub(crate) enum RoomOwnerDecision {
     Undecided,
     Accepted,
     Rejected,
 }
 
+/// Owner-result state of one canonical message, read under its row lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+pub(crate) struct RoomOwnerState {
+    /// Whether the message was created with an authenticated source binding.
+    /// Only a bound message can carry an owner decision.
+    pub source_bound: bool,
+    /// `None` until the origin opens the decision with its dispatch intent.
+    pub decision: Option<RoomOwnerDecision>,
+}
+
+#[cfg(all(test, not(feature = "clustering")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RelayedSourceAuthority {
     pub decision: RoomOwnerDecision,
     pub rejection_child: Option<MessageKey>,
@@ -465,7 +474,9 @@ impl CanonicalMessageRepository {
         .map_err(Into::into)
     }
 
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+    /// Record message content together with its immutable authenticated
+    /// source. A message created this way can later carry a room owner's
+    /// decision; one created without a source never can.
     pub(crate) async fn record_message_with_source(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -613,7 +624,51 @@ impl CanonicalMessageRepository {
             }
             let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
             ingress_substrate::resolve_prepared_origin_in_scope(
-                tx, prepared, &scope, sender, target, origin_id, digest,
+                tx,
+                prepared,
+                &scope,
+                sender,
+                target,
+                origin_id,
+                ingress_substrate::OriginCandidate {
+                    digest,
+                    source: None,
+                },
+            )
+            .await?
+        };
+        Ok((transaction, resolved))
+    }
+
+    /// [`Self::resolve_prepared_origin_owned`] for a message that must carry
+    /// its authenticated source: a first insert binds `source`, and an
+    /// existing alias is returned as it is.
+    pub(crate) async fn resolve_prepared_origin_owned_with_source<'a>(
+        mut transaction: IngressUowTransaction<'a>,
+        sender: &BareJid,
+        target: &NormalizedTarget,
+        origin_id: &OriginId,
+        digest: &SemanticDigest,
+        source: &ingress_substrate::CanonicalSourceBinding,
+    ) -> Result<(IngressUowTransaction<'a>, AliasResolution), IngressUowError> {
+        let scope = super::OwnedAliasScope(());
+        let resolved = {
+            let (tx, prepared) = transaction.prepared_parts();
+            if tx.driver() != DatabaseDriver::Postgres {
+                return Err(IngressUowError::PostgresRequired);
+            }
+            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
+            ingress_substrate::resolve_prepared_origin_in_scope(
+                tx,
+                prepared,
+                &scope,
+                sender,
+                target,
+                origin_id,
+                ingress_substrate::OriginCandidate {
+                    digest,
+                    source: Some(source),
+                },
             )
             .await?
         };
@@ -636,7 +691,8 @@ impl CanonicalMessageRepository {
         .map_err(Into::into)
     }
 
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+    /// [`Self::resolve_and_record_alias`] for a message that must carry its
+    /// authenticated source.
     pub(crate) async fn resolve_and_record_alias_with_source(
         transaction: &mut IngressUowTransaction<'_>,
         sender: &BareJid,
@@ -1099,8 +1155,8 @@ impl CanonicalMessageRepository {
             .map_err(|_| ingress_substrate::IngressSubstrateError::InvalidStoredDigest.into())
     }
 
-    #[allow(dead_code)] // called when relayed source validation is activated.
-    async fn rejection_child(
+    /// The rejection child mapped to `source`, if its owner rejected it.
+    pub(crate) async fn rejection_child(
         transaction: &mut IngressUowTransaction<'_>,
         source: MessageKey,
     ) -> Result<Option<MessageKey>, IngressUowError> {
@@ -1160,7 +1216,8 @@ impl CanonicalMessageRepository {
             .map_err(|_| ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey.into())
     }
 
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+    /// Map a rejected source to the child message that holds its frozen
+    /// error. The source must be bound and undecided.
     pub(crate) async fn record_owner_rejection(
         transaction: &mut IngressUowTransaction<'_>,
         source: MessageKey,
@@ -1247,7 +1304,108 @@ impl CanonicalMessageRepository {
         Ok(())
     }
 
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+    /// Read the owner-result state of a canonical message. The caller holds
+    /// the message's row lock, so the state cannot change before commit.
+    pub(crate) async fn room_owner_state(
+        transaction: &mut IngressUowTransaction<'_>,
+        source: MessageKey,
+    ) -> Result<Option<RoomOwnerState>, IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT source_binding_version::int, owner_decision::int FROM {} WHERE message_key = ?::uuid",
+                ingress_substrate::prepared_ingress_relation(
+                    prepared,
+                    ingress_substrate::PreparedIngressRelation::Messages,
+                )
+            )
+        } else {
+            "SELECT source_binding_version, owner_decision FROM ingress_messages WHERE message_key = ?"
+                .to_owned()
+        };
+        let mut rows = tx
+            .query(&sql, crate::db_params![source.to_storage().to_string()])
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let source_version: Option<i32> = row.get(0)?;
+        let owner_decision: Option<i32> = row.get(1)?;
+        let decision = match owner_decision {
+            None => None,
+            Some(0) => Some(RoomOwnerDecision::Undecided),
+            Some(1) => Some(RoomOwnerDecision::Accepted),
+            Some(2) => Some(RoomOwnerDecision::Rejected),
+            Some(_) => {
+                return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into())
+            }
+        };
+        Ok(Some(RoomOwnerState {
+            source_bound: source_version == Some(1),
+            decision,
+        }))
+    }
+
+    /// The authenticated principal a bound message was created by and the
+    /// origin id its alias records, or `None` for a message without a source
+    /// binding. A room owner that works from a mailbox entry rebuilds the
+    /// sender's admission from these.
+    pub(crate) async fn acceptance_source(
+        transaction: &mut IngressUowTransaction<'_>,
+        source: MessageKey,
+    ) -> Result<Option<(AuthenticatedPrincipalRef, Option<OriginId>)>, IngressUowError> {
+        use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
+        let malformed = || ingress_substrate::IngressSubstrateError::RelayedAliasUnproven;
+        let (tx, prepared) = transaction.prepared_parts();
+        if tx.driver() != DatabaseDriver::Postgres {
+            return Err(IngressUowError::PostgresRequired);
+        }
+        let messages = ingress_substrate::prepared_ingress_relation(
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Messages,
+        );
+        let aliases = ingress_substrate::prepared_ingress_relation(
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Aliases,
+        );
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT m.source_binding_version::int, m.source_bare_jid, \
+                     m.source_auth_context_id::text, m.source_auth_context_version::text, \
+                     m.source_auth_epoch::text, \
+                     (SELECT a.origin_id FROM {aliases} a WHERE a.message_key = m.message_key LIMIT 1) \
+                     FROM {messages} m WHERE m.message_key = ?::uuid"
+                ),
+                crate::db_params![source.to_storage().to_string()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let version: Option<i32> = row.get(0)?;
+        let bare: Option<String> = row.get(1)?;
+        let context: Option<String> = row.get(2)?;
+        let context_version: Option<String> = row.get(3)?;
+        let epoch: Option<String> = row.get(4)?;
+        let origin_id: Option<String> = row.get(5)?;
+        let (Some(1), Some(bare), Some(context), Some(context_version), Some(epoch)) =
+            (version, bare, context, context_version, epoch)
+        else {
+            return Ok(None);
+        };
+        let principal = AuthenticatedPrincipalRef::new(
+            bare.parse().map_err(|_| malformed())?,
+            AuthContextId::new(context.parse::<Uuid>().map_err(|_| malformed())?),
+            AuthContextVersion::new(context_version.parse().map_err(|_| malformed())?),
+            PrincipalAuthEpoch::new(epoch.parse().map_err(|_| malformed())?),
+        );
+        let origin_id = origin_id.map(OriginId::new);
+        Ok(Some((principal, origin_id)))
+    }
+
+    /// Open the owner decision of a bound source that records a dispatch to
+    /// its remote room. The decision starts undecided.
     pub(crate) async fn initialize_room_owner_decision(
         transaction: &mut IngressUowTransaction<'_>,
         source: MessageKey,
@@ -1293,7 +1451,8 @@ impl CanonicalMessageRepository {
         Ok(())
     }
 
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+    /// Latch the owner's first decision on an undecided source. A rejection
+    /// requires its child mapping; an acceptance forbids one.
     pub(crate) async fn decide_room_owner(
         transaction: &mut IngressUowTransaction<'_>,
         source: MessageKey,
@@ -3278,6 +3437,38 @@ impl ClaimRepository {
             transaction_identity: transaction.identity(),
             _transaction: PhantomData,
         })
+    }
+
+    /// Read which node incarnation holds a room's claim, and its epoch,
+    /// without locking the claim row. The result is a fence to present, not
+    /// a proof that this node holds the claim.
+    pub(crate) async fn room_claim(
+        transaction: &mut IngressUowTransaction<'_>,
+        room: &BareJid,
+    ) -> Result<Option<(NodeIdentity, ClaimEpoch)>, IngressUowError> {
+        let entity = format!("{}:{}", EntityType::RoomActor.as_db_str(), room);
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Claims,
+            (
+                "SELECT node_id, node_epoch, claim_epoch FROM ",
+                " WHERE entity = ?",
+            ),
+            "SELECT node_id, node_epoch, claim_epoch FROM clustering_claims WHERE entity = ?",
+        );
+        let mut rows = tx.query(&sql, crate::db_params![entity]).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let node_id: String = row.get(0)?;
+        let node_epoch: String = row.get(1)?;
+        let claim_epoch: i64 = row.get(2)?;
+        Ok(Some((
+            NodeIdentity::new(node_id, node_epoch),
+            ClaimEpoch(claim_epoch),
+        )))
     }
 }
 

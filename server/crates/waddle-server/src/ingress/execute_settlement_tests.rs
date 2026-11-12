@@ -80,6 +80,7 @@ fn generic_completion_cannot_settle_an_arm_owned_key() {
         arm_owned_receipts: vec![key.clone()],
         route_progress: Vec::new(),
         receipts_pending: vec![key],
+        remote_acceptance: None,
     };
     assert!(completed_receipts(
         &decision,

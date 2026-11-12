@@ -303,6 +303,7 @@ pub(super) async fn exercise_sqlite(pool: &DatabasePool, stamp: &StanzaId) {
             &IngressConfig {
                 pool_size: 1,
                 retry_attempts: 2,
+                remote_room_acceptance: Default::default(),
             },
             LineageConfig::default(),
             None,

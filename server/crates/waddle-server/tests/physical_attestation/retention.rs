@@ -275,7 +275,7 @@ async fn sqlite_epoch_and_one_slot_immediate_are_bounded() {
         lab.collect(now(), 1).await.expect("recovered"),
         RetentionLabBatch::default()
     );
-    sqlite_exec(&db, "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1").await;
+    sqlite_exec(&db, "UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1").await;
     assert!(matches!(
         lab.collect(now(), 1).await,
         Err(DarkIngressAuthorityError::UnsupportedEpoch)
@@ -301,7 +301,7 @@ async fn sqlite_temp_epoch_cannot_mask_future_or_missing_main_epoch() {
         )
         .await
         .expect("supported shadow epoch");
-    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
+    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 3, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
     drop(guard);
 
     assert!(matches!(
@@ -847,7 +847,7 @@ async fn postgres_cancelled_epoch_wait_releases_one_slot_and_future_epoch_fails_
             .expect("one-slot pool recovered"),
         RetentionLabBatch::default()
     );
-    for epoch in [1_i64, 2] {
+    for epoch in [1_i64, 2, 3] {
         let mut transition = fixture.admin.begin().await.expect("transition");
         sqlx::query(&format!(
             "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
@@ -1341,7 +1341,7 @@ async fn sqlite_collector_first_refuses_new_pin_and_temp_shadows() {
         .execute("INSERT INTO temp.ingress_protocol_epoch VALUES (1, 0)", ())
         .await
         .expect("supported shadow epoch");
-    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
+    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 3, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
     drop(guard);
     let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("lab");
     assert!(matches!(

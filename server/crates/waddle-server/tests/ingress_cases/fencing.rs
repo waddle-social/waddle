@@ -240,13 +240,13 @@ async fn ingress_owner_acceptance_postgres() {
 
 async fn unsupported_epoch(fixture: IngressFixture) {
     // The Postgres activation guard admits exactly one +1 step per
-    // transaction, so walk 0 -> 1 -> 2 instead of jumping straight past the
-    // supported epoch.
+    // transaction, so walk 0 -> 1 -> 2 -> 3 instead of jumping straight past
+    // the supported epoch.
     let sql = match fixture.db.driver() {
         waddle_server::db::DatabaseDriver::Postgres => "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = ?::timestamptz, lineage_uuid = ?::uuid WHERE id = 1",
         waddle_server::db::DatabaseDriver::Sqlite => "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = ?, lineage_uuid = ? WHERE id = 1",
     };
-    for _ in 0..2 {
+    for _ in 0..3 {
         fixture
             .execute(
                 sql,

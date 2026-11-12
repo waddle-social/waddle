@@ -32,16 +32,33 @@ use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 /// cutoff, keeping wall-clock decisions at its caller boundary.
 pub const ALIAS_RETENTION: Duration = Duration::days(8);
 
-/// Highest protocol epoch whose write semantics this binary implements:
-/// the substrate's retention, locking, and proof contracts are built for
-/// the epoch-1 activation this slice installs.
+/// Highest protocol epoch whose write semantics this binary implements.
+///
+/// Epoch 1 requires the transaction-local proof on every guarded write.
+/// Epoch 2 additionally carries remote room acceptance through the durable
+/// mailbox (see [`mailbox_acceptance_epoch`]). A binary that implements only
+/// epoch 1 refuses a live epoch 2 inside its own transaction, so it cannot
+/// commit a relay-era dispatch beside mailbox-era ones.
 ///
 /// The GC's self-installed proof claims at most this epoch; a live epoch
 /// beyond it fails closed so a future activation fences old collectors
 /// instead of being claimed automatically.  Bump only in the slice that
 /// teaches the substrate the new epoch's semantics.
 pub fn supported_protocol_epoch() -> ProtocolEpoch {
-    ProtocolEpoch::from_storage(1)
+    ProtocolEpoch::from_storage(2)
+}
+
+/// The protocol epoch from which a clustered PostgreSQL deployment carries
+/// remote room acceptance through the durable mailbox and seals clustered
+/// room manifests.
+///
+/// Every ingress transaction reads the live epoch under its row lock, so the
+/// epoch is the cutover boundary: a commit at an earlier epoch dispatches to
+/// the room owner through the ordered relay and writes no mailbox entry, and
+/// a commit at this epoch or later appends one. The owner phase activates
+/// the epoch while no server runs; the two kinds of commit never interleave.
+pub fn mailbox_acceptance_epoch() -> ProtocolEpoch {
+    ProtocolEpoch::from_storage(2)
 }
 
 /// Ingress tables protected by the epoch-proof triggers from migration V1009.
@@ -49,7 +66,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 13] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 15] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -63,6 +80,8 @@ pub const EPOCH_GUARDED_TABLES: [&str; 13] = [
     "ingress_send_attempts",
     "ingress_effect_descendants",
     "ingress_owner_rejections",
+    "ingress_mailbox_lanes",
+    "ingress_mailbox_entries",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -2024,7 +2043,6 @@ pub(crate) enum PreparedIngressRelation {
     CarbonReceipts,
     EffectReceipts,
     EffectDescendants,
-    #[allow(dead_code)] // used by staged relayed-source authority methods.
     OwnerRejections,
     SendAttempts,
     SmAppends,
@@ -2033,6 +2051,8 @@ pub(crate) enum PreparedIngressRelation {
     Claims,
     InboxEntries,
     ArchiveDispatch,
+    MailboxLanes,
+    MailboxEntries,
 }
 
 /// Only a prepared transaction can supply a schema; callers cannot pass an
@@ -2062,6 +2082,8 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::Claims => "clustering_claims",
         PreparedIngressRelation::InboxEntries => "inbox_entries",
         PreparedIngressRelation::ArchiveDispatch => "ingress_archive_dispatch",
+        PreparedIngressRelation::MailboxLanes => "ingress_mailbox_lanes",
+        PreparedIngressRelation::MailboxEntries => "ingress_mailbox_entries",
     };
     match prepared {
         Some(prepared) => format!("{}.{name}", quote_postgres_identifier(prepared.schema())),
@@ -2442,6 +2464,34 @@ pub(in crate::ingress_substrate) async fn expired_candidates(
 /// catalog before mentioning it in SQL. All dedup evidence remains protected,
 /// and the candidate scan omits protected rows, so a
 /// full batch of pending copies cannot starve collectable later messages.
+/// Subqueries appended to a retention statement's SM-reference check: each
+/// names custody that keeps a canonical message, and its child in a rejection
+/// pair, out of collection.
+///
+/// A mailbox entry that is not yet consumed retains its message: the origin
+/// may still need the owner's decision, and the owner's poller still reads
+/// the message through the entry. Terminal entries do not retain it; they
+/// leave with the message through the cascade. A pending-delivery row that an
+/// archive dispatch points at retains its message until the row is gone.
+pub(in crate::ingress_substrate) fn retained_child_unions(
+    alias: &str,
+    has_mailbox: bool,
+    has_pending: bool,
+) -> String {
+    let mut unions = String::new();
+    if has_mailbox {
+        unions.push_str(&format!(
+            " UNION ALL SELECT 1 FROM ingress_mailbox_entries entry WHERE entry.message_key = {alias}.message_key AND entry.disposition < 3"
+        ));
+    }
+    if has_pending {
+        unions.push_str(&format!(
+            " UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"
+        ));
+    }
+    unions
+}
+
 pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
     tx: &mut Transaction<'_>,
     postgres: &'static str,
@@ -2459,14 +2509,33 @@ pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
         )
         .await?;
     let has_pending = rows.next().await?.is_some();
-    if !has_pending {
+    drop(rows);
+    // Mailbox tables exist only on PostgreSQL, from the migration that
+    // introduces them onward.
+    let has_mailbox = if tx.driver() == DatabaseDriver::Postgres {
+        let mut rows = tx
+            .query(
+                "SELECT 1 WHERE to_regclass('ingress_mailbox_entries') IS NOT NULL",
+                (),
+            )
+            .await?;
+        rows.next().await?.is_some()
+    } else {
+        false
+    };
+    if !has_pending && !has_mailbox {
         return Ok(base.to_owned());
     }
     let mut sql = base.to_owned();
     for alias in ["m", "child"] {
+        let reference =
+            format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key");
         sql = sql.replace(
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key"),
-            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"),
+            &reference,
+            &format!(
+                "{reference}{}",
+                retained_child_unions(alias, has_mailbox, has_pending)
+            ),
         );
     }
     Ok(sql)

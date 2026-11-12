@@ -89,9 +89,9 @@ pub fn record_push_registration_snapshot(
 use super::attributes::{
     IngressAliasOutcome, IngressDecisionClass, IngressEffectExecutionPhase, IngressGcOutcome,
     IngressMaintenanceOutcome, IngressMaintenancePhase, IngressUnrecoverableReason,
-    IngressUnresolvedEffectKind, Janitor, ObserverHistoryTable, PushRetryReason,
-    PushSuppressReason, SmAckOutcome, SmDetachedAppendRejectionReason, SmEvictionPath,
-    SmResumeOutcome, SweepOutcome,
+    IngressUnresolvedEffectKind, Janitor, MailboxAcceptanceOutcome, MailboxDeliveryOutcome,
+    MailboxHintOutcome, ObserverHistoryTable, PushRetryReason, PushSuppressReason, SmAckOutcome,
+    SmDetachedAppendRejectionReason, SmEvictionPath, SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -395,6 +395,12 @@ pub fn register_reliability_counters() {
     for outcome in IngressAliasOutcome::ALL {
         add_ingress_alias_outcome(0, outcome);
     }
+    for outcome in MailboxAcceptanceOutcome::ALL {
+        add_mailbox_room_acceptance(0, outcome);
+    }
+    for outcome in MailboxDeliveryOutcome::ALL {
+        add_mailbox_delivery(0, outcome);
+    }
     for kind in IngressUnresolvedEffectKind::ALL {
         for phase in IngressEffectExecutionPhase::ALL {
             add_ingress_effect_unresolved(0, kind, phase);
@@ -600,6 +606,51 @@ fn add_ingress_alias_outcome(count: u64, outcome: IngressAliasOutcome) {
 }
 pub fn increment_ingress_alias_outcome(outcome: IngressAliasOutcome) {
     add_ingress_alias_outcome(1, outcome);
+}
+
+fn add_mailbox_room_acceptance(count: u64, outcome: MailboxAcceptanceOutcome) {
+    crate::counter_add!(
+        "ingress.mailbox.room_acceptances",
+        "{event}",
+        "Origin waits for a remote room owner's decision, by how they ended.",
+        count,
+        outcome
+    );
+}
+/// One origin wait for a remote room owner's decision ended.
+pub fn increment_mailbox_room_acceptance(outcome: MailboxAcceptanceOutcome) {
+    add_mailbox_room_acceptance(1, outcome);
+}
+
+fn add_mailbox_delivery(count: u64, outcome: MailboxDeliveryOutcome) {
+    crate::counter_add!(
+        "ingress.mailbox.deliveries",
+        "{event}",
+        "Mailbox poller attempts at a lane head, by how they ended.",
+        count,
+        outcome
+    );
+}
+/// One mailbox poller attempt at a lane head ended.
+pub fn increment_mailbox_delivery(outcome: MailboxDeliveryOutcome) {
+    add_mailbox_delivery(1, outcome);
+}
+
+/// One mailbox wake-up hint was sent. A lost hint is repaired by the peer's
+/// poll interval, so this counter is context for delivery latency and is not
+/// registered at zero.
+pub fn increment_mailbox_hint(delivered: bool) {
+    crate::counter_add!(
+        "ingress.mailbox.hints",
+        "{event}",
+        "Mailbox wake-up hints sent to a peer, by whether it acknowledged.",
+        1,
+        if delivered {
+            MailboxHintOutcome::Delivered
+        } else {
+            MailboxHintOutcome::Lost
+        }
+    );
 }
 
 fn add_ingress_effect_unresolved(
@@ -1434,6 +1485,28 @@ mod tests {
                 guard.counter_sum("ingress.alias.outcomes", &[("outcome", outcome.value())]),
                 Some(0),
                 "ingress alias outcome {} not registered",
+                outcome.value()
+            );
+        }
+        for outcome in MailboxAcceptanceOutcome::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "ingress.mailbox.room_acceptances",
+                    &[("outcome", outcome.value())]
+                ),
+                Some(0),
+                "mailbox room acceptance outcome {} not registered",
+                outcome.value()
+            );
+        }
+        for outcome in MailboxDeliveryOutcome::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "ingress.mailbox.deliveries",
+                    &[("outcome", outcome.value())]
+                ),
+                Some(0),
+                "mailbox delivery outcome {} not registered",
                 outcome.value()
             );
         }

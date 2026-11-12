@@ -81,6 +81,12 @@ pub struct IngressAuthority {
     pub(in crate::ingress) frame_receipt_retries:
         StdMutex<frame_receipt_retry::FrameReceiptRetries>,
     pub(in crate::ingress) receipt_custody: receipt_custody::ReceiptCustody,
+    /// Where origin commits send mailbox hints; unset without clustering.
+    pub(in crate::ingress) mailbox_hints:
+        std::sync::OnceLock<Arc<dyn super::origin_gate::MailboxHintSink>>,
+    /// Stanzas this node's streams have awaiting a remote room owner.
+    #[cfg(feature = "clustering")]
+    pub(in crate::ingress) pending_acceptances: super::origin_gate::PendingAcceptances,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     pub(in crate::ingress) stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -354,6 +360,7 @@ impl IngressAuthority {
         };
         #[cfg(not(feature = "clustering"))]
         let uow = IngressUnitOfWork::open(database.clone(), lineage)?;
+        let uow = uow.with_remote_room_acceptance(config.remote_room_acceptance);
         // Probe the epoch and lineage before publishing a usable authority. A
         // lineage attestation failure is not fatal at boot: the readiness gate
         // holds the node unready and every ingress transaction keeps failing
@@ -362,7 +369,16 @@ impl IngressAuthority {
             .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
             .await
         {
-            Ok(transaction) => transaction.commit().await?,
+            Ok(mut transaction) => {
+                // A node that carries remote room acceptance through the
+                // mailbox serves only on mailbox rows the cutover rule
+                // explains; see `MailboxRepository::verify_cutover_state`.
+                if uow.mailbox_acceptance_enabled() {
+                    crate::ingress_uow::MailboxRepository::verify_cutover_state(&mut transaction)
+                        .await?;
+                }
+                transaction.commit().await?
+            }
             Err(IngressUowError::Lineage(error)) => {
                 tracing::warn!(
                     %error,
@@ -400,6 +416,9 @@ impl IngressAuthority {
             executing: RwLock::new(true),
             clustered,
             receipt_custody,
+            mailbox_hints: std::sync::OnceLock::new(),
+            #[cfg(feature = "clustering")]
+            pending_acceptances: super::origin_gate::PendingAcceptances::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -456,6 +475,9 @@ impl IngressAuthority {
             executing: RwLock::new(true),
             clustered: false,
             receipt_custody,
+            mailbox_hints: std::sync::OnceLock::new(),
+            #[cfg(feature = "clustering")]
+            pending_acceptances: super::origin_gate::PendingAcceptances::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -900,6 +922,7 @@ pub(in crate::ingress) fn non_advancing(class: IngressDecisionClass) -> IngressD
         arm_owned_receipts: Vec::new(),
         route_progress: Vec::new(),
         receipts_pending: Vec::new(),
+        remote_acceptance: None,
     }
 }
 

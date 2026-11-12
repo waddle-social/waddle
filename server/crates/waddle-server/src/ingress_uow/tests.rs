@@ -62,7 +62,7 @@ async fn sqlite_open_verifies_lineage_and_protocol_epoch() {
     transaction.commit().await.expect("commit SQLite UoW");
     let conn = db.guard().await.expect("SQLite guard");
     conn.execute(
-        "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = '2026-09-06T00:00:00Z', lineage_uuid = '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001' WHERE id = 1",
+        "UPDATE ingress_protocol_epoch SET epoch = 3, activated_at = '2026-09-06T00:00:00Z', lineage_uuid = '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001' WHERE id = 1",
         (),
     )
     .await
@@ -496,14 +496,16 @@ async fn epoch_fence_accepts_live_zero_and_one_and_rejects_future_epoch() {
     assert_eq!(transaction.protocol_epoch(), ProtocolEpoch::from_storage(1));
     transaction.commit().await.expect("commit epoch-one proof");
 
+    // Each call is its own transaction, so the guard sees two single steps.
     fixture.set_epoch(2).await;
+    fixture.set_epoch(3).await;
     let uow = fixture.uow();
     assert!(matches!(
         uow.begin().await,
         Err(IngressUowError::EpochUnsupported {
             live,
             supported: _
-        }) if live == ProtocolEpoch::from_storage(2)
+        }) if live == ProtocolEpoch::from_storage(3)
     ));
     fixture.close().await;
 }

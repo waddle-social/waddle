@@ -235,6 +235,17 @@ async fn make_v1028_pending(fixture: &Fixture) {
     let schema = &fixture.schema;
     let statements = [
         format!(
+            "ALTER TABLE {schema}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row"
+        ),
+        format!(
+            "DELETE FROM {schema}.ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries')"
+        ),
+        format!(
+            "ALTER TABLE {schema}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row"
+        ),
+        format!("DROP TABLE {schema}.ingress_mailbox_entries"),
+        format!("DROP TABLE {schema}.ingress_mailbox_lanes"),
+        format!(
             "DROP FUNCTION {schema}.waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA)"
         ),
         format!("DROP TABLE {schema}.p21_receipt_operation_results"),
@@ -538,7 +549,7 @@ async fn v1009_epoch_id_grant_requires_exact_guard_and_valid_pending_ledger() {
         run(&fixture)
             .await
             .expect("pending catalog from V1028 with scoped V1009 ACL"),
-        vec![1028, 1029, 1030]
+        vec![1028, 1029, 1030, 1031]
     );
     sqlx::query(&format!(
         "UPDATE {epoch} SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1"
@@ -636,7 +647,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         run_dark_postgres_owner(&options, &config, &migrator),
         observe
     );
-    assert_eq!(result.expect("owner commits"), vec![1028, 1029, 1030]);
+    assert_eq!(result.expect("owner commits"), vec![1028, 1029, 1030, 1031]);
     let (v1027, v1028, ack_table, rejection_table): (i64, i64, bool, bool) =
         sqlx::query_as(&format!(
             "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
@@ -809,8 +820,9 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     assert!(ack_table, "timeout preserves V1027 schema");
     assert!(!rejection_table, "timeout leaves V1028 unapplied");
 
-    // Only this disposable fixture advances: the binary accepts its current
-    // supported epoch and refuses the next one before applying the catalog.
+    // Only this disposable fixture advances: the binary accepts a supported
+    // nonzero epoch and refuses the first epoch past the supported one before
+    // applying the catalog.
     let update_epoch = format!("UPDATE {}.ingress_protocol_epoch SET epoch = $1, activated_at = now(), lineage_uuid = $2 WHERE id = 1", fixture.schema);
     sqlx::query(&update_epoch)
         .bind(1_i64)
@@ -826,15 +838,17 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         )
         .await
         .expect("apply at supported epoch"),
-        vec![1028, 1029, 1030]
+        vec![1028, 1029, 1030, 1031]
     );
     make_v1028_pending(&fixture).await;
-    sqlx::query(&update_epoch)
-        .bind(2_i64)
-        .bind(fixture.lineage.lineage_uuid.0)
-        .execute(&fixture.admin)
-        .await
-        .expect("model future epoch");
+    for epoch in [2_i64, 3] {
+        sqlx::query(&update_epoch)
+            .bind(epoch)
+            .bind(fixture.lineage.lineage_uuid.0)
+            .execute(&fixture.admin)
+            .await
+            .expect("model future epoch");
+    }
     assert!(matches!(
         run_dark_postgres_owner(
             &fixture.migrator_options,
@@ -1082,7 +1096,7 @@ async fn owner_handoff_rejects_unsafe_role_graph_before_migration() {
         )
         .await
         .expect("restored graph applies migration"),
-        vec![1028, 1029, 1030]
+        vec![1028, 1029, 1030, 1031]
     );
     fixture.cleanup().await;
 }

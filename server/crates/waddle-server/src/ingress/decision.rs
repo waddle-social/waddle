@@ -42,6 +42,30 @@ pub struct IngressDecision {
     pub arm_owned_receipts: Vec<EffectReceiptKey>,
     pub route_progress: Vec<super::recorded::RouteProgress>,
     pub receipts_pending: Vec<EffectReceiptKey>,
+    /// Set when the stanza waits for its remote room owner's decision. The
+    /// commit did not count the stanza as handled; see
+    /// [`PendingRoomAcceptance`].
+    pub remote_acceptance: Option<PendingRoomAcceptance>,
+}
+
+/// A committed groupchat stanza whose remote room owner has not decided it.
+///
+/// The origin's commit bound the stanza to its wire position but left the
+/// persisted handled checkpoint before it. The stanza joins the handled count
+/// only after [`super::origin_gate::resolve_room_acceptance`] has read the
+/// owner's decision and consumed the mailbox entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRoomAcceptance {
+    pub operation: waddle_xmpp::ingress::mailbox::MailboxOperationKey,
+    pub lane: crate::ingress_uow::MailboxLaneId,
+    /// Claim epoch of the origin's stream when it committed.
+    pub origin_epoch: waddle_xmpp::ownership::ClaimEpoch,
+    /// The node incarnation the lane records as the room's owner. It is
+    /// where a wake-up hint is sent and proves nothing.
+    pub target_owner: waddle_xmpp::ownership::NodeIdentity,
+    /// The handled checkpoint the commit persisted, which excludes this
+    /// stanza. `None` for a stream without stream management.
+    pub persisted_checkpoint: Option<waddle_xmpp::ingress::WireHandledCount>,
 }
 
 pub(super) fn bind_claim_keys(external: &mut [ExternalEffect], key: MessageKey) {
