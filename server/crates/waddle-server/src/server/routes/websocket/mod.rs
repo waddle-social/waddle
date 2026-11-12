@@ -106,6 +106,7 @@ pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource_with_canc
 pub(crate) use cleanup::retain_abandoned_muc_occupancy_sweep;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::retire_occupancy_before_bind;
+pub(crate) use cleanup::run_durable_sm_sweep;
 pub(crate) use cleanup::sweep_abandoned_muc_occupancy;
 pub use cleanup::MucCleanupOutcome;
 pub(crate) use cleanup::{

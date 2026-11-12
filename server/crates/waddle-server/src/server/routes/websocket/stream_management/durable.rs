@@ -430,7 +430,7 @@ impl DurableSmLink {
             Self::Owner(owner) => owner,
         };
         let admitted = match owner.admit_projection_tail(sm_state).await {
-            Ok(()) => owner.admit(&frame).await,
+            Ok(()) => owner.admit(&frame, OwnerStanding::Attached).await,
             Err(refusal) => Err(refusal),
         };
         match admitted {
@@ -538,7 +538,11 @@ impl DurableSmLink {
 impl DurableSmOwner {
     /// Offer one frame on this owner's fence. An unknown commit outcome is
     /// settled by offering the same operation again.
-    async fn admit(&self, frame: &CustodyFrame<'_>) -> Result<CommittedObligation, CustodyRefusal> {
+    async fn admit(
+        &self,
+        frame: &CustodyFrame<'_>,
+        standing: OwnerStanding,
+    ) -> Result<CommittedObligation, CustodyRefusal> {
         let payload = SmReplayPayload::from_wire(frame.xml.to_owned()).map_err(|error| {
             warn!(session = ?self.fence.session, %error, "counted frame is not a stanza the authority can retain");
             CustodyRefusal::Unavailable
@@ -557,9 +561,15 @@ impl DurableSmOwner {
                 .store
                 .admit(
                     AdmissionRequest {
-                        authority: AdmissionAuthority::Owner {
-                            fence: &self.fence,
-                            principal: &self.principal,
+                        authority: match standing {
+                            OwnerStanding::Attached => AdmissionAuthority::Owner {
+                                fence: &self.fence,
+                                principal: &self.principal,
+                            },
+                            OwnerStanding::Detached => AdmissionAuthority::Detached {
+                                session: self.fence.session,
+                                generation: self.fence.generation,
+                            },
                         },
                         claim: self.claim.as_ref(),
                         now: chrono::Utc::now(),
@@ -589,17 +599,28 @@ impl DurableSmOwner {
         &mut self,
         sm_state: &StreamManagementState,
     ) -> Result<(), CustodyRefusal> {
+        self.admit_tail(sm_state, OwnerStanding::Attached).await
+    }
+
+    async fn admit_tail(
+        &mut self,
+        sm_state: &StreamManagementState,
+        standing: OwnerStanding,
+    ) -> Result<(), CustodyRefusal> {
         if sm_state.outbound_count == self.admitted_through {
             return Ok(());
         }
         for entry in sm_state.stanzas_to_resend(self.admitted_through) {
             let committed = self
-                .admit(&CustodyFrame {
-                    xml: &entry.stanza_xml,
-                    original_receipt_at: entry.original_receipt_at,
-                    provenance: &entry.provenance,
-                    ingress_receipts: &entry.ingress_receipts,
-                })
+                .admit(
+                    &CustodyFrame {
+                        xml: &entry.stanza_xml,
+                        original_receipt_at: entry.original_receipt_at,
+                        provenance: &entry.provenance,
+                        ingress_receipts: &entry.ingress_receipts,
+                    },
+                    standing,
+                )
                 .await?;
             let expected = self.admitted_through.wrapping_add(1);
             if committed.sequence() != expected {
@@ -614,6 +635,200 @@ impl DurableSmOwner {
             self.admitted_through = expected;
         }
         Ok(())
+    }
+}
+
+/// On which authority an owner admits a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerStanding {
+    /// The binding owns the session's live generation.
+    Attached,
+    /// The binding detached the session and is draining what its endpoint
+    /// accepted meanwhile. The frames are retained for the next resume.
+    Detached,
+}
+
+/// How ending an owner's hold on its session went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::server::routes::websocket) enum OwnerRelease {
+    /// The authority committed the transition.
+    Committed,
+    /// The session lives on without this binding: another generation owns
+    /// it, or it was recorded as detached. Nothing of it is this binding's
+    /// to clean up.
+    Superseded,
+    /// The session is already terminal or unknown to the authority.
+    Ended,
+    /// The transition could not be committed. The session keeps this
+    /// binding as its owner until an owner-loss record or a resume moves it.
+    Unavailable,
+}
+
+fn owner_release(fence: &OwnerFence, result: Result<(), OwnerError>) -> OwnerRelease {
+    use waddle_xmpp::stream_management::durable::DurableSmState;
+    match result {
+        Ok(()) => OwnerRelease::Committed,
+        Err(OwnerError::Rejected(
+            OwnerRejection::NotOwned(DurableSmState::Terminal(_)) | OwnerRejection::UnknownSession,
+        )) => OwnerRelease::Ended,
+        Err(OwnerError::Rejected(OwnerRejection::Fence(_) | OwnerRejection::NotOwned(_))) => {
+            OwnerRelease::Superseded
+        }
+        Err(error) => {
+            warn!(session = ?fence.session, %error, "durable SM owner transition was not committed");
+            OwnerRelease::Unavailable
+        }
+    }
+}
+
+impl DurableSmOwner {
+    /// The session this owner holds.
+    pub(in crate::server::routes::websocket) fn session(
+        &self,
+    ) -> waddle_xmpp::ownership::SmSessionKey {
+        self.fence.session
+    }
+
+    pub(in crate::server::routes::websocket) fn store(&self) -> &DurableSmStore {
+        &self.store
+    }
+
+    /// Outbound counter value of the last frame known to be in custody.
+    pub(in crate::server::routes::websocket) fn admitted_through(&self) -> u32 {
+        self.admitted_through
+    }
+
+    /// Admit, as the live owner, every frame the projection recorded
+    /// without a transport. Returns whether the whole tail is in custody.
+    pub(in crate::server::routes::websocket) async fn admit_unwritten_tail(
+        &mut self,
+        sm_state: &StreamManagementState,
+    ) -> bool {
+        self.admit_tail(sm_state, OwnerStanding::Attached)
+            .await
+            .is_ok()
+    }
+
+    /// Admit, on the detached authority, the frames this binding's endpoint
+    /// accepted after the session detached. They are retained for the next
+    /// resume; a resume that committed first refuses them by generation.
+    pub(in crate::server::routes::websocket) async fn admit_detached_tail(
+        &mut self,
+        sm_state: &StreamManagementState,
+    ) -> bool {
+        self.admit_tail(sm_state, OwnerStanding::Detached)
+            .await
+            .is_ok()
+    }
+
+    /// Move the session to `Detached` with the resource state `resource`
+    /// and the connection's handled count of client stanzas.
+    pub(in crate::server::routes::websocket) async fn detach(
+        &mut self,
+        sm_state: &StreamManagementState,
+        resource: waddle_xmpp::stream_management::persistence::PersistedSession,
+    ) -> OwnerRelease {
+        let inbound_handled = self.inbound.advance_to(sm_state.inbound_count());
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let detached = self
+                .store
+                .detach(
+                    &self.fence,
+                    self.claim.as_ref(),
+                    crate::sm_authority::DetachSnapshot {
+                        resource: resource.clone(),
+                        inbound_handled,
+                    },
+                    chrono::Utc::now(),
+                )
+                .await;
+            match detached {
+                Err(OwnerError::Indeterminate(_)) if attempts < ADMISSION_ATTEMPTS => {}
+                // The detach whose outcome was unknown did commit: the
+                // repeat finds the session detached under this generation.
+                Err(OwnerError::Rejected(OwnerRejection::NotOwned(
+                    waddle_xmpp::stream_management::durable::DurableSmState::Detached,
+                ))) if attempts > 1 => return OwnerRelease::Committed,
+                result => return owner_release(&self.fence, result),
+            }
+        }
+    }
+
+    /// End the session deliberately. Its retained frames stay in custody
+    /// until they are transferred and released.
+    pub(in crate::server::routes::websocket) async fn close(&self) -> OwnerRelease {
+        owner_release(
+            &self.fence,
+            self.store
+                .close(&self.fence, self.claim.as_ref(), chrono::Utc::now())
+                .await,
+        )
+    }
+}
+
+impl DurableSmLink {
+    /// Take the owner handle out of the link at teardown, leaving the link
+    /// unbound.
+    pub(in crate::server::routes::websocket) fn take_owner(
+        &mut self,
+    ) -> Option<Box<DurableSmOwner>> {
+        if !matches!(self, Self::Owner(_)) {
+            return None;
+        }
+        match std::mem::take(self) {
+            Self::Owner(owner) => Some(owner),
+            _ => None,
+        }
+    }
+
+    /// At teardown, settle an enable whose outcome is still unknown. A
+    /// session it turns out to have committed is closed: its `<enabled/>`
+    /// was never sent, so no client holds its token.
+    pub(in crate::server::routes::websocket) async fn release_unresolved_enable(
+        &mut self,
+        state: &WebSocketState,
+    ) {
+        if !matches!(self, Self::EnableUnresolved(_)) {
+            return;
+        }
+        let Self::EnableUnresolved(unresolved) = std::mem::take(self) else {
+            return;
+        };
+        let Some(store) = selected_store(state) else {
+            return;
+        };
+        match store
+            .resolve_enable(
+                &unresolved.operation,
+                &unresolved.binding,
+                chrono::Utc::now(),
+            )
+            .await
+        {
+            Ok(EnableResolution::Committed(commit)) => {
+                if let Err(error) = store
+                    .close(
+                        commit.fence(),
+                        unresolved.claim.as_ref(),
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    warn!(stream_id = %unresolved.stream_id, %error, "an unannounced durable SM session could not be closed");
+                }
+            }
+            Ok(EnableResolution::Superseded | EnableResolution::NotCommitted) => {}
+            Err(error) => {
+                error!(
+                    stream_id = %unresolved.stream_id,
+                    %error,
+                    "a durable SM enable ended with its commit outcome unknown"
+                );
+            }
+        }
+        abandon_enable(state, *unresolved).await;
     }
 }
 

@@ -2,9 +2,10 @@
 //! selected (`WADDLE_XMPP_DURABLE_SM=durable`) on single-node SQLite.
 //!
 //! The durable authority commits a session before `<enabled/>` is built,
-//! hands the client a resume token that is not the storage key, and takes
-//! custody of every counted outbound stanza before it is written. These
-//! tests observe the wire and the authority's rows.
+//! hands the client a resume token that is not the storage key, takes
+//! custody of every counted outbound stanza before it is written, and owns
+//! resume, detach, close and replacement. These tests observe the wire and
+//! the authority's rows.
 
 #![cfg(feature = "test-support")]
 
@@ -19,6 +20,11 @@ const DURABLE: (&str, &str) = ("WADDLE_XMPP_DURABLE_SM", "durable");
 
 /// Authority row states, as `sm_durable_sessions.state` stores them.
 const STATE_LIVE: i64 = 1;
+const STATE_DETACHED: i64 = 2;
+const STATE_TERMINAL: i64 = 4;
+/// `sm_durable_sessions.terminal_reason` values.
+const REASON_REPLACED: i64 = 3;
+const REASON_CLOSED: i64 = 4;
 
 struct Fixture {
     server: TestServer,
@@ -100,6 +106,7 @@ async fn bind_and_enable(client: &mut WsXmppClient, resource: &str) -> Element {
 struct SessionRow {
     session_id: String,
     state: i64,
+    terminal_reason: Option<i64>,
     generation: i64,
     inbound_handled: i64,
     outbound_acked: i64,
@@ -109,7 +116,7 @@ struct SessionRow {
 
 async fn sessions(pool: &sqlx::SqlitePool, full_jid: &str) -> Vec<SessionRow> {
     sqlx::query_as(
-        "SELECT session_id, state, generation, inbound_handled, outbound_acked, \
+        "SELECT session_id, state, terminal_reason, generation, inbound_handled, outbound_acked, \
          outbound_exposure_ceiling, outbound_appended FROM sm_durable_sessions \
          WHERE full_jid = ? ORDER BY updated_at_ms",
     )
@@ -377,4 +384,171 @@ async fn a_resume_token_that_names_no_session_fails_and_leaves_the_client_free_t
     assert!(sessions(&fixture.pool, "alice@localhost/phone")
         .await
         .is_empty());
+}
+
+/// Alice with a resumable session on `phone` that holds the chat messages
+/// `ids` unacknowledged, and whose transport was then lost. Returns the
+/// resume token and how many counted stanzas the lost transport carried.
+async fn detached_session_holding(fixture: &Fixture, ids: &[&str]) -> (String, u32) {
+    let mut alice = authenticate(&fixture.server, 0).await;
+    let enabled = bind_and_enable(&mut alice, "phone").await;
+    let token = enabled.attr("id").expect("resume token").to_owned();
+    let mut bob = bob(&fixture.server).await;
+    for id in ids {
+        send_element(&mut bob, chat("alice@localhost/phone", id, "held")).await;
+    }
+    let written = recv_chats(&mut alice, ids).await;
+    drop(alice);
+    wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_DETACHED
+    })
+    .await;
+    (token, written)
+}
+
+#[tokio::test]
+async fn a_lost_transport_detaches_and_a_resume_replays_before_live_output() {
+    let fixture = fixture(&[]).await;
+    let (token, written) = detached_session_holding(&fixture, &["m1", "m2"]).await;
+    let detached = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_DETACHED
+    })
+    .await;
+    assert_eq!(detached.generation, 1);
+    assert_eq!(
+        retained_frames(&fixture.pool, &detached.session_id).await,
+        i64::from(written),
+        "the detached session retains every unacknowledged frame"
+    );
+
+    // The client handled all but the last stanza.
+    let mut alice = authenticate(&fixture.server, 0).await;
+    send_element(&mut alice, resume(&token, written - 1)).await;
+    let resumed = recv_sm(&mut alice, "resumed").await;
+    assert_eq!(resumed.attr("previd"), Some(token.as_str()));
+    assert_eq!(
+        recv_chats(&mut alice, &["m2"]).await,
+        1,
+        "exactly the unhandled stanza is replayed"
+    );
+
+    let live = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_LIVE
+    })
+    .await;
+    assert_eq!(
+        live.session_id, detached.session_id,
+        "the same session resumed"
+    );
+    assert_eq!(
+        live.generation, 2,
+        "the resume committed the next generation"
+    );
+    assert_eq!(live.outbound_acked, i64::from(written - 1));
+
+    let mut bob = bob(&fixture.server).await;
+    send_element(&mut bob, chat("alice@localhost/phone", "m3", "live")).await;
+    recv_chats(&mut alice, &["m3"]).await;
+    let after = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.outbound_appended > i64::from(written)
+    })
+    .await;
+    assert_eq!(
+        after.outbound_exposure_ceiling, after.outbound_appended,
+        "live output continues the committed counter"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_by_another_account_is_refused_and_leaves_the_session_detached() {
+    let fixture = fixture(&[]).await;
+    let (token, _) = detached_session_holding(&fixture, &["m1"]).await;
+
+    let mut intruder = authenticate(&fixture.server, 1).await;
+    send_element(&mut intruder, resume(&token, 0)).await;
+    let failed = recv_sm(&mut intruder, "failed").await;
+    assert!(failed
+        .get_child("not-authorized", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
+
+    let rows = sessions(&fixture.pool, "alice@localhost/phone").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, STATE_DETACHED);
+    assert_eq!(rows[0].generation, 1);
+}
+
+#[tokio::test]
+async fn a_resume_count_above_the_exposure_ceiling_is_a_stream_error() {
+    let fixture = fixture(&[]).await;
+    let (token, _) = detached_session_holding(&fixture, &["m1"]).await;
+
+    let mut alice = authenticate(&fixture.server, 0).await;
+    send_element(&mut alice, resume(&token, 5000)).await;
+    alice
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame.contains("handled-count-too-high")
+        })
+        .await
+        .expect("handled-count-too-high stream error");
+
+    let rows = sessions(&fixture.pool, "alice@localhost/phone").await;
+    assert_eq!(
+        rows[0].state, STATE_DETACHED,
+        "a refused resume changes nothing"
+    );
+    assert_eq!(rows[0].outbound_acked, 0);
+}
+
+#[tokio::test]
+async fn closing_the_stream_ends_the_session_and_releases_its_custody() {
+    let fixture = fixture(&[]).await;
+    let mut alice = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut alice, "phone").await;
+    let mut bob = bob(&fixture.server).await;
+    send_element(&mut bob, chat("alice@localhost/phone", "m1", "unacked")).await;
+    recv_chats(&mut alice, &["m1"]).await;
+
+    send_element(
+        &mut alice,
+        Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing").build(),
+    )
+    .await;
+
+    let closed = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_TERMINAL && row.outbound_acked == row.outbound_appended
+    })
+    .await;
+    assert_eq!(closed.terminal_reason, Some(REASON_CLOSED));
+    assert_eq!(
+        retained_frames(&fixture.pool, &closed.session_id).await,
+        0,
+        "the closed session's frames were transferred and released"
+    );
+}
+
+#[tokio::test]
+async fn binding_the_resource_again_replaces_its_detached_session() {
+    let fixture = fixture(&[]).await;
+    let (token, _) = detached_session_holding(&fixture, &["m1"]).await;
+
+    let mut alice = authenticate(&fixture.server, 0).await;
+    alice.bind("phone").await.expect("fresh bind");
+
+    let replaced = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.state == STATE_TERMINAL && row.outbound_acked == row.outbound_appended
+    })
+    .await;
+    assert_eq!(replaced.terminal_reason, Some(REASON_REPLACED));
+    assert_eq!(
+        retained_frames(&fixture.pool, &replaced.session_id).await,
+        0
+    );
+
+    // The replaced session cannot be resumed by a later connection.
+    let mut late = authenticate(&fixture.server, 0).await;
+    send_element(&mut late, resume(&token, 0)).await;
+    let failed = recv_sm(&mut late, "failed").await;
+    assert!(failed
+        .get_child("item-not-found", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .is_some());
 }

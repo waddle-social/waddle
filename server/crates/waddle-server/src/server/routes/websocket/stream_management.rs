@@ -288,9 +288,9 @@ mod ingress_checkpoint_tests {
 mod durable;
 mod implementation;
 pub(super) use durable::{
-    close_unannounced_session, release_unresolved_resume, settle_unresolved_enable,
+    close_unannounced_session, release_unresolved_resume, selected_store, settle_unresolved_enable,
     settle_unresolved_resume, CustodyFrame, CustodyRefusal, DurableResumeSettlement, DurableSmLink,
-    EnableSettlement, LiveCustody,
+    DurableSmOwner, EnableSettlement, LiveCustody, OwnerRelease,
 };
 #[cfg(test)]
 pub(super) use implementation::apply_sm_ack;

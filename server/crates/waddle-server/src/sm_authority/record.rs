@@ -436,6 +436,42 @@ pub(super) async fn due_for_expiry(
     Ok(due)
 }
 
+/// Terminal sessions that still hold custody: retained frames, a resource
+/// snapshot or operation outcomes. Oldest first.
+pub(super) async fn terminal_with_custody(
+    tx: &mut Transaction<'_>,
+    limit: u32,
+) -> Result<Vec<SmSessionKey>, DurableSmError> {
+    let mut rows = tx
+        .query(
+            "SELECT s.session_id FROM sm_durable_sessions s              WHERE s.state = 4 AND (s.outbound_acked < s.outbound_appended                OR EXISTS (SELECT 1 FROM sm_sessions r WHERE r.stream_id = s.session_id)                OR EXISTS (SELECT 1 FROM sm_durable_operations o                           WHERE o.session_id = s.session_id))              ORDER BY s.updated_at_ms LIMIT ?",
+            crate::db_params![i64::from(limit)],
+        )
+        .await?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next().await? {
+        sessions.push(SmSessionKey::from_uuid(uuid(
+            &row.get::<String>(0)?,
+            "session_id",
+        )?));
+    }
+    Ok(sessions)
+}
+
+/// The stream id of every session the authority holds a row for.
+pub(super) async fn all_stream_ids(
+    tx: &mut Transaction<'_>,
+) -> Result<Vec<SmSessionId>, DurableSmError> {
+    let mut rows = tx
+        .query("SELECT session_id FROM sm_durable_sessions", ())
+        .await?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        ids.push(SmSessionId::new(row.get::<String>(0)?));
+    }
+    Ok(ids)
+}
+
 pub(super) async fn delete_operations(
     tx: &mut Transaction<'_>,
     session: SmSessionKey,

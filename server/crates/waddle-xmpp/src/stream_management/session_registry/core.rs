@@ -1120,6 +1120,16 @@ impl InMemorySmSessionRegistry {
     /// Returns the number of sessions hydrated. No-op when no
     /// persistence is attached.
     pub async fn restore_from_persistence(&self) -> Result<usize, SmRegistryError> {
+        self.restore_from_persistence_except(&HashSet::new()).await
+    }
+
+    /// [`Self::restore_from_persistence`], leaving the sessions in `excluded`
+    /// untouched: neither hydrated nor quarantined. They belong to another
+    /// authority that keeps its own rows in the same relations.
+    pub async fn restore_from_persistence_except(
+        &self,
+        excluded: &HashSet<SmSessionId>,
+    ) -> Result<usize, SmRegistryError> {
         let Some(storage) = &self.persistence else {
             return Ok(0);
         };
@@ -1132,10 +1142,11 @@ impl InMemorySmSessionRegistry {
         // this method's doc comment) — the per-row `ensure_claimed` call
         // below is what scopes which rows this node is actually allowed to
         // hydrate.
-        let stored = storage
+        let mut stored = storage
             .list_all_sessions_with_unacked()
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+        stored.retain(|(session, _)| !excluded.contains(&session.stream_id));
         // Bulk readers deliberately omit corrupt headers and queues. Discover
         // those IDs independently so poison cannot survive every cold start,
         // while healthy sessions retain the bulk read's constant round trips.
@@ -1148,7 +1159,7 @@ impl InMemorySmSessionRegistry {
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?
             .into_iter()
-            .filter(|id| !bulk_ids.contains(id))
+            .filter(|id| !bulk_ids.contains(id) && !excluded.contains(id))
             .collect::<Vec<_>>();
         let mut hydrated = 0usize;
         let mut expired = 0usize;
