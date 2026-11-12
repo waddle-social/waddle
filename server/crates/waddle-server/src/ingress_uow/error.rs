@@ -116,6 +116,8 @@ pub enum IngressUowError {
     NodeIdentityUnbound,
     #[error("the exact ownership claim is not held")]
     ClaimFenceMissing,
+    #[error(transparent)]
+    Mailbox(#[from] super::MailboxError),
 }
 
 impl IngressUowError {

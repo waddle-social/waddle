@@ -351,7 +351,7 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
         .unwrap();
     assert_eq!(
         MigrationRunner::single().run(&fixture.db).await.unwrap(),
-        vec![1029, 1030]
+        vec![1029, 1030, 1031]
     );
     assert!(MigrationRunner::single()
         .run(&fixture.db)
@@ -413,6 +413,16 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
 
 async fn reset_to_pre_v1029(tx: &mut waddle_server::db::Transaction<'_>, driver: DatabaseDriver) {
     if driver == DatabaseDriver::Postgres {
+        // V1031's mailbox relations exist only on PostgreSQL.
+        tx.execute_batch(
+            "ALTER TABLE ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
+             DELETE FROM ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries'); \
+             ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row; \
+             DROP TABLE ingress_mailbox_entries; \
+             DROP TABLE ingress_mailbox_lanes;",
+        )
+        .await
+        .unwrap();
         tx.execute(
             "DROP FUNCTION waddle_p21_record_effect_receipt(UUID, UUID, INTEGER, BYTEA)",
             (),

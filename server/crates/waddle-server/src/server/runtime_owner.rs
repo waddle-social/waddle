@@ -355,6 +355,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("ingress_archive_dispatch", READ_INSERT),
     ("ingress_send_attempts", READ_WRITE),
     ("ingress_owner_rejections", READ_INSERT),
+    // Mailbox lanes and entries are inserted, row-locked and updated. An
+    // entry leaves only through its canonical message's cascade.
+    ("ingress_mailbox_lanes", READ_INSERT_UPDATE),
+    ("ingress_mailbox_entries", READ_INSERT_UPDATE),
     // Inbox, stream management and pending delivery.
     ("inbox_entries", READ_INSERT_UPDATE),
     ("groupchat_notification_recovery", READ_WRITE),

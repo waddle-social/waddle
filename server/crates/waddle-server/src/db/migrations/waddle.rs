@@ -1741,6 +1741,13 @@ pub const V1030_RECEIPT_OPERATION_JOURNAL: &str =
 pub const V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES: &str =
     include_str!("owner/p21_receipt_journal_postgres.sql");
 
+/// Durable ordered mailbox lanes and entries. Lanes are written only by
+/// clustered PostgreSQL deployments, so SQLite records the version alone.
+pub const V1031_INGRESS_MAILBOX: &str = r#"
+SELECT 1;
+"#;
+pub const V1031_INGRESS_MAILBOX_POSTGRES: &str = include_str!("mailbox_postgres.sql");
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1927,6 +1934,12 @@ pub fn all() -> Vec<Migration> {
             description: "Create inert receipt-operation result journal".to_string(),
             sql_sqlite: V1030_RECEIPT_OPERATION_JOURNAL,
             sql_postgres: V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES,
+        },
+        Migration {
+            version: 1031,
+            description: "Create durable ordered mailbox lanes and entries".to_string(),
+            sql_sqlite: V1031_INGRESS_MAILBOX,
+            sql_postgres: V1031_INGRESS_MAILBOX_POSTGRES,
         },
     ]
 }

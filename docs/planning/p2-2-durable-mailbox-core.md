@@ -1,20 +1,69 @@
-# P2.2 — durable mailbox core: design gate
+# P2.2 — durable mailbox core
 
-Status: **proposal for review; not implemented or accepted**. This document
-sharpens [#1986](https://github.com/waddle-social/waddle/issues/1986); it does
-not authorize schema, repositories, allocation, a relay cutover or production
-activation. Its code references are to `main@8ecc94bb` unless otherwise noted.
+Status: **storage core implemented and dark**. Migration V1031 creates the
+lane and entry tables and `MailboxRepository` is the only code that writes
+them; no runtime path appends an entry yet. The sections from "Ownership and
+boundaries" onward are the design review that preceded the implementation and
+are kept for their failure analysis. Where they describe a question as open,
+the "Implemented contract" section below is the answer in force.
 
-[#2116](https://github.com/waddle-social/waddle/issues/2116) is a hard
-prerequisite for mailbox DDL and executable storage work. Its composable,
-main-pool transaction authority and migration-owner/epoch-guard boundary are
-not complete. The [#1986 gate](https://github.com/waddle-social/waddle/issues/1986#issuecomment-6562336267)
-prohibits registering mailbox DDL or allocating through a raw or parallel pool.
-Neither the existing cloneable `IngressUnitOfWork` nor an isolated dark receipt
-operation establishes that prerequisite. Re-review this design against the
-actual #2116 interface and guard migration when they are ready. The three
-contract questions below are also **BLOCKING** before mailbox schema or
-repositories: the test matrix does not resolve them by itself.
+## Implemented contract
+
+### Decisions
+
+| Question | Decision |
+| --- | --- |
+| Tables | Two: `ingress_mailbox_lanes` and `ingress_mailbox_entries`. An entry refers to its canonical `ingress_messages` row and stores no payload; acceptance evidence stays in `ingress_messages.owner_decision`, the sealed manifest and `ingress_owner_rejections`. |
+| Operation identity | `MailboxOperationKey::RoomAcceptance(MessageKey)`, unique across every lane (`UNIQUE (message_key, operation_kind)`). `DispatchToRoomRemote` and delivery keys name one owner-specific attempt and are not identity. |
+| Lane key | The stable logical lane `(origin, recipient, room lane)` from `waddle_xmpp::ingress::mailbox`. The row stores the full canonical encoding and indexes its versioned digest; a lookup that finds a row with the same digest and another encoding fails closed. |
+| Fences | `origin_epoch`, `target_epoch`, `target_node_id` and `target_node_epoch` are columns beside the identity. A caller presents the fence it has proven against its claims in the same transaction. An equal fence is current, a fence whose epochs are nowhere smaller and somewhere larger replaces the stored one, and anything else is stale. |
+| Sequence | `last_sequence` on the lane row, read under `FOR UPDATE` and incremented with the entry insert. Gap-free in committed history, `NUMERIC(20)`, 1 through `u64::MAX`, with a typed exhaustion error. |
+| Cursor | `last_dispositioned` on the lane row: the last sequence the lane's target has dispositioned, exclusive. It moves only to its immediate successor, in the target's transaction. |
+| Dispositions | `Pending → OwnerAccepted \| OwnerRejected → Consumed`. The owner's decision moves the cursor; consumption by the origin does not. A terminal entry keeps which decision it was. |
+| Admission | Per-lane and per-node pending caps, checked after the lane lock and before the counter moves. A refused append writes nothing. |
+| Retention | An entry is removed only by the cascade from its canonical message. |
+| Backends | PostgreSQL only. SQLite records V1031 and creates nothing; a single-node deployment seals in one transaction and writes no lane. |
+| Dead letters | A dead-lettered entry stays `Pending` at its lane head. The cursor never passes it without an operator repair. |
+
+### Lock order
+
+Inside one transaction: lane row, then canonical message, then entry.
+`MailboxRepository::lock_lane` (origin, by identity),
+`lock_lane_for_target`, `lock_lane_for_origin` and `claim_backlogged_lane`
+(by lane id) take the lane and return a `LockedMailboxLane`; `append`,
+`decide`, `consume` and `read_after_cursor` require it and check that it was
+locked by the same transaction. `append` locks the canonical message before
+it looks the operation up, so two appenders that hold different lanes
+serialize on the message and at most one allocates.
+
+Message garbage collection locks the canonical message with `SKIP LOCKED` and
+reaches entries only through the cascade. It never locks a lane, so it cannot
+wait on a lane held by an appender that is waiting for that message.
+
+### Guard, roles and manifest
+
+Both tables are in `EPOCH_GUARDED_TABLES` and in
+`ingress_epoch_guard_manifest`, with the statement-level DML guard and the
+truncate guard enabled `ALWAYS`. The owner phase grants the runtime `SELECT,
+INSERT, UPDATE` on both (`TABLE_GRANTS` in `server/runtime_owner.rs`): rows
+are inserted, locked and updated, and deleted only by the cascade, which runs
+as the table owner. The restricted-ingress manifest pins their structure and
+triggers. The definer-API candidate installs its guard trigger on both and
+exposes no mailbox function, so the repository refuses with
+`MailboxError::DefinerApiUnsupported` on a transaction that uses that
+candidate.
+
+### Tests
+
+`crates/waddle-server/tests/mailbox_core_postgres.rs` covers, against real
+PostgreSQL: a blocked second appender behind a held lane lock, unique
+contiguous sequences under concurrent appenders, no gap after a rollback, the
+full unsigned range and exhaustion, one entry for one operation across lanes
+(sequential and raced), a replan from owner A to owner B that returns the
+first entry and fences A out, head-only owner decisions with an exclusive
+cursor, admission refusal before any write, and refusal of unproven,
+stale-proof and unsupported-epoch writes. The binary runs in nextest's
+`postgres` group and its tests are in `required-cluster-tests.txt`.
 
 ## Ownership and boundaries
 

@@ -2930,3 +2930,15 @@ CREATE TRIGGER ingress_owner_rejections_definer_api_guard_dml
 BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_owner_rejections
 FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
 ALTER TABLE __SCHEMA__.ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejections_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_mailbox_lanes_definer_api_guard_dml ON __SCHEMA__.ingress_mailbox_lanes;
+CREATE TRIGGER ingress_mailbox_lanes_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_mailbox_lanes
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_mailbox_lanes ENABLE ALWAYS TRIGGER ingress_mailbox_lanes_definer_api_guard_dml;
+
+DROP TRIGGER IF EXISTS ingress_mailbox_entries_definer_api_guard_dml ON __SCHEMA__.ingress_mailbox_entries;
+CREATE TRIGGER ingress_mailbox_entries_definer_api_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON __SCHEMA__.ingress_mailbox_entries
+FOR EACH STATEMENT EXECUTE FUNCTION __SCHEMA__.waddle_ingress_definer_epoch_guard();
+ALTER TABLE __SCHEMA__.ingress_mailbox_entries ENABLE ALWAYS TRIGGER ingress_mailbox_entries_definer_api_guard_dml;

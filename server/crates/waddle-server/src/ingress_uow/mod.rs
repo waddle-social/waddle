@@ -24,6 +24,11 @@ pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transact
 mod error;
 pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
+mod mailbox;
+pub use mailbox::{
+    LockedMailboxLane, MailboxAppendOutcome, MailboxDeadLetterReason, MailboxError, MailboxLaneId,
+    MailboxRepository, MailboxTargetFence, StoredMailboxEntry,
+};
 mod room_observation;
 pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
@@ -115,7 +120,6 @@ use crate::ingress_substrate::{
     IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest,
     IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };
-#[cfg(feature = "clustering")]
 use uuid::Uuid;
 use waddle_xmpp::ingress::ProtocolEpoch;
 #[cfg(feature = "clustering")]
@@ -399,7 +403,6 @@ impl IngressUnitOfWork {
             observations: self.observations.load(std::sync::atomic::Ordering::Acquire),
             entry,
             lineage,
-            #[cfg(feature = "clustering")]
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
             #[cfg(feature = "clustering")]
@@ -433,9 +436,8 @@ pub struct IngressUowTransaction<'a> {
     entry: IngressEntryTransaction<'a>,
     lineage: IngressLineage,
     /// Private capability identity that binds an in-transaction claim fence
-    /// to this exact transaction, not merely another transaction sharing the
-    /// same pool lifetime.
-    #[cfg(feature = "clustering")]
+    /// or locked mailbox lane to this exact transaction, not merely another
+    /// transaction sharing the same pool lifetime.
     identity: Uuid,
     /// The canonical identity source bound at [`IngressUnitOfWork`]
     /// construction; single-node transactions cannot mint claim fences.
@@ -629,7 +631,6 @@ impl<'a> IngressUowTransaction<'a> {
         }
     }
 
-    #[cfg(feature = "clustering")]
     fn identity(&self) -> Uuid {
         self.identity
     }

@@ -910,7 +910,10 @@ async fn check_guarded_relation_acls(
             "ingress_origin_aliases" | "ingress_sm_refs" | "ingress_deliveries" => {
                 (true, true, false, true)
             }
-            "ingress_effect_intents" | "ingress_effect_descendants" => (true, true, true, false),
+            "ingress_effect_intents"
+            | "ingress_effect_descendants"
+            | "ingress_mailbox_lanes"
+            | "ingress_mailbox_entries" => (true, true, true, false),
             "ingress_effect_receipts"
             | "ingress_carbon_receipts"
             | "ingress_delivery_receipts"

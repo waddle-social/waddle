@@ -49,7 +49,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 13] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 15] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -63,6 +63,8 @@ pub const EPOCH_GUARDED_TABLES: [&str; 13] = [
     "ingress_send_attempts",
     "ingress_effect_descendants",
     "ingress_owner_rejections",
+    "ingress_mailbox_lanes",
+    "ingress_mailbox_entries",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -2033,6 +2035,8 @@ pub(crate) enum PreparedIngressRelation {
     Claims,
     InboxEntries,
     ArchiveDispatch,
+    MailboxLanes,
+    MailboxEntries,
 }
 
 /// Only a prepared transaction can supply a schema; callers cannot pass an
@@ -2062,6 +2066,8 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::Claims => "clustering_claims",
         PreparedIngressRelation::InboxEntries => "inbox_entries",
         PreparedIngressRelation::ArchiveDispatch => "ingress_archive_dispatch",
+        PreparedIngressRelation::MailboxLanes => "ingress_mailbox_lanes",
+        PreparedIngressRelation::MailboxEntries => "ingress_mailbox_entries",
     };
     match prepared {
         Some(prepared) => format!("{}.{name}", quote_postgres_identifier(prepared.schema())),
