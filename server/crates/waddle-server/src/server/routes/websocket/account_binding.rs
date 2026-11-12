@@ -44,7 +44,7 @@ use super::state::WsConnState;
 use super::WebSocketState;
 use crate::account_coordinator::{
     AccountBindingAuthority, AccountCoordinators, BindingReply, CoordinatorBindingPublisher,
-    PublishedBinding, RepairEvidence, RepairOutcome, UnregisterOutcome, UnregisterRequest,
+    PublishedBinding, ReleaseSessionRequest, RetireEvidence, RetireOutcome, SessionRelease,
 };
 
 /// How often a replacing connection re-reads the slot of the binding it
@@ -221,58 +221,84 @@ async fn slot_holds(
 }
 
 /// Retire a binding whose connection is gone, as the coordinator's
-/// liveness reports it: start the retirement and complete it without the
-/// connection's evidence, whose work the recovery paths own.
-pub(super) async fn retire_expired_binding(
-    coordinators: &AccountCoordinators,
+/// liveness reports it, without the connection's evidence: the recovery
+/// paths own the work it accepted. Returns whether the slot no longer
+/// holds it.
+async fn retire_expired_binding(
+    coordinators: &Arc<AccountCoordinators>,
     jid: &FullJid,
     binding: &BindingRef,
 ) -> bool {
-    let evidence = recovery_owned_retirement();
-    let started = coordinators
-        .unregister(
-            jid,
-            UnregisterRequest {
-                operation: evidence.begin,
-                binding_ref: binding.clone(),
-                custody_disposition: evidence.custody_disposition,
-            },
-        )
-        .await;
-    match started {
-        Ok(UnregisterOutcome::Retiring { .. }) => {}
-        Ok(UnregisterOutcome::Stale(_)) => return true,
-        Ok(UnregisterOutcome::Rejected(error)) => {
+    let publisher = CoordinatorBindingPublisher::new(Arc::clone(coordinators));
+    match publisher
+        .retire_binding(jid, binding, RetireEvidence::recovery_owned())
+        .await
+    {
+        Ok(
+            RetireOutcome::Retired { .. } | RetireOutcome::Stale(_) | RetireOutcome::Superseded(_),
+        ) => true,
+        Ok(RetireOutcome::Refused(error)) => {
             warn!(%jid, ?error, "an expired binding's retirement was refused");
-            return false;
+            false
         }
         Err(error) => {
             warn!(%jid, %error, "an expired binding's retirement has an unknown outcome");
+            false
+        }
+    }
+}
+
+/// Release every account binding that names a terminal stream-management
+/// session, so its row can be deleted: the resource row releases first,
+/// the session row is deleted last.
+///
+/// Each binding is retired through its account's coordinator with the
+/// recovery paths as the owner of what it accepted. A binding that still
+/// has a connection is left to that connection. Returns whether no
+/// resource names the session any more; with the connection registry as
+/// the account authority nothing names one and this is `true`.
+pub(super) async fn release_session_bindings(
+    state: &WebSocketState,
+    session: waddle_xmpp::ownership::SmSessionKey,
+) -> bool {
+    let Some(coordinators) = selected_coordinators(state) else {
+        return true;
+    };
+    let resources = match coordinators.store().resources_for_session(session).await {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(?session, %error, "the bindings of a terminal session could not be read");
             return false;
         }
-    }
-    match coordinators
-        .repair(
-            jid,
-            binding,
-            RepairEvidence {
-                operation: evidence.complete,
-                directed_presence: evidence.directed_presence,
-                presentation_flush: evidence.presentation_flush,
-            },
-        )
-        .await
-    {
-        Ok(RepairOutcome::Completed { .. } | RepairOutcome::HeldByNewerBinding(_)) => true,
-        Ok(outcome) => {
-            warn!(%jid, ?outcome, "an expired binding's retirement was not completed");
-            false
+    };
+    let mut released = true;
+    for full_jid in resources {
+        let evidence = RetireEvidence::recovery_owned();
+        let request = ReleaseSessionRequest {
+            begin: evidence.begin,
+            complete: evidence.complete,
+            session,
+            custody_disposition: evidence.custody_disposition,
+            directed_presence: evidence.directed_presence,
+            presentation_flush: evidence.presentation_flush,
+        };
+        match coordinators.release_session(&full_jid, request).await {
+            Ok(SessionRelease::Released { .. } | SessionRelease::NotReferenced) => {}
+            Ok(SessionRelease::HeldByConnection(..)) => {
+                debug!(jid = %full_jid, ?session, "a terminal session is still held by a connection");
+                released = false;
+            }
+            Ok(SessionRelease::Rejected(error)) => {
+                warn!(jid = %full_jid, ?session, ?error, "a terminal session's binding was not released");
+                released = false;
+            }
+            Err(error) => {
+                warn!(jid = %full_jid, ?session, %error, "a session release has an unknown outcome");
+                released = false;
+            }
         }
-        Err(error) => {
-            warn!(%jid, %error, "an expired binding's repair has an unknown outcome");
-            false
-        }
     }
+    released
 }
 
 /// Have the binding a bind displaces retired, and wait until the slot no
@@ -286,7 +312,7 @@ pub(super) async fn retire_expired_binding(
 /// the slot was released in time.
 pub(super) async fn await_displaced_retirement(
     state: &WebSocketState,
-    coordinators: &AccountCoordinators,
+    coordinators: &Arc<AccountCoordinators>,
     jid: &FullJid,
     displaced: &BindingRef,
     deadline: tokio::time::Instant,
@@ -465,20 +491,4 @@ async fn detach(coordinators: &AccountCoordinators, link: &AccountBindingLink) -
             false
         }
     }
-}
-
-/// The room-leave hook of a connection's end.
-///
-/// A connection that ends leaves the rooms its occupancy generation
-/// joined. With the room-request mailbox that departure is a `RoomLeave`
-/// entry appended for the room's owner; that lane does not expose an
-/// append for it yet, so this records nothing and the departure is carried
-/// by the occupancy sweep of the teardown paths alone. Cleanup calls it
-/// once per ended connection, after its teardown, with the full JID and
-/// the occupancy generation that left.
-pub(super) async fn append_room_leave_at_connection_end(
-    _state: &WebSocketState,
-    _jid: &FullJid,
-    _occupancy: waddle_xmpp_core::OccupancySessionGeneration,
-) {
 }

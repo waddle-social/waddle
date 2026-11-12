@@ -4174,6 +4174,21 @@ pub(crate) async fn run_pending_delivery_claim_sweep(
             .active_sm_stream_ids();
         let mut live_sessions = detached_live;
         live_sessions.extend(active_live);
+        // A session of the durable authority is never in the in-memory
+        // registry. While it can be resumed its claimed rows are not
+        // orphaned, attached or detached.
+        if let Some(store) = state.deps.app_state.durable_sm().store() {
+            match store.live_stream_ids().await {
+                Ok(streams) => live_sessions.extend(streams),
+                Err(error) => {
+                    warn!(%error, "claim-expiry janitor: durable SM sessions unavailable; skipping orphan release");
+                    waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                        Janitor::PendingDeliveryClaim, SweepOutcome::Failed,
+                    );
+                    return;
+                }
+            }
+        }
         match state.deps.protocol.sm_session_registry.pending_claim_protected_streams().await {
             Ok(streams) => live_sessions.extend(streams),
             Err(error) => {

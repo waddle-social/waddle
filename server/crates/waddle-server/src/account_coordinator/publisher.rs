@@ -83,6 +83,23 @@ pub struct RetireEvidence {
     pub presentation_flush: PresentationFlushDisposition,
 }
 
+impl RetireEvidence {
+    /// What a retirement states when the binding's own teardown evidence is
+    /// not available: the work it accepted is owned by the stream-management
+    /// and offline recovery paths, which also retract its directed presence
+    /// and own any presentation it had pending.
+    pub fn recovery_owned() -> Self {
+        Self {
+            begin: AccountResourceOperationId::fresh(),
+            complete: AccountResourceOperationId::fresh(),
+            custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+            directed_presence:
+                DirectedPresenceTeardownDisposition::RecipientsRetractedAndUnavailableRecoveryOwned,
+            presentation_flush: PresentationFlushDisposition::RecoveryOwner,
+        }
+    }
+}
+
 /// The result of retiring a binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetireOutcome {
@@ -317,13 +334,25 @@ impl CoordinatorBindingPublisher {
         published: &PublishedBinding,
         evidence: RetireEvidence,
     ) -> Result<RetireOutcome, AccountCoordinatorError> {
+        self.retire_binding(jid, &published.binding_ref, evidence)
+            .await
+    }
+
+    /// Retire the binding with this exact reference, whoever published it.
+    /// This is how a binding whose connection is gone is retired.
+    pub async fn retire_binding(
+        &self,
+        jid: &FullJid,
+        binding_ref: &BindingRef,
+        evidence: RetireEvidence,
+    ) -> Result<RetireOutcome, AccountCoordinatorError> {
         let started = self
             .coordinators
             .unregister(
                 jid,
                 UnregisterRequest {
                     operation: evidence.begin,
-                    binding_ref: published.binding_ref.clone(),
+                    binding_ref: binding_ref.clone(),
                     custody_disposition: evidence.custody_disposition,
                 },
             )
@@ -337,7 +366,7 @@ impl CoordinatorBindingPublisher {
             .coordinators
             .repair(
                 jid,
-                &published.binding_ref,
+                binding_ref,
                 RepairEvidence {
                     operation: evidence.complete,
                     directed_presence: evidence.directed_presence,

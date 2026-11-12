@@ -761,42 +761,108 @@ pub(super) async fn cleanup_connection_shutdown(
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
     let ending = EndingConnection::of(conn);
-    let outcome = Box::pin(cleanup_connection_shutdown_inner(
+    #[cfg(feature = "clustering")]
+    let occupant = EndingOccupant::of(conn);
+    let teardown = Box::pin(cleanup_connection_shutdown_inner(
         state,
         outbound_rx,
         conn,
         superseded,
         None,
-    ))
-    .await;
+    ));
+    #[cfg(feature = "clustering")]
+    let teardown = ENDING_OCCUPANT.scope(occupant, teardown);
+    let outcome = teardown.await;
     ending.finish(state, outcome).await;
     outcome
 }
 
 /// What a connection's end reports once its teardown has run: its binding
-/// at the account coordinator and the occupancy generation that left.
+/// at the account coordinator.
 struct EndingConnection {
     account_binding: Option<super::account_binding::AccountBindingLink>,
-    jid: Option<FullJid>,
-    occupancy: waddle_xmpp_core::OccupancySessionGeneration,
 }
 
 impl EndingConnection {
     fn of(conn: &mut WsConnState) -> Self {
         Self {
             account_binding: conn.account_binding.take(),
-            jid: conn.phase.cleanup_jid().cloned(),
-            occupancy: conn.occupancy_session,
         }
     }
 
     async fn finish(self, state: &WebSocketState, outcome: ConnectionShutdownOutcome) {
         super::account_binding::finish_teardown(state, self.account_binding, outcome).await;
-        // A detached session keeps its occupancy; its rooms are left when
-        // the session ends.
-        if let (Some(jid), ConnectionShutdownOutcome::NotPersisted) = (&self.jid, outcome) {
-            super::account_binding::append_room_leave_at_connection_end(state, jid, self.occupancy)
-                .await;
+    }
+}
+
+/// The identity an ending connection leaves its remote rooms under.
+#[cfg(feature = "clustering")]
+#[derive(Clone)]
+struct EndingOccupant {
+    principal: waddle_xmpp::auth::AuthenticatedPrincipalRef,
+    occupancy: waddle_xmpp_core::OccupancySessionGeneration,
+}
+
+#[cfg(feature = "clustering")]
+impl EndingOccupant {
+    fn of(conn: &WsConnState) -> Option<Self> {
+        let principal = conn
+            .authenticated_session
+            .as_ref()?
+            .authenticated_principal_ref()
+            .ok()?;
+        Some(Self {
+            principal,
+            occupancy: conn.occupancy_session,
+        })
+    }
+}
+
+#[cfg(feature = "clustering")]
+tokio::task_local! {
+    // Set for the teardown of one connection. The remote-room sweep is
+    // reached from that teardown and from janitors that act for no
+    // connection; only the former has a principal to leave a room under.
+    static ENDING_OCCUPANT: Option<EndingOccupant>;
+}
+
+/// Leave one remote room through the room-request mailbox, as the ending
+/// connection. `true` means the mailbox carries the leave (or refused it
+/// with the requester's answer), so the relayed replay is not sent.
+#[cfg(feature = "clustering")]
+async fn commit_room_leave_for_ending_connection(
+    state: &WebSocketState,
+    jid: &FullJid,
+    room: &BareJid,
+    nick: &str,
+    connection_generation: MembershipGenerationFilter,
+) -> bool {
+    use crate::ingress::room_request::RoomRequestCommit;
+    let Ok(Some(ending)) = ENDING_OCCUPANT.try_with(Clone::clone) else {
+        return false;
+    };
+    if !matches!(connection_generation, MembershipGenerationFilter::Only(generation) if generation == ending.occupancy)
+    {
+        return false;
+    }
+    match state
+        .deps
+        .protocol
+        .ingress
+        .commit_room_leave_at_connection_end(
+            room.clone(),
+            jid.clone(),
+            nick,
+            ending.occupancy,
+            ending.principal,
+        )
+        .await
+    {
+        Ok(RoomRequestCommit::Committed(_) | RoomRequestCommit::Refused(_)) => true,
+        Ok(RoomRequestCommit::NotCarried) => false,
+        Err(error) => {
+            warn!(%room, %jid, %error, "room leave was not committed to the mailbox; relaying it");
+            false
         }
     }
 }
@@ -821,14 +887,18 @@ pub(super) async fn cleanup_force_detach_connection_shutdown(
         }
     }
     let ending = EndingConnection::of(conn);
-    let outcome = Box::pin(cleanup_connection_shutdown_inner(
+    #[cfg(feature = "clustering")]
+    let occupant = EndingOccupant::of(conn);
+    let teardown = Box::pin(cleanup_connection_shutdown_inner(
         state,
         outbound_rx,
         conn,
         superseded,
         Some(origin),
-    ))
-    .await;
+    ));
+    #[cfg(feature = "clustering")]
+    let teardown = ENDING_OCCUPANT.scope(occupant, teardown);
+    let outcome = teardown.await;
     ending.finish(state, outcome).await;
     outcome
 }
@@ -3484,6 +3554,21 @@ async fn cleanup_remote_muc_presence(
             waddle_sfu::UnboundOccupantPolicy::Keep,
             None,
         );
+        // An ending connection leaves through the room-request mailbox
+        // where the mailbox carries the room; the relayed replay below is
+        // for every other case.
+        if commit_room_leave_for_ending_connection(
+            state,
+            jid,
+            &room_jid,
+            &nick,
+            connection_generation,
+        )
+        .await
+        {
+            custody.forget();
+            continue;
+        }
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));

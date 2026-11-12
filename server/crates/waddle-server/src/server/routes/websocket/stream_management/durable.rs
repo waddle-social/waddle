@@ -1594,6 +1594,12 @@ pub(super) async fn resume(
     #[cfg(test)]
     resume_binding_attempts.push(attempt_binding.clone());
 
+    // Only a session the durable authority enabled can be resumed here. A
+    // `previd` the legacy registry issued before this authority was
+    // selected names no durable session: it is answered `<failed/>` with
+    // item-not-found, the client binds afresh, and the legacy session's
+    // rows are expired by the stream-management expiry janitor, which
+    // still restores and ages every session the authority does not hold.
     let Ok(operation) = ResumeOperation::for_previd(&resume.previd) else {
         return failed(unnamed_session(), SmResumeOutcome::NotFound);
     };

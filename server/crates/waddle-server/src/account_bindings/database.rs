@@ -426,6 +426,38 @@ impl AccountBindingStore for DatabaseAccountBindingStore {
         Ok(resources)
     }
 
+    async fn bound_accounts(
+        &self,
+        after: Option<&BareJid>,
+        limit: u32,
+    ) -> Result<Vec<BareJid>, AccountBindingStoreError> {
+        let mut tx = self.db.begin().await?;
+        let mut accounts = Vec::new();
+        {
+            let mut rows = tx
+                .query(
+                    "SELECT DISTINCT bare_jid FROM account_resource_bindings \
+                     WHERE binding_ref IS NOT NULL AND bare_jid > ? \
+                     ORDER BY bare_jid LIMIT ?",
+                    crate::db_params![
+                        after.map(ToString::to_string).unwrap_or_default(),
+                        i64::from(limit)
+                    ],
+                )
+                .await?;
+            while let Some(found) = rows.next().await? {
+                accounts.push(
+                    found
+                        .get::<String>(0)?
+                        .parse()
+                        .map_err(|_| AccountBindingStoreError::CorruptRow { field: "bare_jid" })?,
+                );
+            }
+        }
+        tx.rollback().await?;
+        Ok(accounts)
+    }
+
     async fn load_account(
         &self,
         account: &BareJid,

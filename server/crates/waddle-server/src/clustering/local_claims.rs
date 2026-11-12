@@ -80,6 +80,20 @@ impl std::fmt::Display for LocalClaimsErrorClass {
 pub struct SmSessionLocalClaims {
     registry: OnceLock<Arc<InMemorySmSessionRegistry>>,
     connection_registry: OnceLock<Arc<ConnectionRegistry>>,
+    /// The durable stream-management authority, when it is selected.
+    durable_sm: OnceLock<crate::sm_authority::DurableSmStore>,
+}
+
+/// What a reclaimed claim's session is to the durable authority.
+enum ReclaimedDurableSession {
+    /// The authority holds no such session; the in-memory registry
+    /// hydrates it.
+    NotDurable,
+    /// The authority holds the session and its owner is recorded as lost.
+    /// The registry must not hydrate it.
+    OwnerLossRecorded,
+    /// The authority could not be read or written. The reclaim is retried.
+    Unavailable,
 }
 
 impl SmSessionLocalClaims {
@@ -88,7 +102,65 @@ impl SmSessionLocalClaims {
         Arc::new(Self {
             registry: OnceLock::new(),
             connection_registry: OnceLock::new(),
+            durable_sm: OnceLock::new(),
         })
+    }
+
+    /// Wire the durable stream-management authority. Called once, when
+    /// that authority is selected.
+    pub fn wire_durable_sm(&self, store: crate::sm_authority::DurableSmStore) {
+        if self.durable_sm.set(store).is_err() {
+            tracing::error!(
+                "SmSessionLocalClaims::wire_durable_sm called more than once; the durable \
+                 stream-management store was already wired (ignoring this call)"
+            );
+        }
+    }
+
+    /// Record the loss of a durable session's owner under the claim this
+    /// node just reclaimed from it.
+    ///
+    /// The durable authority keeps its sessions in the relations the
+    /// in-memory registry restores from, so the registry must not hydrate
+    /// one: it would become a second owner of the session's retained
+    /// frames. The authority moves the session to detached instead, where
+    /// a resume or its expiry finds it.
+    async fn record_durable_owner_lost(
+        &self,
+        entity: &Entity,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+    ) -> ReclaimedDurableSession {
+        use crate::sm_authority::{LifecycleError, LifecycleRejection};
+        let Some(store) = self.durable_sm.get() else {
+            return ReclaimedDurableSession::NotDurable;
+        };
+        let Ok(key) = uuid::Uuid::parse_str(&entity.id) else {
+            return ReclaimedDurableSession::NotDurable;
+        };
+        let session = waddle_xmpp::ownership::SmSessionKey::from_uuid(key);
+        let record = match store.session(session).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return ReclaimedDurableSession::NotDurable,
+            Err(error) => {
+                tracing::warn!(entity_id = %entity.id, %error, "reclaimed durable SM session could not be read");
+                return ReclaimedDurableSession::Unavailable;
+            }
+        };
+        match store
+            .record_owner_lost(session, record.generation, fence, chrono::Utc::now())
+            .await
+        {
+            // A session that is already detached or terminal has no owner
+            // to lose.
+            Ok(())
+            | Err(LifecycleError::Rejected(
+                LifecycleRejection::Transition(_) | LifecycleRejection::UnknownSession,
+            )) => ReclaimedDurableSession::OwnerLossRecorded,
+            Err(error) => {
+                tracing::warn!(entity_id = %entity.id, %error, "durable SM owner loss could not be recorded");
+                ReclaimedDurableSession::Unavailable
+            }
+        }
     }
 
     /// Wire in the real registry once it exists. A registry is constructed
@@ -327,10 +399,25 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                 owner.clone(),
                 *epoch,
             );
-            match registry
-                .hydrate_reclaimed_typed(entity, &fence, *reservation)
-                .await
-            {
+            let durable = self.record_durable_owner_lost(entity, &fence).await;
+            let hydration = match durable {
+                ReclaimedDurableSession::NotDurable => {
+                    registry
+                        .hydrate_reclaimed_typed(entity, &fence, *reservation)
+                        .await
+                }
+                // The session is detached at the durable authority and no
+                // node owns it. The claim is released like that of a
+                // session with nothing to hydrate, so the node that
+                // resumes or expires it takes a free claim.
+                ReclaimedDurableSession::OwnerLossRecorded => {
+                    Ok(waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable)
+                }
+                ReclaimedDurableSession::Unavailable => {
+                    return ReclaimedHydrationHandoff::NotAccepted;
+                }
+            };
+            match hydration {
                 Ok(
                     waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
                     | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased

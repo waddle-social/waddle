@@ -151,6 +151,67 @@ impl AccountAuthoritySelection {
     }
 }
 
+/// How many accounts one sweep examines for bindings without a connection.
+const EXPIRED_BINDING_SWEEP_ACCOUNTS: u32 = 256;
+
+/// Retire the bindings whose connection is gone: its node lost its lease,
+/// or its process ended. Such a binding has no connection to retire it, so
+/// its resource would stay reserved and a session it references could
+/// never be deleted. Each is retired by `unregister` and then `repair`,
+/// stating that the recovery paths own the work it accepted. A binding
+/// whose liveness is unknown is not reported as expired and is left alone.
+///
+/// One sweep examines a bounded page of the accounts that hold a binding
+/// and resumes after it on the next; `cursor` restarts at the beginning
+/// once the last page was read. Returns how many bindings were retired.
+async fn retire_expired_bindings(
+    coordinators: &Arc<AccountCoordinators>,
+    cursor: &mut Option<jid::BareJid>,
+) -> usize {
+    let accounts = match coordinators
+        .store()
+        .bound_accounts(cursor.as_ref(), EXPIRED_BINDING_SWEEP_ACCOUNTS)
+        .await
+    {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            tracing::warn!(%error, "account coordinator reaper: bound accounts could not be read");
+            return 0;
+        }
+    };
+    *cursor = accounts.last().cloned();
+    let publisher = super::publisher::CoordinatorBindingPublisher::new(Arc::clone(coordinators));
+    let mut retired = 0;
+    for account in accounts {
+        let expired = match coordinators.expired_bindings(&account).await {
+            Ok(expired) => expired,
+            Err(error) => {
+                tracing::debug!(%error, "account coordinator reaper: expired bindings not read");
+                continue;
+            }
+        };
+        for (full_jid, binding_ref) in expired {
+            match publisher
+                .retire_binding(
+                    &full_jid,
+                    &binding_ref,
+                    super::publisher::RetireEvidence::recovery_owned(),
+                )
+                .await
+            {
+                Ok(super::publisher::RetireOutcome::Retired { .. }) => retired += 1,
+                Ok(outcome) => {
+                    tracing::debug!(?outcome, "account coordinator reaper: expired binding kept");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "account coordinator reaper: retirement outcome unknown");
+                }
+            }
+        }
+    }
+    retired
+}
+
 /// Reclaim idle coordinators for as long as the directory exists. Each
 /// sweep runs in a `janitor.sweep` span and is counted as a janitor sweep,
 /// so a stalled reaper shows as a missing heartbeat like any other janitor.
@@ -162,14 +223,20 @@ async fn reclaim_idle_coordinators(
     let period = config.idle_after.max(std::time::Duration::from_secs(1));
     let mut ticks = tokio::time::interval(period);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cursor = None;
     loop {
         ticks.tick().await;
         let Some(coordinators) = coordinators.upgrade() else {
             return;
         };
         async {
+            let retired = retire_expired_bindings(&coordinators, &mut cursor).await;
             let reclaimed = coordinators.reclaim_idle().await;
-            tracing::debug!(reclaimed, "account coordinator reaper: sweep finished");
+            tracing::debug!(
+                reclaimed,
+                retired,
+                "account coordinator reaper: sweep finished"
+            );
             record_janitor_sweep(Janitor::AccountCoordinatorReaper, SweepOutcome::Completed);
         }
         .instrument(tracing::info_span!(

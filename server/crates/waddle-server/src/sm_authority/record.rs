@@ -486,6 +486,63 @@ pub(super) async fn delete_operations(
 
 /// Delete terminal rows that retain no frames and were last updated before
 /// `before`.
+/// Released terminal tombstones last updated before `before`, oldest first.
+pub(super) async fn released_terminal_before(
+    tx: &mut Transaction<'_>,
+    before: DateTime<Utc>,
+    limit: u32,
+) -> Result<Vec<SmSessionKey>, DurableSmError> {
+    let mut rows = tx
+        .query(
+            "SELECT session_id FROM sm_durable_sessions \
+             WHERE state = 4 AND outbound_acked = outbound_appended AND updated_at_ms < ? \
+             ORDER BY updated_at_ms LIMIT ?",
+            crate::db_params![before.timestamp_millis(), i64::from(limit)],
+        )
+        .await?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next().await? {
+        sessions.push(SmSessionKey::from_uuid(uuid(
+            &row.get::<String>(0)?,
+            "session_id",
+        )?));
+    }
+    Ok(sessions)
+}
+
+/// Delete one released terminal tombstone last updated before `before`.
+pub(super) async fn purge_released_terminal_session(
+    tx: &mut Transaction<'_>,
+    session: SmSessionKey,
+    before: DateTime<Utc>,
+) -> Result<u64, DurableSmError> {
+    Ok(tx
+        .execute(
+            "DELETE FROM sm_durable_sessions \
+             WHERE session_id = ? AND state = 4 AND outbound_acked = outbound_appended \
+               AND updated_at_ms < ?",
+            crate::db_params![session.as_uuid().to_string(), before.timestamp_millis()],
+        )
+        .await?)
+}
+
+/// The stream id of every session that has not reached a terminal state.
+pub(super) async fn live_stream_ids(
+    tx: &mut Transaction<'_>,
+) -> Result<Vec<SmSessionId>, DurableSmError> {
+    let mut rows = tx
+        .query(
+            "SELECT session_id FROM sm_durable_sessions WHERE state <> 4",
+            (),
+        )
+        .await?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        ids.push(SmSessionId::new(row.get::<String>(0)?));
+    }
+    Ok(ids)
+}
+
 pub(super) async fn purge_released_terminal(
     tx: &mut Transaction<'_>,
     before: DateTime<Utc>,

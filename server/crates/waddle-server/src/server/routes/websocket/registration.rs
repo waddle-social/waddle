@@ -847,18 +847,7 @@ impl BindingPublisher for RegistryBindingPublisher<'_> {
 /// stream-management and offline recovery paths, and nothing is known to be
 /// outstanding for directed presence or one-time presentations.
 pub(super) fn recovery_owned_retirement() -> RetireEvidence {
-    use waddle_xmpp::ownership::account_resource_transition::{
-        AccountResourceOperationId, BindingRetirementDisposition,
-        DirectedPresenceTeardownDisposition, PresentationFlushDisposition,
-    };
-    RetireEvidence {
-        begin: AccountResourceOperationId::fresh(),
-        complete: AccountResourceOperationId::fresh(),
-        custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
-        directed_presence:
-            DirectedPresenceTeardownDisposition::RecipientsRetractedAndUnavailableRecoveryOwned,
-        presentation_flush: PresentationFlushDisposition::RecoveryOwner,
-    }
+    RetireEvidence::recovery_owned()
 }
 
 /// Withdraw and retire a binding whose publication will not be acknowledged.

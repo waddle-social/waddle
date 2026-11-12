@@ -543,15 +543,52 @@ Still open before the live path can move onto
   write as the session. The durable detach does not prove it, so those
   canonical rows stay non-terminal and are redelivered.
 
+What holds between the durable authority and the rest of the server:
+
+- **Release order.** A terminal session's custody is transferred and
+  released, then every account binding that names it is released through
+  its coordinator (`resources_for_session`, `release_session`), and only
+  then is its tombstone deleted. With the coordinator selected the purge
+  deletes one session at a time; a delete that fails at commit means a
+  resource row still names the session and is repeated by the next sweep.
+  A resume and an enable commit at the durable authority before the
+  connection sends the account mutation that names the generation.
+- **Owner loss by claim.** When a node reclaims the `sm_session:<key>`
+  claim of a lost node (the orphan-claim reaper, or the inline reclaim
+  after a self-fence), a session the durable authority holds is not
+  hydrated into the in-memory registry: `record_owner_lost` moves it to
+  detached under the reclaimed claim, and the claim is released. A resume
+  on any node then takes the free claim. The expiry sweep takes the free
+  claim of a due session on a clustered store before it expires it.
+- **Janitors.** The pending-delivery claim janitor counts every
+  non-terminal durable session as live, so the rows a detached durable
+  session claimed are not released as orphaned.
+- **Sessions of the legacy registry.** A session enabled under `legacy`
+  is not resumable once `durable` is selected: its `previd` names no
+  durable session and is answered `<failed/>` with item-not-found, and
+  the client binds afresh. Its rows are restored into the in-memory
+  registry at startup, as every session the authority does not hold is,
+  and expire through the stream-management expiry janitor.
+- **Bindings without a connection.** The account coordinator reaper
+  retires the bindings the coordinator reports as expired (their node
+  lost its lease or their process ended) by `unregister` then `repair`,
+  a bounded page of bound accounts per sweep.
+
 Open before the durable selector can be chosen in production:
 
-- A resume or a Bind 2 replacement when another node holds the session
-  claim. The connection does not take a claim over; the resume is refused
-  as owner-unreachable, and the store refuses resource replacement on a
-  clustered store. Owner loss by claim (`record_owner_lost`) has no caller.
-- The orphan-claim reaper and the pending-delivery claim janitor still
-  reason about sessions through the in-memory registry, which never holds a
-  durable session.
+- A resume while a live node holds the session claim. The connection does
+  not take the claim from a live owner; the resume is refused as
+  owner-unreachable and the client binds afresh. The cross-node
+  force-detach that the legacy path uses hands the detached session to
+  the resuming node as an in-memory snapshot, which is not how a durable
+  session moves: its owner would have to detach at the authority and
+  release the claim on request, and no relay message asks for that. A
+  resume that arrives before the reaper reclaimed a lost node's claim is
+  refused the same way.
+- A Bind 2 or fresh-bind replacement on a clustered store. The store
+  refuses `replace_resource_sessions`: the binder holds the account's
+  claim, the sessions' claims may be held by other nodes, and no single
+  transaction proves both. The sessions are left to expire.
 - The inline offer is not advertised in the SASL2 stream feature.
 
 ## M7: schema baseline

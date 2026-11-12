@@ -393,6 +393,54 @@ impl DurableSmStore {
         finish(tx, &stored, now).await
     }
 
+    /// The `sm_sessions` and `sm_unacked` stream id of every session that
+    /// can still be resumed or is owned. A reader that releases work claimed
+    /// under a session id uses it to leave a detached session's claims in
+    /// place.
+    pub async fn live_stream_ids(
+        &self,
+    ) -> Result<Vec<waddle_xmpp::pending_delivery::SmSessionId>, DurableSmError> {
+        let mut tx = self.db.begin().await?;
+        let ids = record::live_stream_ids(&mut tx).await?;
+        tx.rollback().await?;
+        Ok(ids)
+    }
+
+    /// Released terminal tombstones last updated before `before`, oldest
+    /// first: the rows a purge deletes.
+    pub async fn purgeable_terminal(
+        &self,
+        before: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<SmSessionKey>, DurableSmError> {
+        let mut tx = self.db.begin().await?;
+        let sessions = record::released_terminal_before(&mut tx, before, limit).await?;
+        tx.rollback().await?;
+        Ok(sessions)
+    }
+
+    /// Delete one released terminal tombstone last updated before `before`.
+    /// Returns whether a row was deleted.
+    ///
+    /// An account resource row may name the session, by a foreign key
+    /// checked at commit. The caller releases every such row first; a
+    /// delete that still fails means a row names the session, and is
+    /// repeated after that row is released.
+    pub async fn purge_terminal_session(
+        &self,
+        session: SmSessionKey,
+        before: DateTime<Utc>,
+    ) -> Result<bool, LifecycleError> {
+        let mut tx = self.begin_write().await.map_err(LifecycleRejection::from)?;
+        let purged = record::purge_released_terminal_session(&mut tx, session, before)
+            .await
+            .map_err(LifecycleRejection::from)?;
+        tx.commit()
+            .await
+            .map_err(|error| LifecycleError::Indeterminate(error.into()))?;
+        Ok(purged > 0)
+    }
+
     /// Delete released terminal tombstones last updated before `before`.
     /// Returns how many rows were deleted.
     pub async fn purge_terminal(&self, before: DateTime<Utc>) -> Result<u64, LifecycleError> {
