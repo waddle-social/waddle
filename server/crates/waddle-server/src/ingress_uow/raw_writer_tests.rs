@@ -1,6 +1,7 @@
 use super::begin_raw_ingress_writer;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 use crate::ingress::test_support::IngressFixture;
+use crate::ingress_substrate::EnteredTransaction;
 use crate::ingress_substrate::{
     self, EffectReceiptKind, IngressSubstrateError, PostgresIngressSubstrate,
 };
@@ -134,7 +135,9 @@ async fn postgres_raw_substrate_rejects_unsupported_epoch_even_with_valid_gucs()
         store.begin().await,
         Err(IngressSubstrateError::UnsupportedLiveEpoch)
     ));
-    let mut tx = fixture.db.begin().await.expect("raw transaction");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin().await.expect("raw transaction"),
+    );
     tx.execute("SELECT set_config('waddle.protocol_epoch', '2', true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)", ()).await.expect("valid epoch and xid GUCs");
     tx.execute(
         "UPDATE ingress_effect_descendants SET settled_at = settled_at WHERE false",

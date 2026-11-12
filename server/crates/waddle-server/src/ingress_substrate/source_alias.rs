@@ -4,6 +4,7 @@
 //! and privileged GC must lock the canonical message before removing an alias.
 //! A non-cooperating privileged writer is not fenced by this experiment.
 
+use crate::ingress_substrate::EnteredTransaction;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use thiserror::Error;
@@ -22,7 +23,7 @@ use super::substrate::{
     IngressSubstrateError, PreparedAttestedReceiptWriter, PreparedIngressRelation,
 };
 use super::{authority, CanonicalSourceBinding, MessageEnvelope};
-use crate::db::{DatabaseDriver, Row, Transaction};
+use crate::db::{DatabaseDriver, Row};
 use crate::ingress_uow::{
     IngressUowError, IngressUowTransaction, PrincipalAssertion, PrincipalRepository,
 };
@@ -83,7 +84,7 @@ tokio::task_local! {
 }
 
 async fn savepoint_command(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     phase: SavepointPhase,
 ) -> Result<(), IngressSubstrateError> {
     let statement = match phase {
@@ -113,7 +114,7 @@ async fn savepoint_command(
 const INSERT_ALIAS_MAIN_SQLITE: &str = "INSERT INTO main.ingress_origin_aliases (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (alias_key_hash) DO NOTHING";
 
 async fn probe_alias(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     alias: &AliasStorageKey<'_>,
 ) -> Result<Option<MessageKey>, IngressSubstrateError> {
@@ -145,7 +146,7 @@ async fn probe_alias(
 }
 
 async fn lock_probed_message(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
@@ -168,7 +169,7 @@ async fn lock_probed_message(
 }
 
 async fn insert_source_candidate(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     digest: &SemanticDigest,
@@ -200,7 +201,7 @@ async fn insert_source_candidate(
 /// Fixture-only storage operation. The caller has already asserted the current
 /// principal and owns the complete UOW; every error must drop that UOW.
 async fn classify_after_assertion(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     sender: &BareJid,
     offer: SourceAliasOffer<'_>,
@@ -276,7 +277,7 @@ async fn classify_after_assertion(
 }
 
 async fn classify_locked(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     alias: &AliasStorageKey<'_>,
     locked_key: MessageKey,

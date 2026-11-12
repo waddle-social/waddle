@@ -1,5 +1,7 @@
 //! Periodic ingress maintenance scheduling and bounded retention collection.
 
+#[cfg(test)]
+use crate::ingress_substrate::EnteredTransaction;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -370,7 +372,9 @@ mod tests {
             .expect("migrate SQLite");
         let key = MessageKey::new();
         let digest = SemanticDigest::from_storage(1, [7; 32]).expect("digest");
-        let mut transaction = database.begin_immediate().await.expect("begin");
+        let mut transaction = EnteredTransaction::from_fixture_transaction(
+            database.begin_immediate().await.expect("begin"),
+        );
         record_message(&mut transaction, key, &digest, None)
             .await
             .expect("record canonical row");
@@ -414,7 +418,9 @@ mod tests {
             .expect("enroll");
         let key = MessageKey::new();
         let digest = SemanticDigest::from_storage(1, [8; 32]).expect("digest");
-        let mut transaction = database.begin_immediate().await.expect("begin");
+        let mut transaction = EnteredTransaction::from_fixture_transaction(
+            database.begin_immediate().await.expect("begin"),
+        );
         record_message(&mut transaction, key, &digest, None)
             .await
             .expect("message");

@@ -10,6 +10,7 @@ use super::{
     Transaction, Utc, Uuid, WireHandledCount, ALIAS_RETENTION,
 };
 use crate::db::{DatabaseConfig, MigrationRunner};
+use crate::ingress_substrate::EnteredTransaction;
 use std::time::Duration as StdDuration;
 
 struct Fixture {
@@ -146,7 +147,9 @@ async fn malformed_stored_envelope_fails_typed(driver: DatabaseDriver) {
         return;
     };
     let key = MessageKey::new();
-    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin"),
+    );
     record_message(&mut tx, key, &digest(), None)
         .await
         .expect("record row");
@@ -184,7 +187,9 @@ async fn envelope_roundtrip(driver: DatabaseDriver) {
     let key = MessageKey::new();
     let empty_key = MessageKey::new();
     let envelope = typed_envelope("round trip body");
-    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin"),
+    );
     assert_eq!(
         load_envelope(&mut tx, key).await.expect("missing envelope"),
         None
@@ -229,13 +234,17 @@ async fn typed_envelope_retry_after_storage_roundtrip(driver: DatabaseDriver) {
     );
     let envelope = MessageEnvelope::new(message.clone());
     assert_eq!(envelope.message(), &message);
-    let mut tx = fixture.db.begin_immediate().await.expect("begin write");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin write"),
+    );
     record_message(&mut tx, key, &digest(), Some(&envelope))
         .await
         .expect("serialize at insert");
     tx.commit().await.expect("commit envelope");
 
-    let mut tx = fixture.db.begin_immediate().await.expect("begin retry");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin retry"),
+    );
     let loaded = load_envelope(&mut tx, key)
         .await
         .expect("parse storage envelope")
@@ -273,7 +282,9 @@ async fn wire_binding_unique(driver: DatabaseDriver) {
     let key = MessageKey::new();
     let id = SmIngressId::new();
     let h = WireHandledCount::from_storage(1);
-    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin"),
+    );
     insert_stream(&mut tx, id).await;
     record_message(&mut tx, key, &digest(), None)
         .await
@@ -291,7 +302,9 @@ async fn wire_binding_unique(driver: DatabaseDriver) {
         MessageWriteOutcome::Recorded
     );
     tx.commit().await.expect("commit binding");
-    let mut tx = fixture.db.begin_immediate().await.expect("begin lookup");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin lookup"),
+    );
     assert_eq!(
         lookup_wire_binding(&mut tx, id, h)
             .await
@@ -318,7 +331,9 @@ async fn checkpoint_frontier(driver: DatabaseDriver) {
         return;
     };
     let id = SmIngressId::new();
-    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin"),
+    );
     assert_eq!(
         load_stream_checkpoint(&mut tx, id)
             .await
@@ -370,7 +385,9 @@ async fn checkpoint_frontier(driver: DatabaseDriver) {
         .await
         .expect("flush");
     tx.commit().await.expect("commit checkpoint");
-    let mut tx = fixture.db.begin_immediate().await.expect("read checkpoint");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("read checkpoint"),
+    );
     assert_eq!(
         load_stream_checkpoint(&mut tx, id)
             .await
@@ -387,7 +404,9 @@ async fn receipts_and_gc(driver: DatabaseDriver) {
     };
     let key = MessageKey::new();
     let kind = EffectReceiptKind::from_storage(1);
-    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin"),
+    );
     record_message(&mut tx, key, &digest(), None)
         .await
         .expect("record message");
@@ -410,7 +429,9 @@ async fn receipts_and_gc(driver: DatabaseDriver) {
     record_receipt_pooled(&fixture.db, key, kind, &[2; 32])
         .await
         .expect("post-commit receipt");
-    let mut tx = fixture.db.begin_immediate().await.expect("terminalize");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("terminalize"),
+    );
     assert!(receipts_complete(&mut tx, key)
         .await
         .expect("complete receipts"));
@@ -476,7 +497,9 @@ async fn postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation() 
         return;
     };
     let key = MessageKey::new();
-    let mut setup = fixture.db.begin_immediate().await.expect("begin setup");
+    let mut setup = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin setup"),
+    );
     record_message(&mut setup, key, &digest(), None)
         .await
         .expect("record parent");
@@ -583,7 +606,9 @@ async fn alias_envelope_completion(driver: DatabaseDriver) {
     let sender = "sender@example.com".parse().expect("sender");
     let target = NormalizedTarget::Full("recipient@example.com/device".parse().expect("target"));
     let origin = OriginId::new("authority-origin");
-    let mut tx = fixture.db.begin_immediate().await.expect("begin alias");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin alias"),
+    );
     resolve_and_record_alias(&mut tx, &sender, &target, &origin, &digest(), || key)
         .await
         .expect("resolve alias");
@@ -643,7 +668,9 @@ async fn alias_identity_mismatch_fails_closed(driver: DatabaseDriver) {
     let Some(fixture) = Fixture::open(driver).await else {
         return;
     };
-    let mut tx = fixture.db.begin_immediate().await.expect("begin aliases");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin aliases"),
+    );
     let offered_digest = digest();
 
     for (index, field) in [
@@ -796,16 +823,20 @@ async fn postgres_alias_lock_serializes_before_terminalization_without_upgrade_d
     let origin = OriginId::new("locked-origin");
     let key = MessageKey::new();
     let digest = digest();
-    let mut seed = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("seed transaction");
+    let mut seed = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("seed transaction"),
+    );
     resolve_and_record_alias(&mut seed, &sender, &target, &origin, &digest, || key)
         .await
         .expect("seed alias");
     seed.commit().await.expect("commit alias");
-    let mut first = fixture.db.begin_immediate().await.expect("first writer");
+    let mut first = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("first writer"),
+    );
     resolve_and_record_alias(
         &mut first,
         &sender,
@@ -816,7 +847,9 @@ async fn postgres_alias_lock_serializes_before_terminalization_without_upgrade_d
     )
     .await
     .expect("lock alias canonical row");
-    let mut second = fixture.db.begin_immediate().await.expect("second writer");
+    let mut second = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("second writer"),
+    );
     {
         let resolution = resolve_and_record_alias(
             &mut second,
@@ -863,11 +896,13 @@ async fn postgres_already_terminal_row_is_unconditionally_locked() {
         return;
     };
     let key = MessageKey::new();
-    let mut seed = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("seed transaction");
+    let mut seed = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("seed transaction"),
+    );
     record_message(&mut seed, key, &digest(), None)
         .await
         .expect("seed message");
@@ -875,22 +910,26 @@ async fn postgres_already_terminal_row_is_unconditionally_locked() {
         .await
         .expect("seed terminal state");
     seed.commit().await.expect("commit terminal state");
-    let mut first = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("first transaction");
+    let mut first = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("first transaction"),
+    );
     assert_eq!(
         terminalize_message(&mut first, key, Utc::now())
             .await
             .expect("lock already terminal row"),
         TerminalizeOutcome::AlreadyTerminal
     );
-    let mut second = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("second transaction");
+    let mut second = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("second transaction"),
+    );
     {
         let terminalize = terminalize_message(&mut second, key, Utc::now());
         tokio::pin!(terminalize);
@@ -941,23 +980,29 @@ async fn checkpoint_flush_never_regresses(driver: DatabaseDriver) {
         (3, 4),
         (4, 4),
     ] {
-        let mut tx = fixture.db.begin_immediate().await.expect("begin flush");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            fixture.db.begin_immediate().await.expect("begin flush"),
+        );
         flush_checkpoint(&mut tx, id, WireHandledCount::from_storage(offered))
             .await
             .expect("flush");
         tx.commit().await.expect("commit flush");
-        let mut tx = fixture.db.begin_immediate().await.expect("read checkpoint");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            fixture.db.begin_immediate().await.expect("read checkpoint"),
+        );
         assert_eq!(
             load_stream_checkpoint(&mut tx, id).await.expect("load"),
             Some(WireHandledCount::from_storage(expected))
         );
         tx.commit().await.expect("close read");
     }
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("missing stream flush");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("missing stream flush"),
+    );
     assert!(matches!(
         flush_checkpoint(
             &mut tx,
@@ -1023,17 +1068,23 @@ async fn room_observer_owner_envelope_attachment(driver: DatabaseDriver) {
     let context = archive_context();
     let owner = MessageEnvelope::with_room_observer(observed.clone(), request.clone())
         .with_archive_context(context.clone());
-    let mut tx = fixture.db.begin_immediate().await.expect("begin origin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin origin"),
+    );
     record_message(&mut tx, key, &digest(), Some(&origin))
         .await
         .expect("origin commits first");
     tx.commit().await.expect("origin commit");
-    let mut tx = fixture.db.begin_immediate().await.expect("begin owner");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin owner"),
+    );
     authority::record_room_canonical_envelope(&mut tx, key, &owner)
         .await
         .expect("owner attaches observed envelope");
     tx.commit().await.expect("owner commit");
-    let mut tx = fixture.db.begin_immediate().await.expect("begin retry");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin retry"),
+    );
     let loaded = load_envelope(&mut tx, key)
         .await
         .expect("read owner envelope")
@@ -1091,7 +1142,9 @@ async fn gc_rechecks_pending_intents_under_canonical_lock(driver: DatabaseDriver
     };
     let key = MessageKey::new();
     let now = Utc::now();
-    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("begin"),
+    );
     record_message(&mut tx, key, &digest(), None)
         .await
         .expect("canonical message");
@@ -1122,11 +1175,13 @@ async fn gc_rechecks_pending_intents_under_canonical_lock(driver: DatabaseDriver
         .await
         .expect("locked candidate recheck");
     assert_eq!(outcome.deleted_messages, 0);
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("verify retained message");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("verify retained message"),
+    );
     assert!(message_exists(&mut tx, key)
         .await
         .expect("message survives"));
@@ -1158,7 +1213,7 @@ fn pair_gc_budget() -> AliasGcBudget {
 }
 
 async fn seed_rejection_pair(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     at: chrono::DateTime<Utc>,
 ) -> (MessageKey, MessageKey) {
     let source = MessageKey::new();
@@ -1230,7 +1285,9 @@ async fn pair_waits_for_both_tails(driver: DatabaseDriver) {
     };
     let now = Utc::now();
     let expired = now - ALIAS_RETENTION - Duration::days(1);
-    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("seed"),
+    );
     let (source, child) = seed_rejection_pair(&mut tx, expired).await;
     set_pair_tail(&mut tx, source, now).await;
     tx.commit().await.expect("commit");
@@ -1298,7 +1355,9 @@ async fn sqlite_pending_archive_custody_protects_rejection_pair() {
         let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
         let now = Utc::now();
         let expired = now - ALIAS_RETENTION - Duration::days(1);
-        let mut tx = fixture.db.begin_immediate().await.expect("seed");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            fixture.db.begin_immediate().await.expect("seed"),
+        );
         tx.execute(
             "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
             (),
@@ -1366,7 +1425,9 @@ async fn sqlite_pending_archive_custody_protects_rejection_pair() {
         );
         assert_pair_present(&fixture.db, source, child).await;
 
-        let mut tx = fixture.db.begin_immediate().await.expect("release custody");
+        let mut tx = EnteredTransaction::from_fixture_transaction(
+            fixture.db.begin_immediate().await.expect("release custody"),
+        );
         tx.execute("DELETE FROM pending_delivery WHERE row_id = 'queued'", ())
             .await
             .expect("release pending copy");
@@ -1415,7 +1476,9 @@ async fn sqlite_rejection_pair_blockers_do_not_enter_scan() {
             let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
             let now = Utc::now();
             let expired = now - ALIAS_RETENTION - Duration::days(1);
-            let mut tx = fixture.db.begin_immediate().await.expect("seed");
+            let mut tx = EnteredTransaction::from_fixture_transaction(
+                fixture.db.begin_immediate().await.expect("seed"),
+            );
             let (source, child) = seed_rejection_pair(&mut tx, expired).await;
             let blocked = if block_child { child } else { source };
             match blocker {
@@ -1475,7 +1538,9 @@ async fn sqlite_blocked_pairs_do_not_starve_later_candidates() {
     let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
     let now = Utc::now();
     let expired = now - ALIAS_RETENTION - Duration::days(1);
-    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("seed"),
+    );
     for _ in 0..super::substrate::GC_BATCH_LIMIT {
         let (_, child) = seed_rejection_pair(&mut tx, expired).await;
         set_pair_tail(&mut tx, child, now).await;
@@ -1509,7 +1574,9 @@ async fn sqlite_pair_delete_rolls_back_after_child_and_readback_handles_lost_ack
     let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
     let now = Utc::now();
     let expired = now - ALIAS_RETENTION - Duration::days(1);
-    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("seed"),
+    );
     let (source, child) = seed_rejection_pair(&mut tx, expired).await;
     tx.commit().await.expect("commit");
     let guard = fixture.db.guard().await.expect("install fault");
@@ -1557,7 +1624,9 @@ async fn postgres_pair_gc_skips_locked_child_and_retries() {
     };
     let now = Utc::now();
     let expired = now - ALIAS_RETENTION - Duration::days(1);
-    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("seed"),
+    );
     let (source, child) = seed_rejection_pair(&mut tx, expired).await;
     tx.commit().await.expect("commit");
     let mut blocker = fixture.db.begin().await.expect("independent connection");
@@ -1604,11 +1673,13 @@ async fn gc_retains_bound_undecided_remote_source(driver: DatabaseDriver) {
         waddle_xmpp::auth::PrincipalAuthEpoch::new(1),
     );
     let binding = CanonicalSourceBinding::new(principal, None);
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("seed remote sources");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("seed remote sources"),
+    );
     record_message_with_source(&mut tx, source, &digest(), None, &binding)
         .await
         .expect("bound remote source");
@@ -1658,11 +1729,13 @@ async fn gc_retains_bound_undecided_remote_source(driver: DatabaseDriver) {
     );
     assert!(message_exists_in_db(&fixture.db, source).await);
 
-    let mut tx = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("latch accepted owner");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("latch accepted owner"),
+    );
     for decision in [0, 1] {
         tx.execute(
             dialect_sql(
@@ -1719,7 +1792,9 @@ async fn sqlite_pending_owner_sources_do_not_starve_a_full_gc_batch() {
     let eligible = MessageKey::new();
     let now = Utc::now();
     let expired = (now - ALIAS_RETENTION - Duration::days(1)).to_rfc3339();
-    let mut tx = fixture.db.begin_immediate().await.expect("seed full head");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        fixture.db.begin_immediate().await.expect("seed full head"),
+    );
     for _ in 0..super::substrate::GC_BATCH_LIMIT {
         let source = MessageKey::new();
         record_message_with_source(&mut tx, source, &digest(), None, &binding)
@@ -1760,7 +1835,9 @@ async fn sqlite_pending_owner_sources_do_not_starve_a_full_gc_batch() {
 }
 
 async fn message_exists_in_db(db: &Database, key: MessageKey) -> bool {
-    let mut tx = db.begin_immediate().await.expect("check retained message");
+    let mut tx = EnteredTransaction::from_fixture_transaction(
+        db.begin_immediate().await.expect("check retained message"),
+    );
     let exists = message_exists(&mut tx, key)
         .await
         .expect("message presence");

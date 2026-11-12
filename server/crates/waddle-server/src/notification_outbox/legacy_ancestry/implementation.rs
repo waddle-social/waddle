@@ -556,7 +556,7 @@ pub(in crate::notification_outbox::legacy_ancestry) fn target(
 }
 
 pub(in crate::notification_outbox::legacy_ancestry) async fn source_matches(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     recorded: &Recorded,
     candidate: &NotificationCandidate,
 ) -> Result<bool, IngressUowError> {

@@ -4,6 +4,7 @@
 //! savepoint. Alias UPDATE/DELETE and candidate-message DELETE are not needed.
 //! Privileged alias removal must follow canonical-message-first lock order.
 
+use crate::ingress_substrate::EnteredTransaction;
 use jid::BareJid;
 use uuid::Uuid;
 use waddle_xmpp::ingress::{
@@ -17,7 +18,7 @@ use super::substrate::{
     validate_stored_alias_identity, validate_stored_alias_identity_at, AliasStorageKey,
     IngressSubstrateError, PreparedAttestedReceiptWriter, PreparedIngressRelation,
 };
-use crate::db::{DatabaseDriver, Transaction};
+use crate::db::DatabaseDriver;
 use crate::ingress_uow::OwnedAliasScope;
 
 #[cfg(test)]
@@ -53,7 +54,7 @@ async fn wait(gate: Option<AliasGate>) {
 }
 
 async fn savepoint(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     statement: &'static str,
     #[cfg(test)] phase: SavepointPhase,
 ) -> Result<(), IngressSubstrateError> {
@@ -78,7 +79,7 @@ async fn savepoint(
 /// Reachable only while the repository owns the complete ingress transaction.
 /// A failure leaves its caller responsible for dropping that transaction.
 pub(crate) async fn resolve_prepared_origin_in_scope(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     _scope: &OwnedAliasScope,
     sender: &BareJid,
@@ -179,7 +180,7 @@ pub(crate) async fn resolve_prepared_origin_in_scope(
 }
 
 async fn probe_alias(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     alias: &AliasStorageKey<'_>,
 ) -> Result<Option<MessageKey>, IngressSubstrateError> {
@@ -203,7 +204,7 @@ async fn probe_alias(
 }
 
 async fn locked_resolution(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     alias: &AliasStorageKey<'_>,
     key: MessageKey,

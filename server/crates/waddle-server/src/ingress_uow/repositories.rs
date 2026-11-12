@@ -2,6 +2,7 @@ pub use super::extension_grants::ExtensionGrantRepository;
 use crate::db::Transaction;
 use crate::inbox::InboxTxError;
 use crate::ingress::EffectReceiptKey;
+use crate::ingress_substrate::EnteredTransaction;
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
@@ -2236,7 +2237,7 @@ impl EffectReceiptRepository {
     }
 
     pub(crate) async fn receipts_complete_on_transaction(
-        transaction: &mut Transaction<'_>,
+        transaction: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, ingress_substrate::IngressSubstrateError> {
         ingress_substrate::receipts_complete(transaction, message_key).await
@@ -2447,7 +2448,7 @@ impl EffectIntentRepository {
 
     #[cfg(test)]
     pub(super) async fn reconcile_on_transaction(
-        transaction: &mut Transaction<'_>,
+        transaction: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
         planned: &[IngressEffectIntent],
         existing_authority: bool,
@@ -2456,7 +2457,7 @@ impl EffectIntentRepository {
     }
 
     async fn reconcile_prepared(
-        transaction: &mut Transaction<'_>,
+        transaction: &mut EnteredTransaction<'_>,
         prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
         message_key: MessageKey,
         planned: &[IngressEffectIntent],
@@ -2890,7 +2891,7 @@ fn inbox_omission_is_recorded_audience(
 }
 
 async fn insert_effect(
-    transaction: &mut Transaction<'_>,
+    transaction: &mut EnteredTransaction<'_>,
     prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     ordinal: u64,

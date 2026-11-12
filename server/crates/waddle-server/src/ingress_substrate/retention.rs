@@ -1,19 +1,20 @@
 use super::{
     dialect_sql, discard_database_error, gc_retained_child_sql, DateTime, IngressSubstrateError,
-    MessageKey, PreparedAttestedReceiptWriter, Transaction, Utc,
+    MessageKey, PreparedAttestedReceiptWriter, Utc,
 };
+use crate::ingress_substrate::EnteredTransaction;
 
 /// Invalidate only while holding the canonical row lock; this is scheduling
 /// state, separate from the executor's terminal receipt proof.
 pub(crate) async fn invalidate_retention(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
     invalidate_retention_in_prepared_transaction(tx, None, message_key).await
 }
 
 pub(crate) async fn invalidate_retention_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
@@ -51,7 +52,7 @@ pub(crate) async fn invalidate_retention_in_prepared_transaction(
 /// Start the tail only when every canonical obligation, descendant and SM
 /// reference has settled. Caller holds the canonical lock through commit.
 pub(crate) async fn refresh_retention(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     now: DateTime<Utc>,
 ) -> Result<(), IngressSubstrateError> {
@@ -101,7 +102,7 @@ pub(crate) async fn refresh_retention(
 
 /// Refresh the same retention proof against the schema attested for this UOW.
 pub(crate) async fn refresh_retention_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     now: DateTime<Utc>,
@@ -178,7 +179,7 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
 }
 
 async fn candidate_boolean(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     query: &str,
     params: impl crate::db::IntoParams,
 ) -> Result<bool, IngressSubstrateError> {
@@ -199,14 +200,14 @@ async fn candidate_boolean(
 }
 
 pub(crate) async fn refresh_retention_with_db_clock(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
     refresh_retention_in_prepared_transaction_with_db_clock(tx, None, message_key).await
 }
 
 pub(crate) async fn refresh_retention_in_prepared_transaction_with_db_clock(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {

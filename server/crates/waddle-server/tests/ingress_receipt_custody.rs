@@ -794,11 +794,11 @@ async fn postgres_blocked_receipt_does_not_stall_a_healthy_key() {
     let (healthy, _) = call_decision_named(&fixture, "healthy-custody").await;
     let key = blocked.external_receipts[0][0].clone();
     let message = blocked.message_key.expect("blocked message");
-    let mut blocker = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("blocking transaction");
+    // Receipt writes require a transaction the ingress substrate opened.
+    let blocking_store =
+        waddle_server::ingress_substrate::PostgresIngressSubstrate::open(fixture.db.clone())
+            .expect("ingress substrate");
+    let mut blocker = blocking_store.begin().await.expect("blocking transaction");
     waddle_server::ingress_substrate::record_receipt(
         &mut blocker,
         message,

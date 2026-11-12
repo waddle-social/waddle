@@ -84,7 +84,7 @@ pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
 pub(crate) async fn candidate_boolean(
-    transaction: &mut Transaction<'_>,
+    transaction: &mut EnteredTransaction<'_>,
     query: &str,
     params: impl crate::db::IntoParams,
 ) -> Result<bool, IngressUowError> {
@@ -109,11 +109,11 @@ use std::time::Duration;
 
 use crate::config::LineageConfig;
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
-use crate::db::{lineage, Database, DatabaseDriver, Transaction};
+use crate::db::{lineage, Database, DatabaseDriver};
 use crate::ingress_substrate::{
-    begin_ingress_entry, set_local_transaction_timeouts, IngressEntryAcquisition,
-    IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest, IngressEntryTransaction,
-    PreparedAttestedReceiptWriter,
+    begin_ingress_entry, set_local_transaction_timeouts, EnteredTransaction,
+    IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp, IngressEntryRequest,
+    IngressEntryTransaction, PreparedAttestedReceiptWriter,
 };
 #[cfg(feature = "clustering")]
 use uuid::Uuid;
@@ -573,25 +573,22 @@ impl<'a> IngressUowTransaction<'a> {
     #[cfg(test)]
     pub(crate) fn source_alias_parts_for_fixture(
         &mut self,
-    ) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
+    ) -> (
+        &mut EnteredTransaction<'a>,
+        Option<&PreparedAttestedReceiptWriter>,
+    ) {
         self.prepared_parts()
     }
 
     /// Keep the prepared identity and its transaction together when ingress
     /// repositories choose their schema-qualified PostgreSQL statements.
-    fn prepared_parts(&mut self) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
-        self.entry.parts_mut()
-    }
-
-    /// The same pair with the transaction as the typed handle that
-    /// scheduler stores require for descendant locks and writes.
-    fn entered_parts(
+    fn prepared_parts(
         &mut self,
     ) -> (
-        &mut crate::ingress_substrate::EnteredTransaction<'a>,
+        &mut EnteredTransaction<'a>,
         Option<&PreparedAttestedReceiptWriter>,
     ) {
-        self.entry.entered_parts_mut()
+        self.entry.parts_mut()
     }
 
     pub(crate) fn room_observers_enabled(&self) -> bool {
@@ -605,17 +602,8 @@ impl<'a> IngressUowTransaction<'a> {
 
     /// Raw SQL remains confined to ingress repositories so callers cannot
     /// bypass the epoch, lineage, and claim-fencing invariants.
-    pub(crate) fn transaction_mut(&mut self) -> &mut Transaction<'a> {
+    pub(crate) fn transaction_mut(&mut self) -> &mut EnteredTransaction<'a> {
         self.entry.transaction_mut()
-    }
-
-    /// The transaction as the typed handle scheduler stores require when a
-    /// unit of work attaches their descendants in its own transaction.
-    #[cfg(feature = "test-support")]
-    pub(crate) fn entered_transaction_mut(
-        &mut self,
-    ) -> &mut crate::ingress_substrate::EnteredTransaction<'a> {
-        self.entry.entered_parts_mut().0
     }
 
     /// Install per-transaction PostgreSQL timeout bounds without exposing raw

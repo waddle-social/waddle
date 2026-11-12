@@ -1054,24 +1054,33 @@ commit whose outcome is unknown.
 
 `server/scripts/check-ingress-typed-entry.py` runs in the clippy lanes. In
 `ingress/`, `ingress_uow/` and `ingress_substrate/`, outside the entry, it
-fails on four kinds of code: a call of `attest_transaction(`; a transaction
+fails on five kinds of code: a call of `attest_transaction(`; a transaction
 opened directly on a database handle; a call that takes the epoch row lock
-without the entry's witness; and an autocommit connection taken with
-`.guard()`. Test code is exempt from the last three. Every exception is
-listed by file, kind and exact
+without the entry's witness; an autocommit connection taken with `.guard()`;
+and a function parameter that is a bare `&mut Transaction`. Test code is
+exempt from the last four. Every exception is listed by file, kind and exact
 count, with its reason, in
 `server/scripts/ingress-typed-entry-allowlist.txt`.
 
-Both raw-writer begins return an `EnteredTransaction`, which only the entry
-module constructs, and a unit-of-work transaction lends the same type. The
-descendant repository methods the notification and push outboxes call
-(`EffectDescendantRepository::lock_raw`, `lock_all_raw`,
-`lock_all_nowait_raw`, `attach_raw`, `copy_raw` and `settle_all_raw`) take
-that type, as does every outbox helper between them and the begin. A
-descendant lock or write on a transaction opened directly on a database
-handle therefore does not compile. Tests wrap a fixture transaction through
-a constructor that exists only in test builds. The source check also fails
-if a `*_raw` method takes anything else.
+Every begin in the entry module returns an `EnteredTransaction`, which only
+that module constructs: `begin_ingress_entry`, and the begins it hosts for
+handles without attestation (the raw writer, the substrate writer, the pooled
+receipt writer and the alias GC writer), each with the statement sequence
+that caller always used. A unit-of-work transaction lends the same type.
+
+Functions that write an epoch-guarded relation on a caller's transaction take
+that type instead of a bare transaction: the substrate writers
+(`record_message`, `resolve_and_record_alias`, `insert_sm_ref`,
+`record_delivery`, `terminalize_message`, `record_receipt`, the retention
+refresh and invalidation, the stream frontier and checkpoint writers and
+their prepared forms), the descendant repository, and every outbox helper
+between those and a begin. `PostgresIngressSubstrate::begin` returns it. A
+write to one of those relations on a transaction opened directly on a
+database handle therefore does not compile, and no function turns the handle
+back into a bare transaction. Unit tests wrap a fixture transaction through a
+constructor that exists only in the crate's own test builds. One writer
+keeps a bare transaction: `start_fresh_sqlite`, which is compiled only with
+the `test-support` feature for a lab's own SQLite fixture.
 
 What the entry does not do:
 

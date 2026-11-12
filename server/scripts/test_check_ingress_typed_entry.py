@@ -95,6 +95,23 @@ class CallDetectionTests(unittest.TestCase):
         source = "let guard = lock(); // db.guard()\nlet permit = relation_guard(tx);\n"
         self.assertEqual(check.occurrence_lines(source, check.AUTOCOMMIT), [])
 
+    def test_bare_transaction_parameters_are_found(self):
+        for source in (
+            "async fn write(tx: &mut Transaction<'_>, key: MessageKey) {}",
+            "pub(crate) async fn write(\n    transaction: &mut crate::db::Transaction<'_>,\n) {}",
+        ):
+            self.assertEqual(
+                len(check.occurrence_lines(source, check.BARE_TRANSACTION)), 1, source
+            )
+        source = '''
+        async fn write(tx: &mut EnteredTransaction<'_>) {}
+        async fn uow(tx: &mut IngressUowTransaction<'_>) {}
+        fn begin() -> Result<Transaction<'_>, Error> { todo!() }
+        struct Holder<'a> { transaction: Transaction<'a> }
+        // async fn old(tx: &mut Transaction<'_>) {}
+        '''
+        self.assertEqual(check.occurrence_lines(source, check.BARE_TRANSACTION), [])
+
     def test_test_modules_hide_begins_and_epoch_locks_but_not_attestation(self):
         source = '''
         fn production() {}
@@ -221,6 +238,14 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"{relative}:2: begin", result.stdout)
         self.assertIn(f"{relative}:3: epoch-lock", result.stdout)
+
+        writer = check.SOURCE / "ingress_substrate/writer.rs"
+        self.write(writer, "async fn record(\n    tx: &mut Transaction<'_>,\n) {}\n")
+        result = self.run_check()
+        self.assertIn(f"{writer}:2: bare-transaction", result.stdout)
+        self.allowlist.write_text(self.allowlist.read_text() + f"{writer} bare-transaction 1\n")
+        self.assertNotIn("bare-transaction", self.run_check().stdout)
+        (self.server / writer).unlink()
 
         reader = check.SOURCE / "ingress_substrate/reader.rs"
         self.write(reader, "async fn f() {\n    let connection = db.guard().await;\n}\n")

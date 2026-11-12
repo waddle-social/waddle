@@ -6,6 +6,7 @@ pub(in crate::ingress_substrate) use super::typed_entry::PreparedAttestedReceipt
 use super::Arc;
 use super::BareJid;
 use super::DbRetryClass;
+use super::EnteredTransaction;
 use super::Error;
 use super::Instant;
 use super::MessageEnvelope;
@@ -268,17 +269,14 @@ impl PostgresIngressSubstrate {
     /// Start a transaction, taking SQLite's write reservation immediately.
     /// PostgreSQL begins at READ COMMITTED and locks the supported live epoch.
     ///
-    /// The returned value and the write methods still accept raw transactions:
-    /// callers supplying another transaction must establish these preconditions
-    /// before acquiring application locks. This API does not prove that order.
-    ///
     /// On a physically attested pool the transaction begins through the typed
     /// ingress entry instead, which attests its connection before the epoch
-    /// is proven.
-    pub async fn begin(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
+    /// is proven. Either way the result is the handle the write methods
+    /// require, so they cannot run on a transaction opened any other way.
+    pub async fn begin(&self) -> Result<EnteredTransaction<'_>, IngressSubstrateError> {
         match self.db.attested_pg_writer_capability() {
             Some(capability) => self.begin_attested(&capability).await,
-            None => self.begin_inner().await,
+            None => super::typed_entry::begin_unattested_substrate_writer(&self.db).await,
         }
     }
 
@@ -289,14 +287,14 @@ impl PostgresIngressSubstrate {
     pub(crate) async fn begin_with_attested_pg_writer(
         &self,
         capability: &AttestedPostgresWriterCapability,
-    ) -> Result<Transaction<'_>, IngressSubstrateError> {
+    ) -> Result<EnteredTransaction<'_>, IngressSubstrateError> {
         self.begin_attested(capability).await
     }
 
     async fn begin_attested(
         &self,
         capability: &AttestedPostgresWriterCapability,
-    ) -> Result<Transaction<'_>, IngressSubstrateError> {
+    ) -> Result<EnteredTransaction<'_>, IngressSubstrateError> {
         let entry = super::begin_ingress_entry(
             &self.db,
             super::IngressEntryRequest {
@@ -309,41 +307,12 @@ impl PostgresIngressSubstrate {
         )
         .await
         .map_err(super::IngressEntryError::into_substrate_error)?;
-        Ok(entry.into_parts().0.into_transaction())
-    }
-
-    async fn begin_inner(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
-        let mut tx = self
-            .db
-            .begin_immediate()
-            .await
-            .map_err(discard_database_error)?;
-        if tx.driver() == DatabaseDriver::Postgres {
-            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                .await
-                .map_err(discard_database_error)?;
-            if !tighten_local_transaction_timeouts(&mut tx)
-                .await
-                .map_err(discard_database_error)?
-            {
-                return Err(IngressSubstrateError::Database {
-                    retry_class: DbRetryClass::NotRetryable,
-                });
-            }
-            let epoch = acquire_supported_epoch_lock_first(&mut tx).await?;
-            tx.execute(
-                "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
-                crate::db_params![epoch.to_storage().to_string()],
-            )
-            .await
-            .map_err(discard_database_error)?;
-        }
-        Ok(tx)
+        Ok(entry.into_parts().0)
     }
 
     pub async fn record_message(
         &self,
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
         digest: &SemanticDigest,
         envelope: Option<&MessageEnvelope>,
@@ -353,7 +322,7 @@ impl PostgresIngressSubstrate {
 
     pub async fn resolve_and_record_alias(
         &self,
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         sender: &BareJid,
         target: &NormalizedTarget,
         origin_id: &OriginId,
@@ -365,7 +334,7 @@ impl PostgresIngressSubstrate {
 
     pub async fn insert_sm_ref(
         &self,
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
         wire_h: WireHandledCount,
@@ -376,7 +345,7 @@ impl PostgresIngressSubstrate {
 
     pub async fn record_delivery(
         &self,
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         delivery_key: DeliveryKey,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
@@ -385,7 +354,7 @@ impl PostgresIngressSubstrate {
 
     pub async fn terminalize_message(
         &self,
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         message_key: MessageKey,
         proven_terminal_at: DateTime<Utc>,
     ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
@@ -506,7 +475,7 @@ async fn read_live_epoch_for_share_in_prepared_transaction(
 /// Insert immutable message content, or fill an alias-created empty envelope.
 /// Retries preserve existing content and reject contradictory digests/envelopes.
 pub async fn record_message(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
@@ -516,7 +485,7 @@ pub async fn record_message(
 
 #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
 pub(crate) async fn record_message_with_source(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
@@ -527,7 +496,7 @@ pub(crate) async fn record_message_with_source(
 }
 
 pub(crate) async fn record_message_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     digest: &SemanticDigest,
@@ -541,7 +510,7 @@ pub(crate) async fn record_message_in_prepared_transaction(
 }
 
 async fn record_message_after_epoch_lock(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     digest: &SemanticDigest,
@@ -560,7 +529,7 @@ async fn record_message_after_epoch_lock(
 }
 
 pub(in crate::ingress_substrate) async fn insert_message(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     digest: &SemanticDigest,
@@ -652,7 +621,7 @@ pub(in crate::ingress_substrate) async fn insert_message(
 }
 
 async fn assert_source_principal_if_recorded(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     source: &CanonicalSourceBinding,
@@ -701,7 +670,7 @@ async fn assert_source_principal_if_recorded(
 /// removed before repeating that same query, so neither outcome observes an
 /// impossible alias/digest split.
 pub async fn resolve_and_record_alias(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     sender: &BareJid,
     target: &NormalizedTarget,
     origin_id: &OriginId,
@@ -716,7 +685,7 @@ pub async fn resolve_and_record_alias(
 // deliberately deferred until caller and role contracts are complete.
 #[allow(dead_code)]
 pub(crate) async fn resolve_and_record_alias_with_source(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     sender: &BareJid,
     target: &NormalizedTarget,
     origin_id: &OriginId,
@@ -739,7 +708,7 @@ pub(crate) async fn resolve_and_record_alias_with_source(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_alias_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     sender: &BareJid,
     target: &NormalizedTarget,
@@ -842,7 +811,7 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
 /// caller-owned transaction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_alias_via_definer_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     sender: &BareJid,
     target: &NormalizedTarget,
@@ -895,7 +864,7 @@ enum DefinerAliasResult {
 
 #[allow(clippy::too_many_arguments)]
 async fn call_definer_alias_api(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: &PreparedAttestedReceiptWriter,
     sender: &BareJid,
     target: &NormalizedTarget,
@@ -1027,7 +996,7 @@ async fn call_definer_alias_api(
 /// the caller's BEGIN IMMEDIATE writer serialization. Neither path discovers or
 /// creates another parent.
 pub(crate) async fn assert_relayed_alias_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     sender: &BareJid,
@@ -1091,7 +1060,7 @@ fn relayed_alias_lock_error(error: DatabaseError) -> IngressSubstrateError {
 /// [`MessageWriteOutcome::AlreadyRecorded`], while the same ordinal bound
 /// to a DIFFERENT message is the typed [`IngressSubstrateError::SmOrdinalConflict`].
 pub async fn insert_sm_ref(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     sm_ingress_id: SmIngressId,
     ordinal: IngressOrdinal,
     wire_h: WireHandledCount,
@@ -1102,7 +1071,7 @@ pub async fn insert_sm_ref(
 }
 
 pub(crate) async fn insert_sm_ref_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     sm_ingress_id: SmIngressId,
     ordinal: IngressOrdinal,
@@ -1245,7 +1214,7 @@ pub(crate) async fn insert_sm_ref_in_prepared_transaction(
 /// [`MessageWriteOutcome::AlreadyRecorded`]; the same key bound to a
 /// different message is [`IngressSubstrateError::DeliveryKeyConflict`].
 pub async fn record_delivery(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     delivery_key: DeliveryKey,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
@@ -1253,7 +1222,7 @@ pub async fn record_delivery(
 }
 
 pub(crate) async fn record_delivery_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     delivery_key: DeliveryKey,
     message_key: MessageKey,
@@ -1263,7 +1232,7 @@ pub(crate) async fn record_delivery_in_prepared_transaction(
 }
 
 async fn record_delivery_after_epoch_lock(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     delivery_key: DeliveryKey,
     message_key: MessageKey,
@@ -1375,7 +1344,7 @@ async fn record_delivery_after_epoch_lock(
 
 /// Record a terminal proof once; later calls preserve the first proof time.
 pub async fn terminalize_message(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     proven_terminal_at: DateTime<Utc>,
 ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
@@ -1383,7 +1352,7 @@ pub async fn terminalize_message(
 }
 
 pub(crate) async fn terminalize_message_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     proven_terminal_at: DateTime<Utc>,
@@ -1587,63 +1556,26 @@ pub(in crate::ingress_substrate) async fn gc_orphan_proof_batch(
     }
     // Serialize windows sharing a traversal so a slower pass cannot rewind it.
     let mut cursor = budget.progress.orphan_cursor.lock().await;
-    // On a physically attested pool the sweep begins through the typed
-    // ingress entry, which attests the connection, sets READ COMMITTED and
-    // holds the epoch share lock and proof through commit, as the branch
-    // below does for every other handle.
-    let mut tx =
-        if let Some(capability) = db.attested_pg_writer_capability() {
-            if Instant::now() >= budget.deadline {
-                return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
-            }
-            begin_attested_gc_writer(db, &capability, budget).await?
-        } else {
-            let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
-            // READ COMMITTED is required so the orphan scan starts from a snapshot
-            // taken after the epoch lock below. This transaction only deletes
-            // `sm_ingress_appends` (which is not in V1009's guarded relation set),
-            // but it reads guarded canonical state and must not race activation.
-            if tx.driver() == DatabaseDriver::Postgres {
-                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                    .await
-                    .map_err(gc_error_from_database)?;
-            }
-            install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
-            if Instant::now() >= budget.deadline {
-                return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
-            }
-            // The share lock and transaction-local proof are held through commit.
-            // Activation therefore cannot change the live epoch between the
-            // canonical-parent scan and deletion of its orphan proof.
-            let live_epoch = acquire_gc_epoch_lock_first(&mut tx, 0)
-                .await
-                .map_err(|failure| failure.error)?;
-            if live_epoch > supported_protocol_epoch() {
-                return Err(AliasGcError::Substrate(
-                    IngressSubstrateError::UnsupportedLiveEpoch,
-                ));
-            }
-            if tx.driver() == DatabaseDriver::Postgres {
-                let mut proof = tx
-                    .query(
-                        r#"
-                SELECT
-                    set_config('waddle.protocol_epoch', ?, true),
-                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
-                "#,
-                        crate::db_params![live_epoch.to_storage().to_string()],
-                    )
-                    .await
-                    .map_err(gc_error_from_database)?;
-                proof.next().await.map_err(gc_error_from_database)?.ok_or(
-                    AliasGcError::Substrate(IngressSubstrateError::Database {
-                        retry_class: DbRetryClass::NotRetryable,
-                    }),
-                )?;
-                drop(proof);
-            }
-            tx
-        };
+    // READ COMMITTED and the epoch share lock with its proof are held
+    // through commit, so the orphan scan starts from a snapshot taken after
+    // the epoch lock and activation cannot change the live epoch between the
+    // canonical-parent scan and deletion of its orphan proof. This
+    // transaction only deletes `sm_ingress_appends`, which V1009 does not
+    // guard, but it reads guarded canonical state. A physically attested
+    // pool begins through the typed ingress entry, which also attests the
+    // connection.
+    let mut tx = if let Some(capability) = db.attested_pg_writer_capability() {
+        if Instant::now() >= budget.deadline {
+            return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
+        }
+        begin_attested_gc_writer(db, &capability, budget).await?
+    } else {
+        let unproven = super::typed_entry::open_unattested_gc_writer(db, budget).await?;
+        if Instant::now() >= budget.deadline {
+            return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
+        }
+        unproven.prove_epoch().await?
+    };
     if Instant::now() >= budget.deadline {
         return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
     }
@@ -1843,70 +1775,16 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
         }
         // GC is an epoch-aware writer. On a physically attested pool its
         // deleting transaction begins through the typed ingress entry, which
-        // attests the connection before proving the epoch; elsewhere it
-        // installs the proof itself.
-        let mut tx = if let Some(capability) = db.attested_pg_writer_capability() {
-            begin_attested_gc_writer(db, &capability, budget)
-                .await
-                .map_err(|error| gc_failure(deleted_messages, error))?
-        } else {
-            let mut tx = db
-                .begin_immediate()
-                .await
-                .map_err(|error| gc_database_failure(deleted_messages, error))?;
-            // First statement: Postgres's default READ COMMITTED mode is required
-            // so every candidate lock/recheck sees the latest committed children.
-            if tx.driver() == DatabaseDriver::Postgres {
-                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                    .await
-                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
-            }
-            install_gc_timeouts(&mut tx, budget, budget.statement_timeout)
-                .await
-                .map_err(|error| gc_failure(deleted_messages, error))?;
-            // GC is an epoch-aware writer: install the transaction-bound proof
-            // for the live epoch so its deletes pass the V1009 guard at
-            // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
-            // to commit, so a concurrent activation waits and the proof cannot
-            // go stale mid-transaction.  The proof only claims epochs this
-            // binary was built for: a future activation past
-            // supported_protocol_epoch() must fence this GC, not be auto-claimed.
-            let live_epoch = acquire_gc_epoch_lock_first(&mut tx, deleted_messages).await?;
-            if live_epoch > supported_protocol_epoch() {
-                return Err(gc_failure(
-                    deleted_messages,
-                    IngressSubstrateError::UnsupportedLiveEpoch.into(),
-                ));
-            }
-            if tx.driver() == DatabaseDriver::Postgres {
-                let mut proof = tx
-                    .query(
-                        r#"
-                SELECT
-                    set_config('waddle.protocol_epoch', ?, true),
-                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
-                "#,
-                        crate::db_params![live_epoch.to_storage().to_string()],
-                    )
-                    .await
-                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
-                proof
-                    .next()
-                    .await
-                    .map_err(|error| gc_database_failure(deleted_messages, error))?
-                    .ok_or_else(|| {
-                        gc_failure(
-                            deleted_messages,
-                            IngressSubstrateError::Database {
-                                retry_class: DbRetryClass::NotRetryable,
-                            }
-                            .into(),
-                        )
-                    })?;
-                drop(proof);
-            }
-            tx
+        // attests the connection before proving the epoch; elsewhere the
+        // entry module's unattested begin installs the proof.
+        let begun = match db.attested_pg_writer_capability() {
+            Some(capability) => begin_attested_gc_writer(db, &capability, budget).await,
+            None => match super::typed_entry::open_unattested_gc_writer(db, budget).await {
+                Ok(unproven) => unproven.prove_epoch().await,
+                Err(error) => Err(error),
+            },
         };
+        let mut tx = begun.map_err(|error| gc_failure(deleted_messages, error))?;
         match lock_eligible_terminal_message(&mut tx, message_key, cutoff)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?
@@ -2044,7 +1922,7 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
 }
 
 async fn gc_message_expired(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     cutoff: &str,
 ) -> Result<bool, DatabaseError> {
@@ -2064,7 +1942,7 @@ async fn gc_message_expired(
 }
 
 async fn delete_gc_message(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<u64, DatabaseError> {
     tx.execute(
@@ -2325,7 +2203,7 @@ impl<'a> AliasStorageKey<'a> {
 }
 
 pub(in crate::ingress_substrate) async fn locked_alias(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     key: &AliasStorageKey<'_>,
 ) -> Result<Option<StoredAlias>, IngressSubstrateError> {
@@ -2421,7 +2299,7 @@ pub(in crate::ingress_substrate) fn decode_stored_alias(
 
 /// Read the message key a child row (sm ref / delivery) is bound to.
 pub(in crate::ingress_substrate) async fn stored_child_message_key(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     sql: &str,
     params: impl crate::db::IntoParams,
 ) -> Result<Option<MessageKey>, IngressSubstrateError> {
@@ -2441,7 +2319,7 @@ pub(in crate::ingress_substrate) async fn stored_child_message_key(
 }
 
 pub(crate) async fn lock_message_for_child_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
@@ -2495,14 +2373,14 @@ pub(crate) async fn lock_message_for_child_in_prepared_transaction(
 
 #[cfg(test)]
 pub(in crate::ingress_substrate) async fn message_exists(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
     message_exists_in_prepared_transaction(tx, None, message_key).await
 }
 
 async fn message_exists_in_prepared_transaction(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
@@ -2604,7 +2482,7 @@ enum RejectionPair {
 }
 
 async fn rejection_pair(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<RejectionPair, AliasGcError> {
     let sql = dialect_sql(
@@ -2638,7 +2516,7 @@ async fn rejection_pair(
 }
 
 async fn owner_result_retains_source(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<bool, DatabaseError> {
     let sql = dialect_sql(
@@ -2674,7 +2552,7 @@ pub(in crate::ingress_substrate) enum CandidateLock {
 /// message alive anyway, and a skipped candidate stays eligible for the next
 /// run.  Only the epoch row is ever waited on, bounded by `lock_timeout`.
 pub(in crate::ingress_substrate) async fn lock_eligible_terminal_message(
-    tx: &mut Transaction<'_>,
+    tx: &mut EnteredTransaction<'_>,
     message_key: MessageKey,
     cutoff: &str,
 ) -> Result<CandidateLock, AliasGcError> {
@@ -2756,7 +2634,7 @@ async fn begin_attested_gc_writer<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
     budget: &AliasGcBudget,
-) -> Result<Transaction<'a>, AliasGcError> {
+) -> Result<EnteredTransaction<'a>, AliasGcError> {
     use super::{
         begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
         IngressEntryError, IngressEntryRequest,
@@ -2778,7 +2656,7 @@ async fn begin_attested_gc_writer<'a>(
         }
         other => AliasGcError::Substrate(other.into_substrate_error()),
     })?;
-    Ok(entry.into_parts().0.into_transaction())
+    Ok(entry.into_parts().0)
 }
 
 pub(in crate::ingress_substrate) fn gc_database_failure(
