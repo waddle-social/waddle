@@ -680,7 +680,7 @@ async fn successor_owner_adopts_the_lane_of_a_room_it_now_owns() {
 
     // While the predecessor holds the claim nobody else adopts its lane.
     let adoption = authority
-        .adopt_transferred_lanes(&successor, None)
+        .adopt_transferred_lanes(&successor, None, |_| async { true })
         .await
         .expect("adoption before the transfer");
     assert_eq!(adoption.adopted, 0);
@@ -714,12 +714,12 @@ async fn successor_owner_adopts_the_lane_of_a_room_it_now_owns() {
         "the lane still names the predecessor"
     );
     let adoption = authority
-        .adopt_transferred_lanes(&bystander, None)
+        .adopt_transferred_lanes(&bystander, None, |_| async { true })
         .await
         .expect("bystander adoption");
     assert_eq!(adoption.adopted, 0, "only the claim holder adopts");
     let adoption = authority
-        .adopt_transferred_lanes(&successor, None)
+        .adopt_transferred_lanes(&successor, None, |_| async { true })
         .await
         .expect("successor adoption");
     assert_eq!(adoption.adopted, 1);

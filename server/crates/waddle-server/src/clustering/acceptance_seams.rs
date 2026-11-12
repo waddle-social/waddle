@@ -7,7 +7,9 @@
 //! a suite that passes the directory to one spawned process arms that process.
 //!
 //! The seams sit on the room owner's side of a relayed XEP-0045 groupchat
-//! message, around the transaction in which the owner accepts it:
+//! message, around the transaction in which the owner accepts it, and of a
+//! room request (join, presence update, leave or relayed IQ), around the
+//! transaction in which the owner decides it:
 //!
 //! - `hold-before-commit`: while this file exists, the owner waits before its
 //!   ingress commit, so nothing about the message is durable on the owner.
@@ -111,6 +113,21 @@ impl Drop for HoldGuard<'_> {
 /// claim check, plan and commit together) cancels a hold that outlasts it,
 /// exactly as it cancels a slow commit.
 pub(crate) async fn hold_owner_acceptance(point: OwnerAcceptancePoint, message: &Message) {
+    hold_owner(point, message.id.as_ref().map(|id| id.0.as_str())).await;
+}
+
+/// Hold the room owner around the transaction in which it decides a room
+/// request, identified in the event log by the request stanza's `id`.
+pub(crate) async fn hold_owner_request(point: OwnerAcceptancePoint, request: &waddle_xmpp::Stanza) {
+    let stanza_id = match request {
+        waddle_xmpp::Stanza::Presence(presence) => presence.id.as_deref(),
+        waddle_xmpp::Stanza::Iq(iq) => Some(iq.id()),
+        waddle_xmpp::Stanza::Message(message) => message.id.as_ref().map(|id| id.0.as_str()),
+    };
+    hold_owner(point, stanza_id).await;
+}
+
+async fn hold_owner(point: OwnerAcceptancePoint, stanza_id: Option<&str>) {
     let Some(directory) = DIRECTORY.as_deref() else {
         return;
     };
@@ -118,7 +135,6 @@ pub(crate) async fn hold_owner_acceptance(point: OwnerAcceptancePoint, message: 
     if !arm_file.exists() {
         return;
     }
-    let stanza_id = message.id.as_ref().map(|id| id.0.as_str());
     record(directory, "held", point.label(), stanza_id);
     let mut guard = HoldGuard {
         directory,

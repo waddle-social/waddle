@@ -482,7 +482,13 @@ pub(in crate::clustering::relay) fn is_idempotent_join_presence_envelope(
 // remote-resource replies; companion endpoint versions are v3 and v6 (#1756).
 // v11: carry the recorded ingress append obligation on full-JID message payloads (#1778).
 // v12: frozen processed recipient copies bypass the recipient pipeline (#1770).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v14")]
+// v15: at the mailbox protocol epoch a peer's join, presence-update and leave
+// handlers send no `JoinPresence` and no `OccupantPresence` payload; those
+// stanzas reach a room owned elsewhere as room requests in the durable
+// mailbox (#2174). The kinds stay in the envelope: the relay serves them
+// below that epoch, and the leave replayed when a connection ends is still
+// relayed at every epoch.
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v15")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 

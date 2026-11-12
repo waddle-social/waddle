@@ -39,6 +39,8 @@ mod muc;
 mod muc_update;
 mod probe;
 mod regular;
+#[cfg(feature = "clustering")]
+pub(crate) mod room_request;
 mod subscription;
 
 pub use muc::parse_room_jid_context;

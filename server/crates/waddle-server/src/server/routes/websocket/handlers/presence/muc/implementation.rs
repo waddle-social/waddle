@@ -1214,6 +1214,41 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                                     debug!(room = %room_jid, sender = %sender_jid, "remote MUC join abandoned: connection superseded before relay");
                                     return Vec::new();
                                 }
+                                // With the mailbox carrying room traffic,
+                                // the join is a room request and the relay
+                                // is not used for it.
+                                if let super::super::room_request::RoomRequestRoute::Answered(
+                                    replies,
+                                ) = super::super::room_request::route_presence_request(
+                                    state,
+                                    authenticated_session,
+                                    waddle_xmpp::ingress::mailbox::RoomRequestKind::Join,
+                                    room_jid,
+                                    sender_jid,
+                                    occupancy_session,
+                                    stanza.clone(),
+                                )
+                                .await
+                                {
+                                    // A refused join must not overwrite the
+                                    // membership of whoever still occupies
+                                    // the room under this full JID.
+                                    if !super::super::room_request::presence_request_refused(
+                                        &replies,
+                                    ) {
+                                        state
+                                            .deps
+                                            .protocol
+                                            .remote_muc_memberships
+                                            .record_join(
+                                                sender_jid,
+                                                room_jid,
+                                                &nick,
+                                                occupancy_session,
+                                            );
+                                    }
+                                    return replies.iter().map(stanza_to_xml).collect();
+                                }
                                 match remote_muc_join_decision(
                                     addressing.room(room_jid).command_if_remote(crate::clustering::addressing::RoomCommand { stanza: &stanza, kind: OrderedRelayMucProxyKind::JoinPresence, sender: MucProxyOrigin::Connection(
                                                 occupancy_session,

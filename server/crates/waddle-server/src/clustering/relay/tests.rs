@@ -145,7 +145,7 @@ async fn relay_replies_follow_repeated_identity_rotations_without_respawn() {
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v14"
+        "waddle.clustering.relay.deliver_ordered.v15"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<remote_resource_compat::BaselineRoute>>::REMOTE_ID,
@@ -236,7 +236,7 @@ fn resource_presence_is_a_new_message_id_with_a_round_tripping_reply() {
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v14",
+        "waddle.clustering.relay.deliver_ordered.v15",
         "a new relay message must not bump the ordered-relay envelope id"
     );
 
@@ -294,7 +294,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v14",
+        "waddle.clustering.relay.deliver_ordered.v15",
         "a new relay message must not bump the ordered-relay envelope id"
     );
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
@@ -375,7 +375,7 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v14",
+        "waddle.clustering.relay.deliver_ordered.v15",
         "a new relay message must not bump the ordered-relay envelope id"
     );
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");

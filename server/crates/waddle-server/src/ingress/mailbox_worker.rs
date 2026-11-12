@@ -54,6 +54,10 @@ pub enum MailboxLaneHead {
     Idle,
     /// The head entry, ready for the owner's commit.
     Ready(Box<ClaimedRoomAcceptance>),
+    /// The head entry carries a room request, ready for the owner to run
+    /// against its room and decide.
+    #[cfg(feature = "clustering")]
+    ReadyRequest(Box<super::room_request::ClaimedRoomRequest>),
     /// The head entry's canonical evidence cannot be used. It was parked for
     /// an operator in the same transaction.
     DeadLettered,
@@ -149,9 +153,28 @@ impl IngressAuthority {
         {
             return Ok(MailboxLaneHead::Idle);
         }
-        // This claim prepares a room acceptance. A head entry that carries a
-        // room request is left for the request worker.
+        // An entry whose parent is a room request is prepared from that
+        // request; one whose request cannot be read is parked for an
+        // operator. Room requests exist only with clustering.
         let Some(key) = entry.operation.message_key() else {
+            #[cfg(feature = "clustering")]
+            {
+                let claimed = Self::load_claimed_request(&mut tx, lane, entry.operation).await?;
+                let Some(claimed) = claimed else {
+                    MailboxRepository::dead_letter(
+                        &mut tx,
+                        &locked,
+                        entry.operation,
+                        MailboxDeadLetterReason::CanonicalEvidenceInvalid,
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(MailboxLaneHead::DeadLettered);
+                };
+                tx.commit().await?;
+                return Ok(MailboxLaneHead::ReadyRequest(Box::new(claimed)));
+            }
+            #[cfg(not(feature = "clustering"))]
             return Ok(MailboxLaneHead::Idle);
         };
         let room = match locked.key().encoding().decode() {
@@ -302,14 +325,23 @@ impl IngressAuthority {
     /// whose room has no claim, or a claim held elsewhere, is left alone:
     /// its entry stays pending until some node owns the room.
     ///
+    /// Before a room's lanes are adopted, `seat_occupancy` loads the room's
+    /// durable occupancy and seats it in this node's room actor; a room for
+    /// which it reports `false` keeps its lanes unadopted until a later pass.
+    ///
     /// Adoption only makes the lane visible to this node's backlog scan. The
     /// owner's commit asserts the room claim again before it decides.
     #[cfg(feature = "clustering")]
-    pub async fn adopt_transferred_lanes(
+    pub async fn adopt_transferred_lanes<Seat, Seated>(
         &self,
         target: &NodeIdentity,
         after: Option<MailboxLaneId>,
-    ) -> Result<MailboxLaneAdoption, IngressUowError> {
+        seat_occupancy: Seat,
+    ) -> Result<MailboxLaneAdoption, IngressUowError>
+    where
+        Seat: Fn(BareJid) -> Seated,
+        Seated: std::future::Future<Output = bool>,
+    {
         use crate::ingress_uow::{ClaimRepository, MailboxTargetFence};
         let mut tx = self
             .uow
@@ -344,7 +376,22 @@ impl IngressAuthority {
         }
         tx.commit().await?;
         let mut adopted = 0;
+        let mut seated: std::collections::HashMap<BareJid, bool> = std::collections::HashMap::new();
         for (lane, room) in owned {
+            // A lane becomes visible to this node's backlog scan only after
+            // the room's durable occupancy is seated in its room actor, so
+            // no entry of the room is decided against an empty roster.
+            let ready = match seated.get(&room) {
+                Some(ready) => *ready,
+                None => {
+                    let ready = seat_occupancy(room.clone()).await;
+                    seated.insert(room.clone(), ready);
+                    ready
+                }
+            };
+            if !ready {
+                continue;
+            }
             let mut tx = self
                 .uow
                 .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
