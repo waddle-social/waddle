@@ -337,11 +337,12 @@ These hold today and bound what the mailbox selector may be used for.
   fails, the next attempt is the maintenance pass, at least a minute later.
 - **Lane rows.** Lane rows are never deleted. A lane exists per
   stream-management session and room, so the table grows with sessions.
-- **Other lanes.** Only `RoomAcceptance(MessageKey)` exists as an operation.
-  MUC joins and occupant presence, Muji signaling and the bare-JID and
-  full-JID lanes are still served by the ordered relay alone;
-  [`2046-relay-lane-responsibilities.md`](2046-relay-lane-responsibilities.md)
-  records what each needs first.
+- **Other lanes.** Room requests (joins, occupant presence, Muji
+  signalling) and direct requests (bare-JID and full-JID delivery) are
+  further operations with their own parent tables; see
+  [`2174-room-request-lanes.md`](2174-room-request-lanes.md),
+  [`2173-direct-lanes.md`](2173-direct-lanes.md) and
+  [`2046-relay-lane-responsibilities.md`](2046-relay-lane-responsibilities.md).
 
 ### Guard, roles and manifest
 

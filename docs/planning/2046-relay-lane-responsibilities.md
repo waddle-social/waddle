@@ -115,13 +115,18 @@ an owner transfer does, and what must hold before the relay path is deleted.
   any entry of the room; lanes are adopted only after that load. Voice
   requests, pending mediated invitations, call and Muji session state and
   rate-limit state are not stored and are not recovered.
-- **What does not exist.** (1) A join accepted for a resource connected to
-  the owner itself writes no occupancy row, so such an occupant is not
-  recovered by a successor and must rejoin. (2) The owner's groupchat commit
-  does not read `ingress_room_occupants`; it relies on the room actor, which
-  is seated from those rows. (3) An occupant removed by a kick, a ban or the
-  ghost sweep keeps its row until its next leave or join. (4) The join
-  repair in `route_bridge/delivery/muc/proxy.rs` still exists for the relay
+- **Occupancy writer.** The room actor records every seat it grants or
+  removes in `ingress_room_occupants` under the room claim, including a
+  resource connected to the owner itself and removals by kick, ban,
+  affiliation change, the ghost sweep and destroy; the join's decision
+  completes the row. A successor seats each row through a join projection,
+  which refuses a row whose connection generation is no longer current, and
+  removes the rows it did not seat. The owner's groupchat commit reads the
+  table once the room is seated.
+- **Receiver.** A node that carries room requests through the mailbox
+  refuses `JoinPresence` on the relay with the unsupported-envelope
+  outcome, so the join repair in `route_bridge/delivery/muc/proxy.rs` has
+  no effect against such an owner. The repair still exists for the relay
   path.
 - **Deletion precondition.** Protocol epoch 2 on every deployment that
   clusters, then removal of `JoinPresence` and the join repair.
@@ -131,7 +136,7 @@ an owner transfer does, and what must hold before the relay path is deleted.
 - **Status.** Presence updates and leaves sent by a client are cut over with
   the join. The leave replayed when a connection ends
   (`websocket/cleanup.rs`, `route_bridge/delivery/muc/cleanup.rs`) is still
-  relayed at every epoch.
+  sent on the relay; an owner at the mailbox epoch refuses it there.
 - **Identity.** `RoomPresence(RoomRequestKey)` and
   `RoomLeave(RoomRequestKey)`, on the lane of the connection that sent them.
 - **Owner.** The room claim holder.
@@ -144,12 +149,12 @@ an owner transfer does, and what must hold before the relay path is deleted.
 - **Consumption, lost hint, transfer.** As for the join.
 - **What does not exist.** The connection-end leave is not committed as a
   request: `IngressAuthority::commit_room_leave_at_connection_end` exists and
-  has no caller. Until it is called from the connection's cleanup, a
-  connection that ends without a leave keeps its occupancy row until the
-  relayed cleanup replay or the ghost sweep removes the occupant, and that
-  removal does not delete the row.
-- **Deletion precondition.** The cleanup call site, row deletion on the
-  owner's own removals, then removal of `OccupantPresence`.
+  has no caller. Until it is called from the connection's cleanup, an
+  occupant whose connection ends without a leave stays seated at a
+  mailbox-epoch owner until the ghost sweep removes it; that removal
+  deletes the row.
+- **Deletion precondition.** The cleanup call site, then removal of
+  `OccupantPresence`.
 
 ### Muji signalling
 
@@ -174,38 +179,44 @@ an owner transfer does, and what must hold before the relay path is deleted.
 
 ### Full-JID and bare-JID delivery
 
-- **Status.** Not cut over; relay at every epoch.
-- **Identity.** The canonical delivery key of the frozen copy
-  (`DeliveryKey` under its `MessageKey`), which already exists for
-  ingress-owned messages. IQ and presence copies have no canonical row.
-- **Owner.** For a full JID, the node that hosts the resource's session; for
-  a bare JID, the node that holds the `UserActor` claim, which freezes the
-  resource selection at acceptance.
-- **Acceptance commits.** The frozen recipient resources and their delivery
-  keys.
-- **Consumption.** Custody ends at an exact stream-management append:
-  `DurableSmStore::admit` with `AdmissionAuthority::Detached { session,
-  generation }` and an operation id derived from the delivery key, followed
-  by the entry's consumption. Admission is idempotent under its operation id,
-  so a repeated attempt after an indeterminate commit appends nothing twice.
-  A resource without stream management records `AttemptedUncertain` after a
-  real transport attempt.
+Decided in [`2173-direct-lanes.md`](2173-direct-lanes.md).
+
+- **Status.** Cut over for a send whose origin commits it at protocol epoch
+  2 or later under the `mailbox` selector with
+  `WADDLE_XMPP_DURABLE_SM=durable`, when the recipient account has a
+  `UserActor` claim. Relay otherwise, and always for a send whose origin
+  resource is hosted through a remote channel mirror.
+- **Identity.** `Direct(DirectRequestKey)`. A copy an ingress transaction
+  owns derives the key from its canonical message key, its receipt key and
+  the recipient; any other stanza mints one. The request row
+  (`ingress_direct_requests`) holds the payload the relay envelope carries.
+- **Owner.** The node that holds the recipient account's `UserActor` claim,
+  for both recipient kinds.
+- **Acceptance commits.** The decision, the entry's disposition and the
+  lane cursor, in one transaction that asserts the account claim. Custody
+  is taken by the recipient's session path: a live connection admits the
+  frame to durable stream management on its own fence. A copy with an
+  ingress receipt is handed over before the decision and recognised on a
+  repeat; any other stanza is handed over once, after the decision.
+- **Consumption.** The origin waits up to ten seconds, consumes the entry
+  and settles the request. Accepted is `Delivered`; rejected is
+  `Unavailable`, from which the origin runs the fallback it runs today; no
+  decision is `MaybeCommitted`, after which nothing else carries the
+  stanza.
 - **Lost hint.** The target's poller.
-- **Owner transfer.** A session that moved resumes under a new generation; an
-  admit against the old one is refused and the entry is retried against the
-  session's current owner. Resources are never reselected.
-- **What does not exist.** The live handlers do not use the durable
-  stream-management store (`WADDLE_XMPP_DURABLE_SM` defaults to `legacy`, and
-  durable mode shares its tables with the legacy store until the handlers are
-  wired), so no target can resolve a full JID to the `(session, generation)`
-  an admit needs or expose an admitted frame to a live transport. IQ and
-  presence copies have no canonical request row. A lane whose recipient is a
-  user has no target-side adoption rule: lane adoption reads the room claim
-  only.
-- **Decision.** Stays on the relay, whatever `WADDLE_XMPP_DURABLE_SM` says.
-- **Deletion precondition.** Durable stream management authoritative in the
-  live handlers; a canonical request for IQ and presence copies; user-lane
-  adoption; then removal of the `BareJid` and `FullJid` recipients with a
+- **Owner transfer.** The adoption pass writes the account's current
+  `UserActor` claim onto a backlogged lane with a `BareJid` or `FullJid`
+  recipient when this node holds it. Resources are never reselected for a
+  decided entry.
+- **What does not exist.** Admission to a detached durable session from
+  outside a connection: such a recipient is rejected and the origin stores
+  the message offline, as the relay does in the same configuration. A
+  writer of the "hosted elsewhere" refusal. A sweep of unconsumed
+  decisions.
+- **Deletion precondition.** Every clustered deployment at epoch 2 or later
+  with the `mailbox` selector and durable stream management, the `relay`
+  selector and the `legacy` mode removed, and remote channel mirrors
+  retired; then removal of the `BareJid` and `FullJid` recipients with a
   version bump.
 
 ### Reserved MUC kinds
@@ -225,13 +236,23 @@ node at the current id still accepts them. The id lives in
 `S/clustering/relay/implementation.rs`; a peer that still registers an
 older id answers an unknown-message error before it admits anything, and
 the sender treats that as no effect. The groupchat cutover removed a sender
-without a version bump.
+without a version bump, and so does the direct-lane cutover: the envelope
+and the reply types are unchanged, a receiver still accepts `BareJid` and
+`FullJid` payloads, and the refusal of relayed room kinds by a
+mailbox-epoch receiver uses the existing `UnsupportedEnvelope` reason.
 
 ## What still uses the ordered relay
 
 | Configuration | Groupchat | Join, presence, Muji | Bare and full JID |
 | --- | --- | --- | --- |
-| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox` | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; relay for the leave replayed at connection end | relay |
+| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox`, durable stream management | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; the relay kinds are refused by the receiver, including the leave replayed at connection end | mailbox; relay for a remote-mirror origin, an account without a claim and a request that could not be committed |
+| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox`, legacy stream management | as above | as above | relay |
 | Clustered PostgreSQL, epoch ≥ 2, selector `relay` | relay | relay | relay |
 | Clustered PostgreSQL, epoch < 2 (no restricted owner phase) | relay | relay | relay |
 | Single node | none | none | none |
+
+No part of `ordered_relay.rs`, `route_bridge/delivery/ordered*.rs` or the
+receiver is unused in every configuration, so none is deleted. Final
+removal needs every clustered deployment at epoch 2 or later with the
+`relay` selector and legacy stream management removed, and remote channel
+mirrors retired.
