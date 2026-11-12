@@ -241,7 +241,22 @@ differ in:
 - how the transaction is acquired, and an optional acquisition deadline;
 - optional explicit `lock_timeout` and `statement_timeout` values;
 - the clamp an attested transaction applies: 100 ms and 250 ms for writers,
-  3 s and 5 s for the relation guard.
+  3 s and 5 s for the relation guard, or none, in which case the explicit
+  timeouts are the bounds exactly as given.
+
+The alias GC uses the last form. On an attested pool
+`gc_candidate_batch`, which deletes expired `ingress_messages` rows with
+their aliases and deliveries, and `gc_orphan_proof_batch`, which deletes
+orphaned `sm_ingress_appends` rows, begin through the entry with the GC's own
+lock and statement budgets (100 ms and 250 ms in the maintenance
+coordinator), so the entry's preparation runs under those budgets. A database
+failure during preparation reaches the GC with its driver diagnostics, so it
+still reports a lock timeout and a statement timeout separately.
+`expired_candidates`, the scan that finds candidates, writes nothing and
+opens its own read transaction. A separate test in
+`tests/restricted_runtime_startup.rs` records a message on the attested pool,
+terminalizes it past retention and runs a GC pass under the runtime role; the
+pass deletes the message and draws no error on a runtime connection.
 
 On an attested pool with the registered guard the entry sends, in order:
 `BEGIN`; `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`; the explicit
@@ -265,10 +280,11 @@ commit whose outcome is unknown.
 
 `server/scripts/check-ingress-typed-entry.py` runs in the clippy lanes. In
 `ingress/`, `ingress_uow/` and `ingress_substrate/`, outside the entry, it
-fails on three kinds of code: a call of `attest_transaction(`; a transaction
-opened directly on a database handle; and a call that takes the epoch row
-lock without the entry's witness. Test code may open transactions and take
-the epoch lock directly. Every exception is listed by file, kind and exact
+fails on four kinds of code: a call of `attest_transaction(`; a transaction
+opened directly on a database handle; a call that takes the epoch row lock
+without the entry's witness; and an autocommit connection taken with
+`.guard()`. Test code is exempt from the last three. Every exception is
+listed by file, kind and exact
 count, with its reason, in
 `server/scripts/ingress-typed-entry-allowlist.txt`.
 
@@ -281,11 +297,16 @@ What the entry does not do:
   writer that began through the entry gets back a plain transaction, and its
   later statements are not schema-qualified; they resolve through the
   `search_path` the entry pinned.
-- The alias GC (`ingress_substrate::gc_expired_aliases`) deletes
-  epoch-guarded `ingress_messages` rows on the serving pool under an epoch
-  row lock it takes itself, without attesting its transaction. The ingress
-  maintenance scans and the room-observation retention batch also open
-  their transactions directly. The allowlist names each.
+- The ingress maintenance scans, the room-observation retention batch and
+  three pooled single-statement reads run outside the entry. None touches a
+  relation the epoch guard protects, and the allowlist names each.
+- The `*_raw` descendant repositories
+  (`EffectDescendantRepository::lock_raw`, `attach_raw`, `copy_raw`,
+  `settle_all_raw` and their siblings) accept any transaction and install
+  the epoch proof on it themselves. The notification and push outboxes call
+  them from outside the ingress modules, where the source check does not
+  look, so nothing yet proves that every such transaction on an attested
+  pool began through the entry.
 - Attach-time checks in other stores call the attestor directly on their own
   read-only transactions.
 - The clustered stores are refused under the attested pool and have no entry.

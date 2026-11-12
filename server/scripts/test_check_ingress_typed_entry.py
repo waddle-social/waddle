@@ -86,6 +86,15 @@ class CallDetectionTests(unittest.TestCase):
         '''
         self.assertEqual(check.occurrence_lines(source, check.EPOCH_LOCK), [])
 
+    def test_autocommit_connections_are_found(self):
+        for source in (
+            "let connection = db.guard().await?;",
+            "let conn = self.db\n    .guard()\n    .await?;",
+        ):
+            self.assertEqual(len(check.occurrence_lines(source, check.AUTOCOMMIT)), 1, source)
+        source = "let guard = lock(); // db.guard()\nlet permit = relation_guard(tx);\n"
+        self.assertEqual(check.occurrence_lines(source, check.AUTOCOMMIT), [])
+
     def test_test_modules_hide_begins_and_epoch_locks_but_not_attestation(self):
         source = '''
         fn production() {}
@@ -177,6 +186,12 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"{relative}:2: begin", result.stdout)
         self.assertIn(f"{relative}:3: epoch-lock", result.stdout)
+
+        reader = check.SOURCE / "ingress_substrate/reader.rs"
+        self.write(reader, "async fn f() {\n    let connection = db.guard().await;\n}\n")
+        result = self.run_check()
+        self.assertIn(f"{reader}:2: autocommit", result.stdout)
+        (self.server / reader).unlink()
 
         self.allowlist.write_text(f"{relative} begin 1\n{relative} epoch-lock 1\n")
         self.assertEqual(self.run_check().returncode, 0)

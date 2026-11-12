@@ -1,10 +1,12 @@
 # Code in the ingress modules, outside the typed entry
 # (crates/waddle-server/src/ingress_substrate/typed_entry.rs), that may
-# attest a transaction, open one directly on a database handle, or take the
-# epoch row lock without the entry's witness.
+# attest a transaction, open one directly on a database handle, take the
+# epoch row lock without the entry's witness, or run statements on an
+# autocommit connection.
 #
-# Format: `<path relative to server/> <attest|begin|epoch-lock> <count>`.
-# scripts/check-ingress-typed-entry.py defines the three kinds and requires
+# Format: `<path relative to server/> <attest|begin|epoch-lock|autocommit>
+# <count>`.
+# scripts/check-ingress-typed-entry.py defines the four kinds and requires
 # each listed file to hold exactly that many occurrences.
 
 # --- Read-only attach- and verify-time checks ------------------------------
@@ -37,6 +39,17 @@ crates/waddle-server/src/ingress/shared_correctness.rs begin 1
 # CarbonReceiptRepository::attempted_resources and the envelope/intent load.
 crates/waddle-server/src/ingress_uow/carbon_receipts.rs begin 2
 
+# recovery_evidence_pooled: one SELECT counting a message's intents,
+# receipts and delivery receipts.
+crates/waddle-server/src/ingress_substrate/maintenance.rs autocommit 1
+
+# canonical_sender_pooled: one SELECT of a message's stored envelope.
+crates/waddle-server/src/ingress_substrate/canonical_sender.rs autocommit 1
+
+# ArchiveDispatchRepository::positions_pooled: one SELECT of dispatch
+# positions.
+crates/waddle-server/src/ingress_uow/archive_dispatch.rs autocommit 1
+
 # --- Writers that are unattested by construction ----------------------------
 # Each is reached only when the database handle carries no attested writer
 # capability; the same function sends an attested pool through the entry.
@@ -54,23 +67,22 @@ crates/waddle-server/src/ingress_substrate/authority.rs epoch-lock 2
 crates/waddle-server/src/ingress_uow/effect_descendants.rs begin 1
 crates/waddle-server/src/ingress_uow/effect_descendants.rs epoch-lock 5
 
-# --- Maintenance writers that do not attest ---------------------------------
-# These run on whatever pool the server serves on, including the attested
-# pool, take the epoch row lock themselves and do not attest their
-# transaction. They are listed so the gap stays visible, not because
-# bypassing the entry is the intended end state.
-
-# Alias GC: `gc_orphan_proof_batch` deletes `sm_ingress_appends`,
-# `gc_candidate_batch` deletes epoch-guarded `ingress_messages` rows and their
-# children, `expired_candidates` scans (three begins); the GC reads the epoch
-# row `FOR SHARE` first in `acquire_gc_epoch_lock_first` (one epoch lock).
-# The remaining begin and epoch lock are `PostgresIngressSubstrate::begin_inner`,
-# which is unattested by construction: `begin` sends an attested pool
-# through the entry.
+# Alias GC and PostgresIngressSubstrate. `gc_candidate_batch` and
+# `gc_orphan_proof_batch` each open their own transaction and take the epoch
+# row lock (`acquire_gc_epoch_lock_first`) only in the branch for a handle
+# without attestation, as does `PostgresIngressSubstrate::begin_inner`; an
+# attested pool begins all three through the entry. The fourth begin is
+# `expired_candidates`, a bounded scan that takes no epoch lock and writes
+# nothing.
 crates/waddle-server/src/ingress_substrate/substrate.rs begin 4
 crates/waddle-server/src/ingress_substrate/substrate.rs epoch-lock 2
 
-# Ingress maintenance: `observer_retention_batch` collects expired room
-# observation rows under its own timeouts; `candidate_page` and
-# `recovery_page` are bounded scans that write nothing.
+# --- Maintenance transactions outside the entry -----------------------------
+# These run on whatever pool the server serves on, including the attested
+# pool, and open their transactions directly. None touches a relation the
+# V1009 epoch guard protects.
+
+# Ingress maintenance: `observer_retention_batch` deletes expired room
+# observation rows, which are not epoch-guarded, under its own timeouts;
+# `candidate_page` and `recovery_page` are bounded scans that only read.
 crates/waddle-server/src/ingress/maintenance/implementation.rs begin 3

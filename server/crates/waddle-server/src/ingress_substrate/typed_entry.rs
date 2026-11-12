@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use waddle_xmpp::ingress::ProtocolEpoch;
 
-use super::substrate::{discard_database_error, read_epoch_in_relation};
+use super::substrate::discard_database_error;
 use super::{
     acquire_epoch_lock_first, quote_postgres_identifier, set_local_transaction_timeouts,
     supported_protocol_epoch, tighten_local_transaction_timeouts, IngressSubstrateError,
@@ -61,6 +61,11 @@ pub(crate) enum IngressEntryClamp {
     /// At most 3 s of lock wait and 5 s per statement, for the candidate
     /// relation guard whose preparation inspects catalog state.
     RelationGuard,
+    /// No clamp: the request's explicit timeouts are the transaction's
+    /// bounds, exactly as given. For maintenance writers that budget their
+    /// own waits; the entry refuses the request if it carries no explicit
+    /// timeouts.
+    CallerBounds,
 }
 
 /// The authority under which the entry proves the protocol epoch.
@@ -94,6 +99,10 @@ pub(crate) enum IngressEntryError {
     AcquisitionTimeout,
     Database(DatabaseError),
     BoundsUnproven,
+    /// A database failure while the registered guard prepared the
+    /// transaction, with its driver diagnostics, so a caller that
+    /// distinguishes lock from statement timeouts still can.
+    PreparationDatabase(DatabaseError),
     Preparation(IngressSubstrateError),
     EpochUnsupported {
         live: ProtocolEpoch,
@@ -108,6 +117,13 @@ impl From<DatabaseError> for IngressEntryError {
     }
 }
 
+impl IngressSubstrateError {
+    /// A typed refusal raised while the entry prepared a transaction.
+    fn into_preparation(self) -> IngressEntryError {
+        IngressEntryError::Preparation(self)
+    }
+}
+
 impl IngressEntryError {
     /// The substrate's classification of an entry refusal: database errors
     /// lose their diagnostics, and an unproven bound or missing proof row is
@@ -117,7 +133,9 @@ impl IngressEntryError {
     pub(crate) fn into_substrate_error(self) -> IngressSubstrateError {
         match self {
             Self::AcquisitionTimeout => IngressSubstrateError::Timeout,
-            Self::Database(error) => discard_database_error(error),
+            Self::Database(error) | Self::PreparationDatabase(error) => {
+                discard_database_error(error)
+            }
             Self::BoundsUnproven | Self::EpochProofMissing => IngressSubstrateError::Database {
                 retry_class: DbRetryClass::NotRetryable,
             },
@@ -267,6 +285,7 @@ pub(crate) async fn begin_ingress_entry<'a>(
             IngressEntryClamp::RelationGuard => {
                 bound_relation_guard_transaction(&mut transaction).await?
             }
+            IngressEntryClamp::CallerBounds => request.explicit_timeouts.is_some(),
         };
         if !bounded {
             return Err(IngressEntryError::BoundsUnproven);
@@ -281,9 +300,7 @@ pub(crate) async fn begin_ingress_entry<'a>(
             (epoch, None)
         }
         IngressEntryAuthority::InstalledGuard(capability) => {
-            let prepared = prepare_installed_guard(&mut transaction, capability)
-                .await
-                .map_err(IngressEntryError::Preparation)?;
+            let prepared = prepare_installed_guard(&mut transaction, capability).await?;
             (prepared.protocol_epoch, Some(prepared))
         }
         IngressEntryAuthority::RelationGuard(guard) => {
@@ -393,11 +410,12 @@ async fn prepare_relation_guard(
 async fn prepare_installed_guard(
     tx: &mut Transaction<'_>,
     capability: &AttestedPostgresWriterCapability,
-) -> Result<PreparedAttestedReceiptWriter, IngressSubstrateError> {
+) -> Result<PreparedAttestedReceiptWriter, IngressEntryError> {
     if tx.driver() != DatabaseDriver::Postgres {
         return Err(IngressSubstrateError::Database {
             retry_class: DbRetryClass::NotRetryable,
-        });
+        }
+        .into_preparation());
     }
 
     let expected = &capability.identity().schema;
@@ -410,12 +428,12 @@ async fn prepare_installed_guard(
         (),
     )
     .await
-    .map_err(discard_database_error)?;
+    .map_err(IngressEntryError::PreparationDatabase)?;
 
     capability
         .attest_transaction(tx)
         .await
-        .map_err(discard_database_error)?;
+        .map_err(IngressEntryError::PreparationDatabase)?;
 
     let mut schema_rows = tx
         .query(
@@ -423,34 +441,34 @@ async fn prepare_installed_guard(
             crate::db_params![expected.name.0.clone()],
         )
         .await
-        .map_err(discard_database_error)?;
+        .map_err(IngressEntryError::PreparationDatabase)?;
     let actual_schema_oid = schema_rows
         .next()
         .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::SchemaIdentityMismatch)?
+        .map_err(IngressEntryError::PreparationDatabase)?
+        .ok_or(IngressSubstrateError::SchemaIdentityMismatch.into_preparation())?
         .get::<String>(0)
-        .map_err(discard_database_error)?
+        .map_err(IngressEntryError::PreparationDatabase)?
         .parse::<u32>()
-        .map_err(|_| IngressSubstrateError::SchemaIdentityMismatch)?;
+        .map_err(|_| IngressSubstrateError::SchemaIdentityMismatch.into_preparation())?;
     drop(schema_rows);
     if actual_schema_oid != expected.oid {
-        return Err(IngressSubstrateError::SchemaIdentityMismatch);
+        return Err(IngressSubstrateError::SchemaIdentityMismatch.into_preparation());
     }
 
     let mut isolation_rows = tx
         .query("SELECT current_setting('transaction_isolation')", ())
         .await
-        .map_err(discard_database_error)?;
+        .map_err(IngressEntryError::PreparationDatabase)?;
     let isolation = isolation_rows
         .next()
         .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::ReadCommittedRequired)?
+        .map_err(IngressEntryError::PreparationDatabase)?
+        .ok_or(IngressSubstrateError::ReadCommittedRequired.into_preparation())?
         .get::<String>(0)
-        .map_err(discard_database_error)?;
+        .map_err(IngressEntryError::PreparationDatabase)?;
     if isolation != "read committed" {
-        return Err(IngressSubstrateError::ReadCommittedRequired);
+        return Err(IngressSubstrateError::ReadCommittedRequired.into_preparation());
     }
     drop(isolation_rows);
 
@@ -465,14 +483,17 @@ async fn prepare_installed_guard(
             crate::db_params![search_path],
         )
         .await
-        .map_err(discard_database_error)?;
+        .map_err(IngressEntryError::PreparationDatabase)?;
     search_path_rows
         .next()
         .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })?;
+        .map_err(IngressEntryError::PreparationDatabase)?
+        .ok_or(
+            IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            }
+            .into_preparation(),
+        )?;
     drop(search_path_rows);
 
     let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
@@ -482,14 +503,17 @@ async fn prepare_installed_guard(
             crate::db_params![fresh_epoch.to_storage().to_string()],
         )
         .await
-        .map_err(discard_database_error)?;
+        .map_err(IngressEntryError::PreparationDatabase)?;
     proof
         .next()
         .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })?;
+        .map_err(IngressEntryError::PreparationDatabase)?
+        .ok_or(
+            IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            }
+            .into_preparation(),
+        )?;
     drop(proof);
 
     // The V1009 guard trigger requests the epoch row `FOR SHARE` on every
@@ -497,7 +521,7 @@ async fn prepare_installed_guard(
     // fails the transaction if an activation landed since the proof above.
     let locked_epoch = read_epoch_in_relation(tx, &relation, true).await?;
     if locked_epoch != fresh_epoch {
-        return Err(IngressSubstrateError::EpochChangedDuringPreparation);
+        return Err(IngressSubstrateError::EpochChangedDuringPreparation.into_preparation());
     }
     Ok(PreparedAttestedReceiptWriter {
         protocol_epoch: locked_epoch,
@@ -505,4 +529,36 @@ async fn prepare_installed_guard(
         relation_guard: false,
         definer_api_candidate: false,
     })
+}
+
+/// Read the epoch row through its schema-qualified name, optionally taking
+/// the `FOR SHARE` row lock the V1009 guard trigger requests.
+async fn read_epoch_in_relation(
+    tx: &mut Transaction<'_>,
+    relation: &str,
+    for_share: bool,
+) -> Result<ProtocolEpoch, IngressEntryError> {
+    let lock_clause = if for_share { " FOR SHARE" } else { "" };
+    let mut rows = tx
+        .query(
+            &format!("SELECT epoch FROM {relation} WHERE id = 1{lock_clause}"),
+            (),
+        )
+        .await
+        .map_err(IngressEntryError::PreparationDatabase)?;
+    let epoch = rows
+        .next()
+        .await
+        .map_err(IngressEntryError::PreparationDatabase)?
+        .ok_or(
+            IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            }
+            .into_preparation(),
+        )?
+        .get::<i64>(0)
+        .map_err(IngressEntryError::PreparationDatabase)?;
+    u32::try_from(epoch)
+        .map(ProtocolEpoch::from_storage)
+        .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch.into_preparation())
 }
