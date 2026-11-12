@@ -471,6 +471,86 @@ follows, before the production activation:
 
 The production activation waits for M1 and M2.
 
+### Durable stream management on the connection
+
+With `WADDLE_XMPP_DURABLE_SM=durable` a resumable XEP-0198 session belongs
+to the durable authority (`S/sm_authority`,
+[`2139-durable-sm-session-model.md`](2139-durable-sm-session-model.md)), and
+the connection holds a `DurableSmLink` (`W/stream_management/durable.rs`):
+the owner fence, claim and principal it presents on each call. The
+connection's `StreamManagementState` is a projection of the authority's
+window, keyed by the session key; the client only ever holds the resume
+token. With the selector on `legacy`, the default, no store exists and no
+link is ever bound.
+
+- **Enable and resume** commit before any reply is built, and each reply is
+  built from the commit's witness. An unknown commit outcome answers
+  nothing, stays on the connection as its operation, and is settled as a
+  turn of the live loop; an unresolved resume also stops the loop reading
+  client input, so no bind is processed without the rejection's permit.
+- **Activation** of a resumed binding sits between `install_binding` and
+  `confirm_installed_binding`: registration publishes and installs, the
+  resume is completed, and the batch carrying `<resumed/>`, the replay and
+  the hydration tail confirms the binding when written. A resume that is
+  not published is compensated and its registration rolled back.
+- **Custody**: a counted stanza is admitted before the projection or the
+  transport may hold it, on both live write paths, and only an exposed
+  frame is written. Frames the projection records after the transport is
+  gone are admitted before detach, in order.
+- **Teardown** detaches with the resource snapshot, closes, or leaves a
+  session to the generation that superseded it
+  (`W/cleanup/durable_sm.rs`). A fence refusal retires the binding with
+  the cause `SessionSuperseded`.
+- **SASL2**, where the dark handshake is enabled, processes inline resume
+  and Bind 2 through the same operations and writes `<success/>` when its
+  inline results are known (`W/sasl.rs`).
+
+What this settles for S5: between dequeue and stream-management record, a
+counted stanza of a durable session is owned by the durable obligation
+from `admit` until the peer acknowledges it. A write receipt therefore
+changes nothing about custody for such a frame; it only tells the producer
+whether the frame was also seen on the wire.
+
+Still open before the live path can move onto
+`ActorSocketOutboundEndpoint` custody, and not decided here:
+
+- **Who owns an uncounted or unmanaged frame.** A non-resumable stream, a
+  stream without stream management and every nonza have no durable
+  obligation. For them only a completed write is acceptance, so the mapping
+  of `NotAttempted` and `AttemptedUncertain` to a producer retry has to stay
+  exactly as it is for the channel endpoint, and the leased entry has to
+  survive until the producer is told.
+- **Admission against a lease.** `admit` needs the frame's exact wire
+  bytes. A peer stanza is serialized by the recipient pass, which runs
+  after dequeue and may emit several frames or none. Whether the lease is
+  released when the last of those frames is admitted, or held until each is
+  flushed, decides what a crash between the two replays.
+- **Draining custody at cleanup.** The detach drain consumes owned
+  `OutboundStanza` values from the receiver. With leases it has to take the
+  terminal entries of a sealed custody (`take_terminal`) and admit them on
+  the detached authority; the order between sealing, the durable detach and
+  the registry removal is not fixed, and a frame leased to a write that is
+  still `Attempting` at seal has no rule.
+- **A provisional binding on the remote paths.** A binding that is
+  published but not yet activated needs a typed retry-before-enqueue
+  outcome on the remote resource proxy and the ordered relay. That is a
+  `deliver_ordered` version bump and belongs with the relay.
+- **Relayed ingress obligations.** A frame drained at detach discharges a
+  relayed ingress obligation that the in-memory detach proves in the same
+  write as the session. The durable detach does not prove it, so those
+  canonical rows stay non-terminal and are redelivered.
+
+Open before the durable selector can be chosen in production:
+
+- A resume or a Bind 2 replacement when another node holds the session
+  claim. The connection does not take a claim over; the resume is refused
+  as owner-unreachable, and the store refuses resource replacement on a
+  clustered store. Owner loss by claim (`record_owner_lost`) has no caller.
+- The orphan-claim reaper and the pending-delivery claim janitor still
+  reason about sessions through the in-memory registry, which never holds a
+  durable session.
+- The inline offer is not advertised in the SASL2 stream feature.
+
 ## M7: schema baseline
 
 After M6, the migration history is replaced by one baseline schema per
