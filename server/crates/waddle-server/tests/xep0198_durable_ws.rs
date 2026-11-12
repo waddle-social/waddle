@@ -1,9 +1,10 @@
 //! XEP-0198 over the loopback WebSocket with the durable session authority
 //! selected (`WADDLE_XMPP_DURABLE_SM=durable`) on single-node SQLite.
 //!
-//! The durable authority commits a session before `<enabled/>` is built and
-//! hands the client a resume token that is not the storage key. These tests
-//! observe the wire and the authority's rows.
+//! The durable authority commits a session before `<enabled/>` is built,
+//! hands the client a resume token that is not the storage key, and takes
+//! custody of every counted outbound stanza before it is written. These
+//! tests observe the wire and the authority's rows.
 
 #![cfg(feature = "test-support")]
 
@@ -100,17 +101,94 @@ struct SessionRow {
     session_id: String,
     state: i64,
     generation: i64,
+    inbound_handled: i64,
+    outbound_acked: i64,
+    outbound_exposure_ceiling: i64,
+    outbound_appended: i64,
 }
 
 async fn sessions(pool: &sqlx::SqlitePool, full_jid: &str) -> Vec<SessionRow> {
     sqlx::query_as(
-        "SELECT session_id, state, generation FROM sm_durable_sessions WHERE full_jid = ? \
-         ORDER BY updated_at_ms",
+        "SELECT session_id, state, generation, inbound_handled, outbound_acked, \
+         outbound_exposure_ceiling, outbound_appended FROM sm_durable_sessions \
+         WHERE full_jid = ? ORDER BY updated_at_ms",
     )
     .bind(full_jid)
     .fetch_all(pool)
     .await
     .expect("read durable sessions")
+}
+
+async fn wait_for_session<F: Fn(&SessionRow) -> bool>(
+    pool: &sqlx::SqlitePool,
+    full_jid: &str,
+    accept: F,
+) -> SessionRow {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(row) = sessions(pool, full_jid).await.into_iter().find(&accept) {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("durable session reached the expected state")
+}
+
+async fn retained_frames(pool: &sqlx::SqlitePool, session_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM sm_unacked WHERE stream_id = ?")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await
+        .expect("read retained frames")
+}
+
+fn chat(to: &str, id: &str, body: &str) -> Element {
+    Element::builder("message", "jabber:client")
+        .attr(nc!("to"), to)
+        .attr(nc!("type"), "chat")
+        .attr(nc!("id"), id)
+        .append(
+            Element::builder("body", "jabber:client")
+                .append(body)
+                .build(),
+        )
+        .build()
+}
+
+fn is_counted_stanza(element: &Element) -> bool {
+    matches!(element.name(), "message" | "presence" | "iq") && element.ns() == "jabber:client"
+}
+
+/// Read frames until every chat message in `ids` has arrived. Returns how
+/// many counted stanzas (XEP-0198 `h` units) were read, in arrival order.
+async fn recv_chats(client: &mut WsXmppClient, ids: &[&str]) -> u32 {
+    let mut counted = 0;
+    let mut missing: Vec<&str> = ids.to_vec();
+    while !missing.is_empty() {
+        let frame = client
+            .recv_timeout(Duration::from_secs(10))
+            .await
+            .expect("frame before the expected chat messages");
+        let Ok(element) = frame.parse::<Element>() else {
+            continue;
+        };
+        if is_counted_stanza(&element) {
+            counted += 1;
+        }
+        if element.name() == "message" {
+            missing.retain(|id| element.attr("id") != Some(*id));
+        }
+    }
+    counted
+}
+
+/// Bob, bound and ready to message Alice.
+async fn bob(server: &TestServer) -> WsXmppClient {
+    let mut bob = authenticate(server, 1).await;
+    bob.bind("laptop").await.expect("bob bind");
+    bob
 }
 
 #[tokio::test]
@@ -167,4 +245,99 @@ async fn non_resumable_enable_creates_no_durable_session() {
     assert!(sessions(&fixture.pool, "alice@localhost/tablet")
         .await
         .is_empty());
+}
+
+#[tokio::test]
+async fn counted_stanzas_are_in_durable_custody_and_an_ack_releases_its_prefix() {
+    let fixture = fixture(&[]).await;
+    let mut alice = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut alice, "phone").await;
+    let mut bob = bob(&fixture.server).await;
+
+    send_element(&mut bob, chat("alice@localhost/phone", "m1", "one")).await;
+    send_element(&mut bob, chat("alice@localhost/phone", "m2", "two")).await;
+    let written = recv_chats(&mut alice, &["m1", "m2"]).await;
+    assert!(written >= 2);
+
+    let row = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.outbound_appended >= i64::from(written)
+    })
+    .await;
+    assert_eq!(
+        row.outbound_exposure_ceiling, row.outbound_appended,
+        "a live owner's frame is exposed by the commit that stores it"
+    );
+    assert_eq!(row.outbound_acked, 0);
+    assert_eq!(
+        retained_frames(&fixture.pool, &row.session_id).await,
+        row.outbound_appended,
+        "every counted stanza on the wire has a retained frame"
+    );
+
+    send_element(&mut alice, sm("a").attr(nc!("h"), "1").build()).await;
+    let acked = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.outbound_acked == 1
+    })
+    .await;
+    assert_eq!(
+        retained_frames(&fixture.pool, &acked.session_id).await,
+        acked.outbound_appended - 1,
+        "the acknowledgement releases exactly the acknowledged frame"
+    );
+}
+
+#[tokio::test]
+async fn acknowledging_a_stanza_that_was_never_exposed_is_a_stream_error() {
+    let fixture = fixture(&[]).await;
+    let mut alice = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut alice, "phone").await;
+    let mut bob = bob(&fixture.server).await;
+    send_element(&mut bob, chat("alice@localhost/phone", "m1", "one")).await;
+    let written = recv_chats(&mut alice, &["m1"]).await;
+
+    send_element(&mut alice, sm("a").attr(nc!("h"), "5000").build()).await;
+    let error = alice
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame.contains("handled-count-too-high")
+        })
+        .await
+        .expect("handled-count-too-high stream error");
+    assert!(error.contains(SM_NS));
+
+    let row = wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.outbound_appended >= i64::from(written)
+    })
+    .await;
+    assert_eq!(row.outbound_acked, 0, "an invalid count releases nothing");
+    assert_eq!(
+        retained_frames(&fixture.pool, &row.session_id).await,
+        row.outbound_appended
+    );
+}
+
+#[tokio::test]
+async fn answering_a_request_reports_the_handled_count_to_the_authority() {
+    let fixture = fixture(&[]).await;
+    let mut alice = authenticate(&fixture.server, 0).await;
+    bind_and_enable(&mut alice, "phone").await;
+
+    for id in ["p1", "p2"] {
+        send_element(
+            &mut alice,
+            Element::builder("iq", "jabber:client")
+                .attr(nc!("type"), "get")
+                .attr(nc!("id"), id)
+                .append(Element::builder("ping", "urn:xmpp:ping").build())
+                .build(),
+        )
+        .await;
+    }
+    send_element(&mut alice, sm("r").build()).await;
+    let answer = recv_sm(&mut alice, "a").await;
+    assert_eq!(answer.attr("h"), Some("2"));
+
+    wait_for_session(&fixture.pool, "alice@localhost/phone", |row| {
+        row.inbound_handled == 2
+    })
+    .await;
 }

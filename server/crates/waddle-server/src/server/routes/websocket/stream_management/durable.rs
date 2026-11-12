@@ -16,25 +16,33 @@ use std::time::Duration;
 
 use jid::FullJid;
 use tracing::{error, info, warn};
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::ownership::BindingRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::durable::OwnerFence;
-use waddle_xmpp::stream_management::persistence::SmClaimFence;
-use waddle_xmpp::stream_management::SmFailed;
+use waddle_xmpp::stream_management::durable::{Exposure, HandledError};
+use waddle_xmpp::stream_management::persistence::{SmClaimFence, SmReplayPayload};
+use waddle_xmpp::stream_management::{
+    SmFailed, SmFrameProvenance, SmIngressFrameReceipt, StreamManagementState,
+};
 use waddle_xmpp::telemetry::attributes::SmEnableOutcome;
 use waddle_xmpp::telemetry::authority::record_sm_enable;
 
 use super::implementation::{SmEnableClaimGuard, SmEnableCommit};
 use super::{ResponseFrame, Session, WebSocketState};
 use crate::sm_authority::{
-    DurableSmStore, EnableError, EnableOperation, EnableRejection, EnableRequest, EnableResolution,
-    EnabledCommit,
+    AdmissionAuthority, AdmissionError, AdmissionFrame, AdmissionRejection, AdmissionRequest,
+    CommittedObligation, DurableSmStore, EnableError, EnableOperation, EnableRejection,
+    EnableRequest, EnableResolution, EnabledCommit, OwnerError, OwnerRejection,
 };
 
 /// First wait before an operation with an unknown commit outcome is settled.
 const SETTLEMENT_FIRST_DELAY: Duration = Duration::from_millis(100);
 /// Longest wait between two settlement attempts.
 const SETTLEMENT_MAX_DELAY: Duration = Duration::from_secs(5);
+/// How often one frame is offered again while its commit outcome is unknown.
+/// Admission is idempotent under the frame's operation id.
+const ADMISSION_ATTEMPTS: usize = 3;
 
 /// What a connection holds of the durable stream-management authority.
 #[derive(Default)]
@@ -47,10 +55,14 @@ pub(in crate::server::routes::websocket) enum DurableSmLink {
     EnableUnresolved(Box<UnresolvedEnable>),
     /// This connection's binding owns the session's current generation.
     Owner(Box<DurableSmOwner>),
+    /// The authority refused this binding's fence: a later generation owns
+    /// the session, or the session ended. The connection writes nothing more
+    /// for it and retires.
+    Superseded,
 }
 
 /// The owner fence a connection presents on each authority call, with the
-/// claim the authority compares it against.
+/// claim and principal the authority compares it against.
 #[derive(Clone)]
 pub(in crate::server::routes::websocket) struct DurableSmOwner {
     store: DurableSmStore,
@@ -58,12 +70,93 @@ pub(in crate::server::routes::websocket) struct DurableSmOwner {
     /// This node's claim on the session. Absent only where the legacy claim
     /// bookkeeping holds none; a clustered store then refuses each write.
     claim: Option<SmClaimFence>,
+    principal: AuthenticatedPrincipalRef,
+    /// Outbound counter value of the last frame this owner knows to be in
+    /// the authority's custody. Projection entries above it were recorded
+    /// without a transport and are admitted before the session detaches.
+    admitted_through: u32,
+    inbound: InboundHandled,
+}
+
+/// The nonwrapping count of handled client stanzas, advanced by the wire
+/// counter's movement.
+#[derive(Debug, Clone, Copy)]
+struct InboundHandled {
+    wire: u32,
+    total: u64,
+}
+
+impl InboundHandled {
+    fn advance_to(&mut self, wire: u32) -> u64 {
+        let delta = wire.wrapping_sub(self.wire);
+        // A value in the far half of the counter space is behind the last
+        // report, not ahead of it.
+        if delta < (1 << 31) {
+            self.total += u64::from(delta);
+            self.wire = wire;
+        }
+        self.total
+    }
+}
+
+/// One counted outbound stanza offered to the authority.
+pub(in crate::server::routes::websocket) struct CustodyFrame<'a> {
+    pub(in crate::server::routes::websocket) xml: &'a str,
+    pub(in crate::server::routes::websocket) original_receipt_at: chrono::DateTime<chrono::Utc>,
+    pub(in crate::server::routes::websocket) provenance: &'a SmFrameProvenance,
+    pub(in crate::server::routes::websocket) ingress_receipts: &'a [SmIngressFrameReceipt],
+}
+
+/// Why a frame is not in the authority's custody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::server::routes::websocket) enum CustodyRefusal {
+    /// Another generation owns the session, or the session ended.
+    Superseded,
+    /// The session's retained-frame bound is reached. The frame is
+    /// undeliverable to this session until the peer acknowledges.
+    WindowFull,
+    /// The authority could not take the frame now: its store, claim or
+    /// commit outcome is unavailable, or the frame is not a stanza.
+    Unavailable,
+}
+
+/// The authority's answer for a frame about to be written to the transport.
+#[must_use = "a refused frame must not be written, and a committed one is recorded under its sequence"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::server::routes::websocket) enum LiveCustody {
+    /// The connection owns no durable session; the in-memory queue counts.
+    Unmanaged,
+    /// The frame is committed and exposed: write it, and record it in the
+    /// projection under this outbound counter value.
+    Exposed {
+        sequence: u32,
+    },
+    /// The frame is committed but must not be written yet: a resume has not
+    /// published the session, and the frame follows its replay.
+    Retained,
+    Refused(CustodyRefusal),
+}
+
+/// The authority's answer for a client `<a h=…/>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::server::routes::websocket) enum AckVerdict {
+    /// The connection owns no durable session, or the authority settled the
+    /// count. The projection applies it.
+    Apply,
+    /// The peer acknowledged a stanza that was never exposed to it. The
+    /// stream is in error and nothing was released.
+    HandledInvalid,
+    /// Another generation owns the session; the connection retires.
+    Superseded,
+    /// The settlement could not be committed. Nothing is applied in memory.
+    Unavailable,
 }
 
 /// An enable attempt between its commit and a known outcome.
 pub(in crate::server::routes::websocket) struct UnresolvedEnable {
     operation: EnableOperation,
     binding: BindingRef,
+    principal: AuthenticatedPrincipalRef,
     claim: Option<SmClaimFence>,
     /// Keeps the session claim published, and inventories its release if the
     /// enable turns out not to have committed.
@@ -104,7 +197,7 @@ impl DurableSmLink {
     ) -> Option<tokio::time::Instant> {
         match self {
             Self::EnableUnresolved(unresolved) => Some(unresolved.retry.due),
-            Self::Unbound | Self::Owner(_) => None,
+            Self::Unbound | Self::Owner(_) | Self::Superseded => None,
         }
     }
 
@@ -112,6 +205,238 @@ impl DurableSmLink {
     /// durable session nor waits on an enable's outcome.
     pub(in crate::server::routes::websocket) fn admits_enable(&self) -> bool {
         matches!(self, Self::Unbound)
+    }
+
+    /// Whether the authority has refused this binding's fence.
+    pub(in crate::server::routes::websocket) fn is_superseded(&self) -> bool {
+        matches!(self, Self::Superseded)
+    }
+
+    /// Take custody of a counted frame before it is written.
+    ///
+    /// Frames the projection recorded without a transport are admitted
+    /// first, so the authority's ordinals follow the projection's order.
+    pub(in crate::server::routes::websocket) async fn take_live_custody(
+        &mut self,
+        sm_state: &StreamManagementState,
+        frame: CustodyFrame<'_>,
+    ) -> LiveCustody {
+        let owner = match self {
+            Self::Unbound | Self::EnableUnresolved(_) => return LiveCustody::Unmanaged,
+            Self::Superseded => return LiveCustody::Refused(CustodyRefusal::Superseded),
+            Self::Owner(owner) => owner,
+        };
+        let admitted = match owner.admit_projection_tail(sm_state).await {
+            Ok(()) => owner.admit(&frame).await,
+            Err(refusal) => Err(refusal),
+        };
+        match admitted {
+            Ok(committed) => match committed.exposure() {
+                Exposure::Exposed => {
+                    owner.admitted_through = committed.sequence();
+                    LiveCustody::Exposed {
+                        sequence: committed.sequence(),
+                    }
+                }
+                Exposure::Retained => LiveCustody::Retained,
+            },
+            Err(refusal) => {
+                if refusal == CustodyRefusal::Superseded {
+                    *self = Self::Superseded;
+                }
+                LiveCustody::Refused(refusal)
+            }
+        }
+    }
+
+    /// Settle a client `<a h=…/>` against the authority's exposure ceiling.
+    pub(in crate::server::routes::websocket) async fn settle_ack(&mut self, h: u32) -> AckVerdict {
+        let Self::Owner(owner) = self else {
+            return match self {
+                Self::Superseded => AckVerdict::Superseded,
+                _ => AckVerdict::Apply,
+            };
+        };
+        let settled = owner
+            .store
+            .settle_ack(&owner.fence, owner.claim.as_ref(), h, chrono::Utc::now())
+            .await;
+        match settled {
+            Ok(_) => AckVerdict::Apply,
+            Err(OwnerError::Rejected(OwnerRejection::Handled(error))) => {
+                match error {
+                    HandledError::TooHigh { .. } | HandledError::Ambiguous { .. } => {}
+                    HandledError::Behind { .. } => {
+                        // Only a resume reports a count behind the floor.
+                        error!(session = ?owner.fence.session, %error, "live SM ack classified as a resume count");
+                    }
+                }
+                AckVerdict::HandledInvalid
+            }
+            Err(OwnerError::Rejected(
+                rejection @ (OwnerRejection::Fence(_)
+                | OwnerRejection::NotOwned(_)
+                | OwnerRejection::UnknownSession),
+            )) => {
+                info!(
+                    session = ?owner.fence.session,
+                    error = %rejection,
+                    "durable SM session is owned elsewhere; retiring this binding"
+                );
+                *self = Self::Superseded;
+                AckVerdict::Superseded
+            }
+            Err(error) => {
+                warn!(session = ?owner.fence.session, %error, "durable SM ack could not be settled");
+                AckVerdict::Unavailable
+            }
+        }
+    }
+
+    /// Report the handled count of client stanzas the connection is about to
+    /// acknowledge. The value is the floor a later resume starts from; the
+    /// ingress checkpoint stays the authority for stanzas that entered
+    /// canonical ingress, so a failed report does not withhold the answer.
+    pub(in crate::server::routes::websocket) async fn report_inbound_handled(&mut self, wire: u32) {
+        let Self::Owner(owner) = self else {
+            return;
+        };
+        let handled = owner.inbound.advance_to(wire);
+        let reported = owner
+            .store
+            .record_inbound_handled(
+                &owner.fence,
+                owner.claim.as_ref(),
+                handled,
+                chrono::Utc::now(),
+            )
+            .await;
+        match reported {
+            Ok(()) => {}
+            Err(OwnerError::Rejected(
+                rejection @ (OwnerRejection::Fence(_)
+                | OwnerRejection::NotOwned(_)
+                | OwnerRejection::UnknownSession),
+            )) => {
+                info!(
+                    session = ?owner.fence.session,
+                    error = %rejection,
+                    "durable SM session is owned elsewhere; retiring this binding"
+                );
+                *self = Self::Superseded;
+            }
+            Err(error) => {
+                warn!(session = ?owner.fence.session, %error, "durable SM handled count was not recorded");
+            }
+        }
+    }
+}
+
+impl DurableSmOwner {
+    /// Offer one frame on this owner's fence. An unknown commit outcome is
+    /// settled by offering the same operation again.
+    async fn admit(&self, frame: &CustodyFrame<'_>) -> Result<CommittedObligation, CustodyRefusal> {
+        let payload = SmReplayPayload::from_wire(frame.xml.to_owned()).map_err(|error| {
+            warn!(session = ?self.fence.session, %error, "counted frame is not a stanza the authority can retain");
+            CustodyRefusal::Unavailable
+        })?;
+        let admission = AdmissionFrame {
+            operation: waddle_xmpp::stream_management::durable::SmOperationId::mint(),
+            payload,
+            original_receipt_at: frame.original_receipt_at,
+            ingress_receipts: frame.ingress_receipts.to_vec(),
+            provenance: frame.provenance.clone(),
+        };
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let admitted = self
+                .store
+                .admit(
+                    AdmissionRequest {
+                        authority: AdmissionAuthority::Owner {
+                            fence: &self.fence,
+                            principal: &self.principal,
+                        },
+                        claim: self.claim.as_ref(),
+                        now: chrono::Utc::now(),
+                    },
+                    &admission,
+                )
+                .await;
+            match admitted {
+                Ok(committed) => return Ok(committed),
+                Err(AdmissionError::Indeterminate(cause)) if attempts < ADMISSION_ATTEMPTS => {
+                    warn!(session = ?self.fence.session, error = %cause, "durable SM admission outcome unknown; offering the frame again");
+                }
+                Err(AdmissionError::Indeterminate(cause)) => {
+                    warn!(session = ?self.fence.session, error = %cause, "durable SM admission outcome is still unknown");
+                    return Err(CustodyRefusal::Unavailable);
+                }
+                Err(AdmissionError::Rejected(rejection)) => {
+                    return Err(admission_refusal(&self.fence, &rejection));
+                }
+            }
+        }
+    }
+
+    /// Admit the projection entries above [`Self::admitted_through`], in
+    /// order. They were recorded while no transport could carry them.
+    async fn admit_projection_tail(
+        &mut self,
+        sm_state: &StreamManagementState,
+    ) -> Result<(), CustodyRefusal> {
+        if sm_state.outbound_count == self.admitted_through {
+            return Ok(());
+        }
+        for entry in sm_state.stanzas_to_resend(self.admitted_through) {
+            let committed = self
+                .admit(&CustodyFrame {
+                    xml: &entry.stanza_xml,
+                    original_receipt_at: entry.original_receipt_at,
+                    provenance: &entry.provenance,
+                    ingress_receipts: &entry.ingress_receipts,
+                })
+                .await?;
+            let expected = self.admitted_through.wrapping_add(1);
+            if committed.sequence() != expected {
+                error!(
+                    session = ?self.fence.session,
+                    committed = committed.sequence(),
+                    expected,
+                    "durable SM ordinal diverged from the connection's projection"
+                );
+                return Err(CustodyRefusal::Unavailable);
+            }
+            self.admitted_through = expected;
+        }
+        Ok(())
+    }
+}
+
+fn admission_refusal(fence: &OwnerFence, rejection: &AdmissionRejection) -> CustodyRefusal {
+    match rejection {
+        AdmissionRejection::UnknownSession
+        | AdmissionRejection::Fence(_)
+        | AdmissionRejection::NotAdmitting(_) => {
+            info!(
+                session = ?fence.session,
+                error = %rejection,
+                "durable SM session is owned elsewhere; retiring this binding"
+            );
+            CustodyRefusal::Superseded
+        }
+        AdmissionRejection::Bound(_) => {
+            warn!(session = ?fence.session, error = %rejection, "durable SM retained-frame bound reached");
+            CustodyRefusal::WindowFull
+        }
+        AdmissionRejection::PrincipalMismatch
+        | AdmissionRejection::ClaimFenceMissing
+        | AdmissionRejection::OperationReused
+        | AdmissionRejection::Store(_) => {
+            warn!(session = ?fence.session, error = %rejection, "durable SM admission refused");
+            CustodyRefusal::Unavailable
+        }
     }
 }
 
@@ -211,6 +536,7 @@ pub(super) async fn enable(
     let unresolved = UnresolvedEnable {
         operation,
         binding: binding.clone(),
+        principal,
         claim,
         claim_guard,
         stream_id,
@@ -275,6 +601,7 @@ fn adopt_committed_enable(
     commit: EnabledCommit,
 ) -> ResponseFrame {
     let UnresolvedEnable {
+        principal,
         claim,
         claim_guard,
         stream_id,
@@ -287,6 +614,9 @@ fn adopt_committed_enable(
         store,
         fence: commit.fence().clone(),
         claim: claim.clone(),
+        principal,
+        admitted_through: 0,
+        inbound: InboundHandled { wire: 0, total: 0 },
     }));
     *pending_commit = Some(SmEnableCommit::new(
         Some(claim_guard),

@@ -627,6 +627,9 @@ fn handler_exit_cause(
     if let Some(reason) = pump_stop.reason() {
         return RetirementCause::from_pump_stop(reason);
     }
+    if conn.durable_sm.is_superseded() {
+        return RetirementCause::SessionSuperseded;
+    }
     match exit {
         HandlerExit::Write => RetirementCause::WriteFailure,
         HandlerExit::Inbound
@@ -1203,7 +1206,14 @@ impl LiveSocketState {
             ..
         } = self;
         let handler_exit = |conn: &WsConnState, exit| {
-            Retire::settled(handler_exit_cause(ctx, pump_stop, conn, exit))
+            match handler_exit_cause(ctx, pump_stop, conn, exit) {
+                // The peer of a superseded binding is told the stream ended
+                // in conflict, as a displaced binding is.
+                cause @ RetirementCause::SessionSuperseded => {
+                    Retire::owing(cause, OwedClose::Conflict)
+                }
+                cause => Retire::settled(cause),
+            }
         };
         let Some(socket_halves) = socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
@@ -2910,7 +2920,9 @@ where
         .await;
         return false;
     }
-    true
+    // A durable session this binding no longer owns ends the loop; the
+    // retirement names the cause and writes the conflict close.
+    !conn.durable_sm.is_superseded()
 }
 
 async fn close_if_frame_authority_revoked<S, E>(

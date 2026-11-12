@@ -6,7 +6,7 @@ use super::interpret_loop::build_interpret_deps;
 use super::replay::drive_interpret_loop;
 use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
 use super::state::WsConnState;
-use super::stream_management::is_countable_stanza;
+use super::stream_management::{is_countable_stanza, CustodyFrame, LiveCustody};
 use super::timers::TransportTimers;
 use super::transport_xml::stanza_to_xml;
 use super::{
@@ -76,12 +76,48 @@ where
                         }
                     },
                 );
-                let record_result = conn.sm_state.record_outbound_with_provenance(
-                    xml.clone(),
-                    pending_row_receipt_at.unwrap_or_else(chrono::Utc::now),
-                    SmEvictionPath::DirectOutbound,
-                    provenance,
-                );
+                let receipt_at = pending_row_receipt_at.unwrap_or_else(chrono::Utc::now);
+                // A durable session takes custody of the frame before the
+                // connection's queue or the transport may hold it.
+                let custody = conn
+                    .durable_sm
+                    .take_live_custody(
+                        &conn.sm_state,
+                        CustodyFrame {
+                            xml: &xml,
+                            original_receipt_at: receipt_at,
+                            provenance: &provenance,
+                            ingress_receipts: &[],
+                        },
+                    )
+                    .await;
+                let record_result = match custody {
+                    LiveCustody::Unmanaged => conn.sm_state.record_outbound_with_provenance(
+                        xml.clone(),
+                        receipt_at,
+                        SmEvictionPath::DirectOutbound,
+                        provenance,
+                    ),
+                    LiveCustody::Exposed { sequence } => conn.sm_state.record_committed_outbound(
+                        sequence,
+                        xml.clone(),
+                        receipt_at,
+                        SmEvictionPath::DirectOutbound,
+                        provenance,
+                    ),
+                    LiveCustody::Retained => {
+                        // The authority holds the frame and a resume in
+                        // progress writes it after its replay.
+                        if let Some(acceptance) = outbound_stanza.write_acceptance.as_ref() {
+                            acceptance.acknowledge();
+                        }
+                        return true;
+                    }
+                    // Nothing was recorded or written. The producer keeps its
+                    // retry, and the connection ends: it retires when another
+                    // generation owns the session, and detaches otherwise.
+                    LiveCustody::Refused(_) => return false,
+                };
                 // Pending copies can hold archive-order barriers for other
                 // resources. Ask even on a quiet stream below the normal
                 // cadence; otherwise those resources may await an ack forever.

@@ -402,13 +402,17 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
             )
             .await
         }
-        SmStanza::Request => {
-            handle_sm_request(state, ctx.phase, ctx.sm_state, ctx.sm_inbound_completion)
-                .await
-                .map(|ack| ResponseFrame::from_serialized_xml(ack.to_xml()))
-                .into_iter()
-                .collect()
-        }
+        SmStanza::Request => handle_sm_request(
+            state,
+            ctx.phase,
+            ctx.sm_state,
+            ctx.sm_inbound_completion,
+            ctx.durable_sm,
+        )
+        .await
+        .map(|ack| ResponseFrame::from_serialized_xml(ack.to_xml()))
+        .into_iter()
+        .collect(),
         SmStanza::Ack(ack) => {
             apply_sm_ack_with_fence(
                 state,
@@ -416,6 +420,7 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
                 ctx.phase,
                 ack.h,
                 ctx.sm_ingress_fence.as_ref(),
+                ctx.durable_sm,
             )
             .await
         }
@@ -433,12 +438,21 @@ pub(in crate::server::routes::websocket) async fn handle_sm_request(
     phase: &mut ConnectionPhase,
     sm_state: &mut StreamManagementState,
     completion: &mut SmInboundCompletionTracker,
+    durable_sm: &mut super::durable::DurableSmLink,
 ) -> Option<waddle_xmpp::stream_management::SmAck> {
     if flush_ingress_checkpoint(state, sm_state, completion)
         .await
         .is_err()
     {
         *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+        return None;
+    }
+    durable_sm
+        .report_inbound_handled(sm_state.inbound_count())
+        .await;
+    if durable_sm.is_superseded() {
+        // Another generation owns the session; this binding answers nothing
+        // more for it and retires.
         return None;
     }
     Some(waddle_xmpp::stream_management::SmAck::new(
@@ -529,7 +543,15 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack(
     phase: &mut ConnectionPhase,
     h: u32,
 ) -> Vec<ResponseFrame> {
-    apply_sm_ack_with_fence(state, sm_state, phase, h, None).await
+    apply_sm_ack_with_fence(
+        state,
+        sm_state,
+        phase,
+        h,
+        None,
+        &mut super::durable::DurableSmLink::default(),
+    )
+    .await
 }
 
 pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
@@ -538,7 +560,49 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
     phase: &mut ConnectionPhase,
     h: u32,
     expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    durable_sm: &mut super::durable::DurableSmLink,
 ) -> Vec<ResponseFrame> {
+    // A durable session validates the count against its committed exposure
+    // ceiling and releases the acknowledged frames before the connection's
+    // projection moves.
+    match durable_sm.settle_ack(h).await {
+        super::durable::AckVerdict::Apply => {}
+        super::durable::AckVerdict::HandledInvalid => {
+            let observation = SmAckObservation::TooHigh {
+                acknowledged: h,
+                send_count: sm_state.outbound_count,
+            };
+            observe_sm_ack(observation);
+            info!(
+                stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+                outcome = ?observation.outcome(),
+                client_h = h,
+                send_count = sm_state.outbound_count,
+                "SM ack rejected by the durable authority: handled count was never exposed"
+            );
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            return vec![
+                ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
+                    acknowledged: h,
+                    send_count: sm_state.outbound_count,
+                }),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ];
+        }
+        // The binding retires; it owes this stream no further frame.
+        super::durable::AckVerdict::Superseded => return Vec::new(),
+        super::durable::AckVerdict::Unavailable => {
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            return vec![
+                ResponseFrame::from(Element::from(xmpp_parsers::stream_error::StreamError {
+                    condition: xmpp_parsers::stream_error::DefinedCondition::InternalServerError,
+                    texts: Default::default(),
+                    application_specific: Vec::new(),
+                })),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ];
+        }
+    }
     if !sm_state.ack_regresses_last_acked(h) && !sm_state.ack_exceeds_outbound(h) {
         // Keep the old acknowledgement window on a failed custody write so a
         // resume can retry it. Acknowledging only in memory would leave the
@@ -562,6 +626,14 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
     }
     let observation = apply_sm_ack_observation(sm_state, h);
     observe_sm_ack(observation);
+    if matches!(
+        observation,
+        SmAckObservation::Advanced { .. } | SmAckObservation::Duplicate { .. }
+    ) {
+        waddle_xmpp::telemetry::authority::record_sm_unacked_depth(
+            sm_state.unacked_count() as usize
+        );
+    }
 
     match observation {
         SmAckObservation::Regressed => {
