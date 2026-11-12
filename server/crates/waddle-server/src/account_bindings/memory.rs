@@ -12,7 +12,7 @@ use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceExecution, AccountResourceOperation, AccountResourceOperationOutcome,
     AccountResourceRevision, ACCOUNT_RESOURCE_OPERATION_CAPACITY,
 };
-use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
+use waddle_xmpp::ownership::{BindingRef, SmSessionKey, UserClaimIdentity};
 
 use super::decision::{
     check_account, decide, decide_presentation, operation_key, Decision, OperationFingerprint,
@@ -30,7 +30,8 @@ struct State {
 
 /// Account resource rows held in process memory, with the fences and the
 /// operation record of the database store. Presence payloads survive here,
-/// unlike in a database row. `set_unavailable` makes every call fail before
+/// unlike in a database row, and a session reference is not checked,
+/// because this store keeps no session relation. `set_unavailable` makes every call fail before
 /// it reads or writes, to exercise a caller's handling of a store failure.
 #[derive(Default)]
 pub struct InMemoryAccountBindingStore {
@@ -172,6 +173,26 @@ impl AccountBindingStore for InMemoryAccountBindingStore {
             .resources
             .get(full_jid)
             .map(|(stored, _)| stored.clone()))
+    }
+
+    async fn resources_for_session(
+        &self,
+        session: SmSessionKey,
+    ) -> Result<Vec<FullJid>, AccountBindingStoreError> {
+        Ok(self
+            .state()?
+            .resources
+            .iter()
+            .filter(|(_, (stored, _))| {
+                stored
+                    .image
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.snapshot.stream_management_ref)
+                    .is_some_and(|reference| reference.session == session)
+            })
+            .map(|(jid, _)| jid.clone())
+            .collect())
     }
 
     async fn load_account(

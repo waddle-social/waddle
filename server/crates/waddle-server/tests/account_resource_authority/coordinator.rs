@@ -11,8 +11,9 @@ use jid::{BareJid, FullJid};
 use waddle_server::account_bindings::{AccountBindingStore, DatabaseAccountBindingStore};
 use waddle_server::account_coordinator::{
     AccountBindingAuthority, AccountClaimError, AccountClaimSource, AccountCoordinatorConfig,
-    AccountCoordinatorError, AccountCoordinators, BindingReply, LocalNodeLiveness, RepairEvidence,
-    RepairOutcome, UnregisterOutcome, UnregisterRequest,
+    AccountCoordinatorError, AccountCoordinators, BindingLiveness, BindingReply,
+    ConnectionLiveness, LocalNodeLiveness, RepairEvidence, RepairOutcome, UnregisterOutcome,
+    UnregisterRequest,
 };
 use waddle_server::db::Database;
 use waddle_xmpp::ownership::account_coordinator::{
@@ -29,8 +30,8 @@ use waddle_xmpp::ownership::{
 };
 
 use super::support::{
-    bind, claim, complete_retirement, detach, fresh_binding, insert_session, operation, presence,
-    publish, register, resource, resume, sm_binding, update,
+    bind, bind_session_generation, claim, complete_retirement, detach, fresh_binding,
+    insert_session, operation, presence, publish, register, resource, resume, sm_binding, update,
 };
 
 const INITIAL: AccountResourceRevision = AccountResourceRevision::INITIAL;
@@ -290,6 +291,7 @@ async fn the_binding_lifecycle_decides_what_is_routable() {
         .expect("the detached binding")
         .lifetime;
     let resumed = fresh_binding();
+    bind_session_generation(&harness.db, session, 2).await;
     let prepared = drive(
         coordinators,
         &jid,
@@ -582,6 +584,7 @@ async fn a_presentation_happens_once_across_a_resume() {
         .expect("the detached binding")
         .lifetime;
     let resumed = fresh_binding();
+    bind_session_generation(&harness.db, session, 2).await;
     let prepared = drive(
         coordinators,
         &jid,
@@ -1022,4 +1025,323 @@ async fn a_store_failure_is_a_typed_error_and_never_an_empty_selection() {
             AccountResourceOperationOutcome::Committed { .. }
         ))
     ));
+}
+
+#[tokio::test]
+async fn a_terminal_session_is_released_by_retiring_its_detached_binding() {
+    use waddle_server::account_coordinator::{ReleaseSessionRequest, SessionRelease};
+
+    let harness = harness("account-coordinator-release-session", config()).await;
+    let coordinators = &harness.coordinators;
+    let jid = resource("resumable");
+    let claim = harness.claim();
+    let session = insert_session(&harness.db).await;
+    let (binding, active) = activate(coordinators, &jid).await;
+    let request = || ReleaseSessionRequest {
+        begin: AccountResourceOperationId::fresh(),
+        complete: AccountResourceOperationId::fresh(),
+        session,
+        custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+        directed_presence: DirectedPresenceTeardownDisposition::NoDirectedRecipients,
+        presentation_flush: PresentationFlushDisposition::NoPendingPresentation,
+    };
+    assert_eq!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("release"),
+        SessionRelease::NotReferenced
+    );
+    let snapshot = AccountResourceSnapshot {
+        stream_management_ref: Some(sm_binding(session, 1)),
+        ..presence(true, 0, false)
+    };
+    let updated = drive(
+        coordinators,
+        &jid,
+        update(&claim, active, &binding, snapshot),
+    )
+    .await;
+    assert_eq!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("release"),
+        SessionRelease::HeldByConnection(binding.clone(), AccountResourceBindingState::Active),
+        "a binding that still has a connection is retired by that connection"
+    );
+    drive(coordinators, &jid, detach(&claim, updated, &binding)).await;
+    assert_eq!(
+        harness
+            .store
+            .resources_for_session(session)
+            .await
+            .expect("resources for the session"),
+        vec![jid.clone()]
+    );
+    assert!(matches!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("release"),
+        SessionRelease::Released { .. }
+    ));
+    assert!(
+        harness
+            .store
+            .resources_for_session(session)
+            .await
+            .expect("resources for the session")
+            .is_empty(),
+        "the row no longer names the session, so the session row can be deleted"
+    );
+    assert_eq!(
+        coordinators
+            .release_session(&jid, request())
+            .await
+            .expect("repeat the release"),
+        SessionRelease::NotReferenced
+    );
+}
+
+#[tokio::test]
+async fn an_account_over_its_slot_bound_serves_its_bindings_and_refuses_new_ones() {
+    let harness = harness("account-coordinator-over-bound", config()).await;
+    let first = resource("first");
+    let second = resource("second");
+    let claim = harness.claim();
+    activate(&harness.coordinators, &first).await;
+    activate(&harness.coordinators, &second).await;
+
+    let bounded = directory(
+        &harness.store,
+        &harness.claims,
+        AccountCoordinatorConfig {
+            max_resources: NonZeroUsize::MIN,
+            ..config()
+        },
+    );
+    assert_eq!(
+        resources(&bounded, &first).await,
+        vec![first.clone(), second.clone()],
+        "stored bindings beyond the bound stay served"
+    );
+    assert!(matches!(
+        bounded
+            .execute(
+                &resource("third"),
+                operation(bind(&claim, INITIAL, &fresh_binding()))
+            )
+            .await,
+        Err(AccountCoordinatorError::Resources(
+            AccountResourcesError::ResourceLimit
+        ))
+    ));
+    let status = bounded.slot_status(&first).await.expect("slot status");
+    let (binding, _) = status.binding.expect("the first binding");
+    drive(
+        &bounded,
+        &first,
+        update(&claim, status.revision, &binding, presence(true, 4, false)),
+    )
+    .await;
+}
+
+/// Liveness the test states per binding; anything else is unknown.
+struct StatedLiveness(Vec<(BindingRef, BindingLiveness)>);
+
+#[async_trait]
+impl ConnectionLiveness for StatedLiveness {
+    async fn liveness(
+        &self,
+        binding: &BindingRef,
+        _session: Option<waddle_xmpp::ownership::SmSessionKey>,
+    ) -> BindingLiveness {
+        self.0
+            .iter()
+            .find(|(stated, _)| stated == binding)
+            .map_or(BindingLiveness::Unknown, |(_, liveness)| *liveness)
+    }
+}
+
+#[tokio::test]
+async fn a_takeover_adopts_live_remote_bindings_and_reports_expired_ones() {
+    let harness = harness("account-coordinator-remote-liveness", config()).await;
+    let remote = |node: &str| {
+        BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            &NodeIdentity::new(node, "epoch"),
+        )))
+    };
+    let live_jid = resource("remote-live");
+    let expired_jid = resource("remote-expired");
+    let unknown_jid = resource("remote-unknown");
+    let live = remote("node-live");
+    let expired = remote("node-expired");
+    let unknown = remote("node-unknown");
+    activate_binding(&harness.coordinators, &live_jid, &live).await;
+    activate_binding(&harness.coordinators, &expired_jid, &expired).await;
+    activate_binding(&harness.coordinators, &unknown_jid, &unknown).await;
+
+    harness.claims.move_to(claim(2));
+    let successor = AccountCoordinators::new(
+        Arc::clone(&harness.store) as Arc<dyn AccountBindingStore>,
+        Arc::clone(&harness.claims) as Arc<dyn AccountClaimSource>,
+        Arc::new(StatedLiveness(vec![
+            (live.clone(), BindingLiveness::Live),
+            (expired.clone(), BindingLiveness::Expired),
+        ])),
+        config(),
+    );
+    let account = live_jid.to_bare();
+    let report = successor
+        .adopt_account(&account)
+        .await
+        .expect("adopt the account");
+    assert_eq!(report.adopted, vec![(live_jid.clone(), live)]);
+    assert_eq!(report.expired, vec![(expired_jid.clone(), expired.clone())]);
+    assert_eq!(
+        report.unadopted,
+        vec![(unknown_jid.clone(), unknown.clone())]
+    );
+    assert_eq!(
+        resources(&successor, &live_jid).await,
+        vec![live_jid],
+        "a binding hosted by a node with a fresh lease stays a destination"
+    );
+    assert_eq!(
+        successor
+            .expired_bindings(&account)
+            .await
+            .expect("expired bindings"),
+        vec![(expired_jid.clone(), expired.clone())],
+        "unknown liveness is not reported as expired"
+    );
+    assert!(matches!(
+        successor
+            .unregister(&expired_jid, unregister_request(&expired))
+            .await
+            .expect("unregister"),
+        UnregisterOutcome::Retiring { .. }
+    ));
+    assert!(matches!(
+        successor
+            .repair(&expired_jid, &expired, repair_evidence())
+            .await
+            .expect("repair"),
+        RepairOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        successor
+            .slot_status(&unknown_jid)
+            .await
+            .expect("slot status")
+            .binding,
+        Some((unknown, AccountResourceBindingState::Active)),
+        "a binding of unknown liveness is kept, not deleted"
+    );
+}
+
+#[tokio::test]
+async fn the_binding_publisher_maps_publish_confirm_and_retire_onto_the_coordinator() {
+    use waddle_server::account_coordinator::{
+        ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome, RetireEvidence, RetireOutcome,
+    };
+    use waddle_xmpp::ownership::joint_identity::ResourceLifetime;
+
+    let harness = harness("account-coordinator-publisher", config()).await;
+    let coordinators = Arc::new(directory(&harness.store, &harness.claims, config()));
+    let publisher = CoordinatorBindingPublisher::new(Arc::clone(&coordinators));
+    let jid = resource("published");
+    let evidence = || RetireEvidence {
+        begin: AccountResourceOperationId::fresh(),
+        complete: AccountResourceOperationId::fresh(),
+        custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+        directed_presence: DirectedPresenceTeardownDisposition::NoDirectedRecipients,
+        presentation_flush: PresentationFlushDisposition::NoPendingPresentation,
+    };
+
+    let first = fresh_binding();
+    let PublishOutcome::Published(published) = publisher
+        .publish(&jid, &first, ResourceLifetime::fresh())
+        .await
+        .expect("publish")
+    else {
+        panic!("expected the first binding to be published");
+    };
+    assert_eq!(
+        state_of(&coordinators, &jid).await,
+        Some(AccountResourceBindingState::Published)
+    );
+    assert_eq!(
+        publisher
+            .publish(&jid, &first, ResourceLifetime::fresh())
+            .await
+            .expect("repeat the publish"),
+        PublishOutcome::Published(published.clone()),
+        "a repeated publish reports the binding as it stands"
+    );
+    assert!(resources(&coordinators, &jid).await.is_empty());
+    assert!(matches!(
+        publisher.confirm(&jid, &published).await.expect("confirm"),
+        ConfirmOutcome::Confirmed(_)
+    ));
+    assert!(matches!(
+        publisher
+            .confirm(&jid, &published)
+            .await
+            .expect("repeat the confirm"),
+        ConfirmOutcome::Confirmed(_)
+    ));
+    assert_eq!(resources(&coordinators, &jid).await, vec![jid.clone()]);
+
+    let second = fresh_binding();
+    let pending = publisher
+        .publish(&jid, &second, ResourceLifetime::fresh())
+        .await
+        .expect("publish the replacement");
+    assert!(matches!(
+        &pending,
+        PublishOutcome::ReplacementPending { displaced, .. } if displaced == &first
+    ));
+    assert!(matches!(
+        publisher
+            .retire(&jid, &published, evidence())
+            .await
+            .expect("retire the displaced binding"),
+        RetireOutcome::Retired { .. }
+    ));
+    let PublishOutcome::Published(replacement) = publisher
+        .publish(&jid, &second, ResourceLifetime::fresh())
+        .await
+        .expect("publish the replacement again")
+    else {
+        panic!("expected the replacement to be published");
+    };
+    assert_eq!(
+        publisher
+            .confirm(&jid, &published)
+            .await
+            .expect("confirm the displaced binding"),
+        ConfirmOutcome::NotCurrent,
+        "a retired binding is never acknowledged to its client"
+    );
+    assert!(matches!(
+        publisher
+            .confirm(&jid, &replacement)
+            .await
+            .expect("confirm the replacement"),
+        ConfirmOutcome::Confirmed(_)
+    ));
+    assert_eq!(
+        publisher
+            .retire_remote(&jid, &published, evidence())
+            .await
+            .expect("retire the displaced binding again"),
+        RetireOutcome::Stale(BindingFenceError::Superseded),
+        "retiring an old binding leaves its replacement alone"
+    );
+    assert_eq!(
+        state_of(&coordinators, &jid).await,
+        Some(AccountResourceBindingState::Active)
+    );
 }

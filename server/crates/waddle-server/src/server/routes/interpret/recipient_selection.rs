@@ -86,6 +86,30 @@ impl RecipientInventory {
     }
 }
 
+/// Every connected resource of `bare`, read from the selected account
+/// authority. A coordinator that does not answer yields no resource, like
+/// an actor tree that does not answer; the registry is not read instead.
+pub(super) async fn live_resources(deps: &Deps<'_>, bare: &BareJid) -> Vec<FullJid> {
+    if let Some(state) = deps.web_socket_state {
+        if let Some(resources) = state
+            .deps
+            .app_state
+            .account_authority()
+            .resources(bare)
+            .await
+        {
+            return resources.unwrap_or_else(|error| {
+                tracing::warn!(%error, "account coordinator did not answer a resource read");
+                Vec::new()
+            });
+        }
+    }
+    match deps.user_registry {
+        Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, bare).await,
+        None => Vec::new(),
+    }
+}
+
 pub(crate) async fn local_recipient_inventory(
     deps: &Deps<'_>,
     bare: &BareJid,

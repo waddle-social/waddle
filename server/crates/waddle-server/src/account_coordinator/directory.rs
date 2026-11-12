@@ -23,8 +23,9 @@ use super::claims::{AccountClaimSource, ConnectionLiveness};
 use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
-    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, MarkPresented,
-    OverdueRetirements, ReadView, ReclaimIfIdle, Repair, RepairEvidence, RepairOutcome, SlotStatus,
+    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
+    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession,
+    ReleaseSessionRequest, Repair, RepairEvidence, RepairOutcome, SessionRelease, SlotStatus,
     Status, Unregister, UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::AccountBindingStore;
@@ -161,6 +162,26 @@ impl AccountCoordinators {
         )
     }
 
+    /// Release a resource's reference to a terminal stream-management
+    /// session by retiring the detached binding that holds it. The durable
+    /// session row can be deleted once no resource references it; see
+    /// [`AccountBindingStore::resources_for_session`].
+    pub async fn release_session(
+        &self,
+        full_jid: &FullJid,
+        request: ReleaseSessionRequest,
+    ) -> Result<SessionRelease, AccountCoordinatorError> {
+        let account = full_jid.to_bare();
+        ask!(
+            self,
+            &account,
+            ReleaseSession {
+                full_jid: full_jid.clone(),
+                request,
+            }
+        )
+    }
+
     /// The account's retirements whose endpoint evidence is past its
     /// deadline. Each stays non-routable until it is repaired.
     pub async fn overdue_retirements(
@@ -168,6 +189,17 @@ impl AccountCoordinators {
         account: &BareJid,
     ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
         ask!(self, account, OverdueRetirements)
+    }
+
+    /// The account's bindings whose connection is gone: its node lost its
+    /// lease, or its process ended. Each can be retired without its
+    /// connection, by `unregister` and then `repair`. A binding whose
+    /// liveness is unknown is not listed and is left alone.
+    pub async fn expired_bindings(
+        &self,
+        account: &BareJid,
+    ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
+        ask!(self, account, ExpiredBindings)
     }
 
     /// Take over an account whose claim moved to this node: replace any

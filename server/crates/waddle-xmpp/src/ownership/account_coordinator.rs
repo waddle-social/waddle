@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use jid::FullJid;
+use minidom::Element;
+use xmpp_parsers::presence::Show;
 
 use super::account_resource_transition::{
     AccountResourceBindingState, AccountResourceExecuteError, AccountResourceExecution,
@@ -66,6 +68,19 @@ pub struct AccountResourceRouting {
     pub available: bool,
     pub priority: i8,
     pub carbons_enabled: bool,
+}
+
+/// The presence a resource last announced, as a probe answer or a
+/// re-broadcast needs it. `payloads` are the extension children of that
+/// presence (entity capabilities, idle time and the like), relayed
+/// verbatim; the snapshot bounds their number and size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountResourcePresence {
+    pub jid: FullJid,
+    pub show: Option<Show>,
+    pub status: Option<String>,
+    pub priority: i8,
+    pub payloads: Vec<Element>,
 }
 
 /// What a resource's one-time presentations are keyed by. A resume mints a
@@ -125,6 +140,12 @@ impl AccountResources {
     /// presentations already recorded for its current binding. An existing
     /// slot for the same full JID is replaced, which is how the owner of
     /// this state adopts what a store committed.
+    ///
+    /// A slot that holds a binding is installed even when the account is
+    /// already at its slot bound: the binding exists durably and must stay
+    /// served. The account is then over its bound and refuses every bind of
+    /// a new resource until enough bindings retire. A free slot is refused
+    /// at the bound.
     pub fn restore_slot(
         &mut self,
         slot: AccountResourceSlot,
@@ -134,7 +155,10 @@ impl AccountResources {
         if &full_jid.to_bare() != self.claim_identity.bare_jid() {
             return Err(AccountResourcesError::AccountMismatch);
         }
-        if !self.slots.contains_key(&full_jid) && self.slots.len() >= self.max_resources.get() {
+        if slot.binding_ref().is_none()
+            && !self.slots.contains_key(&full_jid)
+            && self.slots.len() >= self.max_resources.get()
+        {
             return Err(AccountResourcesError::ResourceLimit);
         }
         if let Some(key) = self.presentation_key(&full_jid) {
@@ -169,6 +193,12 @@ impl AccountResources {
             .filter(|(_, slot)| slot.binding_ref().is_none())
             .map(|(jid, _)| jid.clone())
             .collect()
+    }
+
+    /// Whether the account holds more slots than its bound, which happens
+    /// only when more bindings were stored than the bound allows.
+    pub fn over_slot_bound(&self) -> bool {
+        self.slots.len() > self.max_resources.get()
     }
 
     /// The number of slots the account holds, bound or free.
@@ -343,6 +373,21 @@ impl AccountResources {
                 available: snapshot.presence_available,
                 priority: snapshot.presence_priority,
                 carbons_enabled: snapshot.carbons_enabled,
+            })
+            .collect()
+    }
+
+    /// The announced presence of every presence-available resource,
+    /// ordered by full JID.
+    pub fn presence_states(&self) -> Vec<AccountResourcePresence> {
+        self.active()
+            .filter(|(_, snapshot)| snapshot.presence_available)
+            .map(|(jid, snapshot)| AccountResourcePresence {
+                jid: jid.clone(),
+                show: snapshot.presence_show.clone(),
+                status: snapshot.presence_status.clone(),
+                priority: snapshot.presence_priority,
+                payloads: snapshot.presence_payloads.clone(),
             })
             .collect()
     }

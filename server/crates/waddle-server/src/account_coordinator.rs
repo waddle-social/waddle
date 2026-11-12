@@ -23,20 +23,25 @@ mod config;
 mod directory;
 mod error;
 mod messages;
+mod publisher;
 mod reads;
 mod selection;
 
 pub use authority::AccountBindingAuthority;
 pub use claims::{
-    AccountClaimError, AccountClaimSource, ClaimStoreClaimSource, ConnectionLiveness,
-    LocalNodeLiveness, ProcessClaimSource,
+    AccountClaimError, AccountClaimSource, BindingLiveness, ClaimStoreClaimSource,
+    ClusterLeaseLiveness, ConnectionLiveness, LocalNodeLiveness, ProcessClaimSource,
 };
 pub use config::AccountCoordinatorConfig;
 pub use directory::AccountCoordinators;
 pub use error::AccountCoordinatorError;
 pub use messages::{
-    AccountView, AdoptionReport, BindingReply, RepairEvidence, RepairOutcome, SlotStatus,
-    UnregisterOutcome, UnregisterRequest,
+    AccountView, AdoptionReport, BindingReply, ReleaseSessionRequest, RepairEvidence,
+    RepairOutcome, SessionRelease, SlotStatus, UnregisterOutcome, UnregisterRequest,
+};
+pub use publisher::{
+    ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome, PublishedBinding, RetireEvidence,
+    RetireOutcome,
 };
 pub use selection::{
     AccountAuthorityMode, AccountAuthoritySelection, AccountAuthoritySelectionError,

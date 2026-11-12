@@ -451,11 +451,12 @@ async fn broadcast_presence_to_subscribers(
             continue;
         }
         let mut delivered_resources = Vec::new();
-        for resource in state
-            .deps
-            .protocol
-            .connection_registry
-            .available_resources_for_user(&subscriber_bare)
+        for resource in
+            crate::server::routes::websocket::handlers::account_reads::available_resources(
+                state,
+                &subscriber_bare,
+            )
+            .await
             .into_iter()
             .map(|(jid, _)| jid)
         {
@@ -561,7 +562,9 @@ async fn resolve_caps_for_presence(
     }
 }
 
-pub(super) fn show_name(show: &xmpp_parsers::presence::Show) -> &'static str {
+pub(in crate::server::routes::websocket::handlers) fn show_name(
+    show: &xmpp_parsers::presence::Show,
+) -> &'static str {
     match show {
         xmpp_parsers::presence::Show::Away => "away",
         xmpp_parsers::presence::Show::Chat => "chat",

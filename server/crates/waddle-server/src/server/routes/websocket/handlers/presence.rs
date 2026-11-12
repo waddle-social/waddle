@@ -56,6 +56,7 @@ pub use muc::{handle_muc_join, MucJoinConnectionContext};
 pub(crate) use muc_update::try_handle_muc_presence_update;
 use probe::handle_presence_probe;
 use regular::handle_regular_presence_update;
+pub(in crate::server::routes::websocket::handlers) use regular::show_name;
 pub use subscription::{
     broadcast_unavailable_for_terminated_session, TerminatedPresenceBroadcastOutcome,
 };

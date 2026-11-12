@@ -209,12 +209,100 @@ and present only when it returns `true`.
   (`registry` by default, `coordinator`; any other value fails startup).
   The coordinator is selectable only together with the durable
   stream-management authority, because a binding's session reference
-  points at the durable session relation. When it is selected, the
-  recipient inventory, bare-JID target selection and the roster and
-  block-list push sets are read from the coordinator.
+  points at the durable session relation.
+
+When the coordinator is selected, these reads come from it: the recipient
+inventory; bare-JID target selection; the carbon planner's and the carbon
+fan-out's per-target policy; presence probes, including the probed
+resource's show, status, priority and payloads; presence fan-out to a
+subscriber's or a user's available resources; subscription delivery and its
+roster pushes; last activity; entity-capability and PubSub fan-out targets;
+MUC invite delivery; offline-delivery and inbox-update targets; and the
+roster and block-list push sets. A read the coordinator cannot answer is an
+error at the recipient inventory and an empty set with a warning elsewhere.
+
+These reads stay on the registry in both modes: the connection cleanup and
+registration paths, the cluster route bridge's registration snapshots and
+its owner-side receiver, pending-delivery flush and recovery, the
+stream-management promotion paths, the extension host's presence query, and
+the admin channel command. They read a connection entry together with its
+outbound endpoint, or belong to code that writes the registry, and move
+with the switch of the writers.
 
 No connection sends the binding messages yet, so a selected coordinator
 has no bindings and reads as an account without resources.
+
+## The binding publisher
+
+`CoordinatorBindingPublisher` (`account_coordinator/publisher.rs`) has the
+four steps of the websocket `BindingPublisher` trait and maps them onto the
+coordinator:
+
+| Step | Coordinator calls |
+| --- | --- |
+| `publish` | `slot_status`, `Bind`, `PublishEndpoint` |
+| `publish_resumed` | `slot_status`, `SuccessfulResume`, `PublishEndpoint` |
+| `confirm` | `slot_status`, `RegisterActor`, `bind_success` |
+| `retire`, `retire_remote` | `unregister`, then `repair` with the connection's teardown evidence |
+
+Each step reads the slot first and skips what the binding's state shows as
+done, so a repeat after a lost reply is safe.
+
+It does not implement the trait, which cannot express it as it stands. The
+trait needs these changes before the connection can select the publisher
+through it:
+
+1. **Visibility.** The trait is `pub(in crate::server::routes::websocket)`
+   and reachable only inside that module. Either it becomes `pub(crate)`,
+   or the implementation moves to a file under `routes/websocket`.
+2. **`publish` must be asynchronous and fallible.** It is synchronous and
+   returns `Option<Published>`. Recording a binding commits a row, and the
+   outcome has three shapes the caller acts on differently: published, a
+   pending replacement naming the displaced `BindingRef`, and a typed
+   refusal. It returns a future of `Result<PublishOutcome, _>`.
+3. **`publish` takes the binding, not a registry entry.** It receives a
+   `ConnectionEntry`. The coordinator needs the `BindingRef` and the
+   resource's `ResourceLifetime`; the outbound endpoint stays in the
+   transport index and is not the coordinator's.
+4. **`Published` must be `Clone`, not `Copy`.** What identifies a published
+   binding to the coordinator is its `BindingRef` with the claim identity
+   and revision from `slot_status`, none of which is `Copy`.
+5. **`confirm` returns a typed outcome.** `Option<Confirmation>` cannot
+   tell "no longer the current binding" from a refusal or a store failure.
+   The `resumed` flag is not needed: a resumed binding is published by a
+   separate step that carries the `SuccessfulResumeReceipt` and the
+   previous `BindingRef`, and is confirmed like any other.
+6. **`retire` and `retire_remote` take evidence and return an outcome.**
+   They return `()`. The coordinator completes a retirement only with the
+   custody and teardown dispositions, and the caller must learn whether
+   the binding was retired, was stale, or was refused.
+
+## Session reference and release order
+
+A resource row names the stream-management session of its current binding
+by session id and generation. A commit that sets or changes the reference
+is refused unless the durable session row exists and is bound at that
+generation, and the session id is also a foreign key checked at commit. The
+session therefore outlives every row that names it: **the resource row
+releases first, the session row is deleted last.**
+
+- **Replacement and close with a connection.** The displaced or closing
+  connection retires its binding. `CompleteRetirement` frees the row and
+  clears the reference in the same commit.
+- **Expiry and close of a detached session.** No connection exists. The
+  session authority marks the session terminal in its own transaction,
+  which does not touch the resource row, and then calls
+  `AccountCoordinators::release_session` for each full JID that
+  `AccountBindingStore::resources_for_session` returns. The coordinator
+  retires the detached binding with the caller's custody and teardown
+  dispositions. A binding that still has a connection is reported as
+  `HeldByConnection` and left to it.
+- **Deleting the session row.** The session authority deletes a terminal
+  row only when `resources_for_session` is empty. A delete that fails the
+  foreign key at commit means a row still names the session: it is retried
+  after the release, not treated as a fault.
+- **Resume.** The session authority binds the new generation first; the
+  connection then sends `SuccessfulResume` naming that generation.
 
 ## Decisions the service makes
 
@@ -239,15 +327,25 @@ has no bindings and reads as an account without resources.
   non-routable.
 - **Takeover.** A coordinator that loads rows written under a previous
   claim identity replaces the claim on every row and adopts a prepared,
-  published or active binding whose connection is live. Liveness is local:
-  a connection is live when it was accepted under this node's current
-  lease. Every other binding stays under its previous binding claim, is
-  not a destination, and is reported so it can be retired. A detached
-  binding is among them: the slot model has no adoption for a detached
-  binding, so a session detached under a previous claim cannot resume.
-- **Presence payloads.** A row stores the selection metadata, not the
-  presence extension payloads. They live in the coordinator's memory and
-  are empty after a reload until the resource updates its snapshot.
+  published or active binding whose connection is live. Liveness has three
+  answers. A connection under this node's current lease is live. A binding
+  hosted by another node is judged through its stream-management session's
+  claim, the only node-lease read the claim store exposes: when the node
+  the connection names holds that claim, a fresh lease means live and a
+  lost lease means expired. Everything else is unknown, including a remote
+  binding without a session. On a single node a connection of a previous
+  process is expired. An expired binding is reported and can be retired
+  without its connection; an unknown one is kept, is not a destination and
+  is not retired on that evidence. A detached binding is never adopted:
+  the slot model has no adoption for one, so a session detached under a
+  previous claim cannot resume.
+- **Over the slot bound.** Rows that hold a binding are always loaded,
+  even beyond the account's slot bound. Such an account serves its stored
+  bindings and refuses a bind of any new resource until enough retire.
+- **Presence payloads.** A row stores the presence extension payloads of
+  its snapshot as one XML document, within the snapshot's bounds on their
+  number and size, so a coordinator that reloads an account still answers
+  a probe with what the resource announced.
 - **Presentation marks.** A presentation mark whose commit outcome is
   unknown resolves to "already presented" when it is repeated.
 

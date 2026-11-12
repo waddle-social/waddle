@@ -97,11 +97,9 @@ async fn send_roster_remove_subscription_stanza(
         None,
         &[],
     ));
-    let live_resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(to);
+    let live_resources =
+        crate::server::routes::websocket::handlers::account_reads::roster_interested(state, to)
+            .await;
     let mut delivered_resources = Vec::new();
     for resource in &live_resources {
         if try_deliver_registered_remote_resource(state, resource, &stanza).await {

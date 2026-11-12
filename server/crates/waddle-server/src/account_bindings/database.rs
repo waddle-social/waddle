@@ -10,7 +10,8 @@ use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceExecution, AccountResourceOperation, AccountResourceOperationOutcome,
     AccountResourceRevision, ACCOUNT_RESOURCE_OPERATION_CAPACITY,
 };
-use waddle_xmpp::ownership::{BindingRef, Entity, EntityType, UserClaimIdentity};
+use waddle_xmpp::ownership::joint_identity::SmBinding;
+use waddle_xmpp::ownership::{BindingRef, Entity, EntityType, SmSessionKey, UserClaimIdentity};
 
 use super::decision::{
     check_account, decide, decide_presentation, operation_key, Decision, MutationKind,
@@ -141,6 +142,38 @@ fn for_update(driver: DatabaseDriver) -> &'static str {
     }
 }
 
+fn session_reference(stored: &StoredResource) -> Option<SmBinding> {
+    stored
+        .image
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.snapshot.stream_management_ref)
+}
+
+/// Require the durable session row a new reference names, bound at the
+/// generation the reference names. The row is read in the write's
+/// transaction; the foreign key keeps it from being deleted afterwards.
+async fn check_session(
+    tx: &mut Transaction<'_>,
+    reference: SmBinding,
+) -> Result<(), AccountBindingStoreError> {
+    let mut rows = tx
+        .query(
+            "SELECT generation FROM sm_durable_sessions WHERE session_id = ?",
+            crate::db_params![reference.session.as_uuid().to_string()],
+        )
+        .await?;
+    let Some(found) = rows.next().await? else {
+        return Err(AccountBindingStoreError::SessionUnknown);
+    };
+    let generation = row::unsigned(found.get(0)?, "session generation")?;
+    if generation == reference.generation.value() {
+        Ok(())
+    } else {
+        Err(AccountBindingStoreError::SessionGenerationMismatch)
+    }
+}
+
 async fn load_resource(
     tx: &mut Transaction<'_>,
     full_jid: &FullJid,
@@ -230,6 +263,9 @@ impl AccountBindingStore for DatabaseAccountBindingStore {
         let existing = load_resource(&mut tx, full_jid, true).await?;
         let exists = existing.is_some();
         let previous_seq = existing.as_ref().map_or(0, |(_, seq)| *seq);
+        let previous_session = existing
+            .as_ref()
+            .and_then(|(stored, _)| session_reference(stored));
         let decision = match decide(existing.map(|(stored, _)| stored), full_jid, operation) {
             Ok(decision) => decision,
             Err(error) => {
@@ -249,6 +285,14 @@ impl AccountBindingStore for DatabaseAccountBindingStore {
             }
             Decision::Committed { revision, stored } => (revision, stored),
         };
+        if let Some(reference) =
+            session_reference(&stored).filter(|reference| Some(*reference) != previous_session)
+        {
+            if let Err(error) = check_session(&mut tx, reference).await {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
         let operation_seq = previous_seq
             .checked_add(1)
             .ok_or(AccountBindingStoreError::CounterOutOfRange)?;
@@ -353,6 +397,33 @@ impl AccountBindingStore for DatabaseAccountBindingStore {
         let stored = load_resource(&mut tx, full_jid, false).await?;
         tx.rollback().await?;
         Ok(stored.map(|(stored, _)| stored))
+    }
+
+    async fn resources_for_session(
+        &self,
+        session: SmSessionKey,
+    ) -> Result<Vec<FullJid>, AccountBindingStoreError> {
+        let mut tx = self.db.begin().await?;
+        let mut resources = Vec::new();
+        {
+            let mut rows = tx
+                .query(
+                    "SELECT full_jid FROM account_resource_bindings \
+                     WHERE sm_session_id = ? ORDER BY full_jid",
+                    crate::db_params![session.as_uuid().to_string()],
+                )
+                .await?;
+            while let Some(found) = rows.next().await? {
+                resources.push(
+                    found
+                        .get::<String>(0)?
+                        .parse()
+                        .map_err(|_| AccountBindingStoreError::CorruptRow { field: "full_jid" })?,
+                );
+            }
+        }
+        tx.rollback().await?;
+        Ok(resources)
     }
 
     async fn load_account(

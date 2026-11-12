@@ -50,6 +50,22 @@ pub async fn insert_session(db: &Database) -> SmSessionKey {
     session
 }
 
+/// Bind the stored session row at `generation`, as a committed resume does.
+pub async fn bind_session_generation(db: &Database, session: SmSessionKey, generation: u64) {
+    let connection = db.guard().await.expect("database connection");
+    connection
+        .execute(
+            &format!(
+                "UPDATE sm_durable_sessions SET generation = {generation} \
+                 WHERE session_id = '{}'",
+                session.as_uuid()
+            ),
+            (),
+        )
+        .await
+        .expect("advance the session generation");
+}
+
 pub fn resource(name: &str) -> FullJid {
     format!("alice@example.test/{name}")
         .parse()

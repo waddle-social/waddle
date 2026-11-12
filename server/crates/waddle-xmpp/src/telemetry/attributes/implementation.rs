@@ -179,6 +179,8 @@ pub enum Janitor {
     LocalMucDeparture,
     /// Room-destroy completions drained outside the requesting session.
     DestroyCompletion,
+    /// Account coordinators whose account holds no binding and is idle.
+    AccountCoordinatorReaper,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -202,6 +204,7 @@ impl MetricAttribute for Janitor {
             Self::RemoteMucMembership => "remote_muc_membership",
             Self::LocalMucDeparture => "local_muc_departure",
             Self::DestroyCompletion => "destroy_completion",
+            Self::AccountCoordinatorReaper => "account_coordinator_reaper",
         }
     }
 }

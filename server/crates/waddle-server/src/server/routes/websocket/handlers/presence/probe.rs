@@ -22,11 +22,9 @@ pub(super) async fn handle_presence_probe(
         send_unsubscribed_probe_response(state, &to, &from, ordered_relay_origin).await;
         return;
     }
-    let mut available = state
-        .deps
-        .protocol
-        .connection_registry
-        .available_resources_for_user(&to);
+    let mut available =
+        crate::server::routes::websocket::handlers::account_reads::available_resources(state, &to)
+            .await;
     let mut detached_available = match state
         .deps
         .protocol
@@ -70,8 +68,7 @@ pub(super) async fn handle_presence_probe(
             return;
         }
         for resource in
-            waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &from)
-                .await
+            crate::server::routes::websocket::handlers::account_reads::resources(state, &from).await
         {
             let _ = state
                 .deps
@@ -83,8 +80,7 @@ pub(super) async fn handle_presence_probe(
         return;
     }
     let requester_resources =
-        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, &from)
-            .await;
+        crate::server::routes::websocket::handlers::account_reads::resources(state, &from).await;
     for detached in detached_available {
         let mut probe_response = build_available_presence(
             &detached.resource,
@@ -118,11 +114,11 @@ pub(super) async fn handle_presence_probe(
         }
     }
     for (resource, _priority) in available {
-        let presence_state = state
-            .deps
-            .protocol
-            .connection_registry
-            .presence_state(&resource);
+        let presence_state =
+            crate::server::routes::websocket::handlers::account_reads::presence_state(
+                state, &resource,
+            )
+            .await;
         let mut probe_response = build_available_presence(
             &resource,
             &from,
@@ -191,7 +187,7 @@ async fn send_unsubscribed_probe_response(
         return;
     }
     for resource in
-        waddle_xmpp::registry::get_resources_for_user(&state.deps.protocol.user_registry, to).await
+        crate::server::routes::websocket::handlers::account_reads::resources(state, to).await
     {
         let _ = state
             .deps

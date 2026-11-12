@@ -16,9 +16,9 @@ use waddle_xmpp::ownership::{SmSessionKey, UserClaimIdentity};
 use xmpp_parsers::presence::Show;
 
 use super::support::{
-    activate, begin_retirement, bind, claim, commit, complete_retirement, detach, fresh_binding,
-    insert_session, operation, presence, publish, register, registration, reject, resource, resume,
-    sm_binding, update,
+    activate, begin_retirement, bind, bind_session_generation, claim, commit, complete_retirement,
+    detach, fresh_binding, insert_session, operation, presence, publish, register, registration,
+    reject, resource, resume, sm_binding, update,
 };
 
 const INITIAL: AccountResourceRevision = AccountResourceRevision::INITIAL;
@@ -60,6 +60,13 @@ impl Fixture {
         match &self.db {
             Some(db) => insert_session(db).await,
             None => SmSessionKey::fresh(),
+        }
+    }
+
+    /// Record that the session committed a resume to `generation`.
+    async fn resumed(&self, session: SmSessionKey, generation: u64) {
+        if let Some(db) = &self.db {
+            bind_session_generation(db, session, generation).await;
         }
     }
 }
@@ -335,6 +342,7 @@ async fn detach_and_resume_keep_the_slot(fixture: &Fixture) {
         AccountResourceTransitionError::BindingMismatch,
         "a resume must name the detached binding"
     );
+    fixture.resumed(session, 2).await;
     let resume_operation = operation(resume(
         &claim,
         detached,
@@ -808,22 +816,33 @@ async fn sqlite_checks_the_session_reference_at_commit() {
     let jid = resource("orphan");
     let claim = claim(1);
     let (binding, active) = activate(store, &jid, &claim, INITIAL).await;
-    let unknown = AccountResourceSnapshot {
-        stream_management_ref: Some(sm_binding(SmSessionKey::fresh(), 1)),
+    let reference = |session, generation| AccountResourceSnapshot {
+        stream_management_ref: Some(sm_binding(session, generation)),
         ..presence(true, 0, false)
     };
+    let attempt = |snapshot| operation(update(&claim, active, &binding, snapshot));
     assert!(
         matches!(
             store
                 .execute(
                     &authority,
                     &jid,
-                    &operation(update(&claim, active, &binding, unknown))
+                    &attempt(reference(SmSessionKey::fresh(), 1))
                 )
                 .await,
-            Err(AccountBindingStoreError::Database(_))
+            Err(AccountBindingStoreError::SessionUnknown)
         ),
         "a snapshot that references no stored session does not commit"
+    );
+    let session = fixture.session().await;
+    assert!(
+        matches!(
+            store
+                .execute(&authority, &jid, &attempt(reference(session, 2)))
+                .await,
+            Err(AccountBindingStoreError::SessionGenerationMismatch)
+        ),
+        "a snapshot must name the generation the session is bound at"
     );
     let stored = store
         .load(&jid)
@@ -831,9 +850,91 @@ async fn sqlite_checks_the_session_reference_at_commit() {
         .expect("load")
         .expect("the resource row");
     assert_eq!(stored.image.revision, active);
-    let known = AccountResourceSnapshot {
-        stream_management_ref: Some(sm_binding(fixture.session().await, 1)),
-        ..presence(true, 0, false)
+    assert!(store
+        .resources_for_session(session)
+        .await
+        .expect("resources for the session")
+        .is_empty());
+    commit(
+        store,
+        &jid,
+        update(&claim, active, &binding, reference(session, 1)),
+    )
+    .await;
+    assert_eq!(
+        store
+            .resources_for_session(session)
+            .await
+            .expect("resources for the session"),
+        vec![jid]
+    );
+}
+
+#[tokio::test]
+async fn sqlite_stores_the_presence_payloads_a_probe_answer_relays() {
+    use minidom::Element;
+
+    const CAPS_NS: &str = "http://jabber.org/protocol/caps";
+    let fixture = Fixture::sqlite("account-bindings-presence-payloads").await;
+    let store = fixture.store();
+    let authority = super::support::claim(1);
+    let jid = resource("caps");
+    let claim = claim(1);
+    let (binding, active) = activate(store, &jid, &claim, INITIAL).await;
+    let snapshot = AccountResourceSnapshot {
+        presence_payloads: vec![
+            Element::builder("c", CAPS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("ver").to_owned(),
+                    "q07IKJEyjvHSyhy//CH0CxmKi8w=",
+                )
+                .build(),
+            Element::builder("idle", "urn:xmpp:idle:1").build(),
+        ],
+        ..presence(true, 1, false)
     };
-    commit(store, &jid, update(&claim, active, &binding, known)).await;
+    commit(store, &jid, update(&claim, active, &binding, snapshot)).await;
+    let stored = store
+        .load(&jid)
+        .await
+        .expect("load")
+        .and_then(|stored| stored.image.binding)
+        .expect("a current binding")
+        .snapshot
+        .presence_payloads;
+    assert_eq!(stored.len(), 2);
+    assert!(stored[0].is("c", CAPS_NS));
+    assert_eq!(stored[0].attr("ver"), Some("q07IKJEyjvHSyhy//CH0CxmKi8w="));
+    assert!(stored[1].is("idle", "urn:xmpp:idle:1"));
+
+    // A later update without payloads clears the stored document.
+    let revision = store
+        .load(&jid)
+        .await
+        .expect("load")
+        .expect("the resource row")
+        .image
+        .revision;
+    commit(
+        store,
+        &jid,
+        update(&claim, revision, &binding, presence(true, 1, false)),
+    )
+    .await;
+    let cleared = store
+        .load(&jid)
+        .await
+        .expect("load")
+        .and_then(|stored| stored.image.binding)
+        .expect("a current binding");
+    assert!(cleared.snapshot.presence_payloads.is_empty());
+    assert!(store
+        .mark_presented(
+            &authority,
+            &jid,
+            &binding,
+            waddle_xmpp::ownership::account_coordinator::Presentation::OfflineMessages
+        )
+        .await
+        .is_ok());
 }

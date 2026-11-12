@@ -2,7 +2,7 @@
 
 use jid::FullJid;
 use waddle_xmpp::ownership::account_coordinator::{
-    AccountResourceRouting, BindingFenceError, Presentation,
+    AccountResourcePresence, AccountResourceRouting, BindingFenceError, Presentation,
 };
 use waddle_xmpp::ownership::account_resource_transition::{
     AccountResourceBindingState, AccountResourceExecution, AccountResourceOperation,
@@ -10,7 +10,7 @@ use waddle_xmpp::ownership::account_resource_transition::{
     BindingRetirementDisposition, DirectedPresenceTeardownDisposition,
     PresentationFlushDisposition,
 };
-use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
+use waddle_xmpp::ownership::{BindingRef, SmSessionKey, UserClaimIdentity};
 
 /// The reply to a binding operation.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +44,7 @@ pub struct SlotStatus {
 /// One coherent read of an account's resources. Every list is ordered by
 /// full JID and all are taken in one coordinator turn, so destination
 /// selection and carbon policy agree.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AccountView {
     /// Every resource with an active binding, with no presence filter.
     pub resources: Vec<FullJid>,
@@ -54,6 +54,8 @@ pub struct AccountView {
     pub routable: Vec<FullJid>,
     /// Availability, priority and carbons for every active resource.
     pub routing: Vec<AccountResourceRouting>,
+    /// The announced presence of every presence-available resource.
+    pub presence: Vec<AccountResourcePresence>,
     /// Active resources that want roster pushes.
     pub roster_interested: Vec<FullJid>,
     /// Active resources that want block-list pushes.
@@ -107,16 +109,51 @@ pub enum RepairOutcome {
     Rejected(AccountResourceTransitionError),
 }
 
+/// A request to release a resource row's reference to a stream-management
+/// session that reached a terminal state, by retiring the binding that
+/// holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseSessionRequest {
+    /// The identity the retirement's start is repeated under.
+    pub begin: AccountResourceOperationId,
+    /// The identity the retirement's completion is repeated under.
+    pub complete: AccountResourceOperationId,
+    pub session: SmSessionKey,
+    /// What became of the work the session had accepted.
+    pub custody_disposition: BindingRetirementDisposition,
+    pub directed_presence: DirectedPresenceTeardownDisposition,
+    pub presentation_flush: PresentationFlushDisposition,
+}
+
+/// The result of releasing a session reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRelease {
+    /// The binding is retired and the resource row no longer names the
+    /// session.
+    Released { revision: AccountResourceRevision },
+    /// The resource's current binding does not reference the session.
+    NotReferenced,
+    /// The session is referenced by a binding that still has a connection.
+    /// That connection retires it; the coordinator does not.
+    HeldByConnection(BindingRef, AccountResourceBindingState),
+    /// The slot refused the retirement. The reference stays.
+    Rejected(AccountResourceTransitionError),
+}
+
 /// What a coordinator did with the rows it found under a previous claim
 /// identity when it loaded the account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdoptionReport {
     /// Bindings on live connections, now held under this claim.
     pub adopted: Vec<(FullJid, BindingRef)>,
-    /// Bindings moved to this claim but not adopted: their connection is
-    /// not known to be live, or they are detached. They are not routable
+    /// Bindings moved to this claim but not adopted: their connection's
+    /// liveness is unknown, or they are detached. They are not routable
     /// and stay so until they are retired.
     pub unadopted: Vec<(FullJid, BindingRef)>,
+    /// Bindings moved to this claim whose connection is gone: its node
+    /// lost its lease or its process ended. They are not routable and can
+    /// be retired without their connection, by `unregister` and `repair`.
+    pub expired: Vec<(FullJid, BindingRef)>,
     /// Bindings whose row could not be moved to this claim, with the
     /// slot's reason. They remain under the previous claim.
     pub refused: Vec<(FullJid, BindingRef, AccountResourceTransitionError)>,
@@ -152,6 +189,13 @@ pub(super) struct Repair {
     pub(super) binding_ref: BindingRef,
     pub(super) evidence: RepairEvidence,
 }
+
+pub(super) struct ReleaseSession {
+    pub(super) full_jid: FullJid,
+    pub(super) request: ReleaseSessionRequest,
+}
+
+pub(super) struct ExpiredBindings;
 
 pub(super) struct ReadView;
 

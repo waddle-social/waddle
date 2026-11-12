@@ -998,10 +998,9 @@ async fn push_projected_inbox(
     outcome: super::effects::EffectOutcome,
 ) -> Vec<FullJid> {
     if let super::effects::EffectOutcome::PlannedInbox(projection) = outcome {
-        let resources = match deps.user_registry {
-            Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
-            None => Vec::new(),
-        };
+        let resources =
+            crate::server::routes::interpret::recipient_selection::live_resources(deps, owner)
+                .await;
         let receipt = deps.ingress_effect_capture.as_ref().map(|capture| {
             let intent = IngressEffectIntent::RouteDirect {
                 prepared: None,

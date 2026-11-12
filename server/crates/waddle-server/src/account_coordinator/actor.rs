@@ -22,13 +22,14 @@ use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
 use waddle_xmpp::telemetry::account_coordinator::{record_operation, record_slots_in_use};
 use waddle_xmpp::telemetry::attributes::{AccountMutationKind, AccountOperationOutcome};
 
-use super::claims::ConnectionLiveness;
+use super::claims::{BindingLiveness, ConnectionLiveness};
 use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
-    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, MarkPresented,
-    OverdueRetirements, ReadView, ReclaimIfIdle, Repair, RepairOutcome, SlotStatus, Status,
-    Unregister, UnregisterOutcome,
+    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
+    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession, Repair,
+    RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status, Unregister,
+    UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::{
     AccountBindingStore, AccountBindingStoreError, PresentationMark, StoredResource,
@@ -197,7 +198,17 @@ impl AccountCoordinatorActor {
                 return Ok(Some(row));
             }
         };
-        let adoptable = self.liveness.is_live(binding.binding_ref.connection_ref())
+        let liveness = self
+            .liveness
+            .liveness(
+                &binding.binding_ref,
+                binding
+                    .snapshot
+                    .stream_management_ref
+                    .map(|reference| reference.session),
+            )
+            .await;
+        let adoptable = liveness == BindingLiveness::Live
             && matches!(
                 binding.state,
                 AccountResourceBindingState::Prepared
@@ -205,9 +216,12 @@ impl AccountCoordinatorActor {
                     | AccountResourceBindingState::Active
             );
         if !adoptable {
-            report
-                .unadopted
-                .push((full_jid.clone(), binding.binding_ref.clone()));
+            let entry = (full_jid.clone(), binding.binding_ref.clone());
+            if liveness == BindingLiveness::Expired {
+                report.expired.push(entry);
+            } else {
+                report.unadopted.push(entry);
+            }
             return Ok(self.store.load(&full_jid).await?);
         }
         let adopt = fresh_operation(AccountResourceMutation::AdoptBinding {
@@ -632,6 +646,69 @@ impl AccountCoordinatorActor {
         }
     }
 
+    /// Retire the detached or retiring binding that references a terminal
+    /// stream-management session, which clears the row's session reference
+    /// in the same commit. A binding that still has a connection is left
+    /// to that connection.
+    async fn release_session(&mut self, message: ReleaseSession) -> Reply<SessionRelease> {
+        self.ensure_loaded().await?;
+        let ReleaseSession { full_jid, request } = message;
+        let Some(binding) = self
+            .resources()?
+            .slot(&full_jid)
+            .and_then(AccountResourceSlot::binding_receipt)
+            .filter(|binding| {
+                binding
+                    .snapshot()
+                    .stream_management_ref
+                    .is_some_and(|reference| reference.session == request.session)
+            })
+        else {
+            return Ok(SessionRelease::NotReferenced);
+        };
+        let binding_ref = binding.binding_ref().clone();
+        let state = binding.state();
+        if !matches!(
+            state,
+            AccountResourceBindingState::Detached | AccountResourceBindingState::Retiring
+        ) {
+            return Ok(SessionRelease::HeldByConnection(binding_ref, state));
+        }
+        let started = self
+            .unregister(Unregister {
+                full_jid: full_jid.clone(),
+                request: UnregisterRequest {
+                    operation: request.begin,
+                    binding_ref: binding_ref.clone(),
+                    custody_disposition: request.custody_disposition,
+                },
+            })
+            .await?;
+        match started {
+            UnregisterOutcome::Retiring { .. } => {}
+            UnregisterOutcome::Stale(_) => return Ok(SessionRelease::NotReferenced),
+            UnregisterOutcome::Rejected(error) => return Ok(SessionRelease::Rejected(error)),
+        }
+        let completed = self
+            .repair(Repair {
+                full_jid,
+                binding_ref,
+                evidence: RepairEvidence {
+                    operation: request.complete,
+                    directed_presence: request.directed_presence,
+                    presentation_flush: request.presentation_flush,
+                },
+            })
+            .await?;
+        Ok(match completed {
+            RepairOutcome::Completed { revision } => SessionRelease::Released { revision },
+            RepairOutcome::Rejected(error) => SessionRelease::Rejected(error),
+            RepairOutcome::HeldByNewerBinding(_) | RepairOutcome::NotRetiring(_) => {
+                SessionRelease::NotReferenced
+            }
+        })
+    }
+
     fn forget_retirement(&mut self, full_jid: &FullJid, binding_ref: &BindingRef) {
         self.retirements
             .retain(|pending| &pending.full_jid != full_jid || &pending.binding_ref != binding_ref);
@@ -644,6 +721,7 @@ impl AccountCoordinatorActor {
             available: resources.available_resources(),
             routable: resources.routable_resources(),
             routing: resources.routing_snapshot(),
+            presence: resources.presence_states(),
             roster_interested: resources.roster_interested_resources(),
             blocklist_interested: resources.blocklist_interested_resources(),
         })
@@ -843,6 +921,64 @@ impl Message<Repair> for AccountCoordinatorActor {
             },
         );
         reply
+    }
+}
+
+impl Message<ReleaseSession> for AccountCoordinatorActor {
+    type Reply = Reply<SessionRelease>;
+
+    async fn handle(
+        &mut self,
+        message: ReleaseSession,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.last_activity = Instant::now();
+        let reply = self.release_session(message).await;
+        record_operation(
+            AccountMutationKind::CompleteRetirement,
+            match &reply {
+                Ok(SessionRelease::Released { .. }) => AccountOperationOutcome::Committed,
+                Ok(_) => AccountOperationOutcome::Rejected,
+                Err(_) => AccountOperationOutcome::Failed,
+            },
+        );
+        reply
+    }
+}
+
+impl Message<ExpiredBindings> for AccountCoordinatorActor {
+    type Reply = Reply<Vec<(FullJid, BindingRef)>>;
+
+    /// The bindings whose connection is gone, judged now. A binding whose
+    /// liveness is unknown is not listed.
+    async fn handle(
+        &mut self,
+        _message: ExpiredBindings,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ensure_loaded().await?;
+        let candidates: Vec<_> = self
+            .resources()?
+            .slots()
+            .filter_map(|slot| {
+                let binding = slot.binding_receipt()?;
+                Some((
+                    slot.full_jid().clone(),
+                    binding.binding_ref().clone(),
+                    binding
+                        .snapshot()
+                        .stream_management_ref
+                        .map(|reference| reference.session),
+                ))
+            })
+            .collect();
+        let mut expired = Vec::new();
+        for (full_jid, binding_ref, session) in candidates {
+            if self.liveness.liveness(&binding_ref, session).await == BindingLiveness::Expired {
+                expired.push((full_jid, binding_ref));
+            }
+        }
+        Ok(expired)
     }
 }
 

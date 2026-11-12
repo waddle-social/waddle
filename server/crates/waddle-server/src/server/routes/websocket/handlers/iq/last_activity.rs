@@ -96,12 +96,12 @@ pub(super) async fn handle_last_activity_iq(
             }
         }
 
-        if !state
-            .deps
-            .protocol
-            .connection_registry
-            .available_resources_for_user(&target_bare)
-            .is_empty()
+        if !crate::server::routes::websocket::handlers::account_reads::available_resources(
+            state,
+            &target_bare,
+        )
+        .await
+        .is_empty()
         {
             return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
         }
