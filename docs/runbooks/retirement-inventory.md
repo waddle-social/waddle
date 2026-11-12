@@ -17,7 +17,7 @@ outside test files and test modules. `S/` is
 
 | Legacy path | Where it lives today | Replaced by | Status | Deletion check |
 |---|---|---|---|---|
-| Dual registration | `S/server/dual_registration.rs` (`mirror_register`, `mirror_register_outcome`, `mirror_unregister`). Callers: `W/registration.rs` (5), `W/cleanup.rs` (5), `W/stream_management/registration.rs` (2), `S/server/session_janitors/implementation.rs` (2), `S/clustering/route_bridge/registration/socket.rs`, `S/clustering/route_bridge/delivery/remote.rs`, `S/server/routes/interpret/deps.rs` | The account coordinator owning `connections` and `bind_slots`; one registration per binding (M3) | **present**. Actor selection is authoritative through it today | `grep -rn 'mirror_register\|mirror_unregister' S` is empty and the module is deleted |
+| Dual registration | `S/server/dual_registration.rs` (`mirror_register`, `mirror_register_outcome`, `mirror_unregister`). Callers: the registry binding publisher in `W/registration.rs`, which every websocket bind, rollback and teardown goes through (`withdraw_binding`, `retire_binding`, `retire_remote_binding`); `S/server/session_janitors/implementation.rs` (2), `S/clustering/route_bridge/registration/socket.rs`, `S/clustering/route_bridge/delivery/remote.rs`, `S/server/routes/interpret/deps.rs` | The account coordinator owning `connections` and `bind_slots`; one registration per binding (M3) | **present**. Actor selection is authoritative through it today | `grep -rn 'mirror_register\|mirror_unregister' S` is empty and the module is deleted |
 | User-resource mirrors (account-owner copies of a socket's state on another node) | `X/registry/user_actor/implementation.rs` and `X/registry/user_registry.rs` (`users[].resources`, `pending_unregisters`); `S/clustering/route_bridge/registration/owner.rs`, `owner_update.rs`, `owner_retire.rs`, `owner_sweep.rs`; the reconciliation janitor (`Janitor::RemoteOwnerMirror` in `S/server/session_janitors/implementation.rs`) | Exact connection bindings with account-owned selection metadata, generation-fenced (M3, package E) | **present** | `UserRegistryActor` holds no per-resource clones; `route_bridge/registration/owner*.rs` and the `remote_owner_mirror` janitor are deleted; `xmpp.remote_owner_mirror.*` metrics are gone |
 | Remote channel mirrors (a remote-hosted registry entry whose channel forwards to the socket's node) | `S/clustering/route_bridge/registration/socket_forwarder.rs`, `socket.rs`; relay messages `remote_resource_register.v4`, `remote_resource_unregister.v2`, `remote_resource_update.v1`, `remote_resource_write_accepted.v1`, `remote_resource_force_detach.v3`, `remote_user_side_effect.v4` in `S/clustering/relay/implementation.rs`; compatibility handlers in `S/clustering/relay/remote_resource_compat.rs` | Delivery through the durable mailbox to the owning connection actor (M2, M4) | **present** | None of the `remote_resource_*` and `remote_user_side_effect` message IDs is registered; `socket_forwarder.rs` is deleted |
 | Routing bypasses (enqueue paths that reach a socket without the owning endpoint: direct, peer, pending, ordered and remote enqueues) | Listed call site by call site in [`2046-caller-inventory.md`](../planning/2046-caller-inventory.md) sections 8 and 10 and [`2046-current-caller-candidates.md`](../planning/2046-current-caller-candidates.md); the endpoint itself is `X/registry/connection_registry/outbound.rs` | One domain-facing addressing model: every delivery addressed to a binding and admitted by its endpoint (package B, M3) | **present**. The caller inventory is the baseline for the bypass freeze | Every row of the caller inventory's bypass table is deleted or reclassified as a documented, non-authoritative index |
@@ -46,6 +46,62 @@ A transport-only socket index may remain after step 3 if the connection
 actor needs one to find its pump. It is recorded under "Derived indexes
 that may remain" when that is decided, and nothing may read it to choose a
 destination.
+
+### State of the plan with both selectors available
+
+`WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` with
+`WADDLE_XMPP_DURABLE_SM=durable` makes the coordinator the authority on
+which resources an account has and which receive a stanza, and every
+`/ws` connection reports its binding to it. No step above is deletable
+yet, under either selection:
+
+- **Step 1 is blocked by delivery, not by selection.** The coordinator
+  chooses the destinations; the stanza is then delivered through the
+  account's `UserActor`, which resolves the endpoint from its own copy of
+  the `ConnectionEntry`. That copy is written only by
+  `mirror_register_outcome`. The unselected readers are listed in
+  [`2138-account-coordinator.md`](../planning/2138-account-coordinator.md),
+  "What still writes the registry and the mirrors". Step 1 becomes
+  deletable when full-JID delivery, stream-management promotion and the
+  route bridge's receiver resolve a binding's endpoint without the
+  `UserActor`, and the coordinator selector is the default.
+- **Steps 2 to 4** follow step 1 unchanged.
+
+Deletable once both selectors default to the new authorities, with no
+other precondition:
+
+- the `registry` arm of every account read (`S/account_coordinator/reads.rs`
+  callers: recipient inventory, bare-JID selection, carbons, presence
+  probe and fan-out, roster and block-list push sets), with
+  `registry/selection.rs` and the `UserActor` selection messages those
+  arms call;
+- the legacy stream-management store's enable, resume, detach and expiry
+  paths that the durable authority replaces
+  (`W/stream_management/implementation.rs`, the in-memory session
+  registry's persistence and its expiry janitor), after the last session
+  enabled under `legacy` has expired;
+- `RegistryBindingPublisher`'s confirmation as the gate on a bind, once
+  the mirror is no longer read.
+
+`WsConnState` fields that D5 marks "Deleted", and why each is still
+present under both selections:
+
+| Field | Remaining users |
+|---|---|
+| `registry_owner` | The owner token of the connection's registry entry: every owner-gated registry write (`W/frame.rs`, `W/batch_write.rs`, `W/connection.rs`, the presence, roster, blocking and MUC handlers, `W/stream_management/implementation.rs`) and every teardown path in `W/cleanup.rs` and `W/cleanup/durable_sm.rs`. It goes with the registry entry (step 3) |
+| `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked` | The failed-resume endpoint handback in `W/stream_management/registration.rs` and its guards in `W/registration.rs` and `W/stream_management/durable.rs`. They go with the channel endpoint, when the session's outbound queue is the actor-owned endpoint (S5) |
+| `pending_tx` (the connection loop's unpublished endpoint, a local of `W/connection.rs` passed to registration) | Registration takes the endpoint it publishes from it. Same condition as above |
+| `ingress_generation` | `W/frame.rs` stamps it on each ingress append. It goes when `ConnectionGeneration` is replaced by the `ConnectionRef` (D3) |
+
+The fields D5 assigns to the connection actor are held in `WsConnState`,
+which the actor owns through `LiveSocketState`; they have not been split
+into a separate actor-owned struct. The coordinator-owned rows
+(`carbons_enabled`, `roster_interested`, `blocklist_interested`,
+`presence_*`) are the connection's projection: with the coordinator
+selected they are sent as `UpdateSnapshot` and read by routing from the
+coordinator, and under `registry` they are still copied onto the registry
+entry. `account_binding` is the actor's handle on its coordinator
+binding.
 
 ## Derived indexes that may remain
 
