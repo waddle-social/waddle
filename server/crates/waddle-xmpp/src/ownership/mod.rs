@@ -47,6 +47,7 @@ pub mod in_process;
 pub mod joint_identity;
 mod observe;
 pub mod resume;
+mod sm_session_identity;
 mod user_claim_identity;
 
 pub use connection_identity::{
@@ -57,6 +58,7 @@ pub use connection_identity::{BoundedBindingObservation, BINDING_OBSERVATION_FIE
 pub use in_process::InProcessClaimStore;
 pub use observe::{observed_claim_store, ObservedClaimStore};
 pub use resume::{verify_resume_identity, ResumeIdentityProof};
+pub use sm_session_identity::{SessionGeneration, SmSessionKey};
 pub use user_claim_identity::{UserActorIncarnation, UserClaimIdentity};
 
 use async_trait::async_trait;

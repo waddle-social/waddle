@@ -3,10 +3,10 @@
 //! None of these values grants authority. A future repository must validate
 //! the exact claim, lease and principal in the transaction that mutates data.
 
-use uuid::Uuid;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::endpoint_transition::LogicalResourceGeneration;
+pub use super::sm_session_identity::{SessionGeneration, SmSessionKey};
 use super::{ClaimEpoch, NodeLeaseIdentity};
 
 /// Identities of one logical resource lifetime, retained across SM resume.
@@ -25,52 +25,12 @@ impl ResourceLifetime {
     }
 }
 
-/// Internal session key, distinct from the client-visible SM resume secret.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SmSessionKey(Uuid);
-
-impl SmSessionKey {
-    pub const fn from_uuid(value: Uuid) -> Self {
-        Self(value)
-    }
-
-    pub fn fresh() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
 /// Equality evidence for the SM claim, distinct from the account claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmClaimIdentity {
     pub session: SmSessionKey,
     pub owner: NodeLeaseIdentity,
     pub epoch: ClaimEpoch,
-}
-
-/// Checked durable SM generation, distinct from an install generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SessionGeneration(u64);
-
-impl SessionGeneration {
-    pub const fn new(value: u64) -> Option<Self> {
-        if value > 0 && value <= i64::MAX as u64 {
-            Some(Self(value))
-        } else {
-            None
-        }
-    }
-
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-
-    pub fn checked_next(self) -> Option<Self> {
-        self.0.checked_add(1).and_then(Self::new)
-    }
 }
 
 /// Exact SM identity carried by the account resource snapshot.
