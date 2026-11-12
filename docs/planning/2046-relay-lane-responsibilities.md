@@ -70,7 +70,24 @@ an owner transfer does, and what must hold before the relay path is deleted.
   obligations as soon as its commit has executed
   (`deliver_owner_obligations`), and the ingress maintenance pass repeats
   that for anything still owed after a minute.
-- **Lost hint.** The owner's poller scans its backlog every second.
+- **Copies after an owner attempt that did not execute.** A copy for a
+  resource hosted by another node, the sender's reflection included, is
+  delivered only by the owner's live execution of its commit, over the
+  relay's full-JID path. Recovery of a sealed manifest hands a copy only to
+  a resource hosted by the recovering node, and only where that node also
+  runs the room's actor under the occupancy incarnation the manifest was
+  sealed with (`room_manifest_replay`). So when the owner's attempt ends
+  between its commit and its execution (the process is killed, or the
+  attempt outlasts the six-second receiver budget), the origin still reads
+  the acceptance and counts the stanza, the occupants hosted by the owner
+  receive their copies from recovery, and the sender and every other
+  occupant on another node receive no live copy: the message reaches them
+  from the archive only. `owner_sigkill_after_commit_delivers_the_frozen_reflection_once`
+  and `membership_change_between_acceptance_and_ack` in
+  `tests/xep0045_xep0198_remote_acceptance.rs` fail for this reason.
+- **Lost hint.** The owner's poller scans its backlog every second. A pass
+  works its lanes two at a time and waits for both, so one lane held for
+  its receiver budget delays every other lane of the node by that long.
 - **Owner transfer.** The successor adopts the lane once it holds the claim
   and has seated the room's durable occupancy in its room actor, then
   decides the head entry from canonical rows. An occupant without a row in
@@ -115,6 +132,13 @@ an owner transfer does, and what must hold before the relay path is deleted.
   any entry of the room; lanes are adopted only after that load. Voice
   requests, pending mediated invitations, call and Muji session state and
   rate-limit state are not stored and are not recovered.
+- **Seating only from the poller.** Durable occupancy is seated by the
+  mailbox poller, when it adopts a lane with a backlog or works an entry.
+  A node that takes a room's claim another way (its orphan reaper hydrates
+  the room) serves stanzas of its own connections from an unseated actor
+  until an entry for the room arrives: an occupant connected to that node
+  is refused with `not-acceptable` and must join again. The two-node suite
+  pins the claim to the replacement owner and does not cover this.
 - **Occupancy writer.** The room actor records every seat it grants or
   removes in `ingress_room_occupants` under the room claim, including a
   resource connected to the owner itself and removals by kick, ban,
@@ -147,14 +171,12 @@ an owner transfer does, and what must hold before the relay path is deleted.
   answered with nothing. A requester whose row cannot be parsed is refused
   with `not-acceptable`.
 - **Consumption, lost hint, transfer.** As for the join.
-- **What does not exist.** The connection-end leave is not committed as a
-  request: `IngressAuthority::commit_room_leave_at_connection_end` exists and
-  has no caller. Until it is called from the connection's cleanup, an
-  occupant whose connection ends without a leave stays seated at a
-  mailbox-epoch owner until the ghost sweep removes it; that removal
-  deletes the row.
-- **Deletion precondition.** The cleanup call site, then removal of
-  `OccupantPresence`.
+- **Connection end.** The connection's cleanup commits the leave as a
+  request (`commit_room_leave_for_ending_connection` in
+  `S/server/routes/websocket/cleanup.rs`). A connection whose node is
+  killed commits nothing: its occupant stays seated at a mailbox-epoch
+  owner until the ghost sweep removes it, and that removal deletes the row.
+- **Deletion precondition.** Removal of `OccupantPresence`.
 
 ### Muji signalling
 

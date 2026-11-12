@@ -59,11 +59,13 @@ Where the code differs from the decisions below:
 - **Destroy.** The actor empties the room's rows when it is sealed for a
   destroy, while the claim is still held, and reports its roster again if
   the destroy is undone.
-- **Leave at connection end.** `IngressAuthority::commit_room_leave_at_connection_end`
-  has no caller in this tree. A receiver at the mailbox epoch refuses
-  `OccupantPresence` on the relay, so until the connection's cleanup calls
-  it, an occupant whose connection ends without a leave stays seated until
-  the ghost sweep removes it.
+- **Leave at connection end.** The connection's cleanup commits a
+  `RoomLeave` request for each remote room the ending connection occupies
+  (`commit_room_leave_for_ending_connection` in
+  `S/server/routes/websocket/cleanup.rs`), and the owner removes the
+  occupancy row when it decides it. A connection whose node is killed
+  commits nothing; its row stays until a successor finds its generation
+  superseded or the ghost sweep removes the occupant.
 - **Relay kinds on a receiver.** A node that carries room requests through
   the mailbox answers `JoinPresence`, `OccupantPresence` and `MujiJingleIq`
   on the ordered relay with the unsupported-envelope refusal, before the
