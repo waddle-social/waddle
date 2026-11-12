@@ -12,8 +12,9 @@ use std::time::Duration;
 use jid::BareJid;
 use waddle_xmpp::ingress::mailbox::{
     MailboxEntryDisposition, MailboxLaneIdentity, MailboxLaneRecipient, MailboxOperationKey,
-    MailboxRoomLane,
+    MailboxOwnerDecision, MailboxRoomLane,
 };
+use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::ownership::NodeIdentity;
 
 use super::identity::{IngressCanonicalRef, IngressRelayAdmission};
@@ -29,6 +30,10 @@ pub const MAILBOX_SCAN_LIMIT: u32 = 128;
 pub const MAILBOX_CLAIM_LIMIT: usize = 2;
 /// Failed attempts after which an entry is parked for an operator.
 pub const MAILBOX_ATTEMPT_LIMIT: u32 = 8;
+/// How long after its append a decided entry is left to its origin before
+/// the sweep consumes it. Ten times the origin watcher's budget, so a live
+/// origin has always finished with the entry first.
+pub const MAILBOX_UNCONSUMED_GRACE: Duration = Duration::from_secs(600);
 
 /// A pending room acceptance prepared from canonical rows for the owner's
 /// commit.
@@ -63,6 +68,25 @@ pub enum MailboxAttemptRecord {
     DeadLettered,
     /// The entry was decided or the lane changed hands meanwhile.
     Settled,
+}
+
+/// What one adoption pass did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxLaneAdoption {
+    /// Lanes that now record this node's room claim.
+    pub adopted: usize,
+    /// Where the next pass resumes; `None` starts over.
+    pub resume_after: Option<MailboxLaneId>,
+}
+
+/// What one sweep of unconsumed decisions did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxDecisionSweep {
+    pub consumed: usize,
+    /// Entries whose canonical message does not prove their decision.
+    pub unproven: usize,
+    /// Where the next pass resumes; `None` starts over.
+    pub resume_after: Option<MessageKey>,
 }
 
 /// Delay before the next attempt at an entry that has failed `attempts`
@@ -216,6 +240,161 @@ impl IngressAuthority {
         };
         tx.commit().await?;
         Ok(record)
+    }
+
+    /// Adopt backlogged lanes whose room this node now owns.
+    ///
+    /// A lane records the owner incarnation its origin last proved, and the
+    /// backlog scan reads only lanes recorded for this node. After a room's
+    /// claim moves (to another node, or to a new incarnation of the same
+    /// node) its lanes still name the predecessor. This pass reads at most
+    /// [`MAILBOX_SCAN_LIMIT`] such lanes after `after` and, for each whose
+    /// room the claims table assigns to `target`, writes that claim onto the
+    /// lane in a transaction that reads the claim and locks the lane. A lane
+    /// whose room has no claim, or a claim held elsewhere, is left alone:
+    /// its entry stays pending until some node owns the room.
+    ///
+    /// Adoption only makes the lane visible to this node's backlog scan. The
+    /// owner's commit asserts the room claim again before it decides.
+    #[cfg(feature = "clustering")]
+    pub async fn adopt_transferred_lanes(
+        &self,
+        target: &NodeIdentity,
+        after: Option<MailboxLaneId>,
+    ) -> Result<MailboxLaneAdoption, IngressUowError> {
+        use crate::ingress_uow::{ClaimRepository, MailboxTargetFence};
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        let lanes =
+            MailboxRepository::scan_foreign_backlog(&mut tx, target, after, MAILBOX_SCAN_LIMIT)
+                .await?;
+        let mut owned = Vec::new();
+        let mut claims: std::collections::HashMap<BareJid, bool> = std::collections::HashMap::new();
+        for (lane, key) in &lanes {
+            let Ok(MailboxLaneIdentity {
+                recipient: MailboxLaneRecipient::Room { room, .. },
+                ..
+            }) = key.encoding().decode()
+            else {
+                continue;
+            };
+            let here = match claims.get(&room) {
+                Some(here) => *here,
+                None => {
+                    let here = ClaimRepository::room_claim(&mut tx, &room)
+                        .await?
+                        .is_some_and(|(owner, _)| owner == *target);
+                    claims.insert(room.clone(), here);
+                    here
+                }
+            };
+            if here {
+                owned.push((*lane, room));
+            }
+        }
+        tx.commit().await?;
+        let mut adopted = 0;
+        for (lane, room) in owned {
+            let mut tx = self
+                .uow
+                .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+                .await?;
+            // The claim is read again in the transaction that writes it onto
+            // the lane, so a claim that moved since the scan is not adopted.
+            let Some((owner, epoch)) = ClaimRepository::room_claim(&mut tx, &room).await? else {
+                continue;
+            };
+            if owner != *target {
+                continue;
+            }
+            let fence = MailboxTargetFence {
+                target_epoch: epoch,
+                target_owner: owner,
+            };
+            if MailboxRepository::adopt_backlogged_lane(&mut tx, lane, &fence).await? {
+                tx.commit().await?;
+                adopted += 1;
+            }
+        }
+        let full_page = lanes.len() >= MAILBOX_SCAN_LIMIT as usize;
+        Ok(MailboxLaneAdoption {
+            adopted,
+            resume_after: lanes.last().map(|(lane, _)| *lane).filter(|_| full_page),
+        })
+    }
+
+    /// Consume decided entries whose origin never read the decision.
+    ///
+    /// The origin's watcher or a retransmission normally consumes a decided
+    /// entry. When the origin node stopped in between and the sender never
+    /// sends the stanza again, nothing would, and the entry would keep its
+    /// canonical message from collection indefinitely. This pass reads at
+    /// most [`MAILBOX_SCAN_LIMIT`] entries appended at least `grace` ago
+    /// (the poller passes [`MAILBOX_UNCONSUMED_GRACE`]) and consumes each
+    /// one whose canonical message proves the same decision, under the lane
+    /// and canonical locks.
+    ///
+    /// Consumption discards nothing a sender can still need: the terminal
+    /// entry keeps the decision until its message is collected, so a later
+    /// retransmission reads it and is counted as handled. An entry whose
+    /// evidence does not prove its decision is left in place and reported.
+    pub async fn sweep_unconsumed_decisions(
+        &self,
+        grace: Duration,
+        after: Option<MessageKey>,
+    ) -> Result<MailboxDecisionSweep, IngressUowError> {
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        let entries =
+            MailboxRepository::scan_unconsumed_decisions(&mut tx, grace, after, MAILBOX_SCAN_LIMIT)
+                .await?;
+        tx.commit().await?;
+        let mut sweep = MailboxDecisionSweep::default();
+        for entry in &entries {
+            let decision = match entry.disposition {
+                MailboxEntryDisposition::OwnerAccepted => MailboxOwnerDecision::Accepted,
+                MailboxEntryDisposition::OwnerRejected => MailboxOwnerDecision::Rejected,
+                MailboxEntryDisposition::Pending | MailboxEntryDisposition::Consumed(_) => continue,
+            };
+            let mut tx = self
+                .uow
+                .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+                .await?;
+            let Some(lane) = MailboxRepository::claim_lane_for_sweep(&mut tx, entry.lane).await?
+            else {
+                continue;
+            };
+            match super::origin_gate::consume_proven_decision(
+                &mut tx,
+                &lane,
+                entry.operation,
+                decision,
+            )
+            .await?
+            {
+                None => {
+                    tx.commit().await?;
+                    sweep.consumed += 1;
+                }
+                Some(reason) => {
+                    tracing::warn!(
+                        %reason,
+                        "decided mailbox entry is not proven by its canonical message; left unconsumed"
+                    );
+                    sweep.unproven += 1;
+                }
+            }
+        }
+        let full_page = entries.len() >= MAILBOX_SCAN_LIMIT as usize;
+        sweep.resume_after = entries
+            .last()
+            .map(|entry| entry.operation.message_key())
+            .filter(|_| full_page);
+        Ok(sweep)
     }
 
     /// Operator repair: return a dead-lettered entry to pending work with a

@@ -614,3 +614,23 @@ waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit
 # a pending entry or lose an accepted submission to a lost hint must not ship.
 waddle-server::ingress_commit mailbox_acceptance::poller_works_the_lane_head_from_canonical_rows_and_parks_it_after_its_retries
 waddle-server::xep0045_xep0198_remote_acceptance lost_delivery_and_hint_are_repaired_by_the_owner_poller
+
+# #2118 owner transfer and unread decisions: a lane recorded for a
+# predecessor must be adopted only by the node that holds the room's later
+# claim, after which that node decides the one existing entry; and a decided
+# entry no origin read must be consumed once past its grace while its decision
+# stays readable. An image whose successor owner never sees a predecessor's
+# pending entry, whose bystander can take a lane, or whose unread decision
+# retains its message indefinitely must not ship.
+waddle-server::mailbox_core_postgres successor_owner_adopts_a_backlogged_lane_only_with_a_later_claim
+waddle-server::mailbox_core_postgres unconsumed_decisions_are_found_after_the_grace_and_consumed_once
+waddle-server::ingress_commit mailbox_acceptance::successor_owner_adopts_the_lane_of_a_room_it_now_owns
+waddle-server::ingress_commit mailbox_acceptance::sweep_consumes_a_decision_no_origin_read_and_keeps_it_readable
+waddle-server::xep0045_xep0198_remote_acceptance owner_transfer_before_commit_is_decided_once_by_the_successor
+
+# #1948 frozen audience: `h` must not cover a groupchat stanza before the
+# room owner's decision, must cover it once that decision is durable even
+# though no copy has been delivered, and an occupant who joins after the
+# decision must receive no live copy. An image whose audience can change
+# after acceptance must not ship.
+waddle-server::xep0045_xep0198_remote_acceptance membership_change_between_acceptance_and_ack

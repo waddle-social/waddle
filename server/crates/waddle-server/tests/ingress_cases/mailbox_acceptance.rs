@@ -486,3 +486,224 @@ async fn poller_works_the_lane_head_from_canonical_rows_and_parks_it_after_its_r
         .is_empty());
     fixture.close().await;
 }
+
+/// An ingress authority on the fixture's database that runs as `identity`
+/// in a cluster with the mailbox selected.
+async fn mailbox_authority(
+    fixture: &IngressFixture,
+    identity: &waddle_xmpp::ownership::NodeIdentity,
+) -> waddle_server::ingress::IngressAuthority {
+    let deployment = fixture
+        .optional_text("SELECT deployment_uuid FROM _lineage WHERE id = 1")
+        .await
+        .expect("enrolled deployment")
+        .parse::<uuid::Uuid>()
+        .expect("deployment UUID");
+    let authority = waddle_server::ingress::IngressAuthority::try_new(
+        waddle_server::config::IngressConfig {
+            remote_room_acceptance: RemoteRoomAcceptance::DurableMailbox,
+            ..Default::default()
+        },
+        fixture.db.clone(),
+        waddle_server::config::LineageConfig {
+            deployment_uuid: Some(waddle_server::db::lineage::DeploymentUuid(deployment)),
+            action: None,
+        },
+        Some(waddle_xmpp::ownership::SharedNodeIdentity::new(
+            identity.clone(),
+        )),
+    )
+    .await
+    .expect("mailbox ingress authority");
+    assert!(authority.mailbox_acceptance_enabled());
+    authority
+}
+
+/// The owner decided and the origin never read the decision. The sweep
+/// consumes the entry once it is past the grace, so the canonical message is
+/// no longer retained by it, and the decision stays readable: a late
+/// retransmission of the stanza is counted without waiting.
+#[tokio::test]
+async fn sweep_consumes_a_decision_no_origin_read_and_keeps_it_readable() {
+    let Some((fixture, room_fence)) = mailbox_fixture("mailbox_sweep").await else {
+        return;
+    };
+    let authority = mailbox_authority(&fixture, &room_fence.owner).await;
+    let origin = origin_groupchat(&fixture, "mailbox-sweep", "swept body");
+    let committed = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit");
+    let key = committed.message_key.expect("canonical message");
+
+    // A pending entry is never swept, whatever its age.
+    let sweep = authority
+        .sweep_unconsumed_decisions(std::time::Duration::ZERO, None)
+        .await
+        .expect("sweep before the decision");
+    assert_eq!((sweep.consumed, sweep.unproven), (0, 0));
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::Pending), Some(0))
+    );
+
+    commit_submission(&fixture.uow, &owner_groupchat(&origin, key, &room_fence), 5)
+        .await
+        .expect("owner acceptance");
+    // Inside the grace the entry is left to its origin.
+    let sweep = authority
+        .sweep_unconsumed_decisions(std::time::Duration::from_secs(3600), None)
+        .await
+        .expect("sweep inside the grace");
+    assert_eq!((sweep.consumed, sweep.unproven), (0, 0));
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::OwnerAccepted), Some(1))
+    );
+
+    let sweep = authority
+        .sweep_unconsumed_decisions(std::time::Duration::ZERO, None)
+        .await
+        .expect("sweep past the grace");
+    assert_eq!((sweep.consumed, sweep.unproven), (1, 0));
+    assert_eq!(sweep.resume_after, None);
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (
+            Some(MailboxEntryDisposition::Consumed(
+                MailboxOwnerDecision::Accepted
+            )),
+            Some(1)
+        )
+    );
+    let again = authority
+        .sweep_unconsumed_decisions(std::time::Duration::ZERO, None)
+        .await
+        .expect("second sweep");
+    assert_eq!((again.consumed, again.unproven), (0, 0));
+
+    // The origin's lookup and a retransmission both still read the decision.
+    let pending = committed.remote_acceptance.expect("pending acceptance");
+    assert_eq!(
+        resolve_room_acceptance(&fixture.uow, &pending)
+            .await
+            .expect("lookup after the sweep"),
+        RoomAcceptancePoll::Decided(MailboxOwnerDecision::Accepted)
+    );
+    let replay = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin replay");
+    assert_eq!(replay.message_key, Some(key));
+    assert_eq!(replay.remote_acceptance, None);
+    fixture.close().await;
+}
+
+/// The room's claim moves while an entry is pending. The successor's backlog
+/// scan does not see the lane, which still names the predecessor. Its
+/// adoption pass finds the lane, proves the room claim from the claims table
+/// and writes it onto the lane; a node that does not hold the claim adopts
+/// nothing. The successor then works the same entry from canonical rows.
+#[tokio::test]
+async fn successor_owner_adopts_the_lane_of_a_room_it_now_owns() {
+    use waddle_server::ingress::mailbox_worker::MailboxLaneHead;
+    use waddle_xmpp::ownership::NodeIdentity;
+    let Some((fixture, room_fence)) = mailbox_fixture("mailbox_transfer").await else {
+        return;
+    };
+    let predecessor = room_fence.owner.clone();
+    let successor = NodeIdentity::new("successor-owner", "successor-incarnation");
+    let bystander = NodeIdentity::new("bystander", "bystander-incarnation");
+    let authority = mailbox_authority(&fixture, &successor).await;
+
+    let origin = origin_groupchat(&fixture, "mailbox-transfer", "transferred body");
+    let committed = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit");
+    let key = committed.message_key.expect("canonical message");
+    let lane = committed
+        .remote_acceptance
+        .as_ref()
+        .expect("pending acceptance")
+        .lane;
+
+    // While the predecessor holds the claim nobody else adopts its lane.
+    let adoption = authority
+        .adopt_transferred_lanes(&successor, None)
+        .await
+        .expect("adoption before the transfer");
+    assert_eq!(adoption.adopted, 0);
+    assert_eq!(
+        authority
+            .scan_mailbox_backlog(&predecessor, None)
+            .await
+            .expect("predecessor scan"),
+        vec![lane]
+    );
+
+    // The room claim moves to the successor under a later epoch.
+    fixture
+        .execute(
+            "UPDATE clustering_claims SET node_id = ?, node_epoch = ?, claim_epoch = ? \
+             WHERE entity = ?",
+            waddle_server::db_params![
+                successor.node_id.clone(),
+                successor.node_epoch.clone(),
+                room_fence.epoch.0 + 6,
+                format!("room_actor:{}", room())
+            ],
+        )
+        .await;
+    assert!(
+        authority
+            .scan_mailbox_backlog(&successor, None)
+            .await
+            .expect("successor scan before adoption")
+            .is_empty(),
+        "the lane still names the predecessor"
+    );
+    let adoption = authority
+        .adopt_transferred_lanes(&bystander, None)
+        .await
+        .expect("bystander adoption");
+    assert_eq!(adoption.adopted, 0, "only the claim holder adopts");
+    let adoption = authority
+        .adopt_transferred_lanes(&successor, None)
+        .await
+        .expect("successor adoption");
+    assert_eq!(adoption.adopted, 1);
+    assert_eq!(
+        authority
+            .scan_mailbox_backlog(&successor, None)
+            .await
+            .expect("successor scan"),
+        vec![lane]
+    );
+    assert!(authority
+        .scan_mailbox_backlog(&predecessor, None)
+        .await
+        .expect("predecessor scan after adoption")
+        .is_empty());
+    assert!(matches!(
+        authority
+            .claim_room_acceptance(lane, &predecessor)
+            .await
+            .expect("predecessor claim"),
+        MailboxLaneHead::Idle
+    ));
+
+    // The successor rebuilds the same request the origin recorded.
+    let MailboxLaneHead::Ready(claimed) = authority
+        .claim_room_acceptance(lane, &successor)
+        .await
+        .expect("successor claim")
+    else {
+        panic!("the adopted lane's head is ready for the successor");
+    };
+    assert_eq!(claimed.operation, MailboxOperationKey::RoomAcceptance(key));
+    assert_eq!(claimed.message, origin.plan.sanitized_message);
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::Pending), Some(0)),
+        "adoption decides nothing"
+    );
+    fixture.close().await;
+}

@@ -220,10 +220,9 @@ pub use handoff::ORDERED_RELAY_HANDOFF_CAPACITY;
 pub use handoff::{
     ordered_relay_handoff_channel, OrderedRelayHandoffCompletion, OrderedRelayHandoffReceiver,
     OrderedRelayHandoffSender, OrderedRelayInboundSequence, SmInboundCompletionTracker,
-    WithheldInbound,
 };
 #[cfg(feature = "clustering")]
-pub use handoff::{OrderedRelayHandoffHandle, OrderedRelayHandoffRefusal};
+pub use handoff::{OrderedRelayHandoffHandle, OrderedRelayHandoffRefusal, WithheldInbound};
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use message_plan::ownership_plan_tests::PlanningClaims;
 use offline_delivery::queue_offline_delivery;

@@ -32,7 +32,8 @@ use super::repositories::CanonicalMessageRepository;
 use super::{IngressUowError, IngressUowTransaction};
 use crate::db::{DatabaseDriver, Transaction};
 use crate::ingress_substrate::{
-    prepared_ingress_relation, PreparedAttestedReceiptWriter, PreparedIngressRelation,
+    prepared_ingress_relation, EnteredTransaction, PreparedAttestedReceiptWriter,
+    PreparedIngressRelation,
 };
 
 /// Typed refusals of the mailbox repository.
@@ -523,7 +524,7 @@ impl MailboxRepository {
     }
 
     async fn lock_by_id(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         relations: &Relations,
         lane: MailboxLaneId,
         transaction_identity: Uuid,
@@ -550,7 +551,7 @@ impl MailboxRepository {
     }
 
     async fn write_fence(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         relations: &Relations,
         lane: MailboxLaneId,
         fence: &MailboxLaneFence,
@@ -602,7 +603,7 @@ impl MailboxRepository {
     }
 
     async fn read_entry(
-        tx: &mut Transaction<'_>,
+        tx: &mut EnteredTransaction<'_>,
         relations: &Relations,
         operation: MailboxOperationKey,
         for_update: bool,
@@ -883,6 +884,147 @@ impl MailboxRepository {
             lanes.push(MailboxLaneId::from_storage(&lane)?);
         }
         Ok(lanes)
+    }
+
+    /// Backlogged lanes whose recorded target is not `target`, in lane-id
+    /// order after `after`, at most `limit`, each with its lane key.
+    ///
+    /// A lane records the owner incarnation its origin last proved. When the
+    /// recipient's claim moves, the successor finds the lane here, proves
+    /// the claim and adopts the lane with
+    /// [`Self::adopt_backlogged_lane`]. The read takes no lock and confers
+    /// no authority.
+    pub async fn scan_foreign_backlog(
+        transaction: &mut IngressUowTransaction<'_>,
+        target: &NodeIdentity,
+        after: Option<MailboxLaneId>,
+        limit: u32,
+    ) -> Result<Vec<(MailboxLaneId, MailboxLaneKey)>, IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT lane_id::text, digest_version::int, digest, encoding FROM {} \
+                     WHERE last_dispositioned < last_sequence \
+                       AND NOT (target_node_id = ? AND target_node_epoch = ?) \
+                       AND (?::uuid IS NULL OR lane_id > ?::uuid) \
+                     ORDER BY lane_id LIMIT ?",
+                    relations.lanes
+                ),
+                crate::db_params![
+                    target.node_id.clone(),
+                    target.node_epoch.clone(),
+                    after.map(MailboxLaneId::to_storage),
+                    after.map(MailboxLaneId::to_storage),
+                    i64::from(limit),
+                ],
+            )
+            .await?;
+        let mut lanes = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let lane: String = row.get(0)?;
+            let digest_version: i32 = row.get(1)?;
+            let digest: Vec<u8> = row.get(2)?;
+            let encoding: Vec<u8> = row.get(3)?;
+            let digest_version =
+                u8::try_from(digest_version).map_err(|_| MailboxError::InvalidStored)?;
+            lanes.push((
+                MailboxLaneId::from_storage(&lane)?,
+                MailboxLaneKey::from_storage(
+                    MailboxLaneDigest::from_storage(digest_version, &digest)
+                        .map_err(MailboxError::from)?,
+                    MailboxLaneEncoding::from_storage(&encoding).map_err(MailboxError::from)?,
+                ),
+            ));
+        }
+        Ok(lanes)
+    }
+
+    /// Move a backlogged lane to the target claim `presented`, which the
+    /// caller has read from the claims table in this transaction.
+    ///
+    /// `true` when the lane now records `presented`. A lane another worker
+    /// holds, a drained lane, and a lane whose recorded target claim is not
+    /// older than `presented` are left as they are. Adoption confers no
+    /// authority over the recipient: the owner's commit still asserts its
+    /// claim before it decides an entry.
+    pub async fn adopt_backlogged_lane(
+        transaction: &mut IngressUowTransaction<'_>,
+        lane: MailboxLaneId,
+        presented: &MailboxTargetFence,
+    ) -> Result<bool, IngressUowError> {
+        let transaction_identity = transaction.identity();
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let Some(locked) =
+            Self::lock_by_id(tx, &relations, lane, transaction_identity, true).await?
+        else {
+            return Ok(false);
+        };
+        if locked.pending() == 0 {
+            return Ok(false);
+        }
+        let presented = MailboxLaneFence {
+            origin_epoch: locked.fence.origin_epoch,
+            target_epoch: presented.target_epoch,
+            target_owner: presented.target_owner.clone(),
+        };
+        match fence_order(&locked.fence, &presented) {
+            Ok(FenceOrder::Current) => Ok(true),
+            Ok(FenceOrder::Supersedes) => {
+                Self::write_fence(tx, &relations, locked.id, &presented).await?;
+                Ok(true)
+            }
+            Err(StaleMailboxLaneFence) => Ok(false),
+        }
+    }
+
+    /// Decided entries their origin has not consumed, appended at least
+    /// `older_than` ago, in message-key order after `after`, at most `limit`.
+    /// The read takes no lock.
+    pub async fn scan_unconsumed_decisions(
+        transaction: &mut IngressUowTransaction<'_>,
+        older_than: std::time::Duration,
+        after: Option<MessageKey>,
+        limit: u32,
+    ) -> Result<Vec<StoredMailboxEntry>, IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let older_than_ms = i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX);
+        let after = after.map(|key| key.to_storage().to_string());
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT {ENTRY_COLUMNS} FROM {} \
+                     WHERE disposition IN (1, 2) \
+                       AND appended_at <= now() - (?::bigint * interval '1 millisecond') \
+                       AND (?::uuid IS NULL OR message_key > ?::uuid) \
+                     ORDER BY message_key LIMIT ?",
+                    relations.entries
+                ),
+                crate::db_params![older_than_ms, after.clone(), after, i64::from(limit)],
+            )
+            .await?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().await? {
+            entries.push(decode_entry(&row)?);
+        }
+        Ok(entries)
+    }
+
+    /// Lock the lane of a decided entry for the sweep that consumes it on
+    /// behalf of an origin that is gone. `None` when another transaction
+    /// holds the lane. No fence is presented: consuming a decided entry
+    /// changes neither the decision nor the lane's cursor.
+    pub async fn claim_lane_for_sweep(
+        transaction: &mut IngressUowTransaction<'_>,
+        lane: MailboxLaneId,
+    ) -> Result<Option<LockedMailboxLane>, IngressUowError> {
+        let transaction_identity = transaction.identity();
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        Self::lock_by_id(tx, &relations, lane, transaction_identity, true).await
     }
 
     /// Count one failed attempt at the pending head entry and defer its next

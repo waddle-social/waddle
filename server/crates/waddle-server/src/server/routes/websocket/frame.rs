@@ -1780,6 +1780,30 @@ async fn dispatch_authoritative_message(
     };
     #[cfg(not(feature = "clustering"))]
     let acceptance_slot: Option<()> = None;
+    // No deferred slot could be reserved for this stanza (the connection has
+    // its full count outstanding, or its completion queue is closed). The
+    // stanza is committed and its entry is durable, so it is neither refused
+    // nor counted early: this handler waits for the owner's decision itself,
+    // which also stops the connection from reading further frames. Without a
+    // proven decision the stanza stays an unhandled hole.
+    #[cfg(feature = "clustering")]
+    let disposition = match (&decision.remote_acceptance, &acceptance_slot, sequence) {
+        (Some(pending), None, Some(_)) => {
+            match state
+                .deps
+                .protocol
+                .ingress
+                .await_room_acceptance_inline(pending)
+                .await
+            {
+                Ok(_) => InboundDisposition::Handled,
+                Err(_) => InboundDisposition::Unhandled,
+            }
+        }
+        _ => InboundDisposition::Handled,
+    };
+    #[cfg(not(feature = "clustering"))]
+    let disposition = InboundDisposition::Handled;
     if resumable {
         if let (Some(seq), Some(checkpoint)) = (sequence, checkpoint) {
             // The commit persisted a checkpoint that excludes a stanza still
@@ -1793,14 +1817,20 @@ async fn dispatch_authoritative_message(
         }
     }
     settle_inbound_dispatch(
-        InboundDisposition::Handled,
+        disposition,
         acceptance_slot.is_some(),
         sequence,
         &mut conn.sm_inbound_completion,
         &mut conn.sm_state,
     );
+    // A stream with stream management that had no slot was settled by the
+    // inline wait above; every other pending acceptance gets a watcher.
     #[cfg(feature = "clustering")]
-    if let Some(pending) = decision.remote_acceptance.clone() {
+    if let Some(pending) = decision
+        .remote_acceptance
+        .clone()
+        .filter(|_| acceptance_slot.is_some() || sequence.is_none())
+    {
         state
             .deps
             .protocol

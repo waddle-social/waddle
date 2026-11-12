@@ -1008,3 +1008,198 @@ async fn appender_behind_a_collector_neither_deadlocks_nor_allocates() {
     );
     fixture.close().await;
 }
+
+/// A lane recorded for owner A is invisible to B's backlog scan. Once B
+/// presents a later claim for the lane's room, the lane records B and B's
+/// scan finds it; an older or equal-epoch claim from another node adopts
+/// nothing, and a drained lane is not adopted at all.
+#[tokio::test]
+async fn successor_owner_adopts_a_backlogged_lane_only_with_a_later_claim() {
+    let Some(fixture) = Fixture::open("adopt").await else {
+        return;
+    };
+    let identity = lane("stream-a");
+    let operation = fixture.message().await;
+    let appended = append(&fixture.uow, &identity, &fence(3, 5, "node-a"), operation)
+        .await
+        .expect("append for owner A");
+    let lane_id = appended.entry().lane;
+    let node_a = target(5, "node-a").target_owner;
+    let node_b = target(9, "node-b").target_owner;
+
+    let mut tx = fixture.uow.begin().await.expect("begin scan");
+    assert_eq!(
+        MailboxRepository::scan_backlog(&mut tx, &node_b, None, 16)
+            .await
+            .expect("B's backlog"),
+        Vec::new(),
+        "B's backlog scan reads only lanes recorded for B"
+    );
+    let foreign = MailboxRepository::scan_foreign_backlog(&mut tx, &node_b, None, 16)
+        .await
+        .expect("lanes recorded for other nodes");
+    assert_eq!(foreign.len(), 1);
+    assert_eq!(foreign[0].0, lane_id);
+    assert_eq!(
+        foreign[0].1.encoding().decode().expect("lane identity"),
+        identity,
+        "the scan returns the lane's identity, from which its room is read"
+    );
+    assert_eq!(
+        MailboxRepository::scan_foreign_backlog(&mut tx, &node_a, None, 16)
+            .await
+            .expect("A's foreign scan")
+            .len(),
+        0,
+        "a lane recorded for A is not foreign to A"
+    );
+    // The same claim epoch cannot be held by another node, and an older
+    // claim is stale: neither moves the lane.
+    assert!(
+        !MailboxRepository::adopt_backlogged_lane(&mut tx, lane_id, &target(5, "node-b"))
+            .await
+            .expect("contradictory claim")
+    );
+    assert!(
+        !MailboxRepository::adopt_backlogged_lane(&mut tx, lane_id, &target(4, "node-b"))
+            .await
+            .expect("older claim")
+    );
+    assert!(
+        MailboxRepository::adopt_backlogged_lane(&mut tx, lane_id, &target(9, "node-b"))
+            .await
+            .expect("later claim")
+    );
+    tx.commit().await.expect("commit adoption");
+
+    let mut tx = fixture.uow.begin().await.expect("begin successor");
+    assert_eq!(
+        MailboxRepository::scan_backlog(&mut tx, &node_b, None, 16)
+            .await
+            .expect("B's backlog after adoption"),
+        vec![lane_id]
+    );
+    assert!(matches!(
+        MailboxRepository::lock_lane_for_target(&mut tx, lane_id, &target(5, "node-a")).await,
+        Err(IngressUowError::Mailbox(MailboxError::StaleFence(_)))
+    ));
+    drop(tx);
+
+    let mut owner = fixture.uow.begin().await.expect("begin owner B");
+    let mut locked = MailboxRepository::claim_backlogged_lane(&mut owner, lane_id, &node_b)
+        .await
+        .expect("claim adopted lane")
+        .expect("B's poller may work the adopted lane");
+    MailboxRepository::decide(
+        &mut owner,
+        &mut locked,
+        operation,
+        MailboxOwnerDecision::Accepted,
+    )
+    .await
+    .expect("owner B decides the predecessor's entry");
+    owner.commit().await.expect("owner B commits");
+
+    // The entry is the one the origin appended for A: one responsibility.
+    let mut tx = fixture.uow.begin().await.expect("begin lookup");
+    let entry = MailboxRepository::lookup(&mut tx, operation)
+        .await
+        .expect("lookup")
+        .expect("entry");
+    assert_eq!(entry.sequence, appended.entry().sequence);
+    assert_eq!(entry.disposition, MailboxEntryDisposition::OwnerAccepted);
+    // A drained lane owes nothing and is not adopted by a still later claim.
+    assert!(
+        !MailboxRepository::adopt_backlogged_lane(&mut tx, lane_id, &target(12, "node-c"))
+            .await
+            .expect("drained lane")
+    );
+    drop(tx);
+    fixture.close().await;
+}
+
+/// The sweep's scan returns decided entries no origin consumed once they are
+/// older than the grace period, never a pending or consumed entry, and the
+/// lane claim it uses lets the entry be consumed without an origin fence.
+#[tokio::test]
+async fn unconsumed_decisions_are_found_after_the_grace_and_consumed_once() {
+    let Some(fixture) = Fixture::open("sweep").await else {
+        return;
+    };
+    let identity = lane("stream-a");
+    let presented = fence(3, 5, "node-a");
+    let decided = fixture.message().await;
+    let pending = fixture.message().await;
+    let lane_id = append(&fixture.uow, &identity, &presented, decided)
+        .await
+        .expect("first append")
+        .entry()
+        .lane;
+    append(&fixture.uow, &identity, &presented, pending)
+        .await
+        .expect("second append");
+    let mut owner = fixture.uow.begin().await.expect("begin owner");
+    let mut locked =
+        MailboxRepository::lock_lane_for_target(&mut owner, lane_id, &target(5, "node-a"))
+            .await
+            .expect("owner locks lane");
+    MailboxRepository::decide(
+        &mut owner,
+        &mut locked,
+        decided,
+        MailboxOwnerDecision::Rejected,
+    )
+    .await
+    .expect("owner rejects the head");
+    owner.commit().await.expect("owner commits");
+
+    let mut tx = fixture.uow.begin().await.expect("begin sweep");
+    assert_eq!(
+        MailboxRepository::scan_unconsumed_decisions(&mut tx, Duration::from_secs(3600), None, 16)
+            .await
+            .expect("scan inside the grace"),
+        Vec::new(),
+        "an entry younger than the grace is left to its origin"
+    );
+    let found = MailboxRepository::scan_unconsumed_decisions(&mut tx, Duration::ZERO, None, 16)
+        .await
+        .expect("scan past the grace");
+    assert_eq!(found.len(), 1, "only the decided entry: {found:?}");
+    assert_eq!(found[0].operation, decided);
+    assert_eq!(found[0].disposition, MailboxEntryDisposition::OwnerRejected);
+    assert_eq!(
+        MailboxRepository::scan_unconsumed_decisions(
+            &mut tx,
+            Duration::ZERO,
+            Some(decided.message_key()),
+            16
+        )
+        .await
+        .expect("scan after the cursor"),
+        Vec::new()
+    );
+    let locked = MailboxRepository::claim_lane_for_sweep(&mut tx, lane_id)
+        .await
+        .expect("claim lane")
+        .expect("lane is free");
+    assert_eq!(
+        MailboxRepository::consume(&mut tx, &locked, decided)
+            .await
+            .expect("consume"),
+        MailboxDispositionChange::Applied(MailboxEntryDisposition::Consumed(
+            MailboxOwnerDecision::Rejected
+        ))
+    );
+    tx.commit().await.expect("commit sweep");
+
+    let mut tx = fixture.uow.begin().await.expect("begin second sweep");
+    assert_eq!(
+        MailboxRepository::scan_unconsumed_decisions(&mut tx, Duration::ZERO, None, 16)
+            .await
+            .expect("second scan"),
+        Vec::new(),
+        "a consumed entry is not swept again and a pending entry never is"
+    );
+    drop(tx);
+    fixture.close().await;
+}

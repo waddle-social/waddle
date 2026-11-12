@@ -24,12 +24,18 @@ use super::{
 };
 use crate::ingress::mailbox_worker::{
     ClaimedRoomAcceptance, MailboxAttemptRecord, MailboxLaneHead, MAILBOX_CLAIM_LIMIT,
+    MAILBOX_UNCONSUMED_GRACE,
 };
 use crate::ingress::origin_gate::MailboxHintSink;
 use crate::ingress_uow::MailboxLaneId;
 
 /// How long the poller waits for a hint before it scans anyway.
 const MAILBOX_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Poll passes between two adoption passes. A room whose claim moved is
+/// served by its new owner within this many poll intervals.
+const MAILBOX_ADOPTION_PASSES: u32 = 5;
+/// Poll passes between two sweeps of unconsumed decisions.
+const MAILBOX_SWEEP_PASSES: u32 = 30;
 /// Budget of one hint. A hint that does not arrive is not retried.
 const MAILBOX_HINT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -65,6 +71,9 @@ pub fn spawn_mailbox_poller(bridge: Arc<OrderedRelayDeliveryBridge>) {
         // lanes whose heads are deferred or dead-lettered cannot keep the
         // poller from the lanes behind them; a short page starts over.
         let mut resume_after = None;
+        let mut adoption_after = None;
+        let mut sweep_after = None;
+        let mut pass: u32 = 0;
         loop {
             tokio::select! {
                 biased;
@@ -75,9 +84,82 @@ pub fn spawn_mailbox_poller(bridge: Arc<OrderedRelayDeliveryBridge>) {
             let Some(services) = bridge.services.get().cloned() else {
                 continue;
             };
+            pass = pass.wrapping_add(1);
+            if pass.is_multiple_of(MAILBOX_ADOPTION_PASSES) {
+                adoption_after = adopt_once(&services, adoption_after).await;
+            }
             resume_after = poll_once(&services, resume_after).await;
+            if pass.is_multiple_of(MAILBOX_SWEEP_PASSES) {
+                sweep_after = sweep_once(&services, sweep_after).await;
+            }
         }
     });
+}
+
+/// The ingress authority, while this node carries remote room acceptance
+/// through the mailbox.
+fn mailbox_authority(
+    services: &Arc<OrderedRelayDeliveryServices>,
+) -> Option<Arc<crate::ingress::IngressAuthority>> {
+    let state = services.web_socket_state.upgrade()?;
+    let authority = Arc::clone(&state.deps.protocol.ingress);
+    authority.mailbox_acceptance_enabled().then_some(authority)
+}
+
+/// Adopt lanes of rooms whose claim moved to this node, so the next backlog
+/// scan finds them. Returns where the next adoption pass resumes.
+async fn adopt_once(
+    services: &Arc<OrderedRelayDeliveryServices>,
+    resume_after: Option<MailboxLaneId>,
+) -> Option<MailboxLaneId> {
+    let authority = mailbox_authority(services)?;
+    let target = services.node_identity.current();
+    match authority
+        .adopt_transferred_lanes(&target, resume_after)
+        .await
+    {
+        Ok(adoption) => {
+            if adoption.adopted > 0 {
+                tracing::info!(
+                    adopted = adoption.adopted,
+                    "mailbox poller adopted lanes of rooms this node now owns"
+                );
+            }
+            adoption.resume_after
+        }
+        Err(error) => {
+            tracing::warn!(%error, "mailbox poller could not adopt transferred lanes");
+            None
+        }
+    }
+}
+
+/// Consume decided entries no origin read. Returns where the next sweep
+/// resumes.
+async fn sweep_once(
+    services: &Arc<OrderedRelayDeliveryServices>,
+    resume_after: Option<waddle_xmpp::ingress::MessageKey>,
+) -> Option<waddle_xmpp::ingress::MessageKey> {
+    let authority = mailbox_authority(services)?;
+    match authority
+        .sweep_unconsumed_decisions(MAILBOX_UNCONSUMED_GRACE, resume_after)
+        .await
+    {
+        Ok(sweep) => {
+            if sweep.consumed > 0 || sweep.unproven > 0 {
+                tracing::info!(
+                    consumed = sweep.consumed,
+                    unproven = sweep.unproven,
+                    "mailbox poller swept decided entries no origin consumed"
+                );
+            }
+            sweep.resume_after
+        }
+        Err(error) => {
+            tracing::warn!(%error, "mailbox poller could not sweep unconsumed decisions");
+            None
+        }
+    }
 }
 
 /// One pass: scan this node's backlog after `resume_after` and work its

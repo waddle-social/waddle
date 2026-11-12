@@ -16,8 +16,7 @@
 //! handled-count part of the contract when remote room acceptance runs
 //! through the durable mailbox, so those tests start their nodes with that
 //! selector. Each has a `*_characterizes_*` twin that pins what the default
-//! relay selector does instead. A contract test the server does not meet
-//! under either selector is `#[ignore]`d.
+//! relay selector does instead.
 //!
 //! The binary needs PostgreSQL and fails without `WADDLE_TEST_POSTGRES_URL`:
 //! every scenario is about durable state shared by two processes.
@@ -904,32 +903,60 @@ async fn owner_sigkill_before_commit_characterizes_current_silent_loss() {
 }
 
 /// Room membership changes between the owner's acceptance of a groupchat
-/// message and the origin's acknowledgement of it.
+/// message and the delivery of its copies.
 ///
-/// The owner commits the message while `witness` and `sender` are the only
-/// occupants, and is stopped before it executes effects or replies. A third
-/// occupant, `latecomer`, then joins. When the owner continues, the audience
-/// is the one frozen at acceptance: `witness` and `sender` each receive one
-/// live copy carrying the archived stanza id, `latecomer` receives no live
-/// copy (history delivered on join carries XEP-0203 `<delay/>` and is not a
-/// live copy), the archive still holds one message, and only then does the
-/// sender's `h` cover the stanza.
+/// Before the owner's decision the sender's `h` excludes the stanza. The
+/// owner then commits it while `witness` and `sender` are the only
+/// occupants, and is stopped before it executes effects or replies. From
+/// that commit on the acceptance is durable: the origin reads it from the
+/// mailbox and `h` covers the stanza although no copy has been delivered. A
+/// third occupant, `latecomer`, joins while the owner is still stopped. When
+/// the owner continues, the audience is the one frozen at acceptance:
+/// `witness` and `sender` each receive one live copy carrying the archived
+/// stanza id, `latecomer` receives no live copy (history delivered on join
+/// carries XEP-0203 `<delay/>` and is not a live copy), and the archive
+/// still holds one message.
 #[tokio::test]
-#[ignore = "requires remote child settlement"]
 async fn membership_change_between_acceptance_and_ack() {
-    let mut scenario = Scenario::start().await;
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    let paused = request_h_while_owner_commit_paused(&mut scenario).await;
+    assert_eq!(
+        paused.h,
+        Some(0),
+        "h must not cover the stanza before the owner's decision"
+    );
+
     scenario.seams.arm(HOLD_AFTER_COMMIT);
-    let body = scenario
-        .send_groupchat("membership", uuid::Uuid::new_v4())
-        .await;
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
     scenario
         .seams
-        .wait_for("held after-commit membership", Duration::from_secs(10))
+        .wait_for("held after-commit paused", Duration::from_secs(30))
         .await;
-    let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+    let archived = archived_ids(&scenario.db, &scenario.room, &paused.body).await;
     assert_eq!(archived.len(), 1, "the owner accepted once: {archived:?}");
-    let (h, _) = scenario.sender.request_h(Duration::from_secs(7)).await;
-    assert_eq!(h, Some(0), "the origin has not learned of the acceptance");
+
+    // The decision is durable, so the origin may count the stanza while the
+    // owner has delivered nothing.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut before_release = Vec::new();
+    loop {
+        let (h, frames) = scenario.sender.request_h(Duration::from_secs(10)).await;
+        before_release.extend(frames);
+        if h == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "h covers the stanza once the owner's decision is recorded; got {h:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        !before_release
+            .iter()
+            .any(|frame| is_groupchat(frame, "paused")),
+        "the owner is stopped before it delivers any copy: {before_release:?}"
+    );
 
     let server_a = scenario.server_a.as_ref().expect("origin node");
     let mut latecomer = WsXmppClient::connect_and_auth(
@@ -948,25 +975,197 @@ async fn membership_change_between_acceptance_and_ack() {
     let sender_frames = scenario
         .sender
         .until(Duration::from_secs(30), "sender reflection", |frame| {
-            is_groupchat(frame, "membership")
+            is_groupchat(frame, "paused")
         })
         .await;
-    scenario.assert_one_reflection("sender", &sender_frames, "membership", &archived[0]);
+    scenario.assert_one_reflection("sender", &sender_frames, "paused", &archived[0]);
     let witness_frames = scenario.witness.drain(Duration::from_secs(5)).await;
-    scenario.assert_one_reflection("witness", &witness_frames, "membership", &archived[0]);
+    scenario.assert_one_reflection("witness", &witness_frames, "paused", &archived[0]);
     let late_frames = latecomer.drain(Duration::from_secs(5)).await;
     assert!(
         !late_frames.iter().any(|frame| {
-            is_groupchat(frame, "membership")
-                && frame.get_child("delay", "urn:xmpp:delay").is_none()
+            is_groupchat(frame, "paused") && frame.get_child("delay", "urn:xmpp:delay").is_none()
         }),
         "an occupant who joined after acceptance is outside the frozen audience: {late_frames:?}"
     );
     let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
-    assert_eq!(h, Some(1), "h covers the stanza after owner acceptance");
+    assert_eq!(h, Some(1), "the stanza is counted once");
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &paused.body).await,
+        archived,
+        "membership changes do not create another acceptance"
+    );
+}
+
+/// The newest mailbox entry: its disposition as stored and the node
+/// incarnation its lane records as target.
+async fn newest_mailbox_entry(db: &Database) -> Option<(i64, String, String)> {
+    let conn = db.guard().await.expect("mailbox guard");
+    let mut rows = conn
+        .query(
+            "SELECT e.disposition::bigint, l.target_node_id, l.target_node_epoch \
+             FROM ingress_mailbox_entries e \
+             JOIN ingress_mailbox_lanes l ON l.lane_id = e.lane_id \
+             ORDER BY e.appended_at DESC LIMIT 1",
+            (),
+        )
+        .await
+        .expect("mailbox query");
+    let row = rows.next().await.expect("mailbox row")?;
+    Some((
+        row.get::<i64>(0).expect("disposition"),
+        row.get::<String>(1).expect("target node"),
+        row.get::<String>(2).expect("target incarnation"),
+    ))
+}
+
+/// The room's owner dies before it decides a groupchat message, and the
+/// room's claim then moves to another node incarnation.
+///
+/// The origin appended the entry on a lane that names the dead owner. The
+/// successor's backlog scan does not read that lane until the successor
+/// holds the room's claim and has adopted the lane. It then decides the one
+/// entry from canonical rows. Whatever it decides, the decision is made
+/// once: the archive holds the message exactly when the entry records an
+/// acceptance, the lane names the successor, and the sender's `h` covers the
+/// stanza only when the origin has read that decision.
+#[tokio::test]
+async fn owner_transfer_before_commit_is_decided_once_by_the_successor() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    let room_entity = Entity::new(EntityType::RoomActor, scenario.room.to_string());
+    let claims = PostgresClaimStore::new(scenario.db.clone());
+    let first_owner = claims
+        .current_claim(&room_entity)
+        .await
+        .expect("room claim lookup")
+        .expect("live room claim")
+        .owner;
+
+    scenario.seams.arm(HOLD_BEFORE_COMMIT);
+    let body = scenario
+        .send_groupchat("transfer", uuid::Uuid::new_v4())
+        .await;
+    scenario
+        .seams
+        .wait_for("held before-commit transfer", Duration::from_secs(10))
+        .await;
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(7)).await;
+    assert_eq!(h, Some(0), "nothing is decided yet");
+    let (disposition, target_node, target_incarnation) = newest_mailbox_entry(&scenario.db)
+        .await
+        .expect("the origin appended an entry");
+    assert_eq!(disposition, 0, "the entry awaits its owner");
+    assert_eq!(
+        (target_node, target_incarnation),
+        (first_owner.node_id.clone(), first_owner.node_epoch.clone()),
+        "the lane names the owner the origin proved"
+    );
+
+    // Dropping the handle SIGKILLs the owner. Its replacement is a new
+    // incarnation; rejoining the room there makes it take the room's claim.
+    drop(scenario.server_b.take());
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
+    let port_b = free_tcp_port();
+    let (server_b, _, _) = spawn_cluster_server_with_envs(
+        &scenario.postgres_url,
+        &scenario.pool.pool_env,
+        port_b,
+        &[scenario.port_a],
+        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
+    )
+    .await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    // Kept open: an occupant that left would let the room close again.
+    let mut rejoined = Vec::new();
+    let successor = loop {
+        let claim = claims
+            .current_claim(&room_entity)
+            .await
+            .expect("room claim lookup");
+        if let Some(claim) = claim.filter(|claim| claim.owner != first_owner) {
+            break claim.owner;
+        }
+        // A join is refused or times out until the dead owner's claim can
+        // be taken; each attempt asks the replacement to host the room.
+        if let Ok(mut rejoining) = WsXmppClient::connect_and_auth(
+            &server_b.ws_url(),
+            DOMAIN,
+            "admin",
+            server_b.fixed_account_password(),
+            &format!("witness-{}", uuid::Uuid::new_v4()),
+        )
+        .await
+        {
+            let _ = rejoining
+                .send(&String::from(&cluster_support::muc_join_presence(
+                    &scenario.room.to_string(),
+                    "witness",
+                )))
+                .await;
+            rejoined.push(rejoining);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the room's claim must move off the dead owner"
+        );
+    };
+    scenario.server_b = Some(server_b);
+
+    // The successor adopts the lane and decides its head entry.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let (disposition, target_node, target_incarnation) = loop {
+        let entry = newest_mailbox_entry(&scenario.db)
+            .await
+            .expect("the entry outlives the transfer");
+        if entry.0 != 0 {
+            break entry;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the successor's poller must decide the predecessor's entry"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(
+        (target_node, target_incarnation),
+        (successor.node_id.clone(), successor.node_epoch.clone()),
+        "the lane follows the room's claim"
+    );
+    let accepted = matches!(disposition, 1 | 3);
+    let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+    assert_eq!(
+        archived.len(),
+        usize::from(accepted),
+        "the archive holds the message exactly when the entry records an acceptance"
+    );
+
+    // Give the origin's watcher time to read the decision, if it still can.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+    let (disposition, _, _) = newest_mailbox_entry(&scenario.db)
+        .await
+        .expect("the entry is kept with its message");
+    let consumed = matches!(disposition, 3 | 4);
+    assert_eq!(
+        h,
+        Some(u32::from(consumed)),
+        "h covers the stanza only when the origin has read the owner's decision"
+    );
     assert_eq!(
         archived_ids(&scenario.db, &scenario.room, &body).await,
         archived,
-        "membership changes do not create another acceptance"
+        "later poll passes decide nothing again"
+    );
+    drop(rejoined);
+    assert!(
+        !scenario
+            .seams
+            .events()
+            .iter()
+            .any(|event| event.starts_with("released")),
+        "the killed owner never passed its commit hold: {:?}",
+        scenario.seams.events()
     );
 }

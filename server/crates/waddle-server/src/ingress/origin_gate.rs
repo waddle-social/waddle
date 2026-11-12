@@ -18,13 +18,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use waddle_xmpp::ingress::mailbox::{MailboxEntryDisposition, MailboxOwnerDecision};
+use waddle_xmpp::ingress::mailbox::{
+    MailboxEntryDisposition, MailboxOperationKey, MailboxOwnerDecision,
+};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::telemetry::attributes::RemoteDispatchOutcome;
 
 use super::decision::PendingRoomAcceptance;
 use super::IngressAuthority;
 use crate::ingress_uow::{
-    CanonicalMessageRepository, IngressUnitOfWork, IngressUowError, MailboxRepository,
-    RoomOwnerDecision,
+    CanonicalMessageRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
+    LockedMailboxLane, MailboxRepository, RoomOwnerDecision,
 };
 
 /// Why a pending acceptance can never be proven by this origin.
@@ -116,16 +120,35 @@ pub async fn resolve_room_acceptance(
             }
             Err(error) => return Err(error),
         };
-    let key = pending.operation.message_key();
-    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
-        return Ok(RoomAcceptancePoll::Unresolved(
-            RoomAcceptanceUnresolved::EntryMissing,
-        ));
+    if let Some(reason) =
+        consume_proven_decision(&mut tx, &lane, pending.operation, decision).await?
+    {
+        return Ok(RoomAcceptancePoll::Unresolved(reason));
     }
-    let recorded = CanonicalMessageRepository::room_owner_state(&mut tx, key)
+    tx.commit().await?;
+    Ok(RoomAcceptancePoll::Decided(decision))
+}
+
+/// Consume a decided entry once the canonical message proves the same
+/// decision. The caller holds the entry's lane; this locks the canonical
+/// message, requires `owner_decision` to record `decision` (and a refusal to
+/// have its rejection child, an acceptance to have none) and only then marks
+/// the entry consumed. `Some` names why the decision is not proven; nothing
+/// is written in that case.
+pub(super) async fn consume_proven_decision(
+    tx: &mut IngressUowTransaction<'_>,
+    lane: &LockedMailboxLane,
+    operation: MailboxOperationKey,
+    decision: MailboxOwnerDecision,
+) -> Result<Option<RoomAcceptanceUnresolved>, IngressUowError> {
+    let key = operation.message_key();
+    if !CanonicalMessageRepository::lock(tx, key).await? {
+        return Ok(Some(RoomAcceptanceUnresolved::EntryMissing));
+    }
+    let recorded = CanonicalMessageRepository::room_owner_state(tx, key)
         .await?
         .and_then(|state| state.decision);
-    let rejection_child = CanonicalMessageRepository::rejection_child(&mut tx, key).await?;
+    let rejection_child = CanonicalMessageRepository::rejection_child(tx, key).await?;
     let proven = match (decision, recorded) {
         (MailboxOwnerDecision::Accepted, Some(RoomOwnerDecision::Accepted)) => {
             rejection_child.is_none()
@@ -136,13 +159,10 @@ pub async fn resolve_room_acceptance(
         _ => false,
     };
     if !proven {
-        return Ok(RoomAcceptancePoll::Unresolved(
-            RoomAcceptanceUnresolved::EvidenceMismatch,
-        ));
+        return Ok(Some(RoomAcceptanceUnresolved::EvidenceMismatch));
     }
-    MailboxRepository::consume(&mut tx, &lane, pending.operation).await?;
-    tx.commit().await?;
-    Ok(RoomAcceptancePoll::Decided(decision))
+    MailboxRepository::consume(tx, lane, operation).await?;
+    Ok(None)
 }
 
 /// Look for the owner's decision until it is read, proven impossible, or the
@@ -172,6 +192,61 @@ pub async fn await_room_acceptance(
     }
 }
 
+/// The waits for a remote room owner that this node's streams have open,
+/// by lane. A lane is one sender session's traffic to one room, so each
+/// sample describes one stream: how many of its stanzas await the owner and
+/// how long the oldest has waited.
+#[derive(Debug, Default)]
+pub struct PendingAcceptances {
+    lanes: std::sync::Mutex<
+        std::collections::HashMap<crate::ingress_uow::MailboxLaneId, Vec<tokio::time::Instant>>,
+    >,
+}
+
+impl PendingAcceptances {
+    /// Record that a wait on `lane` began at `started` and sample the lane.
+    fn opened(&self, lane: crate::ingress_uow::MailboxLaneId, started: tokio::time::Instant) {
+        self.update(lane, |waits| waits.push(started));
+    }
+
+    /// Record that the wait on `lane` that began at `started` ended and
+    /// sample the lane.
+    fn closed(&self, lane: crate::ingress_uow::MailboxLaneId, started: tokio::time::Instant) {
+        self.update(lane, |waits| {
+            if let Some(index) = waits.iter().position(|wait| *wait == started) {
+                waits.swap_remove(index);
+            }
+        });
+    }
+
+    fn update(
+        &self,
+        lane: crate::ingress_uow::MailboxLaneId,
+        change: impl FnOnce(&mut Vec<tokio::time::Instant>),
+    ) {
+        let (pending, oldest) = {
+            let mut lanes = self
+                .lanes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let waits = lanes.entry(lane).or_default();
+            change(waits);
+            let sample = (
+                waits.len(),
+                waits
+                    .iter()
+                    .min()
+                    .map_or(Duration::ZERO, tokio::time::Instant::elapsed),
+            );
+            if waits.is_empty() {
+                lanes.remove(&lane);
+            }
+            sample
+        };
+        waddle_xmpp::telemetry::authority::record_pending_acceptance(pending, oldest);
+    }
+}
+
 /// Where an origin sends its wake-up after appending a mailbox entry. A hint
 /// is best effort and proves nothing; the target's poller is the authority.
 pub trait MailboxHintSink: Send + Sync {
@@ -197,8 +272,87 @@ impl IngressAuthority {
     }
 }
 
+/// Removes one wait from [`PendingAcceptances`] when the wait ends, also
+/// when its future is dropped.
+#[cfg(feature = "clustering")]
+struct OpenAcceptanceWait<'a> {
+    waits: &'a PendingAcceptances,
+    lane: crate::ingress_uow::MailboxLaneId,
+    started: tokio::time::Instant,
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for OpenAcceptanceWait<'_> {
+    fn drop(&mut self) {
+        self.waits.closed(self.lane, self.started);
+    }
+}
+
 #[cfg(feature = "clustering")]
 impl IngressAuthority {
+    /// Hint the room owner and look for its decision on `pending` until it
+    /// is read and consumed, proven impossible, the budget ends, the
+    /// authority stops or `abandoned` reports that nobody waits any more.
+    async fn read_room_acceptance(
+        &self,
+        pending: &PendingRoomAcceptance,
+        abandoned: impl Fn() -> bool,
+    ) -> Result<MailboxOwnerDecision, RoomAcceptanceUnresolved> {
+        if let Some(hints) = self.mailbox_hints.get() {
+            hints.hint(pending.target_owner.clone());
+        }
+        let started = tokio::time::Instant::now();
+        self.pending_acceptances.opened(pending.lane, started);
+        let wait = OpenAcceptanceWait {
+            waits: &self.pending_acceptances,
+            lane: pending.lane,
+            started,
+        };
+        let outcome =
+            await_room_acceptance(&self.uow, pending, RoomAcceptanceWatch::default(), || {
+                self.cancellation.is_cancelled() || abandoned()
+            })
+            .await;
+        drop(wait);
+        waddle_xmpp::telemetry::reliability::increment_mailbox_room_acceptance(match outcome {
+            Ok(MailboxOwnerDecision::Accepted) => {
+                waddle_xmpp::telemetry::attributes::MailboxAcceptanceOutcome::Accepted
+            }
+            Ok(MailboxOwnerDecision::Rejected) => {
+                waddle_xmpp::telemetry::attributes::MailboxAcceptanceOutcome::Rejected
+            }
+            Err(_) => waddle_xmpp::telemetry::attributes::MailboxAcceptanceOutcome::Unresolved,
+        });
+        waddle_xmpp::telemetry::authority::record_remote_dispatch(match outcome {
+            Ok(MailboxOwnerDecision::Accepted) => RemoteDispatchOutcome::Accepted,
+            Ok(MailboxOwnerDecision::Rejected) => RemoteDispatchOutcome::Rejected,
+            Err(RoomAcceptanceUnresolved::BudgetExhausted) => RemoteDispatchOutcome::TimedOut,
+            Err(_) => RemoteDispatchOutcome::Uncertain,
+        });
+        if let Err(reason) = outcome {
+            tracing::warn!(%reason, "remote room acceptance unresolved; stanza stays unacknowledged");
+        }
+        outcome
+    }
+
+    /// Wait, inside the caller's own handler, for the owner's decision on a
+    /// stanza whose connection could not reserve a deferred slot for it.
+    ///
+    /// A connection holds a bounded number of deferred slots. When none is
+    /// free, or its completion queue is closed, the committed stanza still
+    /// must not be counted before its owner decides, so the handler waits
+    /// here and the connection reads no further frame meanwhile. `Ok` means
+    /// the decision was read and consumed and the stanza may be counted;
+    /// `Err` means it must be left as an unhandled hole. The entry is
+    /// durable either way: a dropped wait loses nothing, and the stanza is
+    /// then simply never settled on this connection.
+    pub async fn await_room_acceptance_inline(
+        &self,
+        pending: &PendingRoomAcceptance,
+    ) -> Result<MailboxOwnerDecision, RoomAcceptanceUnresolved> {
+        self.read_room_acceptance(pending, || false).await
+    }
+
     /// Watch a stanza that awaits its remote room owner and settle it.
     ///
     /// The connection calls this once, right after a commit whose decision
@@ -215,33 +369,13 @@ impl IngressAuthority {
         pending: PendingRoomAcceptance,
         slot: Option<InboundAcceptanceSlot>,
     ) {
-        if let Some(hints) = self.mailbox_hints.get() {
-            hints.hint(pending.target_owner.clone());
-        }
         let authority = Arc::clone(self);
         tokio::spawn(async move {
-            let outcome = await_room_acceptance(
-                &authority.uow,
-                &pending,
-                RoomAcceptanceWatch::default(),
-                || {
-                    authority.cancellation.is_cancelled()
-                        || slot.as_ref().is_some_and(|slot| slot.handoff.is_closed())
-                },
-            )
-            .await;
-            waddle_xmpp::telemetry::reliability::increment_mailbox_room_acceptance(match outcome {
-                Ok(MailboxOwnerDecision::Accepted) => {
-                    waddle_xmpp::telemetry::attributes::MailboxAcceptanceOutcome::Accepted
-                }
-                Ok(MailboxOwnerDecision::Rejected) => {
-                    waddle_xmpp::telemetry::attributes::MailboxAcceptanceOutcome::Rejected
-                }
-                Err(_) => waddle_xmpp::telemetry::attributes::MailboxAcceptanceOutcome::Unresolved,
-            });
-            if let Err(reason) = outcome {
-                tracing::warn!(%reason, "remote room acceptance unresolved; stanza stays unacknowledged");
-            }
+            let outcome = authority
+                .read_room_acceptance(&pending, || {
+                    slot.as_ref().is_some_and(|slot| slot.handoff.is_closed())
+                })
+                .await;
             if let Some(slot) = slot {
                 match outcome {
                     Ok(_) => slot.handoff.complete(Vec::new()),

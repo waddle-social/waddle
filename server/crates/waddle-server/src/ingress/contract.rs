@@ -84,6 +84,8 @@ pub struct IngressAuthority {
     /// Where origin commits send mailbox hints; unset without clustering.
     pub(in crate::ingress) mailbox_hints:
         std::sync::OnceLock<Arc<dyn super::origin_gate::MailboxHintSink>>,
+    /// Stanzas this node's streams have awaiting a remote room owner.
+    pub(in crate::ingress) pending_acceptances: super::origin_gate::PendingAcceptances,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     pub(in crate::ingress) stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -405,6 +407,7 @@ impl IngressAuthority {
             clustered,
             receipt_custody,
             mailbox_hints: std::sync::OnceLock::new(),
+            pending_acceptances: super::origin_gate::PendingAcceptances::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -462,6 +465,7 @@ impl IngressAuthority {
             clustered: false,
             receipt_custody,
             mailbox_hints: std::sync::OnceLock::new(),
+            pending_acceptances: super::origin_gate::PendingAcceptances::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),

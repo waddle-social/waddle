@@ -125,6 +125,16 @@ while its room owner is undecided (`ingress/origin_gate.rs`):
   report only the proven prefix, while `<r/>` and later stanzas are still
   processed. Later stanzas complete their own slots but cannot move `h` past
   the open one.
+- **No free slot.** A connection holds at most 256 deferred slots, each
+  reserved when its stanza is routed, and a held slot keeps its place in the
+  completion queue until the owner's decision settles it. When no slot can be
+  reserved, or the queue is closed, the stanza is still committed and its
+  entry appended; the handler then waits for the owner's decision itself
+  (`await_room_acceptance_inline`), so the connection reads no further frame
+  and `h` cannot cross the stanza. A proven decision counts it; anything else
+  leaves it an unhandled hole. The stanza is not refused, because the
+  refusal would have to precede a commit that alone knows whether the room
+  is remote.
 - **Authoritative lookup.** The watcher polls `resolve_room_acceptance`: it
   reads the entry, and for a decided entry locks the lane as origin and the
   canonical message, requires `owner_decision` to record the same decision
@@ -182,6 +192,65 @@ keeps `h` behind it.
   `dead_lettered`) and `ingress.mailbox.room_acceptances{outcome}` are
   registered at zero. `ingress.mailbox.hints{outcome}` is context only.
 
+### Owner transfer and unread decisions
+
+- **Lane adoption.** A lane records the owner incarnation its origin last
+  proved, and a node's backlog scan reads only lanes recorded for itself.
+  Every fifth poll pass a node also reads up to 128 backlogged lanes recorded
+  for another incarnation (`scan_foreign_backlog`), decodes each lane's room
+  and looks its claim up in `clustering_claims`. For a room the claims table
+  assigns to this node, a second transaction reads the claim again, locks the
+  lane and writes the claim onto it (`adopt_backlogged_lane`), provided the
+  claim epoch is later than the one on file. The lane then appears in this
+  node's backlog scan and its head entry is worked like any other. Adoption
+  decides nothing: the owner's commit asserts the room claim again. A lane
+  whose room has no claim, or whose claim is held elsewhere, is left alone,
+  so its entry stays pending until some node owns the room. A restarted owner
+  is a new incarnation and adopts its own earlier lanes the same way, once it
+  holds the room's claim again. The origin still moves the lane itself when
+  it commits the same stanza again under the new claim.
+- **Occupancy after a transfer.** A room's occupants live in the room actor's
+  memory. A successor that does not know the sender as an occupant refuses
+  the stanza through the ordinary groupchat checks; that refusal is the
+  owner's decision and is recorded like any other. No acceptance is derived
+  from the predecessor's state.
+- **Unread decisions.** Every thirtieth poll pass a node reads up to 128
+  decided entries appended at least ten minutes ago
+  (`scan_unconsumed_decisions`) and consumes each one whose canonical message
+  proves the same decision, under the lane and canonical locks
+  (`sweep_unconsumed_decisions`). The origin's watcher gives up after 60
+  seconds, so a live origin has finished with an entry long before. The
+  terminal entry keeps which decision it was until its message is collected,
+  so a retransmission that arrives after the sweep still reads the decision
+  and is counted. An entry whose canonical message does not prove its
+  decision is left in place and logged; it keeps retaining its message.
+
+### Remote copies of a frozen manifest
+
+The owner's commit seals the room manifest: the audience, the child delivery
+keys and the sender's reflection. Delivering those copies does not depend on
+the mailbox entry or on the node that accepted the message:
+
+- The owner's live execution relays each copy to the node that hosts the
+  occupant and records a receipt for each one that lands.
+- A copy whose relay failed, whose reply was lost, or which was never
+  attempted because the owner stopped, leaves its route receipt pending. The
+  ingress maintenance pass of every node reads unreceipted rows from the
+  shared database and rebuilds exactly the frozen copies
+  (`ingress/recovery_muc.rs`): occupants named by the manifest and not yet
+  completed, never the current roster. A rebuilt copy for an occupant this
+  node does not host goes through the detached-delivery effect
+  (`QueueDetached`) addressed to the frozen resource. It stays pending, and a
+  later pass retries it, while the node that owns the occupant cannot be
+  reached.
+- Because the rebuild reads only canonical rows, it gives the same result
+  after a restart and after the room's claim has moved. An occupant who
+  joined after the acceptance is not in the manifest and receives no live
+  copy.
+
+The poller does not write the frames the owner produces for the sender;
+their receipts stay pending and the same recovery delivers them.
+
 ### Limits of the current implementation
 
 These hold today and bound what the mailbox selector may be used for.
@@ -196,17 +265,6 @@ These hold today and bound what the mailbox selector may be used for.
   stanza through `deliver_ordered`; the mailbox entry and the poller make the
   owner's acceptance durable and recoverable beside it. No ordered-relay kind
   is removed and its wire id is unchanged.
-- **Owner transfer.** A lane records the owner incarnation the origin saw.
-  The poller of a successor owner does not scan lanes recorded for its
-  predecessor. The lane moves to the successor when the origin commits the
-  same stanza again with the new room claim (the fence is adopted and the
-  first entry returned); until then the entry stays pending and the stanza
-  unacknowledged.
-- **Unconsumed decisions.** A decided entry is consumed by the origin's
-  watcher or by a retransmission of the stanza. If the origin node stops
-  between the owner's decision and that read and the sender never
-  retransmits, the entry stays decided and keeps its canonical message from
-  collection. No sweep consumes such entries.
 - **Lane rows.** Lane rows are never deleted. A lane exists per
   stream-management session and room, so the table grows with sessions.
 - **Refusal after a lost reply.** The owner's refusal reaches the sender in

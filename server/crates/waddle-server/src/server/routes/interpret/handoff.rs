@@ -205,6 +205,7 @@ impl SmInboundCompletionTracker {
 
     /// The set a deferred slot's settling task marks to keep its stanza out
     /// of the handled count.
+    #[cfg(feature = "clustering")]
     pub fn withheld(&self) -> WithheldInbound {
         self.withheld.clone()
     }
