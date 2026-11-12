@@ -1700,3 +1700,192 @@ async fn health_check_or_wedge_kill_kills_a_wedged_actor() {
     // `_release_tx` drops here, releasing the wedge — harmless, the actor
     // is already gone.
 }
+
+/// One resource of a selection case: name, availability, priority, carbons.
+type SelectionCase = &'static [(&'static str, bool, i8, bool)];
+
+const SELECTION_CASES: &[SelectionCase] = &[
+    &[],
+    &[("solo", true, 0, false)],
+    &[("solo", false, 5, true)],
+    &[("low", true, 1, false), ("high", true, 10, true)],
+    &[
+        ("a", true, 3, false),
+        ("b", true, 3, true),
+        ("c", true, 2, false),
+    ],
+    &[("negative", true, -1, true), ("zero", true, 0, false)],
+    &[("negative", true, -1, false), ("lower", true, -128, true)],
+    &[("away", false, 100, true), ("here", true, 1, false)],
+    &[("max", true, 127, false), ("also-max", true, 127, false)],
+];
+
+/// The account coordinator's pure state answers every selection read the
+/// way the `UserActor` does for the same resources.
+#[tokio::test]
+async fn account_resources_select_the_same_resources_as_the_user_actor() {
+    use std::num::NonZeroUsize;
+
+    use crate::ownership::account_coordinator::AccountResources;
+    use crate::ownership::account_resource_transition::{
+        AccountResourceExecution, AccountResourceMutation, AccountResourceOperation,
+        AccountResourceOperationId, AccountResourceOperationOutcome, AccountResourceRevision,
+        AccountResourceSnapshot, ActorRegistrationReceipt, BindingEvidence,
+        EndpointPublicationReceipt,
+    };
+    use crate::ownership::joint_identity::ResourceLifetime;
+    use crate::ownership::{
+        BindingRef, ClaimEpoch, ConnectionRef, NodeLeaseIdentity, UserClaimIdentity,
+    };
+    use crate::registry::user_actor::GetRoutingResources;
+
+    for (index, case) in SELECTION_CASES.iter().enumerate() {
+        let actor = spawn_actor("alice").await;
+        let claim = UserClaimIdentity::fresh(
+            bare("alice"),
+            NodeLeaseIdentity::local_process(),
+            ClaimEpoch(1),
+        );
+        let mut account = AccountResources::new(
+            claim.clone(),
+            NonZeroUsize::new(16).expect("positive slot bound"),
+        );
+        let mut receivers = Vec::new();
+        for (name, available, priority, carbons) in case.iter().copied() {
+            let jid = full("alice", name);
+            let (connection, receiver) = entry();
+            receivers.push(receiver);
+            actor
+                .ask(RegisterConnection {
+                    jid: jid.clone(),
+                    entry: connection,
+                })
+                .await
+                .expect("register with the user actor");
+            actor
+                .ask(UpdatePresence {
+                    jid: jid.clone(),
+                    available,
+                    priority,
+                })
+                .await
+                .expect("presence on the user actor");
+            actor
+                .ask(SetCarbonsEnabled {
+                    jid: jid.clone(),
+                    enabled: carbons,
+                })
+                .await
+                .expect("carbons on the user actor");
+
+            let binding =
+                BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+            let evidence = BindingEvidence::for_binding(&binding);
+            let mutations = [
+                AccountResourceMutation::Bind {
+                    claim_identity: claim.clone(),
+                    expected_revision: AccountResourceRevision::new(0),
+                    binding_ref: binding.clone(),
+                    lifetime: ResourceLifetime::fresh(),
+                },
+                AccountResourceMutation::PublishEndpoint {
+                    claim_identity: claim.clone(),
+                    expected_revision: AccountResourceRevision::new(1),
+                    binding_ref: binding.clone(),
+                    publication: EndpointPublicationReceipt::observed(evidence.clone()),
+                },
+                AccountResourceMutation::RegisterActor {
+                    claim_identity: claim.clone(),
+                    expected_revision: AccountResourceRevision::new(2),
+                    binding_ref: binding.clone(),
+                    registration: ActorRegistrationReceipt::observed(claim.clone(), evidence),
+                },
+                AccountResourceMutation::UpdateSnapshot {
+                    claim_identity: claim.clone(),
+                    expected_revision: AccountResourceRevision::new(3),
+                    binding_ref: binding,
+                    snapshot: AccountResourceSnapshot {
+                        presence_available: available,
+                        presence_priority: priority,
+                        carbons_enabled: carbons,
+                        ..AccountResourceSnapshot::default()
+                    },
+                },
+            ];
+            for mutation in mutations {
+                let execution = account
+                    .execute(
+                        &jid,
+                        AccountResourceOperation::new(
+                            AccountResourceOperationId::fresh(),
+                            mutation,
+                        ),
+                    )
+                    .expect("the account accepts the operation");
+                assert!(
+                    matches!(
+                        execution,
+                        AccountResourceExecution::Applied(
+                            AccountResourceOperationOutcome::Committed { .. }
+                        )
+                    ),
+                    "case {index}: {execution:?}"
+                );
+            }
+        }
+
+        let mut resources = actor.ask(GetResources).await.expect("resources");
+        resources.sort();
+        assert_eq!(account.resources(), resources, "case {index}: resources");
+
+        let mut available = actor
+            .ask(GetAvailableResources)
+            .await
+            .expect("available resources");
+        available.sort();
+        assert_eq!(
+            account.available_resources(),
+            available,
+            "case {index}: available resources"
+        );
+
+        let mut routable = actor
+            .ask(SelectRoutableResources)
+            .await
+            .expect("routable resources");
+        routable.sort();
+        assert_eq!(
+            account.routable_resources(),
+            routable,
+            "case {index}: routable resources"
+        );
+
+        let routing: Vec<_> = actor
+            .ask(GetRoutingResources)
+            .await
+            .expect("routing snapshot")
+            .into_iter()
+            .map(|state| {
+                (
+                    state.jid,
+                    state.available,
+                    state.priority,
+                    state.carbons_enabled,
+                )
+            })
+            .collect();
+        let modelled: Vec<_> = account
+            .routing_snapshot()
+            .into_iter()
+            .map(|state| {
+                (
+                    state.jid,
+                    state.available,
+                    state.priority,
+                    state.carbons_enabled,
+                )
+            })
+            .collect();
+        assert_eq!(modelled, routing, "case {index}: routing snapshot");
+    }
+}

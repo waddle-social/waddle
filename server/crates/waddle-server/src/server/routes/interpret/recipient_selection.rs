@@ -90,11 +90,28 @@ pub(crate) async fn local_recipient_inventory(
     deps: &Deps<'_>,
     bare: &BareJid,
 ) -> Result<RecipientInventory, ()> {
-    let live = match deps.user_registry {
-        Some(registry) => waddle_xmpp::registry::routing_resources_for_user(registry, bare)
-            .await
-            .map_err(|_| ())?,
-        None => Vec::new(),
+    let selected = match deps.web_socket_state {
+        Some(state) => {
+            state
+                .deps
+                .app_state
+                .account_authority()
+                .routing_resources(bare)
+                .await
+        }
+        None => None,
+    };
+    let live = match selected {
+        // The coordinator is the selected authority. Its failure is a
+        // failed read; the registry is not written in this mode and must
+        // not answer instead.
+        Some(resources) => resources.map_err(|_| ())?,
+        None => match deps.user_registry {
+            Some(registry) => waddle_xmpp::registry::routing_resources_for_user(registry, bare)
+                .await
+                .map_err(|_| ())?,
+            None => Vec::new(),
+        },
     };
     let (detached, detached_carbons, detached_headlines) = match deps.sm_session_registry {
         Some(sm) => (

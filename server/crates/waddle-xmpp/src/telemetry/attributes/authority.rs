@@ -656,6 +656,106 @@ impl MetricAttribute for RemoteDispatchOutcome {
     }
 }
 
+/// `mutation` — which account-resource mutation a coordinator handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountMutationKind {
+    Bind,
+    PublishEndpoint,
+    RegisterActor,
+    UpdateSnapshot,
+    Detach,
+    SuccessfulResume,
+    BeginRetirement,
+    CompleteRetirement,
+    ReplaceClaim,
+    AdoptBinding,
+    /// Recording a one-time presentation.
+    MarkPresented,
+    /// Repair of a retirement whose endpoint evidence is overdue.
+    Repair,
+}
+
+impl AccountMutationKind {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 12] = [
+        Self::Bind,
+        Self::PublishEndpoint,
+        Self::RegisterActor,
+        Self::UpdateSnapshot,
+        Self::Detach,
+        Self::SuccessfulResume,
+        Self::BeginRetirement,
+        Self::CompleteRetirement,
+        Self::ReplaceClaim,
+        Self::AdoptBinding,
+        Self::MarkPresented,
+        Self::Repair,
+    ];
+}
+
+impl sealed::Sealed for AccountMutationKind {}
+impl MetricAttribute for AccountMutationKind {
+    fn key(&self) -> &'static str {
+        "mutation"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Bind => "bind",
+            Self::PublishEndpoint => "publish_endpoint",
+            Self::RegisterActor => "register_actor",
+            Self::UpdateSnapshot => "update_snapshot",
+            Self::Detach => "detach",
+            Self::SuccessfulResume => "successful_resume",
+            Self::BeginRetirement => "begin_retirement",
+            Self::CompleteRetirement => "complete_retirement",
+            Self::ReplaceClaim => "replace_claim",
+            Self::AdoptBinding => "adopt_binding",
+            Self::MarkPresented => "mark_presented",
+            Self::Repair => "repair",
+        }
+    }
+}
+
+/// `outcome` — how an account coordinator operation ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountOperationOutcome {
+    /// The operation committed now.
+    Committed,
+    /// The operation's recorded outcome was returned again.
+    Replayed,
+    /// The operation was refused by a fence or by the lifecycle.
+    Rejected,
+    /// The coordinator or its store could not decide the operation.
+    Failed,
+}
+
+impl AccountOperationOutcome {
+    /// Every value, for zero-registration and tests.
+    pub const ALL: [Self; 4] = [
+        Self::Committed,
+        Self::Replayed,
+        Self::Rejected,
+        Self::Failed,
+    ];
+}
+
+impl sealed::Sealed for AccountOperationOutcome {}
+impl MetricAttribute for AccountOperationOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::Replayed => "replayed",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -692,5 +792,7 @@ mod tests {
         distinct(&RelayOutcome::ALL);
         distinct(&SmEnableOutcome::ALL);
         distinct(&RemoteDispatchOutcome::ALL);
+        distinct(&AccountMutationKind::ALL);
+        distinct(&AccountOperationOutcome::ALL);
     }
 }

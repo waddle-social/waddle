@@ -1,7 +1,7 @@
-//! Shared identity evidence for the inactive P3 resource and SM models.
+//! Shared identity evidence for the P3 resource and SM models.
 //!
-//! None of these values grants authority. A future repository must validate
-//! the exact claim, lease and principal in the transaction that mutates data.
+//! None of these values grants authority. A repository validates the exact
+//! claim, lease and principal in the transaction that mutates data.
 
 use waddle_xmpp_core::OccupancySessionGeneration;
 

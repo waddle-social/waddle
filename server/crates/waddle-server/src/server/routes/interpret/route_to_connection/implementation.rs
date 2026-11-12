@@ -67,6 +67,26 @@ pub(in crate::server::routes::interpret::route_to_connection) async fn select_ba
     deps: &Deps<'_>,
     bare: &BareJid,
 ) -> Vec<jid::FullJid> {
+    if let Some(state) = deps.web_socket_state {
+        if let Some(targets) = state
+            .deps
+            .app_state
+            .account_authority()
+            .bare_jid_targets(bare)
+            .await
+        {
+            // The coordinator is the selected authority. A failed read
+            // degrades like a failed actor read: no live target, so the
+            // caller persists the stanza through its offline pass.
+            return targets.unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    "account coordinator did not answer bare-JID selection; no live target"
+                );
+                Vec::new()
+            });
+        }
+    }
     let Some(user_registry) = deps.user_registry else {
         return Vec::new();
     };

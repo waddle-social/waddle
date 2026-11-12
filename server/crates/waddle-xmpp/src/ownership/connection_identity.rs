@@ -32,6 +32,18 @@ impl NodeLeaseIdentity {
         })
     }
 
+    /// The node incarnation of a clustered identity, as the claim store
+    /// records it. A standalone process identity has none.
+    pub fn clustered_node(&self) -> Option<NodeIdentity> {
+        match &self.0 {
+            NodeLeaseIdentityKind::Clustered {
+                node_id,
+                node_epoch,
+            } => Some(NodeIdentity::new(node_id.clone(), node_epoch.clone())),
+            NodeLeaseIdentityKind::LocalProcess { .. } => None,
+        }
+    }
+
     /// Return the stable incarnation shared by connections in this standalone
     /// process. The value changes when the process restarts.
     pub fn local_process() -> Self {

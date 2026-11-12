@@ -37,15 +37,11 @@
 //!   [`in_process`]) construct one directly — exactly the loophole moving
 //!   the type down into `resume` closes.
 
-#[cfg(any(test, feature = "test-utils"))]
 pub mod account_coordinator;
-#[cfg(any(test, feature = "test-utils"))]
 pub mod account_resource_transition;
 mod connection_identity;
-#[cfg(any(test, feature = "test-utils"))]
 pub mod endpoint_transition;
 pub mod in_process;
-#[cfg(any(test, feature = "test-utils"))]
 pub mod joint_identity;
 mod observe;
 pub mod resume;

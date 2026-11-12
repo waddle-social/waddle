@@ -1,17 +1,23 @@
-//! Inactive, bounded model of one P3.2 account-resource slot.
+//! Bounded state machine of one P3.2 account-resource slot.
 //!
-//! This fixture assumes the supplied UserClaimIdentity was authorized by an
-//! external claim owner. It does not check claim authority, persist state,
-//! coordinate concurrent processes, or participate in production routing.
-//! Its synchronous &mut self transitions model a serialized compare-and-set
-//! history for tests only. Publication, registration, cleanup, and custody
-//! receipts are caller-supplied evidence and are checked for exact identity.
+//! The slot assumes the supplied UserClaimIdentity was authorized by an
+//! external claim owner. It does not check claim authority, perform I/O or
+//! coordinate concurrent processes: its synchronous &mut self transitions
+//! are a serialized compare-and-set history, and the caller that owns the
+//! slot provides the serialization. Publication, registration, cleanup, and
+//! custody receipts are caller-supplied evidence and are checked for exact
+//! identity.
+//!
+//! A slot's durable facts are its [`AccountResourceSlotImage`]. A store
+//! rebuilds a slot from its image, applies one operation and writes the new
+//! image back, so the transition rules exist once. The operation journal and
+//! the retained histories are bounded: the oldest entry is dropped when a
+//! full one takes another.
 //!
 //! A successful resume replaces the exact transport binding while preserving
 //! the resource snapshot and opaque SM session reference. A failed resume
 //! followed by a fresh bind on the same transport uses a distinct BindingRef.
-//! The snapshot and receipts are model data only; they do not define a
-//! production storage schema or wire protocol.
+//! The receipts do not define a wire protocol.
 
 use jid::FullJid;
 use minidom::element::Nodes;
@@ -23,7 +29,8 @@ use xmpp_parsers::presence::Show;
 use super::joint_identity::{InstallGeneration, ResourceLifetime, SmBinding};
 use super::{BindingRef, ConnectionRef, UserClaimIdentity};
 
-/// Maximum number of operation identities retained by one fixture slot.
+/// Maximum number of operation identities, and of each retained history, one
+/// slot keeps. The oldest entry is dropped to admit a new one.
 pub const ACCOUNT_RESOURCE_OPERATION_CAPACITY: usize = 64;
 /// Maximum number of presence extension payloads retained per snapshot.
 pub const ACCOUNT_RESOURCE_MAX_PRESENCE_PAYLOADS: usize = 64;
@@ -355,6 +362,10 @@ pub struct AccountResourceRevision(u64);
 impl AccountResourceRevision {
     pub const INITIAL: Self = Self(0);
 
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
     pub const fn value(self) -> u64 {
         self.0
     }
@@ -371,6 +382,14 @@ pub struct AccountResourceOperationId(Uuid);
 impl AccountResourceOperationId {
     pub fn fresh() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
     }
 }
 
@@ -890,6 +909,88 @@ pub enum AccountResourceMutation {
     },
 }
 
+impl AccountResourceMutation {
+    /// The claim identity the mutation acts under.
+    pub fn claim_identity(&self) -> &UserClaimIdentity {
+        self.fence().0
+    }
+
+    /// The slot revision the caller last saw.
+    pub fn expected_revision(&self) -> AccountResourceRevision {
+        self.fence().1
+    }
+
+    /// The binding the mutation acts for. A resume names the new binding.
+    pub fn binding_ref(&self) -> &BindingRef {
+        self.fence().2
+    }
+
+    fn fence(&self) -> (&UserClaimIdentity, AccountResourceRevision, &BindingRef) {
+        match self {
+            Self::Bind {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::PublishEndpoint {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::RegisterActor {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::UpdateSnapshot {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::Detach {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::BeginRetirement {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::CompleteRetirement {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::ReplaceClaim {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::AdoptBinding {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            }
+            | Self::SuccessfulResume {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                ..
+            } => (claim_identity, *expected_revision, binding_ref),
+        }
+    }
+}
+
 /// One identified mutation and its replay key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountResourceOperation {
@@ -921,7 +1022,6 @@ pub enum AccountResourceExecution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountResourceExecuteError {
     OperationIdConflict,
-    JournalFull,
     SnapshotTooLarge,
 }
 
@@ -967,7 +1067,65 @@ struct JournalEntry {
     outcome: AccountResourceOperationOutcome,
 }
 
-/// One serialized test fixture for a single exact full JID.
+/// Append to a retained history, dropping its oldest entry at capacity.
+fn push_bounded<T>(items: &mut Vec<T>, item: T) {
+    if items.len() >= ACCOUNT_RESOURCE_OPERATION_CAPACITY {
+        items.remove(0);
+    }
+    items.push(item);
+}
+
+/// The durable facts of a retirement that has started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountResourceRetirementImage {
+    pub starting_state: AccountResourceBindingState,
+    pub source_revision: AccountResourceRevision,
+    pub custody_disposition: BindingRetirementDisposition,
+}
+
+/// The durable facts of a slot's current binding. `published` and
+/// `registered` say whether the binding ever had an endpoint publication and
+/// an actor registration, which decides the evidence its retirement needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountResourceBindingImage {
+    pub binding_ref: BindingRef,
+    pub binding_claim_identity: UserClaimIdentity,
+    pub lifetime: ResourceLifetime,
+    pub state: AccountResourceBindingState,
+    pub published: bool,
+    pub registered: bool,
+    pub snapshot: AccountResourceSnapshot,
+    pub snapshot_revision: AccountResourceRevision,
+    pub detach_custody: Option<BindingRetirementDisposition>,
+    pub retirement: Option<AccountResourceRetirementImage>,
+}
+
+/// The durable facts of one slot: what a store writes for it and what
+/// [`AccountResourceSlot::restore`] rebuilds it from. The operation journal
+/// and the retained histories are not part of the image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountResourceSlotImage {
+    pub full_jid: FullJid,
+    pub claim_identity: UserClaimIdentity,
+    pub revision: AccountResourceRevision,
+    pub install_generation: InstallGeneration,
+    pub binding: Option<AccountResourceBindingImage>,
+}
+
+/// Why an image does not describe a slot this model can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AccountResourceRestoreError {
+    #[error("the image's claim or binding names a different account")]
+    AccountMismatch,
+    #[error("the image's binding is in a state that has no current binding")]
+    RetiredBinding,
+    #[error("the image's binding state lacks the facts that state requires")]
+    IncompleteBinding,
+    #[error("the image's snapshot exceeds the snapshot bounds")]
+    SnapshotTooLarge,
+}
+
+/// The state machine of a single exact full JID.
 #[derive(Debug)]
 pub struct AccountResourceSlot {
     full_jid: FullJid,
@@ -1009,6 +1167,135 @@ impl AccountResourceSlot {
             install_generation: InstallGeneration::INITIAL,
             journal: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
         })
+    }
+
+    /// Rebuild a slot from its durable facts. The receipts a live slot
+    /// collected from its callers are derived from the image: a publication
+    /// and a registration are evidence about the exact binding, so the image
+    /// needs only whether each happened. The journal starts empty, so an
+    /// operation recorded before the image was taken is resolved by the
+    /// store that holds the image, not by the rebuilt slot.
+    pub fn restore(image: AccountResourceSlotImage) -> Result<Self, AccountResourceRestoreError> {
+        let mut slot = Self::new(image.full_jid, image.claim_identity)
+            .map_err(|_| AccountResourceRestoreError::AccountMismatch)?;
+        slot.revision = image.revision;
+        slot.install_generation = image.install_generation;
+        let Some(binding) = image.binding else {
+            return Ok(slot);
+        };
+        if binding.binding_claim_identity.bare_jid() != &slot.full_jid.to_bare() {
+            return Err(AccountResourceRestoreError::AccountMismatch);
+        }
+        if !binding.snapshot.within_bounds() {
+            return Err(AccountResourceRestoreError::SnapshotTooLarge);
+        }
+        let source = BindingEvidence::for_binding(&binding.binding_ref);
+        let publication = binding
+            .published
+            .then(|| EndpointPublicationReceipt::observed(source.clone()));
+        let registration = binding.registered.then(|| {
+            ActorRegistrationReceipt::observed(
+                binding.binding_claim_identity.clone(),
+                source.clone(),
+            )
+        });
+        let complete = match binding.state {
+            AccountResourceBindingState::Prepared => !binding.published && !binding.registered,
+            AccountResourceBindingState::Published => binding.published && !binding.registered,
+            AccountResourceBindingState::Active => binding.published && binding.registered,
+            AccountResourceBindingState::Detached => {
+                binding.published
+                    && binding.registered
+                    && binding.detach_custody.is_some()
+                    && binding.snapshot.stream_management_ref.is_some()
+            }
+            AccountResourceBindingState::Retiring => binding.retirement.is_some(),
+            AccountResourceBindingState::Retired => {
+                return Err(AccountResourceRestoreError::RetiredBinding);
+            }
+        };
+        if !complete {
+            return Err(AccountResourceRestoreError::IncompleteBinding);
+        }
+        let detachment = match (binding.detach_custody, publication.as_ref()) {
+            (Some(custody_disposition), Some(publication)) => {
+                Some(AccountResourceDetachmentEvidence {
+                    endpoint: EndpointRetirementEvidence::Unpublished {
+                        publication: publication.clone(),
+                        removed: source.clone(),
+                    },
+                    custody_disposition,
+                })
+            }
+            _ => None,
+        };
+        let retirement_start =
+            binding
+                .retirement
+                .map(|retirement| AccountResourceRetirementStart {
+                    initiated_by: slot.claim_identity.clone(),
+                    source: source.clone(),
+                    starting_state: retirement.starting_state,
+                    source_revision: retirement.source_revision,
+                    snapshot_revision: binding.snapshot_revision,
+                    custody_disposition: retirement.custody_disposition,
+                });
+        slot.seen_binding_refs.push(binding.binding_ref.clone());
+        slot.seen_lifetimes.push(binding.lifetime);
+        slot.binding = Some(AccountResourceBindingReceipt {
+            source,
+            binding_claim_identity: binding.binding_claim_identity,
+            lifetime: binding.lifetime,
+            install_generation: image.install_generation,
+            state: binding.state,
+            snapshot: binding.snapshot,
+            snapshot_revision: binding.snapshot_revision,
+            publication,
+            registration,
+            detachment,
+            resumed_from: None,
+            retirement_start,
+            retirement: None,
+        });
+        Ok(slot)
+    }
+
+    /// The slot's durable facts as they stand.
+    pub fn image(&self) -> AccountResourceSlotImage {
+        AccountResourceSlotImage {
+            full_jid: self.full_jid.clone(),
+            claim_identity: self.claim_identity.clone(),
+            revision: self.revision,
+            install_generation: self.install_generation,
+            binding: self
+                .binding
+                .as_ref()
+                .map(|binding| AccountResourceBindingImage {
+                    binding_ref: binding.binding_ref().clone(),
+                    binding_claim_identity: binding.binding_claim_identity.clone(),
+                    lifetime: binding.lifetime,
+                    state: binding.state,
+                    published: binding.publication.is_some(),
+                    registered: binding.registration.is_some(),
+                    snapshot: binding.snapshot.clone(),
+                    snapshot_revision: binding.snapshot_revision,
+                    detach_custody: binding
+                        .detachment
+                        .as_ref()
+                        .map(|detachment| detachment.custody_disposition),
+                    retirement: binding.retirement_start.as_ref().map(|start| {
+                        AccountResourceRetirementImage {
+                            starting_state: start.starting_state,
+                            source_revision: start.source_revision,
+                            custody_disposition: start.custody_disposition,
+                        }
+                    }),
+                }),
+        }
+    }
+
+    pub fn install_generation(&self) -> InstallGeneration {
+        self.install_generation
     }
 
     pub fn full_jid(&self) -> &FullJid {
@@ -1110,10 +1397,6 @@ impl AccountResourceSlot {
             return Err(AccountResourceExecuteError::OperationIdConflict);
         }
 
-        if self.journal.len() == ACCOUNT_RESOURCE_OPERATION_CAPACITY {
-            return Err(AccountResourceExecuteError::JournalFull);
-        }
-
         if let AccountResourceMutation::UpdateSnapshot { snapshot, .. } = &operation.mutation {
             if !snapshot.within_bounds() {
                 return Err(AccountResourceExecuteError::SnapshotTooLarge);
@@ -1121,11 +1404,14 @@ impl AccountResourceSlot {
         }
 
         let outcome = self.apply(&operation.mutation);
-        self.journal.push(JournalEntry {
-            id: operation.id,
-            mutation: operation.mutation,
-            outcome,
-        });
+        push_bounded(
+            &mut self.journal,
+            JournalEntry {
+                id: operation.id,
+                mutation: operation.mutation,
+                outcome,
+            },
+        );
         Ok(AccountResourceExecution::Applied(outcome))
     }
 
@@ -1308,8 +1594,8 @@ impl AccountResourceSlot {
             retirement_start: None,
             retirement: None,
         });
-        self.seen_binding_refs.push(binding_ref.clone());
-        self.seen_lifetimes.push(lifetime);
+        push_bounded(&mut self.seen_binding_refs, binding_ref.clone());
+        push_bounded(&mut self.seen_lifetimes, lifetime);
         self.install_generation = install_generation;
         self.revision = revision;
         Ok(revision)
@@ -1531,7 +1817,7 @@ impl AccountResourceSlot {
             .ok_or(AccountResourceTransitionError::NotBound)?;
         retired.state = AccountResourceBindingState::Retired;
         retired.retirement = Some(evidence.clone());
-        self.retired_bindings.push(retired);
+        push_bounded(&mut self.retired_bindings, retired);
         self.revision = revision;
         Ok(revision)
     }
@@ -1632,8 +1918,10 @@ impl AccountResourceSlot {
         }
         let revision = self.next_revision()?;
 
-        self.retired_claim_identities
-            .push(self.claim_identity.clone());
+        push_bounded(
+            &mut self.retired_claim_identities,
+            self.claim_identity.clone(),
+        );
         self.claim_identity = replacement_claim_identity.clone();
         self.revision = revision;
         Ok(revision)
@@ -1753,8 +2041,8 @@ impl AccountResourceSlot {
             .binding
             .take()
             .ok_or(AccountResourceTransitionError::NotBound)?;
-        self.resumed_predecessors.push(predecessor);
-        self.successful_resumes.push(receipt.clone());
+        push_bounded(&mut self.resumed_predecessors, predecessor);
+        push_bounded(&mut self.successful_resumes, receipt.clone());
         self.binding = Some(AccountResourceBindingReceipt {
             source: BindingEvidence::for_binding(binding_ref),
             binding_claim_identity,
@@ -1770,7 +2058,7 @@ impl AccountResourceSlot {
             retirement_start: None,
             retirement: None,
         });
-        self.seen_binding_refs.push(binding_ref.clone());
+        push_bounded(&mut self.seen_binding_refs, binding_ref.clone());
         self.install_generation = install_generation;
         self.revision = revision;
         Ok(revision)
@@ -3751,7 +4039,7 @@ mod tests {
             Err(AccountResourceExecuteError::OperationIdConflict)
         );
 
-        let mut last_recorded = bind;
+        let mut last_recorded = bind.clone();
         while slot.journal.len() < ACCOUNT_RESOURCE_OPERATION_CAPACITY {
             last_recorded = operation(AccountResourceMutation::UpdateSnapshot {
                 claim_identity: claim_identity.clone(),
@@ -3769,21 +4057,31 @@ mod tests {
             );
         }
         let at_capacity = slot.revision();
-        let refused = operation(AccountResourceMutation::Bind {
+        let admitted = operation(AccountResourceMutation::Bind {
             claim_identity,
             expected_revision: at_capacity,
             binding_ref: binding(local_connection()),
             lifetime: ResourceLifetime::fresh(),
         });
         assert_eq!(
-            slot.execute(refused.clone()),
-            Err(AccountResourceExecuteError::JournalFull)
+            slot.execute(admitted.clone()),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::AlreadyBound,
+                ),
+            ))
         );
         assert_eq!(slot.revision(), at_capacity);
+        assert_eq!(slot.journal.len(), ACCOUNT_RESOURCE_OPERATION_CAPACITY);
         assert_eq!(
-            slot.lookup(&refused),
-            AccountResourceOperationLookup::Unknown
+            slot.lookup(&bind),
+            AccountResourceOperationLookup::Unknown,
+            "the oldest journal entry makes room for the newest"
         );
+        assert!(matches!(
+            slot.lookup(&admitted),
+            AccountResourceOperationLookup::Recorded(_)
+        ));
         assert!(matches!(
             slot.execute(last_recorded).expect("replay retained result"),
             AccountResourceExecution::Replayed(AccountResourceOperationOutcome::Rejected(
