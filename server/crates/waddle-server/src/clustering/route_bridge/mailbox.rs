@@ -6,16 +6,31 @@
 //! pass examines a bounded number of lanes and works a bounded number at a
 //! time, so a backlog cannot occupy more than that many ingress connections.
 //!
-//! Working a lane means running the owner's ordinary relayed-groupchat commit
-//! for its head entry, rebuilt from canonical rows. That commit asserts the
-//! room claim and records the decision; the poller itself decides nothing.
+//! Working a lane depends on what its head entry carries. A room acceptance
+//! runs the owner's ordinary relayed-groupchat commit, rebuilt from canonical
+//! rows; that commit asserts the room claim and records the decision. A room
+//! request (join, presence update, leave or relayed IQ) runs the owner's
+//! handler for the stored stanza and then one transaction that asserts the
+//! room claim, latches the decision, freezes the handler's reply as the
+//! response, writes durable occupancy and moves the lane's cursor.
+//!
+//! Before this node decides any entry of a room under a claim it has not
+//! served yet, it loads the room's durable occupancy and seats it in the
+//! room actor. Lanes of a room whose claim moved here are adopted only after
+//! that load.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use jid::BareJid;
+use waddle_xmpp::ingress::mailbox::{MailboxOperationKey, MailboxOwnerDecision, RoomRequestKind};
+use waddle_xmpp::muc::room_actor::{RecoveredOccupant, SeedRecoveredOccupants};
+use waddle_xmpp::muc::room_registry_actor::GetOrRestoreDurableRoom;
 use waddle_xmpp::ownership::NodeIdentity;
 use waddle_xmpp::telemetry::attributes::MailboxDeliveryOutcome;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::{Affiliation, Role};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 use super::delivery::deliver_reserved_muc_proxy;
 use super::{
@@ -27,7 +42,11 @@ use crate::ingress::mailbox_worker::{
     MAILBOX_UNCONSUMED_GRACE,
 };
 use crate::ingress::origin_gate::MailboxHintSink;
-use crate::ingress_uow::MailboxLaneId;
+use crate::ingress::room_request::{ClaimedRoomRequest, RoomOccupancyChange, RoomRequestOutcome};
+use crate::ingress_uow::{MailboxLaneId, RoomOccupantLookup, StoredRoomRequest};
+use crate::server::routes::websocket::handlers::presence::room_request::{
+    presence_request_refused, room_request_error,
+};
 
 /// How long the poller waits for a hint before it scans anyway.
 const MAILBOX_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -41,6 +60,8 @@ const MAILBOX_SWEEP_PASSES: u32 = 30;
 const MAILBOX_LANE_DRAIN_LIMIT: u32 = 64;
 /// Budget of one hint. A hint that does not arrive is not retried.
 const MAILBOX_HINT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Budget of restoring a room and seating its recovered occupants.
+const OCCUPANCY_SEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl OrderedRelayDeliveryBridge {
     /// Wake this node's mailbox poller. Called when a peer's hint arrives.
@@ -118,7 +139,11 @@ async fn adopt_once(
     let authority = mailbox_authority(services)?;
     let target = services.node_identity.current();
     match authority
-        .adopt_transferred_lanes(&target, resume_after)
+        .adopt_transferred_lanes(&target, resume_after, |room| {
+            let authority = Arc::clone(&authority);
+            let target = target.clone();
+            async move { seat_room_occupancy(services, &authority, &room, &target).await }
+        })
         .await
     {
         Ok(adoption) => {
@@ -215,28 +240,15 @@ async fn work_lane(
             Ok(MailboxLaneHead::Idle) => return,
             Ok(MailboxLaneHead::DeadLettered) => MailboxDeliveryOutcome::DeadLettered,
             Ok(MailboxLaneHead::Ready(claimed)) => {
-                if accept(services, &claimed).await {
-                    authority.deliver_owner_obligations(claimed.operation).await;
-                    MailboxDeliveryOutcome::Decided
-                } else {
-                    match authority
-                        .record_room_acceptance_failure(claimed.lane, claimed.operation, target)
-                        .await
-                    {
-                        Ok(MailboxAttemptRecord::DeadLettered) => {
-                            MailboxDeliveryOutcome::DeadLettered
-                        }
-                        // The commit landed although the attempt did not
-                        // finish; its effects were not executed here.
-                        Ok(MailboxAttemptRecord::Settled) => {
-                            authority.deliver_owner_obligations(claimed.operation).await;
-                            MailboxDeliveryOutcome::Decided
-                        }
-                        Ok(MailboxAttemptRecord::Deferred { .. }) | Err(_) => {
-                            MailboxDeliveryOutcome::Retried
-                        }
-                    }
-                }
+                let decided = seat_room_occupancy(services, authority, &claimed.room, target).await
+                    && accept(services, &claimed).await;
+                record_attempt(authority, claimed.lane, claimed.operation, target, decided).await
+            }
+            Ok(MailboxLaneHead::ReadyRequest(claimed)) => {
+                let decided =
+                    seat_room_occupancy(services, authority, &claimed.request.room, target).await
+                        && decide_request(services, authority, &claimed, target).await;
+                record_attempt(authority, claimed.lane, claimed.operation, target, decided).await
             }
             Err(error) => {
                 tracing::warn!(%error, "mailbox poller could not read a lane head");
@@ -247,6 +259,357 @@ async fn work_lane(
         if outcome != MailboxDeliveryOutcome::Decided {
             return;
         }
+    }
+}
+
+/// Record how an attempt at a lane head ended. A decided entry has its
+/// owner obligations delivered; a failed attempt is counted and deferred, or
+/// parked for an operator once its retry budget is spent.
+async fn record_attempt(
+    authority: &Arc<crate::ingress::IngressAuthority>,
+    lane: MailboxLaneId,
+    operation: MailboxOperationKey,
+    target: &NodeIdentity,
+    decided: bool,
+) -> MailboxDeliveryOutcome {
+    if decided {
+        authority.deliver_owner_obligations(operation).await;
+        return MailboxDeliveryOutcome::Decided;
+    }
+    match authority
+        .record_room_acceptance_failure(lane, operation, target)
+        .await
+    {
+        Ok(MailboxAttemptRecord::DeadLettered) => MailboxDeliveryOutcome::DeadLettered,
+        // The commit landed although the attempt did not finish; its
+        // effects were not executed here.
+        Ok(MailboxAttemptRecord::Settled) => {
+            authority.deliver_owner_obligations(operation).await;
+            MailboxDeliveryOutcome::Decided
+        }
+        Ok(MailboxAttemptRecord::Deferred { .. }) | Err(_) => MailboxDeliveryOutcome::Retried,
+    }
+}
+
+/// Seat `room`'s durable occupancy in this node's room actor, once per room
+/// claim. `true` when the room is seated under its current claim, which
+/// `target` must hold.
+///
+/// A node that took a room's claim has an actor without the occupants its
+/// predecessor held in memory. The rows restore membership, nick, role and
+/// affiliation. Voice requests, pending mediated invitations, call and Muji
+/// session state and rate-limit state are not stored and stay empty, so work
+/// that depends on them is answered as for unknown state. A row that cannot
+/// be parsed is not seated; its occupant's requests are refused until it
+/// joins again.
+async fn seat_room_occupancy(
+    services: &Arc<OrderedRelayDeliveryServices>,
+    authority: &Arc<crate::ingress::IngressAuthority>,
+    room: &BareJid,
+    target: &NodeIdentity,
+) -> bool {
+    let (load, claim) = match authority.load_room_occupancy(room).await {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            tracing::warn!(%error, room = %room, "durable room occupancy not loaded");
+            return false;
+        }
+    };
+    let Some((owner, epoch)) = claim else {
+        return false;
+    };
+    if owner != *target {
+        return false;
+    }
+    if authority.open_room_requests().room_seeded(room, epoch) {
+        return true;
+    }
+    if load.unparseable > 0 {
+        tracing::warn!(
+            room = %room,
+            unparseable = load.unparseable,
+            "durable occupancy rows that cannot be parsed were not seated"
+        );
+    }
+    if !load.seated.is_empty() {
+        let Some(state) = services.web_socket_state.upgrade() else {
+            return false;
+        };
+        let restored = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetOrRestoreDurableRoom {
+                room_jid: room.clone(),
+            })
+            .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+            .await;
+        let actor = match restored {
+            Ok(Some(actor)) => actor,
+            // The room has no durable lifecycle: there is no actor to seat
+            // and nothing an entry could be decided against.
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%error, room = %room, "room not restored for occupancy seating");
+                return false;
+            }
+        };
+        let occupants = load
+            .seated
+            .into_iter()
+            .map(|record| RecoveredOccupant {
+                real_jid: record.occupant,
+                nick: record.nick,
+                role: record.role,
+                affiliation: record.affiliation,
+                session: record.generation,
+            })
+            .collect();
+        match actor
+            .ask(SeedRecoveredOccupants { occupants })
+            .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+            .await
+        {
+            Ok(seated) => {
+                tracing::info!(room = %room, seated, "seated recovered room occupants");
+            }
+            Err(error) => {
+                tracing::warn!(%error, room = %room, "recovered room occupants not seated");
+                return false;
+            }
+        }
+    }
+    authority
+        .open_room_requests()
+        .mark_room_seeded(room.clone(), epoch);
+    true
+}
+
+/// The role and affiliation the room gave the requester, read from the
+/// self-presence among `responses`, with that presence.
+fn seated_as(
+    responses: &[Stanza],
+) -> Option<(String, Role, Affiliation, xmpp_parsers::presence::Presence)> {
+    use xmpp_parsers::muc::user::{
+        Affiliation as WireAffiliation, MucUser, Role as WireRole, Status,
+    };
+    responses.iter().find_map(|stanza| {
+        let Stanza::Presence(presence) = stanza else {
+            return None;
+        };
+        let user = presence
+            .payloads
+            .iter()
+            .find_map(|payload| MucUser::try_from(payload.clone()).ok())?;
+        if !user.status.contains(&Status::SelfPresence) {
+            return None;
+        }
+        let item = user.items.first()?;
+        let nick = presence.from.as_ref()?.resource()?.as_str().to_owned();
+        let role = match item.role {
+            WireRole::Moderator => Role::Moderator,
+            WireRole::Participant => Role::Participant,
+            WireRole::Visitor => Role::Visitor,
+            WireRole::None => Role::None,
+        };
+        let affiliation = match item.affiliation {
+            WireAffiliation::Owner => Affiliation::Owner,
+            WireAffiliation::Admin => Affiliation::Admin,
+            WireAffiliation::Member => Affiliation::Member,
+            WireAffiliation::Outcast => Affiliation::Outcast,
+            WireAffiliation::None => Affiliation::None,
+        };
+        Some((nick, role, affiliation, presence.clone()))
+    })
+}
+
+/// The owner's refusal of a request whose requester has an occupancy row
+/// that cannot be parsed: the occupant is not seated and must join again.
+fn refuse_unseated(request: &StoredRoomRequest) -> RoomRequestOutcome {
+    RoomRequestOutcome {
+        decision: MailboxOwnerDecision::Rejected,
+        responses: room_request_error(
+            &request.stanza,
+            &request.room,
+            &request.occupant,
+            ErrorType::Modify,
+            DefinedCondition::NotAcceptable,
+        ),
+        occupancy: RoomOccupancyChange::Unchanged,
+    }
+}
+
+/// Run one room request against this node's room and decide it. `true`
+/// when the decision committed.
+///
+/// The stored stanza goes through the handler the ordered relay uses for the
+/// same kind, so the room actor stays the single writer of room state and
+/// produces the reply in the order the requester must receive it: for a
+/// join, the other occupants' presence, the self-presence with its status
+/// codes, history and the subject. That reply is frozen as the response.
+/// Presence to the other occupants is fanned out by the handler itself and
+/// is not part of the response.
+///
+/// A presence update or leave whose generation is not the one seated for
+/// the full JID comes from an earlier connection: it is accepted without
+/// running the handler and answered with nothing.
+async fn decide_request(
+    services: &Arc<OrderedRelayDeliveryServices>,
+    authority: &Arc<crate::ingress::IngressAuthority>,
+    claimed: &ClaimedRoomRequest,
+    target: &NodeIdentity,
+) -> bool {
+    let request = &claimed.request;
+    let occupancy = match authority.room_request_occupancy(request).await {
+        Ok(occupancy) => occupancy,
+        Err(error) => {
+            tracing::warn!(%error, "room request occupancy not read");
+            return false;
+        }
+    };
+    let stale = matches!(
+        (&occupancy, request.kind),
+        (RoomOccupantLookup::Seated(row), RoomRequestKind::Presence | RoomRequestKind::Leave)
+            if row.generation != request.generation
+    );
+    let unseated = matches!(occupancy, RoomOccupantLookup::Unparseable)
+        && request.kind != RoomRequestKind::Join;
+    let outcome = if stale {
+        RoomRequestOutcome {
+            decision: MailboxOwnerDecision::Accepted,
+            responses: Vec::new(),
+            occupancy: RoomOccupancyChange::Unchanged,
+        }
+    } else if unseated {
+        refuse_unseated(request)
+    } else {
+        let kind = match request.kind {
+            RoomRequestKind::Join => OrderedRelayMucProxyKind::JoinPresence,
+            RoomRequestKind::Presence | RoomRequestKind::Leave => {
+                OrderedRelayMucProxyKind::OccupantPresence
+            }
+            RoomRequestKind::Iq => OrderedRelayMucProxyKind::MujiJingleIq,
+        };
+        let mut completion = None;
+        let frames = match deliver_reserved_muc_proxy(
+            services,
+            &request.room,
+            kind,
+            MucProxyOrigin::Connection(request.generation),
+            &request.stanza,
+            None,
+            &mut completion,
+        )
+        .await
+        {
+            Ok(frames) => frames,
+            Err(reason) => {
+                tracing::warn!(?reason, room = %request.room, "room request handler did not finish");
+                return false;
+            }
+        };
+        let responses: Vec<Stanza> = frames.into_iter().map(|frame| frame.stanza.0).collect();
+        outcome_of(request, &occupancy, responses)
+    };
+    #[cfg(feature = "test-support")]
+    crate::clustering::acceptance_seams::hold_owner_request(
+        crate::clustering::acceptance_seams::OwnerAcceptancePoint::BeforeCommit,
+        &request.stanza,
+    )
+    .await;
+    let decided = authority
+        .decide_room_request(claimed, target, outcome)
+        .await;
+    #[cfg(feature = "test-support")]
+    if decided.is_ok() {
+        crate::clustering::acceptance_seams::hold_owner_request(
+            crate::clustering::acceptance_seams::OwnerAcceptancePoint::AfterCommit,
+            &request.stanza,
+        )
+        .await;
+    }
+    match decided {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(%error, room = %request.room, "room request decision not committed");
+            false
+        }
+    }
+}
+
+/// The decision and occupancy change a handler's reply stands for.
+fn outcome_of(
+    request: &StoredRoomRequest,
+    occupancy: &RoomOccupantLookup,
+    responses: Vec<Stanza>,
+) -> RoomRequestOutcome {
+    let refused = match request.kind {
+        RoomRequestKind::Join | RoomRequestKind::Presence | RoomRequestKind::Leave => {
+            presence_request_refused(&responses)
+        }
+        RoomRequestKind::Iq => responses.iter().any(|stanza| {
+            matches!(stanza, Stanza::Iq(iq)
+                if matches!(**iq, xmpp_parsers::iq::Iq::Error { .. }))
+        }),
+    };
+    if refused {
+        return RoomRequestOutcome {
+            decision: MailboxOwnerDecision::Rejected,
+            responses,
+            occupancy: RoomOccupancyChange::Unchanged,
+        };
+    }
+    let requested_nick = match &request.stanza {
+        Stanza::Presence(presence) => presence
+            .to
+            .as_ref()
+            .and_then(|to| to.resource())
+            .map(|resource| resource.as_str().to_owned()),
+        Stanza::Message(_) | Stanza::Iq(_) => None,
+    };
+    let change = match request.kind {
+        RoomRequestKind::Iq => RoomOccupancyChange::Unchanged,
+        RoomRequestKind::Leave => RoomOccupancyChange::Remove,
+        RoomRequestKind::Join => match (seated_as(&responses), requested_nick) {
+            (Some((nick, role, affiliation, presence)), _) => RoomOccupancyChange::Seat {
+                nick,
+                role,
+                affiliation,
+                presence: Some(presence),
+            },
+            // The room accepted the join without a self-presence to read
+            // the grant from; seat the requester as an unaffiliated
+            // participant, the least a seated occupant can be.
+            (None, Some(nick)) => RoomOccupancyChange::Seat {
+                nick,
+                role: Role::Participant,
+                affiliation: Affiliation::None,
+                presence: None,
+            },
+            (None, None) => RoomOccupancyChange::Unchanged,
+        },
+        RoomRequestKind::Presence => match (seated_as(&responses), occupancy) {
+            (Some((nick, role, affiliation, presence)), _) => RoomOccupancyChange::Update {
+                nick,
+                role,
+                affiliation,
+                presence: Some(presence),
+            },
+            (None, RoomOccupantLookup::Seated(row)) => RoomOccupancyChange::Update {
+                nick: row.nick.clone(),
+                role: row.role,
+                affiliation: row.affiliation,
+                presence: row.presence.clone(),
+            },
+            (None, RoomOccupantLookup::Absent | RoomOccupantLookup::Unparseable) => {
+                RoomOccupancyChange::Unchanged
+            }
+        },
+    };
+    RoomRequestOutcome {
+        decision: MailboxOwnerDecision::Accepted,
+        responses,
+        occupancy: change,
     }
 }
 

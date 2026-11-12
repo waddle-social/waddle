@@ -4,8 +4,8 @@
 //! mailbox write always sits behind the typed ingress entry and its epoch
 //! proof. Nothing here opens a transaction or waits on the network.
 //!
-//! Lock order inside one transaction is lane, then canonical message, then
-//! entry. [`MailboxRepository::lock_lane`] and
+//! Lock order inside one transaction is lane, then the entry's parent (its
+//! canonical message, or its room request), then entry. [`MailboxRepository::lock_lane`] and
 //! [`MailboxRepository::lock_lane_for_target`] take the lane row first and
 //! hand back a [`LockedMailboxLane`]; the operations that touch an entry
 //! require that value. Message garbage collection takes the canonical
@@ -22,13 +22,14 @@ use waddle_xmpp::ingress::mailbox::{
     MailboxDispositionChange, MailboxDispositionError, MailboxEntryDisposition, MailboxEntryEvent,
     MailboxLaneCodecError, MailboxLaneDigest, MailboxLaneDigestCollision, MailboxLaneEncoding,
     MailboxLaneFence, MailboxLaneIdentity, MailboxLaneKey, MailboxLaneSequence,
-    MailboxLaneSequenceError, MailboxOperationKey, MailboxOwnerDecision, MailboxPendingLoad,
-    StaleMailboxLaneFence,
+    MailboxLaneSequenceError, MailboxOperationKey, MailboxOperationParent, MailboxOwnerDecision,
+    MailboxPendingLoad, RoomRequestKey, RoomRequestKind, StaleMailboxLaneFence,
 };
 use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
 
 use super::repositories::CanonicalMessageRepository;
+use super::room_requests::RoomRequestRepository;
 use super::{IngressUowError, IngressUowTransaction};
 use crate::db::{DatabaseDriver, Transaction};
 use crate::ingress_substrate::{
@@ -67,7 +68,7 @@ pub enum MailboxError {
     EntryMissing,
     #[error("mailbox entry belongs to another lane than the one locked")]
     LaneMismatch,
-    #[error("mailbox entry's canonical message is missing")]
+    #[error("mailbox entry's canonical message or room request is missing")]
     ParentMissing,
     #[error("mailbox entry is dead-lettered and awaits operator repair")]
     DeadLettered,
@@ -235,13 +236,31 @@ const LANE_COLUMNS: &str = "lane_id::text, digest_version::int, digest, encoding
     last_sequence::text, last_dispositioned::text, origin_epoch, target_epoch, \
     target_node_id, target_node_epoch";
 const ENTRY_COLUMNS: &str = "lane_id::text, sequence::text, operation_kind::int, \
-    message_key::text, disposition::int, attempt_count, dead_letter_reason::int";
+    message_key::text, disposition::int, attempt_count, dead_letter_reason::int, \
+    request_key::text";
 
 const OPERATION_ROOM_ACCEPTANCE: i32 = 1;
+const OPERATION_ROOM_JOIN: i32 = 2;
+const OPERATION_ROOM_PRESENCE: i32 = 3;
+const OPERATION_ROOM_LEAVE: i32 = 4;
+const OPERATION_ROOM_IQ: i32 = 5;
 
 fn operation_kind(operation: &MailboxOperationKey) -> i32 {
     match operation {
         MailboxOperationKey::RoomAcceptance(_) => OPERATION_ROOM_ACCEPTANCE,
+        MailboxOperationKey::RoomJoin(_) => OPERATION_ROOM_JOIN,
+        MailboxOperationKey::RoomPresence(_) => OPERATION_ROOM_PRESENCE,
+        MailboxOperationKey::RoomLeave(_) => OPERATION_ROOM_LEAVE,
+        MailboxOperationKey::RoomIq(_) => OPERATION_ROOM_IQ,
+    }
+}
+
+/// The parent column an operation's entry is found by, with the key stored
+/// in it. Exactly one parent column of an entry is set.
+fn parent_column(operation: &MailboxOperationKey) -> (&'static str, String) {
+    match operation.parent() {
+        MailboxOperationParent::Message(key) => ("message_key", key.to_storage().to_string()),
+        MailboxOperationParent::Request(key) => ("request_key", key.to_storage().to_string()),
     }
 }
 
@@ -296,16 +315,34 @@ fn decode_entry(row: &crate::db::Row) -> Result<StoredMailboxEntry, IngressUowEr
     let lane: String = row.get(0)?;
     let sequence: String = row.get(1)?;
     let kind: i32 = row.get(2)?;
-    let message_key: String = row.get(3)?;
+    let message_key: Option<String> = row.get(3)?;
     let disposition: i32 = row.get(4)?;
     let attempts: i32 = row.get(5)?;
     let dead_letter: Option<i32> = row.get(6)?;
-    let message_key = message_key
-        .parse::<Uuid>()
-        .map(MessageKey::from_storage)
-        .map_err(|_| MailboxError::InvalidStored)?;
-    let operation = match kind {
-        OPERATION_ROOM_ACCEPTANCE => MailboxOperationKey::RoomAcceptance(message_key),
+    let request_key: Option<String> = row.get(7)?;
+    let parse = |value: String| {
+        value
+            .parse::<Uuid>()
+            .map_err(|_| MailboxError::InvalidStored)
+    };
+    let request_kind = match kind {
+        OPERATION_ROOM_ACCEPTANCE => None,
+        OPERATION_ROOM_JOIN => Some(RoomRequestKind::Join),
+        OPERATION_ROOM_PRESENCE => Some(RoomRequestKind::Presence),
+        OPERATION_ROOM_LEAVE => Some(RoomRequestKind::Leave),
+        OPERATION_ROOM_IQ => Some(RoomRequestKind::Iq),
+        _ => return Err(MailboxError::InvalidStored.into()),
+    };
+    // The operation kind decides which parent the entry has; a row with the
+    // other parent, both or neither is malformed.
+    let operation = match (request_kind, message_key, request_key) {
+        (None, Some(message_key), None) => {
+            MailboxOperationKey::RoomAcceptance(MessageKey::from_storage(parse(message_key)?))
+        }
+        (Some(request_kind), None, Some(request_key)) => MailboxOperationKey::for_request(
+            request_kind,
+            RoomRequestKey::from_storage(parse(request_key)?),
+        ),
         _ => return Err(MailboxError::InvalidStored.into()),
     };
     Ok(StoredMailboxEntry {
@@ -630,17 +667,15 @@ impl MailboxRepository {
         for_update: bool,
     ) -> Result<Option<StoredMailboxEntry>, IngressUowError> {
         let suffix = if for_update { " FOR UPDATE" } else { "" };
+        let (column, parent) = parent_column(&operation);
         let mut rows = tx
             .query(
                 &format!(
                     "SELECT {ENTRY_COLUMNS} FROM {} \
-                     WHERE message_key = ?::uuid AND operation_kind = ?::smallint{suffix}",
+                     WHERE {column} = ?::uuid AND operation_kind = ?::smallint{suffix}",
                     relations.entries
                 ),
-                crate::db_params![
-                    operation.message_key().to_storage().to_string(),
-                    operation_kind(&operation),
-                ],
+                crate::db_params![parent, operation_kind(&operation)],
             )
             .await?;
         let Some(row) = rows.next().await? else {
@@ -680,11 +715,27 @@ impl MailboxRepository {
         })
     }
 
+    /// Lock the durable parent of `operation`: its canonical message or its
+    /// room request. `false` when the parent is gone.
+    async fn lock_parent(
+        transaction: &mut IngressUowTransaction<'_>,
+        operation: MailboxOperationKey,
+    ) -> Result<bool, IngressUowError> {
+        match operation.parent() {
+            MailboxOperationParent::Message(key) => {
+                CanonicalMessageRepository::lock(transaction, key).await
+            }
+            MailboxOperationParent::Request(key) => {
+                RoomRequestRepository::lock_parent(transaction, key).await
+            }
+        }
+    }
+
     /// Append `operation` to the locked lane.
     ///
-    /// The canonical message is locked before the operation is looked up, so
-    /// two appenders holding different lanes serialize on the message and at
-    /// most one allocates. An operation that already has an entry returns it
+    /// The operation's parent (its canonical message or room request) is
+    /// locked before the operation is looked up, so two appenders holding
+    /// different lanes serialize on the parent and at most one allocates. An operation that already has an entry returns it
     /// unchanged, on whichever lane it was first appended. Admission is
     /// checked before the counter moves; a refused append changes nothing.
     pub async fn append(
@@ -694,7 +745,7 @@ impl MailboxRepository {
         limits: &MailboxAdmissionLimits,
     ) -> Result<MailboxAppendOutcome, IngressUowError> {
         Self::assert_locked_here(transaction, lane)?;
-        if !CanonicalMessageRepository::lock(transaction, operation.message_key()).await? {
+        if !Self::lock_parent(transaction, operation).await? {
             return Err(MailboxError::ParentMissing.into());
         }
         let load = Self::pending_load(transaction, lane).await?;
@@ -722,9 +773,10 @@ impl MailboxRepository {
         if moved != 1 {
             return Err(MailboxError::CounterConflict.into());
         }
+        let (column, parent) = parent_column(&operation);
         tx.execute(
             &format!(
-                "INSERT INTO {} (lane_id, sequence, operation_kind, message_key) \
+                "INSERT INTO {} (lane_id, sequence, operation_kind, {column}) \
                  VALUES (?::uuid, ?::numeric, ?::smallint, ?::uuid)",
                 relations.entries
             ),
@@ -732,7 +784,7 @@ impl MailboxRepository {
                 lane.id.to_storage(),
                 next.to_storage(),
                 operation_kind(&operation),
-                operation.message_key().to_storage().to_string(),
+                parent,
             ],
         )
         .await?;
@@ -747,15 +799,14 @@ impl MailboxRepository {
         }))
     }
 
-    /// Lock the entry of `operation` on the locked lane, after its canonical
-    /// message.
+    /// Lock the entry of `operation` on the locked lane, after its parent.
     async fn lock_entry(
         transaction: &mut IngressUowTransaction<'_>,
         lane: &LockedMailboxLane,
         operation: MailboxOperationKey,
     ) -> Result<StoredMailboxEntry, IngressUowError> {
         Self::assert_locked_here(transaction, lane)?;
-        if !CanonicalMessageRepository::lock(transaction, operation.message_key()).await? {
+        if !Self::lock_parent(transaction, operation).await? {
             return Err(MailboxError::ParentMissing.into());
         }
         let (tx, prepared) = transaction.prepared_parts();
@@ -1051,9 +1102,13 @@ impl MailboxRepository {
         }
     }
 
-    /// Decided entries their origin has not consumed, appended at least
-    /// `older_than` ago, in message-key order after `after`, at most `limit`.
-    /// The read takes no lock.
+    /// Decided room acceptances their origin has not consumed, appended at
+    /// least `older_than` ago, in message-key order after `after`, at most
+    /// `limit`. The read takes no lock.
+    ///
+    /// Entries of room requests are not returned: a decided request is
+    /// consumed only by the connection that sent it, because consuming it
+    /// hands over its response.
     pub async fn scan_unconsumed_decisions(
         transaction: &mut IngressUowTransaction<'_>,
         older_than: std::time::Duration,
@@ -1068,7 +1123,7 @@ impl MailboxRepository {
             .query(
                 &format!(
                     "SELECT {ENTRY_COLUMNS} FROM {} \
-                     WHERE disposition IN (1, 2) \
+                     WHERE disposition IN (1, 2) AND message_key IS NOT NULL \
                        AND appended_at <= now() - (?::bigint * interval '1 millisecond') \
                        AND (?::uuid IS NULL OR message_key > ?::uuid) \
                      ORDER BY message_key LIMIT ?",

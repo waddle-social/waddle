@@ -243,7 +243,14 @@ async fn handle_sans_io_iq_with_relay_override(
                         Some(outcome) => outcome,
                         None => {
                             relay_muji_to_room_owner(
-                                state, conn_state, full_jid, iq, &room_jid, reply,
+                                state,
+                                conn_state,
+                                full_jid,
+                                iq,
+                                &room_jid,
+                                reply,
+                                authenticated_session
+                                    .and_then(|session| session.authenticated_principal_ref().ok()),
                             )
                             .await
                         }
@@ -652,6 +659,7 @@ async fn relay_muji_to_room_owner(
     iq: &xmpp_parsers::iq::Iq,
     room_jid: &jid::BareJid,
     reply: IqReplyAddressing<'_>,
+    principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
 ) -> MujiRelayOutcome {
     use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
     use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
@@ -867,6 +875,34 @@ async fn relay_muji_to_room_owner(
         | xmpp_parsers::iq::Iq::Error { from, .. } => *from = stamped_from,
     }
     let stanza = waddle_xmpp::Stanza::Iq(Box::new(relayed));
+    // With the mailbox carrying room traffic, the signalling is a room
+    // request on the room's Muji lane and the relay is not used for it. The
+    // owner's frozen response is the IQ result or error followed by any
+    // server-initiated `session-accept`.
+    if let crate::server::routes::websocket::handlers::presence::room_request::RoomRequestRoute::Answered(
+        replies,
+    ) = crate::server::routes::websocket::handlers::presence::room_request::route_room_request(
+        state,
+        principal,
+        waddle_xmpp::ingress::mailbox::RoomRequestKind::Iq,
+        room_jid,
+        full_jid,
+        *conn_state.occupancy_session,
+        stanza.clone(),
+    )
+    .await
+    {
+        if replies.is_empty() {
+            unrelayable_after_relay_failure("delivered_without_replies");
+            return unrelayable(true, &|| relay_uncertain("delivered_without_replies"));
+        }
+        return MujiRelayOutcome::Frames(
+            replies
+                .iter()
+                .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
+                .collect(),
+        );
+    }
     match addressing
         .room(room_jid)
         .command(crate::clustering::addressing::RoomCommand {
@@ -959,6 +995,7 @@ async fn relay_muji_to_room_owner(
     iq: &xmpp_parsers::iq::Iq,
     room_jid: &jid::BareJid,
     reply: IqReplyAddressing<'_>,
+    _principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
 ) -> MujiRelayOutcome {
     if super::jingle_muji_gate::muji_session_terminate_room(iq).is_some() {
         return MujiRelayOutcome::ProcessLocally {
@@ -1770,6 +1807,7 @@ mod tests {
                 response_from: Some("calls.example.com"),
                 response_to: Some("alice@example.com/web"),
             },
+            None,
         )
         .await;
         assert!(matches!(outcome, super::MujiRelayOutcome::Frames(_)));
@@ -1826,6 +1864,7 @@ mod tests {
                 response_from: Some("calls.example.com"),
                 response_to: Some("alice@example.com/web"),
             },
+            None,
         )
         .await;
 

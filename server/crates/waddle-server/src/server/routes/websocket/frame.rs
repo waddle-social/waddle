@@ -1554,6 +1554,28 @@ async fn dispatch_authoritative_message(
         client_room_origin,
         backstop,
     } = request;
+    // A groupchat stanza is not committed while this connection's own join
+    // of the room awaits its remote owner: the join and the stanza travel on
+    // different mailbox lanes, and the owner refuses a sender it has not
+    // seated.
+    #[cfg(feature = "clustering")]
+    if message.type_ == xmpp_parsers::message::MessageType::Groupchat {
+        if let (Some(room_origin), Some(room)) = (
+            client_room_origin.as_ref(),
+            message.to.as_ref().map(jid::Jid::to_bare),
+        ) {
+            state
+                .deps
+                .protocol
+                .ingress
+                .hold_groupchat_for_undecided_join(
+                    &room,
+                    &room_origin.full_jid,
+                    room_origin.occupancy_session,
+                )
+                .await;
+        }
+    }
     let checkpoint = sequence.map(|seq| conn.sm_inbound_completion.checkpoint_for(seq));
     let stream_id = conn
         .sm_state

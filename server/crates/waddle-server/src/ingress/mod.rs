@@ -24,6 +24,8 @@ pub mod decision;
 mod durable;
 pub mod mailbox_worker;
 pub mod origin_gate;
+#[cfg(feature = "clustering")]
+pub mod room_request;
 pub(crate) use durable::receipt_key;
 pub mod execute;
 mod execute_uow;

@@ -152,6 +152,46 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
         };
 
         if is_unavailable {
+            // With the mailbox carrying room traffic, a leave from a room
+            // another node owns is a room request; the relay is not used.
+            #[cfg(feature = "clustering")]
+            {
+                let mut leave = presence.clone();
+                leave.from = Some(jid::Jid::from(sender_jid.clone()));
+                leave.to = Some(to_jid.clone());
+                if let super::room_request::RoomRequestRoute::Answered(replies) =
+                    super::room_request::route_presence_request(
+                        context.state,
+                        context.authenticated_session,
+                        waddle_xmpp::ingress::mailbox::RoomRequestKind::Leave,
+                        &room_jid,
+                        sender_jid,
+                        *context.occupancy_session,
+                        Stanza::Presence(leave),
+                    )
+                    .await
+                {
+                    crate::server::routes::interpret::record_presence_unavailable_activity_on_state(
+                        context.state,
+                        &sender_jid.to_bare(),
+                        &room_jid,
+                    )
+                    .await;
+                    if !super::room_request::presence_request_refused(&replies) {
+                        context
+                            .state
+                            .deps
+                            .protocol
+                            .remote_muc_memberships
+                            .record_leave_if_session(
+                                sender_jid,
+                                &room_jid,
+                                *context.occupancy_session,
+                            );
+                    }
+                    return replies.iter().map(stanza_to_xml).collect();
+                }
+            }
             return handle_muc_leave(
                 context.state,
                 &room_jid,
@@ -206,6 +246,22 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
                     routed_presence.from = Some(jid::Jid::from(sender_jid.clone()));
                     routed_presence.to = Some(to_jid.clone());
                     let stanza = Stanza::Presence(routed_presence);
+                    // With the mailbox carrying room traffic, the update is
+                    // a room request; the relay is not used for it.
+                    if let super::room_request::RoomRequestRoute::Answered(replies) =
+                        super::room_request::route_presence_request(
+                            context.state,
+                            context.authenticated_session,
+                            waddle_xmpp::ingress::mailbox::RoomRequestKind::Presence,
+                            &room_jid,
+                            sender_jid,
+                            *context.occupancy_session,
+                            stanza.clone(),
+                        )
+                        .await
+                    {
+                        return replies.iter().map(stanza_to_xml).collect();
+                    }
                     match addressing.room(&room_jid).command_if_remote(crate::clustering::addressing::RoomCommand { stanza: &stanza, kind: OrderedRelayMucProxyKind::OccupantPresence, sender: MucProxyOrigin::Connection(
                                 *context.occupancy_session,
                             ), origin, admission: None })

@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use super::PinnedRuntimeAuthority;
 
-const INGRESS: [&str; 15] = [
+const INGRESS: [&str; 18] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -32,6 +32,9 @@ const INGRESS: [&str; 15] = [
     "ingress_owner_rejections",
     "ingress_mailbox_lanes",
     "ingress_mailbox_entries",
+    "ingress_room_requests",
+    "ingress_room_responses",
+    "ingress_room_occupants",
 ];
 
 // Runtime table privileges, in the same order as the independently supplied
@@ -76,13 +79,13 @@ pub struct PinnedPartialProfilePinsV1 {
     pub helper_role_oid: u32,
     pub monitor_role_oid: u32,
     pub migrator_role_oid: u32,
-    pub ingress_relation_oids: [u32; 15],
+    pub ingress_relation_oids: [u32; 18],
     pub pubsub_relation_oids: [u32; 12],
 }
 
 impl PinnedPartialProfilePinsV1 {
     /// Fixed V1 ingress OID order for independent provisioning.
-    pub fn ingress_relation_names() -> &'static [&'static str; 15] {
+    pub fn ingress_relation_names() -> &'static [&'static str; 18] {
         &INGRESS
     }
 

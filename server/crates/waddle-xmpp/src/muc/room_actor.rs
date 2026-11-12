@@ -58,7 +58,8 @@ pub use occupancy_handlers::{
     InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId,
     LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome,
     OccupancyOrder, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
-    ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
+    RecoveredOccupant, ResolverAffiliationSyncOutcome, SeedRecoveredOccupants,
+    SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
 pub use waddle_xmpp_core::OccupancySessionGeneration;
 

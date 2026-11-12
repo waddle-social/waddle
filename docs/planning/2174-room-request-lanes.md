@@ -8,8 +8,44 @@ the ordered relay to the durable mailbox. It defines the three things
 lists as missing. `S/` is `server/crates/waddle-server/src/`, `X/` is
 `server/crates/waddle-xmpp/src/`.
 
-Status: **decided, not built**. Migration V1032 and the code below do not
-exist yet; these lanes are served by the ordered relay at every epoch.
+Status: **built, not yet verified by a test run**. Migration V1032, the
+three repositories, the owner's decision transaction, the origin's commit
+and hand-over, occupancy seating at claim takeover and the Muji path are in
+the tree; `deliver_ordered` is at `v16`. At protocol epoch 2 or later under
+the `mailbox` selector, client-sent joins, presence updates, leaves and Muji
+signalling for a room owned by another node are room requests; the relay
+serves them below that epoch and under the `relay` selector. The PostgreSQL
+suite `room_requests_postgres` and the two-node suite
+`xep0045_room_request_lanes` compile and have not been run.
+
+Where the code differs from the decisions below:
+
+- **Grants.** The runtime holds `SELECT, INSERT, UPDATE, DELETE` on
+  `ingress_room_requests`, because the retention pass deletes requests as the
+  runtime role, and `SELECT, INSERT` on `ingress_room_responses`, which the
+  repository never updates.
+- **Decision immutability.** `owner_decision` moves once because the
+  repository's update is conditional on the undecided value and the origin's
+  settlement is conditional on a decision; no trigger enforces it.
+- **Join before message, owner side.** The owner's groupchat commit does not
+  read `ingress_room_occupants`. It relies on the room actor, which is seated
+  from those rows before any entry of the room is decided.
+- **Order of the owner's work.** The owner runs its handler against the room
+  actor, which changes actor state and fans presence out, and then commits
+  the decision transaction. A failure between the two is retried from the
+  lane head: the handler runs again and the first recorded decision and
+  response are kept.
+- **Local joins.** A join accepted for a resource connected to the owner
+  itself writes no occupancy row. Such an occupant is not recovered by a
+  successor.
+- **Stale rows.** The leave at connection end has a typed entry point,
+  `IngressAuthority::commit_room_leave_at_connection_end`, and no caller yet.
+  The owner's own removals (kick, ban, ghost sweep) do not delete the row.
+- **Source binding.** A request records the authenticated principal
+  reference and no stream-management occurrence.
+- **Unconsumed decisions.** `count_unsettled_decisions` and the
+  `waddle_ingress_room_requests` monitoring query report them; no sweep logs
+  them.
 
 ## Decisions
 

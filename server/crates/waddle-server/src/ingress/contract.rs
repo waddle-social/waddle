@@ -87,6 +87,10 @@ pub struct IngressAuthority {
     /// Stanzas this node's streams have awaiting a remote room owner.
     #[cfg(feature = "clustering")]
     pub(in crate::ingress) pending_acceptances: super::origin_gate::PendingAcceptances,
+    /// Joins this node's connections await a remote room owner for, and the
+    /// rooms whose durable occupancy this node has seated.
+    #[cfg(feature = "clustering")]
+    pub(in crate::ingress) open_room_requests: super::room_request::OpenRoomRequests,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     pub(in crate::ingress) stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -419,6 +423,8 @@ impl IngressAuthority {
             mailbox_hints: std::sync::OnceLock::new(),
             #[cfg(feature = "clustering")]
             pending_acceptances: super::origin_gate::PendingAcceptances::default(),
+            #[cfg(feature = "clustering")]
+            open_room_requests: super::room_request::OpenRoomRequests::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -478,6 +484,8 @@ impl IngressAuthority {
             mailbox_hints: std::sync::OnceLock::new(),
             #[cfg(feature = "clustering")]
             pending_acceptances: super::origin_gate::PendingAcceptances::default(),
+            #[cfg(feature = "clustering")]
+            open_room_requests: super::room_request::OpenRoomRequests::default(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),

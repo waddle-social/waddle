@@ -1,0 +1,639 @@
+//! Two-node suite for XEP-0045 joins, occupant presence and leaves carried
+//! to a remote room owner as room requests in the durable mailbox (#2174).
+//!
+//! Node B owns the room and node A hosts the joining resource. Both select
+//! the mailbox and the shared database is at the mailbox protocol epoch, so
+//! the join travels as a `RoomJoin` entry: the origin commits the request,
+//! the owner decides it with its frozen response and durable occupancy, and
+//! the origin hands the response over in the transaction that consumes the
+//! entry.
+//!
+//! The owner-side seams of `clustering::acceptance_seams` stop the owner
+//! before and after the transaction in which it decides a request. A join's
+//! request stanza is rebuilt by the origin's handler and carries no `id`, so
+//! its seam events name the stanza `-`.
+
+#![cfg(all(feature = "clustering", feature = "test-support"))]
+
+#[path = "cluster_support/mod.rs"]
+pub mod cluster_support;
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use cluster_support::{
+    cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
+    open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
+    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
+use waddle_server::clustering::claims::PostgresClaimStore;
+use waddle_server::db::Database;
+use waddle_ws_test_support::{TestServer, WsXmppClient};
+use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType};
+
+const DOMAIN: &str = "localhost";
+const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
+const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
+const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
+const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+
+/// Control directory of the owner's seams.
+struct OwnerSeams {
+    directory: PathBuf,
+}
+
+impl OwnerSeams {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "waddle-room-request-seams-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create seam directory");
+        Self { directory }
+    }
+
+    fn directory(&self) -> String {
+        self.directory.display().to_string()
+    }
+
+    fn arm(&self, seam: &str) {
+        std::fs::write(self.directory.join(seam), b"").expect("arm seam");
+    }
+
+    fn release(&self, seam: &str) {
+        std::fs::remove_file(self.directory.join(seam)).expect("release seam");
+    }
+
+    fn events(&self) -> Vec<String> {
+        std::fs::read_to_string(self.directory.join("events"))
+            .map(|events| events.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    async fn wait_for(&self, event: &str, budget: Duration) {
+        let waited = tokio::time::timeout(budget, async {
+            while !self.events().iter().any(|line| line == event) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            waited.is_ok(),
+            "owner seam never recorded {event:?} within {budget:?}; recorded {:?}",
+            self.events()
+        );
+    }
+}
+
+impl Drop for OwnerSeams {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Advance the shared database to the mailbox protocol epoch.
+async fn activate_mailbox_epoch(db: &Database) {
+    let conn = db.guard().await.expect("epoch guard");
+    for _ in 0..2 {
+        conn.execute(
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
+             lineage_uuid = (SELECT lineage_uuid::uuid FROM _lineage WHERE id = 1) \
+             WHERE id = 1 AND epoch < 2",
+            (),
+        )
+        .await
+        .expect("activate the mailbox epoch");
+    }
+}
+
+async fn scalar(db: &Database, sql: &str) -> i64 {
+    let conn = db.guard().await.expect("database guard");
+    let mut rows = conn.query(sql, ()).await.expect("scalar query");
+    rows.next()
+        .await
+        .expect("scalar row")
+        .expect("one row")
+        .get::<i64>(0)
+        .expect("scalar value")
+}
+
+/// Wait until `sql` yields `expected`.
+async fn wait_for_scalar(db: &Database, sql: &str, expected: i64, budget: Duration) {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let value = scalar(db, sql).await;
+        if value == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{sql} stayed at {value}, expected {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn join_presence(room: &jid::BareJid, nick: &str) -> Element {
+    let occupant = room.with_resource_str(nick).expect("occupant JID");
+    Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(xml_ncname!("to").to_owned(), occupant.to_string())
+        .append(Element::builder("x", NS_MUC).build())
+        .build()
+}
+
+fn parse(frames: &[String]) -> Vec<Element> {
+    frames
+        .iter()
+        .filter_map(|frame| frame.parse::<Element>().ok())
+        .collect()
+}
+
+fn is_presence_from(frame: &Element, occupant: &jid::FullJid) -> bool {
+    frame.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        && frame.attr("from") == Some(occupant.to_string().as_str())
+        && frame.attr("type").is_none()
+}
+
+fn is_self_presence(frame: &Element, occupant: &jid::FullJid) -> bool {
+    is_presence_from(frame, occupant)
+        && frame.get_child("x", NS_MUC_USER).is_some_and(|x| {
+            x.children()
+                .any(|child| child.is("status", NS_MUC_USER) && child.attr("code") == Some("110"))
+        })
+}
+
+fn is_subject(frame: &Element) -> bool {
+    frame.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+        && frame
+            .get_child("subject", waddle_xmpp::ns::JABBER_CLIENT)
+            .is_some()
+}
+
+fn is_error(frame: &Element) -> bool {
+    frame.attr("type") == Some("error")
+}
+
+/// Frames a client receives until `budget` passes without one.
+async fn drain(client: &mut WsXmppClient, budget: Duration) -> Vec<Element> {
+    let mut frames = Vec::new();
+    while let Ok(frame) = client.recv_timeout(budget).await {
+        frames.push(frame);
+    }
+    parse(&frames)
+}
+
+/// Two meshed nodes at the mailbox epoch and a room owned by node B, with a
+/// witness occupant there.
+struct Scenario {
+    postgres_url: String,
+    db: Database,
+    pool: EnrolledPool,
+    port_a: u16,
+    server_a: TestServer,
+    server_b: Option<TestServer>,
+    seams: OwnerSeams,
+    room: jid::BareJid,
+    witness: Option<WsXmppClient>,
+    _serial: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Scenario {
+    async fn start() -> Self {
+        let postgres_url = waddle_ws_test_support::require_test_postgres_url()
+            .expect("the room request suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
+        let serial = cluster_e2e_serial_lock().lock().await;
+        let db = open_control_db(&postgres_url).await;
+        let pool = generate_pool();
+        reset_and_enroll(&db, &pool).await;
+        reset_node_lease_tables(&db).await;
+        let seams = OwnerSeams::new();
+        let port_a = free_tcp_port();
+        let port_b = free_tcp_port();
+        let (server_a, _, _) = spawn_cluster_server_with_envs(
+            &postgres_url,
+            &pool.pool_env,
+            port_a,
+            &[port_b],
+            &[(ACCEPTANCE_ENV, "mailbox")],
+        )
+        .await;
+        let (server_b, node_b, _) = spawn_cluster_server_with_envs(
+            &postgres_url,
+            &pool.pool_env,
+            port_b,
+            &[port_a],
+            &[
+                (SEAM_DIRECTORY_ENV, &seams.directory()),
+                (ACCEPTANCE_ENV, "mailbox"),
+            ],
+        )
+        .await;
+        wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+        wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+        activate_mailbox_epoch(&db).await;
+
+        let room: jid::BareJid = format!("requests-{}@muc.{DOMAIN}", uuid::Uuid::new_v4())
+            .parse()
+            .expect("unique room JID");
+        // The first join creates the room, so the witness's node owns it.
+        let mut witness = WsXmppClient::connect_and_auth(
+            &server_b.ws_url(),
+            DOMAIN,
+            "admin",
+            server_b.fixed_account_password(),
+            &format!("witness-{}", uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect("witness binds on the owner node");
+        join_fanout_room(&mut witness, &room, "witness").await;
+        let claim = PostgresClaimStore::new(db.clone())
+            .current_claim(&Entity::new(EntityType::RoomActor, room.to_string()))
+            .await
+            .expect("room claim lookup")
+            .expect("live room claim");
+        assert_eq!(claim.owner.node_id, node_b, "node B must own the room");
+        Self {
+            postgres_url,
+            db,
+            pool,
+            port_a,
+            server_a,
+            server_b: Some(server_b),
+            seams,
+            room,
+            witness: Some(witness),
+            _serial: serial,
+        }
+    }
+
+    /// A client of the cluster peer account bound on the origin node.
+    async fn origin_client(&self, resource: &str) -> WsXmppClient {
+        WsXmppClient::connect_and_auth(
+            &self.server_a.ws_url(),
+            DOMAIN,
+            CLUSTER_PEER_USERNAME,
+            CLUSTER_PEER_PASSWORD,
+            resource,
+        )
+        .await
+        .expect("client binds on the origin node")
+    }
+
+    fn occupant(&self, nick: &str) -> jid::FullJid {
+        self.room.with_resource_str(nick).expect("occupant JID")
+    }
+
+    /// SIGKILL the owner and start its replacement, a new incarnation.
+    async fn replace_owner(&mut self) {
+        drop(self.witness.take());
+        drop(self.server_b.take());
+        let port_b = free_tcp_port();
+        let (server_b, _, _) = spawn_cluster_server_with_envs(
+            &self.postgres_url,
+            &self.pool.pool_env,
+            port_b,
+            &[self.port_a],
+            &[
+                (SEAM_DIRECTORY_ENV, &self.seams.directory()),
+                (ACCEPTANCE_ENV, "mailbox"),
+            ],
+        )
+        .await;
+        wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
+        self.server_b = Some(server_b);
+    }
+}
+
+const REQUESTS: &str = "SELECT count(*) FROM ingress_room_requests";
+const SETTLED_JOINS: &str = "SELECT count(*) FROM ingress_room_requests \
+     WHERE request_kind = 1 AND owner_decision = 1 AND settled_at IS NOT NULL";
+const CONSUMED_JOIN_ENTRIES: &str =
+    "SELECT count(*) FROM ingress_mailbox_entries WHERE operation_kind = 2 AND disposition = 3";
+const OCCUPANTS: &str = "SELECT count(*) FROM ingress_room_occupants";
+
+/// XEP-0045 §7.2: the joining resource receives the other occupants'
+/// presence, then its self-presence with status 110, then the subject. The
+/// response is frozen by the owner in that order, handed over once, and the
+/// join seats the requester in durable occupancy.
+#[tokio::test]
+async fn join_response_is_handed_over_once_in_section_7_2_order() {
+    let scenario = Scenario::start().await;
+    let mut joiner = scenario.origin_client("joiner").await;
+    joiner
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send join");
+    let frames = tokio::time::timeout(
+        Duration::from_secs(20),
+        joiner.recv_until(|frame| frame.contains("<subject")),
+    )
+    .await
+    .expect("bounded join")
+    .expect("join replies");
+    let frames = parse(&frames);
+    let position = |matches: &dyn Fn(&Element) -> bool| frames.iter().position(matches);
+    let witness = position(&|frame| is_presence_from(frame, &scenario.occupant("witness")))
+        .expect("the other occupant's presence");
+    let own = position(&|frame| is_self_presence(frame, &scenario.occupant("joiner")))
+        .expect("self-presence with status 110");
+    let subject = position(&is_subject).expect("room subject");
+    assert!(
+        witness < own && own < subject,
+        "§7.2 order is occupants, self-presence, subject: {frames:?}"
+    );
+
+    // No second copy of the response follows.
+    let later = drain(&mut joiner, Duration::from_secs(2)).await;
+    assert!(
+        !later
+            .iter()
+            .any(|frame| is_self_presence(frame, &scenario.occupant("joiner"))),
+        "the response is handed over once: {later:?}"
+    );
+    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1);
+    assert_eq!(scalar(&scenario.db, SETTLED_JOINS).await, 1);
+    assert_eq!(scalar(&scenario.db, CONSUMED_JOIN_ENTRIES).await, 1);
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT count(*) FROM ingress_room_occupants WHERE nick = 'joiner' \
+             AND join_request IS NOT NULL AND presence IS NOT NULL"
+        )
+        .await,
+        1
+    );
+    // The stored response is contiguous from position zero.
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT (max(position) + 1 - count(*))::bigint FROM ingress_room_responses"
+        )
+        .await,
+        0
+    );
+}
+
+/// The owner refuses a groupchat stanza from a sender it has not seated and
+/// accepts it once that sender's join was decided.
+#[tokio::test]
+async fn groupchat_is_refused_before_the_senders_join_and_accepted_after() {
+    let scenario = Scenario::start().await;
+    let mut sender = scenario.origin_client("sender").await;
+    sender
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "before-join",
+            Some("before the join"),
+        )))
+        .await
+        .expect("send before join");
+    let refused = drain(&mut sender, Duration::from_secs(10)).await;
+    assert!(
+        refused
+            .iter()
+            .any(|frame| frame.attr("id") == Some("before-join") && is_error(frame)),
+        "a sender without occupancy is refused: {refused:?}"
+    );
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 0);
+
+    join_fanout_room(&mut sender, &scenario.room, "sender").await;
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    sender
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "after-join",
+            Some("after the join"),
+        )))
+        .await
+        .expect("send after join");
+    let reflected = tokio::time::timeout(
+        Duration::from_secs(20),
+        sender.recv_until(|frame| frame.contains("after the join")),
+    )
+    .await
+    .expect("bounded reflection")
+    .expect("reflection");
+    assert!(
+        !parse(&reflected)
+            .iter()
+            .any(|frame| frame.attr("id") == Some("after-join") && is_error(frame)),
+        "a seated sender is accepted: {reflected:?}"
+    );
+}
+
+/// A join committed while the owner is stopped is not lost with its hint:
+/// the entry stays pending, the replacement's poller adopts the lane after
+/// loading the room's occupancy, decides the join once and the requester
+/// receives one response.
+#[tokio::test]
+async fn join_committed_while_the_owner_is_down_is_decided_by_its_replacement() {
+    let mut scenario = Scenario::start().await;
+    scenario.seams.arm(HOLD_BEFORE_COMMIT);
+    let mut joiner = scenario.origin_client("joiner").await;
+    joiner
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send join");
+    scenario
+        .seams
+        .wait_for("held before-commit -", Duration::from_secs(10))
+        .await;
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT count(*) FROM ingress_room_requests WHERE owner_decision = 0"
+        )
+        .await,
+        1,
+        "the owner stopped before its decision"
+    );
+    scenario.replace_owner().await;
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
+
+    let frames = tokio::time::timeout(
+        Duration::from_secs(60),
+        joiner.recv_until(|frame| frame.contains("<subject")),
+    )
+    .await
+    .expect("the replacement owner decides the pending join")
+    .expect("join replies");
+    let own = scenario.occupant("joiner");
+    assert_eq!(
+        parse(&frames)
+            .iter()
+            .filter(|frame| is_self_presence(frame, &own))
+            .count(),
+        1
+    );
+    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1, "decided once");
+    assert_eq!(scalar(&scenario.db, SETTLED_JOINS).await, 1);
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+}
+
+/// An owner killed after its decision committed has already frozen the
+/// response. The origin reads it from the database without the owner, hands
+/// it over once, and the replacement decides nothing again.
+#[tokio::test]
+async fn owner_killed_after_commit_hands_the_frozen_response_over_once() {
+    let mut scenario = Scenario::start().await;
+    scenario.seams.arm(HOLD_AFTER_COMMIT);
+    let mut joiner = scenario.origin_client("joiner").await;
+    joiner
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send join");
+    scenario
+        .seams
+        .wait_for("held after-commit -", Duration::from_secs(10))
+        .await;
+    drop(scenario.witness.take());
+    drop(scenario.server_b.take());
+    scenario.seams.release(HOLD_AFTER_COMMIT);
+
+    let frames = tokio::time::timeout(
+        Duration::from_secs(20),
+        joiner.recv_until(|frame| frame.contains("<subject")),
+    )
+    .await
+    .expect("the origin reads the frozen response without the owner")
+    .expect("join replies");
+    let own = scenario.occupant("joiner");
+    assert_eq!(
+        parse(&frames)
+            .iter()
+            .filter(|frame| is_self_presence(frame, &own))
+            .count(),
+        1
+    );
+    wait_for_scalar(&scenario.db, SETTLED_JOINS, 1, Duration::from_secs(10)).await;
+
+    scenario.replace_owner().await;
+    let later = drain(&mut joiner, Duration::from_secs(5)).await;
+    assert!(
+        !later.iter().any(|frame| is_self_presence(frame, &own)),
+        "the replacement owner does not answer a decided join again: {later:?}"
+    );
+    assert_eq!(scalar(&scenario.db, REQUESTS).await, 1);
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+}
+
+/// After the room's claim moves to a new owner incarnation, an occupant that
+/// joined under the predecessor is recovered from its durable row: its
+/// groupchat stanza is accepted without a rejoin. A sender with no row is
+/// still refused, so nothing is inferred for occupants the table does not
+/// hold.
+#[tokio::test]
+async fn owner_transfer_recovers_occupancy_and_refuses_unrecorded_senders() {
+    let mut scenario = Scenario::start().await;
+    let mut seated = scenario.origin_client("seated").await;
+    join_fanout_room(&mut seated, &scenario.room, "seated").await;
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    scenario.replace_owner().await;
+
+    seated
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "after-transfer",
+            Some("after the transfer"),
+        )))
+        .await
+        .expect("send after transfer");
+    let reflected = tokio::time::timeout(
+        Duration::from_secs(60),
+        seated.recv_until(|frame| frame.contains("after the transfer")),
+    )
+    .await
+    .expect("the successor accepts the recovered occupant's stanza")
+    .expect("reflection");
+    assert!(
+        !parse(&reflected)
+            .iter()
+            .any(|frame| frame.attr("id") == Some("after-transfer") && is_error(frame)),
+        "a recovered occupant is not asked to rejoin: {reflected:?}"
+    );
+
+    let mut stranger = scenario.origin_client("stranger").await;
+    stranger
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "never-joined",
+            Some("never joined"),
+        )))
+        .await
+        .expect("send without occupancy");
+    let refused = drain(&mut stranger, Duration::from_secs(10)).await;
+    assert!(
+        refused
+            .iter()
+            .any(|frame| frame.attr("id") == Some("never-joined") && is_error(frame)),
+        "the successor seats only recorded occupants: {refused:?}"
+    );
+}
+
+/// A decision reached for a connection that has ended is not handed to a
+/// later connection of the same full JID: the later connection receives
+/// exactly the response to its own join.
+#[tokio::test]
+async fn decision_for_an_ended_connection_is_not_handed_to_its_successor() {
+    let scenario = Scenario::start().await;
+    scenario.seams.arm(HOLD_BEFORE_COMMIT);
+    let mut first = scenario.origin_client("same-resource").await;
+    first
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send first join");
+    scenario
+        .seams
+        .wait_for("held before-commit -", Duration::from_secs(10))
+        .await;
+    drop(first);
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
+    wait_for_scalar(
+        &scenario.db,
+        "SELECT count(*) FROM ingress_room_requests WHERE owner_decision <> 0",
+        1,
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let mut second = scenario.origin_client("same-resource").await;
+    second
+        .send(&String::from(&join_presence(&scenario.room, "joiner")))
+        .await
+        .expect("send second join");
+    let mut frames = parse(
+        &tokio::time::timeout(
+            Duration::from_secs(20),
+            second.recv_until(|frame| frame.contains("<subject")),
+        )
+        .await
+        .expect("bounded second join")
+        .expect("second join replies"),
+    );
+    frames.extend(drain(&mut second, Duration::from_secs(2)).await);
+    let own = scenario.occupant("joiner");
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| is_self_presence(frame, &own))
+            .count(),
+        1,
+        "only the second connection's own response is delivered: {frames:?}"
+    );
+    assert_eq!(scalar(&scenario.db, REQUESTS).await, 2);
+    // The occupancy row belongs to the later connection's join.
+    assert_eq!(
+        scalar(
+            &scenario.db,
+            "SELECT count(*) FROM ingress_room_occupants o JOIN ingress_room_requests r \
+             ON r.request_key = o.join_request \
+             WHERE r.created_at = (SELECT max(created_at) FROM ingress_room_requests)"
+        )
+        .await,
+        1
+    );
+}

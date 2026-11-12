@@ -334,3 +334,38 @@ data:
         - oldest_seconds:
             usage: GAUGE
             description: Age in seconds of the oldest canonical message non-terminal for at least ten minutes, or zero.
+
+    waddle_ingress_room_requests:
+      target_databases: ["waddle"]
+      query: |
+        -- A request is collected once its mailbox entry is consumed and its
+        -- origin settled it at least one hour ago; this is the collector's
+        -- predicate. Always emits one row.
+        SELECT
+          count(*) FILTER (WHERE eligible) AS eligible_requests,
+          count(*) FILTER (WHERE owner_decision = 0) AS undecided_requests,
+          count(*) FILTER (WHERE owner_decision <> 0 AND settled_at IS NULL) AS unsettled_decisions,
+          coalesce(extract(epoch FROM now() - min(created_at)
+            FILTER (WHERE settled_at IS NULL)), 0) AS oldest_unsettled_age_seconds
+        FROM (
+          SELECT r.owner_decision, r.settled_at, r.created_at,
+            (r.settled_at IS NOT NULL
+            AND r.settled_at <= now() - (3600000::bigint * interval '1 millisecond')
+            AND EXISTS (SELECT 1 FROM ingress_mailbox_entries e
+            WHERE e.request_key = r.request_key AND e.disposition >= 3)) AS eligible
+          FROM ingress_room_requests r
+        ) requests
+      primary: true
+      metrics:
+        - eligible_requests:
+            usage: GAUGE
+            description: Settled room requests currently eligible for collection.
+        - undecided_requests:
+            usage: GAUGE
+            description: Room requests the room owner has not decided.
+        - unsettled_decisions:
+            usage: GAUGE
+            description: Decided room requests whose origin has not handed the response to the requester.
+        - oldest_unsettled_age_seconds:
+            usage: GAUGE
+            description: Age in seconds of the oldest room request that is not settled, or zero.

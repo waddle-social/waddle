@@ -9,7 +9,8 @@
 //!   carried beside the identity as fence values;
 //! - a gap-free, nonwrapping lane sequence and its exclusive consumption
 //!   cursor;
-//! - the owner-independent operation key of a remote room acceptance;
+//! - the owner-independent operation key of a remote room acceptance and of
+//!   a room request (join, presence update, leave, IQ);
 //! - the closed disposition state machine of a mailbox entry;
 //! - a pure admission check for pending-entry caps.
 
@@ -18,6 +19,8 @@ use std::fmt;
 use jid::{BareJid, FullJid};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::ingress::MessageKey;
 use crate::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity, ENTITY_ID_MAX_LEN};
@@ -39,6 +42,15 @@ pub enum MailboxRoomLane {
 pub enum MailboxLaneOrigin {
     SmSession(SmSessionId),
     Entity(Entity),
+    /// One connection of a bound resource: its full JID together with the
+    /// occupancy generation minted for that connection. Room requests use
+    /// this origin, so a connection's own attempt and its repair after a
+    /// stream resumption append to one lane, while a later connection of the
+    /// same full JID gets a lane of its own.
+    BoundResource {
+        jid: FullJid,
+        generation: OccupancySessionGeneration,
+    },
 }
 
 /// Logical recipient of a lane. Bare-JID, full-JID and room recipients are
@@ -174,6 +186,7 @@ pub enum LaneField {
     Origin,
     OriginEntityType,
     OriginId,
+    OriginGeneration,
     Recipient,
     RecipientJid,
     RoomLane,
@@ -185,6 +198,7 @@ impl fmt::Display for LaneField {
             Self::Origin => "origin",
             Self::OriginEntityType => "origin entity type",
             Self::OriginId => "origin id",
+            Self::OriginGeneration => "origin occupancy generation",
             Self::Recipient => "recipient",
             Self::RecipientJid => "recipient JID",
             Self::RoomLane => "room lane",
@@ -194,6 +208,7 @@ impl fmt::Display for LaneField {
 
 const ORIGIN_SM_SESSION: u8 = 1;
 const ORIGIN_ENTITY: u8 = 2;
+const ORIGIN_BOUND_RESOURCE: u8 = 3;
 const ENTITY_USER_ACTOR: u8 = 1;
 const ENTITY_ROOM_ACTOR: u8 = 2;
 const ENTITY_SM_SESSION: u8 = 3;
@@ -299,6 +314,11 @@ impl MailboxLaneIdentity {
                 });
                 put_value(&mut out, &entity.id);
             }
+            MailboxLaneOrigin::BoundResource { jid, generation } => {
+                out.push(ORIGIN_BOUND_RESOURCE);
+                put_value(&mut out, jid.as_str());
+                put_value(&mut out, &generation.to_string());
+            }
         }
         match &self.recipient {
             MailboxLaneRecipient::BareJid(jid) => {
@@ -366,6 +386,20 @@ impl MailboxLaneIdentity {
                     });
                 }
                 MailboxLaneOrigin::Entity(Entity::new(entity_type, id))
+            }
+            ORIGIN_BOUND_RESOURCE => {
+                let jid = FullJid::new(reader.value(LaneField::OriginId)?).map_err(|_| {
+                    MailboxLaneCodecError::InvalidValue {
+                        field: LaneField::OriginId,
+                    }
+                })?;
+                let generation = reader
+                    .value(LaneField::OriginGeneration)?
+                    .parse::<OccupancySessionGeneration>()
+                    .map_err(|_| MailboxLaneCodecError::InvalidValue {
+                        field: LaneField::OriginGeneration,
+                    })?;
+                MailboxLaneOrigin::BoundResource { jid, generation }
             }
             value => {
                 return Err(MailboxLaneCodecError::UnknownDiscriminator {
@@ -622,23 +656,113 @@ impl MailboxConsumptionCursor {
     }
 }
 
+/// Identity of one room request: a MUC join, occupant presence update, leave
+/// or relayed IQ. The origin mints it before its first owner attempt and
+/// keeps it for every retry of that attempt; a later request of the same
+/// occupant is a new key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RoomRequestKey(Uuid);
+
+impl RoomRequestKey {
+    /// Mint the key of a new request.
+    pub fn mint() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub fn from_storage(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn to_storage(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for RoomRequestKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RoomRequestKey(..)")
+    }
+}
+
+/// What a room request asks of the room owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoomRequestKind {
+    Join,
+    Presence,
+    Leave,
+    Iq,
+}
+
+/// The durable parent a mailbox entry refers to. An entry stores no payload:
+/// a room acceptance reads its canonical message and every other operation
+/// reads its room request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MailboxOperationParent {
+    Message(MessageKey),
+    Request(RoomRequestKey),
+}
+
 /// Identity of the operation a mailbox entry carries, known before any commit
 /// and independent of the lane and of whichever node owns the target.
 ///
 /// A dispatch effect key or delivery key names one owner-specific attempt and
 /// changes when the room moves; it is provenance of an attempt, never an
-/// input here. Every attempt at one room acceptance carries the same key.
+/// input here. Every attempt at one room acceptance or one room request
+/// carries the same key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MailboxOperationKey {
     /// The room owner's acceptance of one canonical message.
     RoomAcceptance(MessageKey),
+    /// The room owner's decision on one MUC join.
+    RoomJoin(RoomRequestKey),
+    /// The room owner's decision on one occupant presence update.
+    RoomPresence(RoomRequestKey),
+    /// The room owner's decision on one departure.
+    RoomLeave(RoomRequestKey),
+    /// The room owner's answer to one relayed IQ.
+    RoomIq(RoomRequestKey),
 }
 
 impl MailboxOperationKey {
-    /// The canonical message this operation is about.
-    pub fn message_key(&self) -> MessageKey {
+    /// The operation that carries a room request of `kind`.
+    pub fn for_request(kind: RoomRequestKind, key: RoomRequestKey) -> Self {
+        match kind {
+            RoomRequestKind::Join => Self::RoomJoin(key),
+            RoomRequestKind::Presence => Self::RoomPresence(key),
+            RoomRequestKind::Leave => Self::RoomLeave(key),
+            RoomRequestKind::Iq => Self::RoomIq(key),
+        }
+    }
+
+    /// The durable parent this operation is about.
+    pub fn parent(&self) -> MailboxOperationParent {
         match self {
-            Self::RoomAcceptance(message_key) => *message_key,
+            Self::RoomAcceptance(message_key) => MailboxOperationParent::Message(*message_key),
+            Self::RoomJoin(request)
+            | Self::RoomPresence(request)
+            | Self::RoomLeave(request)
+            | Self::RoomIq(request) => MailboxOperationParent::Request(*request),
+        }
+    }
+
+    /// The canonical message of a room acceptance; `None` for an operation
+    /// whose parent is a room request.
+    pub fn message_key(&self) -> Option<MessageKey> {
+        match self.parent() {
+            MailboxOperationParent::Message(message_key) => Some(message_key),
+            MailboxOperationParent::Request(_) => None,
+        }
+    }
+
+    /// The room request of a join, presence update, leave or IQ, with its
+    /// kind; `None` for a room acceptance.
+    pub fn request(&self) -> Option<(RoomRequestKind, RoomRequestKey)> {
+        match self {
+            Self::RoomAcceptance(_) => None,
+            Self::RoomJoin(request) => Some((RoomRequestKind::Join, *request)),
+            Self::RoomPresence(request) => Some((RoomRequestKind::Presence, *request)),
+            Self::RoomLeave(request) => Some((RoomRequestKind::Leave, *request)),
+            Self::RoomIq(request) => Some((RoomRequestKind::Iq, *request)),
         }
     }
 }
@@ -814,8 +938,9 @@ mod tests {
         MailboxEntryEvent, MailboxLaneCodecError, MailboxLaneDigest, MailboxLaneDigestCollision,
         MailboxLaneEncoding, MailboxLaneFence, MailboxLaneIdentity, MailboxLaneKey,
         MailboxLaneOrigin, MailboxLaneRecipient, MailboxLaneSequence, MailboxLaneSequenceError,
-        MailboxOperationKey, MailboxOwnerDecision, MailboxPendingLoad, MailboxRoomLane, MessageKey,
-        NodeIdentity, SmSessionId, StaleMailboxLaneFence,
+        MailboxOperationKey, MailboxOperationParent, MailboxOwnerDecision, MailboxPendingLoad,
+        MailboxRoomLane, MessageKey, NodeIdentity, OccupancySessionGeneration, RoomRequestKey,
+        RoomRequestKind, SmSessionId, StaleMailboxLaneFence,
     };
 
     fn bare_jid() -> impl Strategy<Value = BareJid> {
@@ -841,6 +966,14 @@ mod tests {
             "[a-zA-Z0-9-]{0,40}".prop_map(|id| MailboxLaneOrigin::SmSession(SmSessionId::new(id))),
             (entity_type, "[a-z0-9@./-]{0,40}").prop_map(|(entity_type, id)| {
                 MailboxLaneOrigin::Entity(Entity::new(entity_type, id))
+            }),
+            (full_jid(), any::<u128>()).prop_map(|(jid, generation)| {
+                MailboxLaneOrigin::BoundResource {
+                    jid,
+                    generation: OccupancySessionGeneration::from_uuid(uuid::Uuid::from_u128(
+                        generation,
+                    )),
+                }
             }),
         ]
     }
@@ -1380,10 +1513,146 @@ mod tests {
         let message = MessageKey::new();
         let operation = MailboxOperationKey::RoomAcceptance(message);
         assert_eq!(operation, MailboxOperationKey::RoomAcceptance(message));
-        assert_eq!(operation.message_key(), message);
+        assert_eq!(operation.message_key(), Some(message));
+        assert_eq!(operation.parent(), MailboxOperationParent::Message(message));
+        assert_eq!(operation.request(), None);
         assert_ne!(
             operation,
             MailboxOperationKey::RoomAcceptance(MessageKey::new())
+        );
+    }
+
+    #[test]
+    fn room_request_operations_name_their_request_and_kind() {
+        let request = RoomRequestKey::mint();
+        for kind in [
+            RoomRequestKind::Join,
+            RoomRequestKind::Presence,
+            RoomRequestKind::Leave,
+            RoomRequestKind::Iq,
+        ] {
+            let operation = MailboxOperationKey::for_request(kind, request);
+            assert_eq!(operation.message_key(), None);
+            assert_eq!(operation.parent(), MailboxOperationParent::Request(request));
+            assert_eq!(operation.request(), Some((kind, request)));
+        }
+        // One request key under two kinds is two operations.
+        assert_ne!(
+            MailboxOperationKey::RoomJoin(request),
+            MailboxOperationKey::RoomLeave(request)
+        );
+        assert_eq!(RoomRequestKey::from_storage(request.to_storage()), request);
+    }
+
+    /// The encodings and the digest of lanes that existed before the
+    /// bound-resource origin, written out by hand. Stored lane rows are found
+    /// by these bytes, so adding an origin variant must not move them.
+    #[test]
+    fn existing_lane_encodings_are_pinned_byte_for_byte() {
+        let len = |value: u64| value.to_be_bytes();
+        let bare = |jid: &str| BareJid::new(jid).expect("bare JID");
+        let full = |jid: &str| FullJid::new(jid).expect("full JID");
+
+        let sm_to_room = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::SmSession(SmSessionId::new("s1")),
+            recipient: MailboxLaneRecipient::Room {
+                room: bare("room@muc.example"),
+                lane: MailboxRoomLane::MucStanza,
+            },
+        };
+        let expected = [
+            &[1_u8, 1][..],
+            &len(2),
+            b"s1",
+            &[3],
+            &len(16),
+            b"room@muc.example",
+            &[1],
+        ]
+        .concat();
+        assert_eq!(sm_to_room.encode().to_storage(), expected.as_slice());
+        let digest: String = sm_to_room
+            .key()
+            .digest()
+            .to_storage()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest,
+            "04d2a5bb928d458da82e9ab8a8b051934071194ebaadc689c6b3f941d656e5a5"
+        );
+
+        let user_to_bare = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::Entity(Entity::new(EntityType::UserActor, "a@b/c")),
+            recipient: MailboxLaneRecipient::BareJid(bare("x@y")),
+        };
+        let expected = [&[1_u8, 2, 1][..], &len(5), b"a@b/c", &[1], &len(3), b"x@y"].concat();
+        assert_eq!(user_to_bare.encode().to_storage(), expected.as_slice());
+
+        let room_to_full = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::Entity(Entity::new(EntityType::RoomActor, "r")),
+            recipient: MailboxLaneRecipient::FullJid(full("x@y/z")),
+        };
+        let expected = [&[1_u8, 2, 2][..], &len(1), b"r", &[2], &len(5), b"x@y/z"].concat();
+        assert_eq!(room_to_full.encode().to_storage(), expected.as_slice());
+
+        let session_to_muji = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::Entity(Entity::new(EntityType::SmSession, "")),
+            recipient: MailboxLaneRecipient::Room {
+                room: bare("r@m"),
+                lane: MailboxRoomLane::MujiSignaling,
+            },
+        };
+        let expected = [&[1_u8, 2, 3][..], &len(0), &[3], &len(3), b"r@m", &[2]].concat();
+        assert_eq!(session_to_muji.encode().to_storage(), expected.as_slice());
+    }
+
+    #[test]
+    fn bound_resource_origin_has_its_own_discriminator_and_round_trips() {
+        let generation = OccupancySessionGeneration::from_uuid(uuid::Uuid::from_u128(0xab));
+        let identity = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::BoundResource {
+                jid: FullJid::new("a@b/c").expect("full JID"),
+                generation,
+            },
+            recipient: MailboxLaneRecipient::Room {
+                room: BareJid::new("r@m").expect("room JID"),
+                lane: MailboxRoomLane::MucStanza,
+            },
+        };
+        let encoding = identity.encode();
+        let text = generation.to_string();
+        let expected = [
+            &[1_u8, 3][..],
+            &5_u64.to_be_bytes(),
+            b"a@b/c",
+            &36_u64.to_be_bytes(),
+            text.as_bytes(),
+            &[3],
+            &3_u64.to_be_bytes(),
+            b"r@m",
+            &[1],
+        ]
+        .concat();
+        assert_eq!(encoding.to_storage(), expected.as_slice());
+        assert_eq!(encoding.decode(), Ok(identity.clone()));
+        // Another connection of the same full JID is another lane.
+        let later = MailboxLaneIdentity {
+            origin: MailboxLaneOrigin::BoundResource {
+                jid: FullJid::new("a@b/c").expect("full JID"),
+                generation: OccupancySessionGeneration::from_uuid(uuid::Uuid::from_u128(8)),
+            },
+            ..identity.clone()
+        };
+        assert_ne!(later.encode(), encoding);
+        // A generation spelled otherwise than its canonical text is refused.
+        let mut upper = expected.clone();
+        let start = 2 + 8 + 5 + 8;
+        upper[start..start + 36].copy_from_slice(text.to_uppercase().as_bytes());
+        assert_eq!(
+            MailboxLaneEncoding::from_storage(&upper),
+            Err(MailboxLaneCodecError::NonCanonical)
         );
     }
 

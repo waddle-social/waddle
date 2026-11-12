@@ -83,7 +83,7 @@ active transport/control path.
 | `remote_resource_route.v9` / `live_resource_route.v3` | Socket to owner; route a stanza. | T/O |
 | `remote_resource_frame.v3` / `live_resource_frame.v2` | Owner to socket; frame delivery. | T/O |
 | `resource_presence.v1` | Remote presence lookup. | I/T |
-| `deliver_ordered.v14` | Ordered relay for existing inter-node paths. | T |
+| `deliver_ordered.v16` | Ordered relay for existing inter-node paths. | T |
 
 The compatibility helper's fallback on `UnknownMessage` is conditional
 ([source](../../server/crates/waddle-server/src/clustering/relay/remote_resource_compat.rs#L39)).
