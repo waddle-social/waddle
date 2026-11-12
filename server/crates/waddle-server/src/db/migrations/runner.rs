@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use tracing::{debug, info, instrument};
 
+use super::baseline::{self, BaselineAction};
 use super::postgres_ledger::{self, PreparedLedger};
 use super::sql::migrations_table_sql;
 use super::{
@@ -27,6 +28,8 @@ const MIGRATION_LOCK_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 pub struct MigrationRunner {
     pub(super) migrations: Vec<Migration>,
     owned_namespaces: HashSet<MigrationNamespace>,
+    /// Set when the process selected the schema baseline as its catalog.
+    baseline: Option<BaselineAction>,
 }
 
 impl MigrationRunner {
@@ -43,6 +46,7 @@ impl MigrationRunner {
         Self {
             migrations: sorted,
             owned_namespaces,
+            baseline: None,
         }
     }
 
@@ -62,7 +66,15 @@ impl MigrationRunner {
     ///
     /// This composes global + channel/message schema migrations into one
     /// ordered stream so they share one migration history without collisions.
+    ///
+    /// A process that selected the schema baseline gets the baseline as its
+    /// whole catalog instead; see [`baseline`].
     pub fn single() -> Self {
+        if let Some(action) = baseline::selected() {
+            let mut runner = Self::new(vec![baseline::migration()]);
+            runner.baseline = Some(action);
+            return runner;
+        }
         let mut migrations = global::all();
         migrations.extend(waddle::all());
         Self::new(migrations)
@@ -150,6 +162,9 @@ impl MigrationRunner {
         checksum_column_added: bool,
         prepared: Option<&PreparedLedger>,
     ) -> Result<Vec<i64>, DatabaseError> {
+        if let Some(action) = self.baseline {
+            baseline::prepare_ledger(tx, driver, ledger_table, action).await?;
+        }
         let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
@@ -197,6 +212,8 @@ impl MigrationRunner {
                 && migration.sql_postgres == waddle::V1029_SM_FRAME_PROVENANCE_POSTGRES
             {
                 apply_sm_frame_provenance(tx, driver, migration).await
+            } else if self.baseline.is_some() {
+                baseline::apply(tx, driver, migration).await
             } else {
                 tx.execute_batch(migration.sql_for(driver)).await
             };
@@ -497,6 +514,13 @@ impl MigrationRunner {
         driver: DatabaseDriver,
         required_version: i64,
     ) -> Result<(), DatabaseError> {
+        // Callers name the retired version that created what they attach to.
+        // On the baseline that version is the baseline itself.
+        let required_version = if self.baseline.is_some() {
+            required_version.max(baseline::BASELINE_VERSION)
+        } else {
+            required_version
+        };
         self.validate_ledger(applied_rows, driver, false)?;
         let mut seen = HashSet::new();
         for row in applied_rows {

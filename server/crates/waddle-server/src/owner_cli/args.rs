@@ -62,6 +62,14 @@ Environment (no flag; secret values are never printed):
                                   deployment; unset otherwise.
   WADDLE_SESSION_KEY              The server's session key. The VAPID signing
                                   key is sealed under it.
+  WADDLE_DB_BASELINE_ACTION       Unset: the migration history is the catalog.
+                                  `apply`: the schema baseline is the catalog;
+                                  an empty database is built from it. `stamp`:
+                                  as `apply`, and a database that holds the
+                                  complete migration history has its ledger
+                                  rewritten to the baseline, without DDL. The
+                                  other subcommands and the server must be
+                                  given `apply` for a database on the baseline.
   WADDLE_CLUSTERING_ENABLED       `true` prepares the clustering stores and
                                   requires a server built with clustering.
   WADDLE_CLUSTERING_KEYPAIR_POOL  The server's keypair pool. Its PeerIds, in

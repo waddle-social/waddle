@@ -53,6 +53,10 @@ pub use migrations::{
     DisposableEpochTransitionError, DisposableEpochTransitionFault,
     DisposableEpochTransitionObservation,
 };
+pub use migrations::{
+    schema_baseline_selected, select_schema_baseline_from_env, BaselineAction, BaselineActionError,
+    BASELINE_ACTION_ENV, BASELINE_VERSION,
+};
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};
 pub use value::{row_value, DbDecode, IntoParams, Row, Rows, Value, ValueExt};

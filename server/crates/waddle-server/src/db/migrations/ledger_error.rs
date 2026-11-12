@@ -50,6 +50,55 @@ pub enum MigrationLedgerError {
     )]
     MissingChecksum { version: i64 },
 
+    #[error(
+        "the schema baseline is selected, but the migration ledger still holds {versions} \
+         retired version(s); run the owner step once with WADDLE_DB_BASELINE_ACTION=stamp to \
+         record the baseline on this database"
+    )]
+    RetiredLedger { versions: usize },
+
+    #[error(
+        "the schema baseline cannot be stamped: the ledger holds retired versions together \
+         with v{version}"
+    )]
+    RetiredLedgerMixed { version: i64 },
+
+    #[error(
+        "the schema baseline cannot be stamped: retired migration(s) {missing:?} were never \
+         applied; run the last release that carries the migration history first"
+    )]
+    RetiredLedgerIncomplete { missing: Vec<i64> },
+
+    #[error(
+        "the schema baseline cannot be stamped: ledger version v{version} is not part of the \
+         retired migration history"
+    )]
+    RetiredLedgerUnknownVersion { version: i64 },
+
+    #[error(
+        "the schema baseline cannot be stamped: ledger version v{version} does not carry the \
+         retired history's description and checksum"
+    )]
+    RetiredLedgerMismatch { version: i64 },
+
+    #[error(
+        "the schema baseline cannot be stamped while {others} other session(s) or prepared \
+         transaction(s) use the database"
+    )]
+    BaselineStampNotExclusive { others: i64 },
+
+    #[error(
+        "the schema baseline cannot be stamped: {count} object(s) differ from the schema the \
+         migration history builds ({first})"
+    )]
+    BaselineCatalogMismatch { count: usize, first: String },
+
+    #[error("the schema baseline stamp did not leave exactly the baseline row; nothing was kept")]
+    BaselineStampUnverified,
+
+    #[error("the embedded schema baseline artefacts are not valid")]
+    BaselineArtefactInvalid,
+
     #[error("migration runtime attachment refuses duplicate ledger version v{version}")]
     DuplicateVersion { version: i64 },
 

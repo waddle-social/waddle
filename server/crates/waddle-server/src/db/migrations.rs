@@ -10,6 +10,7 @@
 //! Migration files should be named: `NNNN_description.sql`
 //! Where NNNN is a zero-padded version number (e.g., 0001, 0002).
 
+mod baseline;
 mod checksum;
 pub mod global;
 mod ledger_error;
@@ -23,6 +24,10 @@ mod tests;
 mod types;
 pub mod waddle;
 
+pub use baseline::{
+    is_selected as schema_baseline_selected, select_from_env as select_schema_baseline_from_env,
+    BaselineAction, BaselineActionError, BASELINE_ACTION_ENV, BASELINE_VERSION,
+};
 pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;
 pub use namespace::{MigrationNamespace, WADDLE_NAMESPACE_START};
