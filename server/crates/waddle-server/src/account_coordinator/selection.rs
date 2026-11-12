@@ -10,8 +10,8 @@ use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome}
 use waddle_xmpp::telemetry::reliability::record_janitor_sweep;
 
 use super::claims::{
-    AccountClaimSource, ClaimStoreClaimSource, ConnectionLiveness, LocalNodeLiveness,
-    ProcessClaimSource,
+    AccountClaimSource, ClaimStoreClaimSource, ClusterLeaseLiveness, ConnectionLiveness,
+    LocalNodeLiveness, ProcessClaimSource,
 };
 use super::config::AccountCoordinatorConfig;
 use super::directory::AccountCoordinators;
@@ -116,8 +116,11 @@ impl AccountAuthoritySelection {
                 };
                 let lease = NodeLeaseIdentity::from_node_identity(&node_identity.current());
                 (
-                    Arc::new(ClaimStoreClaimSource::new(claim_store, node_identity)),
-                    Arc::new(LocalNodeLiveness::new(lease)),
+                    Arc::new(ClaimStoreClaimSource::new(
+                        Arc::clone(&claim_store),
+                        node_identity,
+                    )),
+                    Arc::new(ClusterLeaseLiveness::new(lease, Arc::clone(&claim_store))),
                 )
             } else {
                 (

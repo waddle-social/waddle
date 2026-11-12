@@ -146,10 +146,14 @@ pub enum SessionRelease {
 pub struct AdoptionReport {
     /// Bindings on live connections, now held under this claim.
     pub adopted: Vec<(FullJid, BindingRef)>,
-    /// Bindings moved to this claim but not adopted: their connection is
-    /// not known to be live, or they are detached. They are not routable
+    /// Bindings moved to this claim but not adopted: their connection's
+    /// liveness is unknown, or they are detached. They are not routable
     /// and stay so until they are retired.
     pub unadopted: Vec<(FullJid, BindingRef)>,
+    /// Bindings moved to this claim whose connection is gone: its node
+    /// lost its lease or its process ended. They are not routable and can
+    /// be retired without their connection, by `unregister` and `repair`.
+    pub expired: Vec<(FullJid, BindingRef)>,
     /// Bindings whose row could not be moved to this claim, with the
     /// slot's reason. They remain under the previous claim.
     pub refused: Vec<(FullJid, BindingRef, AccountResourceTransitionError)>,
@@ -190,6 +194,8 @@ pub(super) struct ReleaseSession {
     pub(super) full_jid: FullJid,
     pub(super) request: ReleaseSessionRequest,
 }
+
+pub(super) struct ExpiredBindings;
 
 pub(super) struct ReadView;
 

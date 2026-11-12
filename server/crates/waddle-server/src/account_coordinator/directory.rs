@@ -23,10 +23,10 @@ use super::claims::{AccountClaimSource, ConnectionLiveness};
 use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
-    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, MarkPresented,
-    OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession, ReleaseSessionRequest, Repair,
-    RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status, Unregister,
-    UnregisterOutcome, UnregisterRequest,
+    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
+    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession,
+    ReleaseSessionRequest, Repair, RepairEvidence, RepairOutcome, SessionRelease, SlotStatus,
+    Status, Unregister, UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::AccountBindingStore;
 
@@ -189,6 +189,17 @@ impl AccountCoordinators {
         account: &BareJid,
     ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
         ask!(self, account, OverdueRetirements)
+    }
+
+    /// The account's bindings whose connection is gone: its node lost its
+    /// lease, or its process ended. Each can be retired without its
+    /// connection, by `unregister` and then `repair`. A binding whose
+    /// liveness is unknown is not listed and is left alone.
+    pub async fn expired_bindings(
+        &self,
+        account: &BareJid,
+    ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
+        ask!(self, account, ExpiredBindings)
     }
 
     /// Take over an account whose claim moved to this node: replace any

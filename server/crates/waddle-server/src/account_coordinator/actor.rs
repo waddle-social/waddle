@@ -22,14 +22,14 @@ use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
 use waddle_xmpp::telemetry::account_coordinator::{record_operation, record_slots_in_use};
 use waddle_xmpp::telemetry::attributes::{AccountMutationKind, AccountOperationOutcome};
 
-use super::claims::ConnectionLiveness;
+use super::claims::{BindingLiveness, ConnectionLiveness};
 use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
-    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, MarkPresented,
-    OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession, Repair, RepairEvidence,
-    RepairOutcome, SessionRelease, SlotStatus, Status, Unregister, UnregisterOutcome,
-    UnregisterRequest,
+    AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
+    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession, Repair,
+    RepairEvidence, RepairOutcome, SessionRelease, SlotStatus, Status, Unregister,
+    UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::{
     AccountBindingStore, AccountBindingStoreError, PresentationMark, StoredResource,
@@ -198,7 +198,17 @@ impl AccountCoordinatorActor {
                 return Ok(Some(row));
             }
         };
-        let adoptable = self.liveness.is_live(binding.binding_ref.connection_ref())
+        let liveness = self
+            .liveness
+            .liveness(
+                &binding.binding_ref,
+                binding
+                    .snapshot
+                    .stream_management_ref
+                    .map(|reference| reference.session),
+            )
+            .await;
+        let adoptable = liveness == BindingLiveness::Live
             && matches!(
                 binding.state,
                 AccountResourceBindingState::Prepared
@@ -206,9 +216,12 @@ impl AccountCoordinatorActor {
                     | AccountResourceBindingState::Active
             );
         if !adoptable {
-            report
-                .unadopted
-                .push((full_jid.clone(), binding.binding_ref.clone()));
+            let entry = (full_jid.clone(), binding.binding_ref.clone());
+            if liveness == BindingLiveness::Expired {
+                report.expired.push(entry);
+            } else {
+                report.unadopted.push(entry);
+            }
             return Ok(self.store.load(&full_jid).await?);
         }
         let adopt = fresh_operation(AccountResourceMutation::AdoptBinding {
@@ -930,6 +943,42 @@ impl Message<ReleaseSession> for AccountCoordinatorActor {
             },
         );
         reply
+    }
+}
+
+impl Message<ExpiredBindings> for AccountCoordinatorActor {
+    type Reply = Reply<Vec<(FullJid, BindingRef)>>;
+
+    /// The bindings whose connection is gone, judged now. A binding whose
+    /// liveness is unknown is not listed.
+    async fn handle(
+        &mut self,
+        _message: ExpiredBindings,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ensure_loaded().await?;
+        let candidates: Vec<_> = self
+            .resources()?
+            .slots()
+            .filter_map(|slot| {
+                let binding = slot.binding_receipt()?;
+                Some((
+                    slot.full_jid().clone(),
+                    binding.binding_ref().clone(),
+                    binding
+                        .snapshot()
+                        .stream_management_ref
+                        .map(|reference| reference.session),
+                ))
+            })
+            .collect();
+        let mut expired = Vec::new();
+        for (full_jid, binding_ref, session) in candidates {
+            if self.liveness.liveness(&binding_ref, session).await == BindingLiveness::Expired {
+                expired.push((full_jid, binding_ref));
+            }
+        }
+        Ok(expired)
     }
 }
 

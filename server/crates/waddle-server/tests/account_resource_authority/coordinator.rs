@@ -11,8 +11,9 @@ use jid::{BareJid, FullJid};
 use waddle_server::account_bindings::{AccountBindingStore, DatabaseAccountBindingStore};
 use waddle_server::account_coordinator::{
     AccountBindingAuthority, AccountClaimError, AccountClaimSource, AccountCoordinatorConfig,
-    AccountCoordinatorError, AccountCoordinators, BindingReply, LocalNodeLiveness, RepairEvidence,
-    RepairOutcome, UnregisterOutcome, UnregisterRequest,
+    AccountCoordinatorError, AccountCoordinators, BindingLiveness, BindingReply,
+    ConnectionLiveness, LocalNodeLiveness, RepairEvidence, RepairOutcome, UnregisterOutcome,
+    UnregisterRequest,
 };
 use waddle_server::db::Database;
 use waddle_xmpp::ownership::account_coordinator::{
@@ -1144,4 +1145,98 @@ async fn an_account_over_its_slot_bound_serves_its_bindings_and_refuses_new_ones
         update(&claim, status.revision, &binding, presence(true, 4, false)),
     )
     .await;
+}
+
+/// Liveness the test states per binding; anything else is unknown.
+struct StatedLiveness(Vec<(BindingRef, BindingLiveness)>);
+
+#[async_trait]
+impl ConnectionLiveness for StatedLiveness {
+    async fn liveness(
+        &self,
+        binding: &BindingRef,
+        _session: Option<waddle_xmpp::ownership::SmSessionKey>,
+    ) -> BindingLiveness {
+        self.0
+            .iter()
+            .find(|(stated, _)| stated == binding)
+            .map_or(BindingLiveness::Unknown, |(_, liveness)| *liveness)
+    }
+}
+
+#[tokio::test]
+async fn a_takeover_adopts_live_remote_bindings_and_reports_expired_ones() {
+    let harness = harness("account-coordinator-remote-liveness", config()).await;
+    let remote = |node: &str| {
+        BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(
+            &NodeIdentity::new(node, "epoch"),
+        )))
+    };
+    let live_jid = resource("remote-live");
+    let expired_jid = resource("remote-expired");
+    let unknown_jid = resource("remote-unknown");
+    let live = remote("node-live");
+    let expired = remote("node-expired");
+    let unknown = remote("node-unknown");
+    activate_binding(&harness.coordinators, &live_jid, &live).await;
+    activate_binding(&harness.coordinators, &expired_jid, &expired).await;
+    activate_binding(&harness.coordinators, &unknown_jid, &unknown).await;
+
+    harness.claims.move_to(claim(2));
+    let successor = AccountCoordinators::new(
+        Arc::clone(&harness.store) as Arc<dyn AccountBindingStore>,
+        Arc::clone(&harness.claims) as Arc<dyn AccountClaimSource>,
+        Arc::new(StatedLiveness(vec![
+            (live.clone(), BindingLiveness::Live),
+            (expired.clone(), BindingLiveness::Expired),
+        ])),
+        config(),
+    );
+    let account = live_jid.to_bare();
+    let report = successor
+        .adopt_account(&account)
+        .await
+        .expect("adopt the account");
+    assert_eq!(report.adopted, vec![(live_jid.clone(), live)]);
+    assert_eq!(report.expired, vec![(expired_jid.clone(), expired.clone())]);
+    assert_eq!(
+        report.unadopted,
+        vec![(unknown_jid.clone(), unknown.clone())]
+    );
+    assert_eq!(
+        resources(&successor, &live_jid).await,
+        vec![live_jid],
+        "a binding hosted by a node with a fresh lease stays a destination"
+    );
+    assert_eq!(
+        successor
+            .expired_bindings(&account)
+            .await
+            .expect("expired bindings"),
+        vec![(expired_jid.clone(), expired.clone())],
+        "unknown liveness is not reported as expired"
+    );
+    assert!(matches!(
+        successor
+            .unregister(&expired_jid, unregister_request(&expired))
+            .await
+            .expect("unregister"),
+        UnregisterOutcome::Retiring { .. }
+    ));
+    assert!(matches!(
+        successor
+            .repair(&expired_jid, &expired, repair_evidence())
+            .await
+            .expect("repair"),
+        RepairOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        successor
+            .slot_status(&unknown_jid)
+            .await
+            .expect("slot status")
+            .binding,
+        Some((unknown, AccountResourceBindingState::Active)),
+        "a binding of unknown liveness is kept, not deleted"
+    );
 }

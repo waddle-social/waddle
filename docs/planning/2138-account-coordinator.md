@@ -282,12 +282,18 @@ releases first, the session row is deleted last.**
   non-routable.
 - **Takeover.** A coordinator that loads rows written under a previous
   claim identity replaces the claim on every row and adopts a prepared,
-  published or active binding whose connection is live. Liveness is local:
-  a connection is live when it was accepted under this node's current
-  lease. Every other binding stays under its previous binding claim, is
-  not a destination, and is reported so it can be retired. A detached
-  binding is among them: the slot model has no adoption for a detached
-  binding, so a session detached under a previous claim cannot resume.
+  published or active binding whose connection is live. Liveness has three
+  answers. A connection under this node's current lease is live. A binding
+  hosted by another node is judged through its stream-management session's
+  claim, the only node-lease read the claim store exposes: when the node
+  the connection names holds that claim, a fresh lease means live and a
+  lost lease means expired. Everything else is unknown, including a remote
+  binding without a session. On a single node a connection of a previous
+  process is expired. An expired binding is reported and can be retired
+  without its connection; an unknown one is kept, is not a destination and
+  is not retired on that evidence. A detached binding is never adopted:
+  the slot model has no adoption for one, so a session detached under a
+  previous claim cannot resume.
 - **Over the slot bound.** Rows that hold a binding are always loaded,
   even beyond the account's slot bound. Such an account serves its stored
   bindings and refuses a bind of any new resource until enough retire.

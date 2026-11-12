@@ -28,8 +28,8 @@ mod selection;
 
 pub use authority::AccountBindingAuthority;
 pub use claims::{
-    AccountClaimError, AccountClaimSource, ClaimStoreClaimSource, ConnectionLiveness,
-    LocalNodeLiveness, ProcessClaimSource,
+    AccountClaimError, AccountClaimSource, BindingLiveness, ClaimStoreClaimSource,
+    ClusterLeaseLiveness, ConnectionLiveness, LocalNodeLiveness, ProcessClaimSource,
 };
 pub use config::AccountCoordinatorConfig;
 pub use directory::AccountCoordinators;

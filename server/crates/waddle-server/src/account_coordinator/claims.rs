@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use jid::BareJid;
 use thiserror::Error;
 use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimStore, ConnectionRef, Entity, EntityType, NodeLeaseIdentity,
-    SharedNodeIdentity, UserClaimIdentity,
+    BindingRef, ClaimEpoch, ClaimStore, Entity, EntityType, NodeLeaseIdentity, SharedNodeIdentity,
+    SmSessionKey, UserClaimIdentity,
 };
 
 /// Why this node cannot act as an account's coordinator.
@@ -99,16 +99,37 @@ impl AccountClaimSource for ClaimStoreClaimSource {
     }
 }
 
-/// Whether the connection a stored binding names still exists. A
-/// coordinator that takes over an account adopts only bindings on live
-/// connections; the rest stay non-routable until they are retired.
-pub trait ConnectionLiveness: Send + Sync + 'static {
-    fn is_live(&self, connection: &ConnectionRef) -> bool;
+/// What is known about the connection a stored binding names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingLiveness {
+    /// The connection's node holds a fresh lease.
+    Live,
+    /// The connection's node lost its lease, or its process ended. The
+    /// connection is gone and the binding can be retired without it.
+    Expired,
+    /// Nothing proves either. The binding is not adopted, not routed to
+    /// and not retired on this evidence.
+    Unknown,
 }
 
-/// Liveness as one node knows it without asking the cluster: a connection
-/// is live when it was accepted under this node's current lease. A
-/// connection hosted by another node is not known to be live here.
+/// Whether the connection a stored binding names still exists. A
+/// coordinator that takes over an account adopts only bindings on live
+/// connections.
+#[async_trait]
+pub trait ConnectionLiveness: Send + Sync + 'static {
+    /// The liveness of `binding`'s connection. `session` is the binding's
+    /// stream-management session, when it has one.
+    async fn liveness(
+        &self,
+        binding: &BindingRef,
+        session: Option<SmSessionKey>,
+    ) -> BindingLiveness;
+}
+
+/// Liveness as one node knows it without asking the cluster. A connection
+/// accepted under this node's current lease is live. On a single node, a
+/// connection of a previous process is expired, because that process has
+/// ended. A connection hosted by another node is unknown.
 #[derive(Debug, Clone)]
 pub struct LocalNodeLiveness {
     lease: NodeLeaseIdentity,
@@ -120,8 +141,67 @@ impl LocalNodeLiveness {
     }
 }
 
+#[async_trait]
 impl ConnectionLiveness for LocalNodeLiveness {
-    fn is_live(&self, connection: &ConnectionRef) -> bool {
-        connection.node_lease() == &self.lease
+    async fn liveness(
+        &self,
+        binding: &BindingRef,
+        _session: Option<SmSessionKey>,
+    ) -> BindingLiveness {
+        let lease = binding.connection_ref().node_lease();
+        if lease == &self.lease {
+            BindingLiveness::Live
+        } else if lease.clustered_node().is_none() && self.lease.clustered_node().is_none() {
+            BindingLiveness::Expired
+        } else {
+            BindingLiveness::Unknown
+        }
+    }
+}
+
+/// Liveness on a clustered node, from the claim store's read of the node
+/// lease. The only lease read the claim store exposes is the freshness of
+/// the owner of a claim, so a binding hosted by another node is judged
+/// through its stream-management session's claim: when that claim is held
+/// by the node the binding's connection names, the node's lease decides.
+/// A binding without a session, or whose session claim is absent or held
+/// by a different node, is unknown.
+#[derive(Clone)]
+pub struct ClusterLeaseLiveness {
+    lease: NodeLeaseIdentity,
+    claim_store: Arc<dyn ClaimStore>,
+}
+
+impl ClusterLeaseLiveness {
+    pub fn new(lease: NodeLeaseIdentity, claim_store: Arc<dyn ClaimStore>) -> Self {
+        Self { lease, claim_store }
+    }
+}
+
+#[async_trait]
+impl ConnectionLiveness for ClusterLeaseLiveness {
+    async fn liveness(
+        &self,
+        binding: &BindingRef,
+        session: Option<SmSessionKey>,
+    ) -> BindingLiveness {
+        let lease = binding.connection_ref().node_lease();
+        if lease == &self.lease {
+            return BindingLiveness::Live;
+        }
+        let (Some(host), Some(session)) = (lease.clustered_node(), session) else {
+            return BindingLiveness::Unknown;
+        };
+        let entity = Entity::new(EntityType::SmSession, session.as_uuid().to_string());
+        match self.claim_store.current_claim(&entity).await {
+            Ok(Some(claim)) if claim.owner == host => {
+                if claim.owner_lease_fresh {
+                    BindingLiveness::Live
+                } else {
+                    BindingLiveness::Expired
+                }
+            }
+            Ok(_) | Err(_) => BindingLiveness::Unknown,
+        }
     }
 }
