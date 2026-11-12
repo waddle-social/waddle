@@ -2026,7 +2026,6 @@ pub(crate) enum PreparedIngressRelation {
     CarbonReceipts,
     EffectReceipts,
     EffectDescendants,
-    #[allow(dead_code)] // used by staged relayed-source authority methods.
     OwnerRejections,
     SendAttempts,
     SmAppends,

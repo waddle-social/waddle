@@ -584,3 +584,13 @@ waddle-server::mailbox_core_postgres guarded_tables_reject_unproven_and_unsuppor
 waddle-server::mailbox_core_postgres unconsumed_entry_retains_its_message_and_a_consumed_entry_leaves_with_it
 waddle-server::mailbox_core_postgres collector_skips_a_message_an_appender_holds
 waddle-server::mailbox_core_postgres appender_behind_a_collector_neither_deadlocks_nor_allocates
+
+# #1948 owner acceptance transaction: with the mailbox selected the origin's
+# commit must append the pending entry, and the owner's commit must latch its
+# decision on the canonical message and the entry together, for an acceptance
+# and for a refusal; the relay selector must write no lane. An image whose
+# owner can accept without recording it, or whose default path writes mailbox
+# rows, must not ship.
+waddle-server::ingress_commit mailbox_acceptance::origin_appends_pending_entry_and_owner_accepts_in_one_transaction
+waddle-server::ingress_commit mailbox_acceptance::owner_rejection_records_its_child_and_decides_the_entry
+waddle-server::ingress_commit mailbox_acceptance::relay_selector_writes_no_mailbox_entry

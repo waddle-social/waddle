@@ -1,8 +1,10 @@
 # P2.2 — durable mailbox core
 
-Status: **storage core implemented and dark**. Migration V1031 creates the
-lane and entry tables and `MailboxRepository` is the only code that writes
-them; no runtime path appends an entry yet. The sections from "Ownership and
+Status: **implemented behind a selector that defaults to the relay**.
+Migration V1031 creates the lane and entry tables and `MailboxRepository` is
+the only code that writes them. The ingress commit appends and decides entries
+only when `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=mailbox` on a clustered
+PostgreSQL deployment. The sections from "Ownership and
 boundaries" onward are the design review that preceded the implementation and
 are kept for their failure analysis. Where they describe a question as open,
 the "Implemented contract" section below is the answer in force.
@@ -65,6 +67,47 @@ The unregistered GC pilot (`ingress_gc_fk_transition_v1_candidate.sql`,
 `ingress_gc_api_v1_candidate.sql`) lists the entry foreign key in its FK
 manifest, turns it into `NO ACTION`, refuses a message whose entry is not
 consumed and deletes consumed entries explicitly.
+
+### Remote room acceptance
+
+`RemoteRoomAcceptance` (`ingress_uow`) selects how a groupchat message for a
+room owned by another node reaches the owner's acceptance. `OrderedRelay`, the
+default, leaves the relay path as it is. `DurableMailbox` takes effect only
+with clustered fencing on PostgreSQL (`mailbox_acceptance_enabled`) and is set
+from `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE` (`relay` or `mailbox`).
+
+With the mailbox selected (`ingress/commit_mailbox.rs`):
+
+- **Origin commit.** After its stream row and before any canonical row, the
+  origin locks its lane: origin = the stream-management session (or the bound
+  resource for a stream without one), recipient = the room's `MucStanza` lane.
+  The fence is the stream's claim epoch and the room claim read from
+  `clustering_claims` in the same transaction. The canonical message is
+  created with its authenticated source binding, because only a bound message
+  can carry an owner decision and the binding is immutable. Once the
+  `DispatchToRoomRemote` intent is recorded, the same transaction sets
+  `owner_decision = 0` and appends the entry `Pending`. A message that already
+  exists without a source binding keeps the relay's behaviour and gets no
+  entry.
+- **Admission.** Under the lane lock, a lane at 64 or an owner node at 16 384
+  pending entries refuses the stanza: the commit records an ordinary denial
+  with a `resource-constraint` error of type `wait` and appends nothing. A
+  stanza already bound to its wire position is never refused for a backlog it
+  is part of.
+- **Owner commit.** The owner's relayed commit looks the entry up by
+  `RoomAcceptance(MessageKey)`, locks its lane as target with the room claim
+  it has just asserted, and only then locks the canonical message. Clustered
+  rooms seal their manifest in this mode. Before commit the same transaction
+  latches `owner_decision` to accepted, or stores the frozen error as a
+  rejection child, maps it in `ingress_owner_rejections` and latches rejected;
+  then it moves the entry to `OwnerAccepted` or `OwnerRejected` and the lane
+  cursor past it. The owner's first decision may refuse a message even though
+  the origin's row already records its dispatch. On a replay the latched
+  decision is the authority, whatever the replayed plan concluded.
+
+No second acceptance record exists: the entry's disposition and
+`owner_decision` are written together and the manifest or the rejection child
+is the evidence.
 
 ### Guard, roles and manifest
 

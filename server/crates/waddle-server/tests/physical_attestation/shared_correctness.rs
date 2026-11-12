@@ -43,6 +43,7 @@ fn facade(pool: &DatabasePool, lineage: LineageConfig) -> SharedCorrectnessFixtu
         &IngressConfig {
             pool_size: 1,
             retry_attempts: 2,
+            remote_room_acceptance: Default::default(),
         },
         lineage,
         #[cfg(feature = "clustering")]
@@ -314,7 +315,8 @@ async fn sqlite_memory_pool_with_two_checkouts_is_refused() {
             &pool,
             &IngressConfig {
                 pool_size: 1,
-                retry_attempts: 1
+                retry_attempts: 1,
+                remote_room_acceptance: Default::default(),
             },
             LineageConfig::default(),
             #[cfg(feature = "clustering")]
@@ -567,6 +569,7 @@ async fn exercise_postgres(
             &IngressConfig {
                 pool_size: 2,
                 retry_attempts: 1,
+                remote_room_acceptance: Default::default(),
             },
             LineageConfig {
                 deployment_uuid: Some(fixture.lineage.deployment_uuid),
@@ -581,6 +584,7 @@ async fn exercise_postgres(
     let ingress_config = IngressConfig {
         pool_size: 1,
         retry_attempts: 2,
+        remote_room_acceptance: Default::default(),
     };
     let lineage_config = LineageConfig {
         deployment_uuid: Some(fixture.lineage.deployment_uuid),

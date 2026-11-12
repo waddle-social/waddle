@@ -16,7 +16,7 @@ pub use maintenance::{
     receipt_complete_nonterminal_keys, recovery_evidence_pooled,
     unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
 };
-pub(crate) use owned_alias::resolve_prepared_origin_in_scope;
+pub(crate) use owned_alias::{resolve_prepared_origin_in_scope, OriginCandidate};
 #[cfg(test)]
 pub(crate) use owned_alias::{
     AliasGate as OwnedAliasGate, SavepointPhase as OwnedAliasSavepointPhase,
@@ -75,14 +75,12 @@ use crate::ingress_uow::DbRetryClass;
 /// Immutable authenticated origin identity stamped with a newly-created
 /// canonical message. The SM occurrence is absent for ephemeral streams.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
 pub(crate) struct CanonicalSourceBinding {
     principal: AuthenticatedPrincipalRef,
     sm_occurrence: Option<(SmIngressId, IngressOrdinal)>,
 }
 
 impl CanonicalSourceBinding {
-    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
     pub(crate) fn new(
         principal: AuthenticatedPrincipalRef,
         sm_occurrence: Option<(SmIngressId, IngressOrdinal)>,

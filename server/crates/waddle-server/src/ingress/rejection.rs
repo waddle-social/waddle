@@ -83,6 +83,28 @@ pub(super) fn rejection_plan(
     Ok(rejected)
 }
 
+/// The plan of a stanza refused because the mailbox to its room's owner is
+/// full: a `resource-constraint` error of type `wait` to the sender and no
+/// other work. The caller commits it as an ordinary denial.
+pub(super) fn mailbox_full_plan(plan: &IngressPlan, sender: &jid::FullJid) -> IngressPlan {
+    let error = FrozenStanzaError::new(
+        FrozenStanzaErrorType::Wait,
+        StanzaErrorCondition::ResourceConstraint,
+    );
+    let mut reply = plan.sanitized_message.clone();
+    reply.to = Some(sender.clone().into());
+    reply.from = plan.sanitized_message.to.clone();
+    reply.type_ = xmpp_parsers::message::MessageType::Error;
+    reply.payloads.push(error.to_xmpp().into());
+    let mut refused = plan.clone();
+    refused.intents = vec![IngressEffectIntent::ErrorReply {
+        recipient: sender.clone(),
+        error,
+    }];
+    refused.error_reply = Some(Stanza::Message(reply));
+    refused
+}
+
 fn sender_carbon_intent(intent: &IngressEffectIntent, sender: &jid::BareJid) -> bool {
     match intent {
         IngressEffectIntent::Carbons {

@@ -22,8 +22,8 @@ Abbreviations: `S/` is `server/crates/waddle-server/src/`, `W/` is
 | Restricted database runtime | Refused before any pool escapes | `S/main.rs:94`, `S/server/lifecycle.rs:95-97` |
 | Connection actor on `/ws` | Every started connection is hosted by the connection actor, which runs the live loop and the legacy handlers. The gate returns the legacy admission, and registration still installs the binding and owns the outbound endpoint | `W/connection/live_actor.rs`, `W/connection.rs` (`LiveWebSocketConnection::run`), `S/server/state.rs` (`WebSocketAdmissionGate::reserve`) |
 | Connection state | The actor owns a whole `WsConnState` by value inside `LiveSocketState`; there is no separate state type | `W/connection.rs` (`LiveSocketState`) |
-| Durable mailbox (P2.2–P2.4) | Absent: `MailboxLane`, `mailbox_entries`, `AcceptanceUow` and `TargetConsumptionUow` have no hits under `server/crates` | grep |
-| Clustered frozen room manifests | Off outside tests | `S/ingress/commit/commit_hooks.rs:24-34` |
+| Durable mailbox (P2.2–P2.4) | Storage core present. Remote room acceptance appends and decides entries only under `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=mailbox`; the default is the relay | `S/db/migrations/mailbox_postgres.sql`, `S/ingress_uow/mailbox.rs`, `S/ingress/commit_mailbox.rs`, [`p2-2-durable-mailbox-core.md`](p2-2-durable-mailbox-core.md) |
+| Clustered frozen room manifests | Sealed where remote room acceptance uses the mailbox; otherwise off outside tests | `S/ingress/commit_room.rs` (`new_manifests_enabled`), `S/ingress/commit/commit_hooks.rs` |
 | Hosted CI | Actions disabled, workflow files removed | [`2046-ci-pause.md`](2046-ci-pause.md) |
 
 ## Working rules

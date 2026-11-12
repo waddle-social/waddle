@@ -8,14 +8,18 @@ use crate::ingress_uow::IngressUnitOfWork;
 use crate::ingress_uow::RoomClaimFence;
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 
-/// Cluster integration stays dark until remote children can complete. The
-/// test-only scope exercises guarded manifests without enabling production.
+/// Single-node rooms always seal. A clustered room seals where remote room
+/// acceptance runs through the durable mailbox, or inside the test scope that
+/// exercises guarded manifests.
 pub(super) fn new_manifests_enabled(uow: &IngressUnitOfWork) -> bool {
     match uow.fencing() {
         IngressFencing::SingleNode => true,
         #[cfg(feature = "clustering")]
         crate::ingress_uow::IngressFencing::Clustered(_) => {
-            super::commit::commit_hooks::allow_clustered_room_manifests()
+            // With mailbox acceptance the owner seals in the transaction that
+            // records its decision, so the manifest is what was accepted.
+            uow.mailbox_acceptance_enabled()
+                || super::commit::commit_hooks::allow_clustered_room_manifests()
         }
     }
 }

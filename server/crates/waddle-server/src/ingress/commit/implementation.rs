@@ -166,7 +166,25 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     if matches!(submission.identity, IngressStreamIdentity::Relayed { .. }) {
         super::super::commit_room::assert_room(&mut tx, submission, false).await?;
     }
+    // Mailbox lanes are locked before any canonical row: the owner's here,
+    // under its proven room claim, and the origin's after its stream row.
+    let mut owner_acceptance =
+        super::super::commit_mailbox::begin_owner(uow, &mut tx, submission).await?;
     let stream = super::super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
+    let mut origin_acceptance = None;
+    let mut mailbox_full = false;
+    match super::super::commit_mailbox::begin_origin(uow, &mut tx, submission, stream.as_ref())
+        .await?
+    {
+        Some(super::super::commit_mailbox::OriginAdmission::Admitted(acceptance)) => {
+            origin_acceptance = Some(acceptance);
+        }
+        Some(super::super::commit_mailbox::OriginAdmission::Full(refusal)) => {
+            tracing::warn!(%refusal, "remote room acceptance refused: mailbox is full");
+            mailbox_full = true;
+        }
+        None => {}
+    }
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
     let relayed_alias = match (&submission.identity, submission.digest_input.origin()) {
         (
@@ -203,6 +221,13 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         MessageEnvelope::new(submission.plan.sanitized_message.clone())
     };
     let mut rejection = super::super::rejection::planned_rejection(&submission.plan)?;
+    // A full mailbox refuses the stanza with a committed `resource-constraint`
+    // denial instead of an entry: nothing that was accepted is dropped.
+    let refused_plan = mailbox_full
+        .then(|| super::super::rejection::mailbox_full_plan(&submission.plan, &submission.sender));
+    if mailbox_full {
+        rejection = Some(IngressDecisionClass::PolicyDenied);
+    }
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
         (key, AliasOutcomeClass::Existing)
     } else if let Some(key) = relayed_alias {
@@ -257,27 +282,62 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     } else if let IngressStreamIdentity::Relayed { canonical, .. } = &submission.identity {
         (canonical.message_key, AliasOutcomeClass::Existing)
     } else if let Some(origin) = submission.digest_input.origin() {
-        let resolution = if tx.receipt_schema().is_some() {
-            let (next, resolution) = CanonicalMessageRepository::resolve_prepared_origin_owned(
-                tx,
-                submission.principal.bare_jid(),
-                &submission.target,
-                origin,
-                &digest,
-            )
-            .await?;
-            tx = next;
-            resolution
-        } else {
-            CanonicalMessageRepository::resolve_and_record_alias(
-                &mut tx,
-                submission.principal.bare_jid(),
-                &submission.target,
-                origin,
-                &digest,
-                MessageKey::new,
-            )
-            .await?
+        // A message that will await its room owner's decision is created
+        // bound to its authenticated source; the binding cannot be added
+        // later.
+        let source = origin_acceptance
+            .as_ref()
+            .map(|acceptance| acceptance.source().clone());
+        let resolution = match (tx.receipt_schema().is_some(), source.as_ref()) {
+            (true, Some(source)) => {
+                let (next, resolution) =
+                    CanonicalMessageRepository::resolve_prepared_origin_owned_with_source(
+                        tx,
+                        submission.principal.bare_jid(),
+                        &submission.target,
+                        origin,
+                        &digest,
+                        source,
+                    )
+                    .await?;
+                tx = next;
+                resolution
+            }
+            (true, None) => {
+                let (next, resolution) = CanonicalMessageRepository::resolve_prepared_origin_owned(
+                    tx,
+                    submission.principal.bare_jid(),
+                    &submission.target,
+                    origin,
+                    &digest,
+                )
+                .await?;
+                tx = next;
+                resolution
+            }
+            (false, Some(source)) => {
+                CanonicalMessageRepository::resolve_and_record_alias_with_source(
+                    &mut tx,
+                    submission.principal.bare_jid(),
+                    &submission.target,
+                    origin,
+                    &digest,
+                    source,
+                    MessageKey::new,
+                )
+                .await?
+            }
+            (false, None) => {
+                CanonicalMessageRepository::resolve_and_record_alias(
+                    &mut tx,
+                    submission.principal.bare_jid(),
+                    &submission.target,
+                    origin,
+                    &digest,
+                    MessageKey::new,
+                )
+                .await?
+            }
         };
         match resolution {
             AliasResolution::Aliased(AliasOutcome::Existing(key)) => {
@@ -296,7 +356,22 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         (MessageKey::new(), AliasOutcomeClass::NoOrigin)
     };
     if alias != AliasOutcomeClass::Existing {
-        CanonicalMessageRepository::record_message(&mut tx, key, &digest, Some(&envelope)).await?;
+        match origin_acceptance.as_ref().filter(|_| rejection.is_none()) {
+            Some(acceptance) => {
+                CanonicalMessageRepository::record_message_with_source(
+                    &mut tx,
+                    key,
+                    &digest,
+                    Some(&envelope),
+                    acceptance.source(),
+                )
+                .await?;
+            }
+            None => {
+                CanonicalMessageRepository::record_message(&mut tx, key, &digest, Some(&envelope))
+                    .await?;
+            }
+        }
     }
     if !CanonicalMessageRepository::lock(&mut tx, key).await? {
         return Err(IngressUowError::EffectIntentMessageMissing);
@@ -323,7 +398,16 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     // A policy change cannot replace an already committed acceptance with a
     // rejection. Preserve its recorded obligations; any work absent from this
     // new plan stays pending for recovery rather than inventing a new denial.
+    //
+    // The room owner's first decision on a relayed message is the exception:
+    // the origin's row records a dispatch, not an acceptance, so the owner
+    // may still refuse it until its decision is latched.
+    let owner_undecided = match owner_acceptance.as_ref() {
+        Some(_) => super::super::commit_mailbox::owner_undecided(&mut tx, key).await?,
+        None => false,
+    };
     let replay_acceptance = alias == AliasOutcomeClass::Existing
+        && !owner_undecided
         && !super::super::rejection::is_recorded_rejection(&recorded);
     let discard_new_denial = replay_acceptance && rejection.take().is_some();
     let recorded_ids = archive_ids(&recorded);
@@ -380,7 +464,11 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         accepted.rejection = None;
         accepted
     } else if let Some(class) = rejection {
-        super::super::rejection::rejection_plan(&submission.plan, class, &submission.sender)?
+        super::super::rejection::rejection_plan(
+            refused_plan.as_ref().unwrap_or(&submission.plan),
+            class,
+            &submission.sender,
+        )?
     } else {
         super::super::restamp::restamp_plan(&submission.plan, &recorded_ids)?
     };
@@ -482,6 +570,13 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     let verdict = replay_verdict.unwrap_or(verdict);
     if matches!(verdict, ReconcileVerdict::Contradiction { .. }) {
         return Err(IngressUowError::EffectIntentConflict);
+    }
+    // The origin's dispatch intent is recorded now, so the same transaction
+    // opens the owner decision and appends the pending mailbox entry.
+    if rejection.is_none() {
+        if let Some(acceptance) = origin_acceptance.as_mut() {
+            super::super::commit_mailbox::record_origin(&mut tx, acceptance, key).await?;
+        }
     }
     let mut intents = EffectIntentRepository::load(&mut tx, key).await?;
     if intents.iter().any(|intent| {
@@ -693,6 +788,22 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     }
     if sealed_manifest.is_some() && commit_hooks::fail_after_manifest() {
         return Err(IngressUowError::Timeout);
+    }
+    // The owner's decision joins the manifest, its child keys and the
+    // rejection evidence in this one transaction.
+    if let Some(acceptance) = owner_acceptance.as_mut() {
+        let outcome = if rejection.is_none() {
+            super::super::commit_mailbox::OwnerOutcome::Accepted
+        } else {
+            super::super::commit_mailbox::OwnerOutcome::Rejected {
+                reply: match plan.error_reply.as_ref() {
+                    Some(waddle_xmpp::Stanza::Message(reply)) => Some(reply),
+                    _ => None,
+                },
+                sender: &submission.sender,
+            }
+        };
+        super::super::commit_mailbox::decide_owner(&mut tx, acceptance, outcome).await?;
     }
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
     super::super::commit_stream::finish_stream(&mut tx, stream.as_ref(), key).await?;

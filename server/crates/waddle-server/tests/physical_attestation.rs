@@ -5833,6 +5833,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         &waddle_server::config::IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
+            remote_room_acceptance: Default::default(),
         },
         &database_pool,
         &lineage,
@@ -5850,6 +5851,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         waddle_server::config::IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
+            remote_room_acceptance: Default::default(),
         },
         database_pool.global().clone(),
         lineage.clone(),
@@ -5878,6 +5880,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
             waddle_server::config::IngressConfig {
                 pool_size: 1,
                 retry_attempts: 1,
+                remote_room_acceptance: Default::default(),
             },
             database_pool.global().clone(),
             LineageConfig {
@@ -5930,6 +5933,7 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
         waddle_server::config::IngressConfig {
             pool_size: 1,
             retry_attempts: 1,
+            remote_room_acceptance: Default::default(),
         },
         ingress.clone(),
         LineageConfig {

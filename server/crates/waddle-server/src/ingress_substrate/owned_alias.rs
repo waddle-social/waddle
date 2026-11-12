@@ -18,6 +18,7 @@ use super::substrate::{
     validate_stored_alias_identity, validate_stored_alias_identity_at, AliasStorageKey,
     IngressSubstrateError, PreparedAttestedReceiptWriter, PreparedIngressRelation,
 };
+use super::CanonicalSourceBinding;
 use crate::db::DatabaseDriver;
 use crate::ingress_uow::OwnedAliasScope;
 
@@ -76,6 +77,14 @@ async fn savepoint(
     Ok(())
 }
 
+/// Content a first-seen origin's candidate message is created with.
+pub(crate) struct OriginCandidate<'a> {
+    pub digest: &'a SemanticDigest,
+    /// Authenticated source to bind at insert. The binding is immutable, so
+    /// a candidate created without one stays unbound.
+    pub source: Option<&'a CanonicalSourceBinding>,
+}
+
 /// Reachable only while the repository owns the complete ingress transaction.
 /// A failure leaves its caller responsible for dropping that transaction.
 pub(crate) async fn resolve_prepared_origin_in_scope(
@@ -85,8 +94,9 @@ pub(crate) async fn resolve_prepared_origin_in_scope(
     sender: &BareJid,
     target: &NormalizedTarget,
     origin: &OriginId,
-    digest: &SemanticDigest,
+    candidate: OriginCandidate<'_>,
 ) -> Result<AliasResolution, IngressSubstrateError> {
+    let OriginCandidate { digest, source } = candidate;
     if tx.driver() != DatabaseDriver::Postgres {
         return Err(IngressSubstrateError::SchemaIdentityMismatch);
     }
@@ -98,7 +108,7 @@ pub(crate) async fn resolve_prepared_origin_in_scope(
             target,
             origin,
             digest,
-            None,
+            source,
             MessageKey::new,
         )
         .await;
@@ -121,9 +131,10 @@ pub(crate) async fn resolve_prepared_origin_in_scope(
         SavepointPhase::Begin,
     )
     .await?;
-    // The live caller records the envelope after resolving the alias; this
-    // candidate must not assert a source binding on its behalf.
-    if !insert_message(tx, Some(prepared), candidate, digest, None, None).await? {
+    // The live caller records the envelope after resolving the alias. The
+    // source binding is immutable from insert, so a caller that needs one
+    // supplies it here; without one the candidate stays unbound.
+    if !insert_message(tx, Some(prepared), candidate, digest, None, source).await? {
         return Err(IngressSubstrateError::MessageContentConflict);
     }
     let sql = format!(
