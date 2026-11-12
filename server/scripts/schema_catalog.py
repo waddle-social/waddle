@@ -12,6 +12,10 @@ settings, so two databases with the same schema produce the same bytes.
 side only and every property that differs. It exits 0 when they are equal and
 1 when they are not.
 
+`fingerprint` writes one digest per structural object of the application
+schema. The server computes the same digests before it records the schema
+baseline on an existing database, and refuses on any difference.
+
 PostgreSQL is read with catalog queries through `psql` (the `--psql` option,
 then `WADDLE_PSQL`, then `PATH`). SQLite is read through Python's `sqlite3`.
 
@@ -24,7 +28,9 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -444,6 +450,82 @@ _ROW_COUNT_SQL = """
 """
 
 
+# The structural sections a fingerprint covers, each with the SQL expression
+# that names one of its rows within the application schema.
+FINGERPRINT_SECTIONS: dict[str, str] = {
+    "relation": "q.name",
+    "column": "q.relation || '.' || q.name",
+    "constraint": "q.parent || '.' || q.name",
+    "index": "q.name",
+    "sequence": "q.name",
+    "trigger": "q.relation || '.' || q.name",
+    "function": "q.name || '(' || q.identity_arguments || ')'",
+    "type": "q.name",
+    "policy": "q.relation || '.' || q.name",
+    "rule": "q.relation || '.' || q.name",
+    "statistics": "q.name",
+}
+
+SCHEMA_PLACEHOLDER = "__SCHEMA__"
+_SIMPLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def fingerprint_sql() -> str:
+    """One query that returns `(key, digest)` for every structural object.
+
+    It covers the schema that leads the search path and nothing else. Each
+    digest is the SHA-256 of the object's dump row without its owner and
+    ACL, with the schema's name replaced by a placeholder, so the same
+    structure has the same fingerprint under any schema and any roles. The
+    server runs this text to decide whether a database may be stamped, and
+    the tooling runs it to record what the server should find; neither
+    interprets the rows.
+
+    The caller must have set `search_path` to the application schema alone,
+    and the schema's name must be a plain lower-case identifier.
+    """
+    parts = []
+    for section, key in FINGERPRINT_SECTIONS.items():
+        parts.append(
+            f"SELECT '{section} ' || {key} AS key,\n"
+            "       encode(sha256(convert_to(regexp_replace(\n"
+            "           (to_jsonb(q) - 'owner' - 'acl' - 'schema')::text,\n"
+            f"           '\\m' || current_schema() || '\\M', '{SCHEMA_PLACEHOLDER}', 'g'), 'UTF8')), 'hex') AS digest\n"
+            f"  FROM ({POSTGRES_SECTIONS[section]}) q\n"
+            " WHERE q.schema = current_schema()"
+        )
+    parts.append(
+        "SELECT 'undescribed ' || q.kind, q.count::text\n"
+        f"  FROM ({POSTGRES_SECTIONS['undescribed']}) q"
+    )
+    return "\nUNION ALL\n".join(parts) + "\n"
+
+
+def fingerprint_postgres(url: str, psql: str | None = None, schema: str = "public") -> dict[str, str]:
+    """The structural fingerprint of `schema` in the database at `url`."""
+    if not _SIMPLE_NAME.match(schema):
+        raise CatalogError("a fingerprint needs a plain lower-case schema name")
+    sql = (
+        f"SET search_path = {quote_identifier(schema)};\n"
+        "SELECT coalesce(jsonb_object_agg(f.key, f.digest), '{}'::jsonb)::text\n"
+        f"  FROM ({fingerprint_sql()}) f;\n"
+    )
+    return json.loads(run_psql(find_psql(psql), url, sql))
+
+
+def table_rows_postgres(url: str, psql: str, schema: str, tables: list[str]) -> dict[str, list[Any]]:
+    """Every row of each named table, as JSON objects in canonical order."""
+    rows = {}
+    for table in tables:
+        text = run_psql(
+            psql, url,
+            "SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)::text "
+            f"FROM {quote_identifier(schema)}.{quote_identifier(table)} t",
+        )
+        rows[table] = _sorted_list(json.loads(text))
+    return rows
+
+
 def find_psql(explicit: str | None) -> str:
     candidate = explicit or os.environ.get("WADDLE_PSQL") or shutil.which("psql")
     if not candidate:
@@ -588,8 +670,13 @@ def dump_postgres(
     schema: str = "public",
     role_aliases: dict[str, str] | None = None,
     row_counts: bool = False,
+    rows: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Read the catalog of the database at `url` into a document."""
+    """Read the catalog of the database at `url` into a document.
+
+    `rows` names tables of the application schema whose contents are
+    recorded too; a named table the database lacks is skipped.
+    """
     psql = find_psql(psql)
     aliases = role_aliases or {}
     raw = json.loads(run_psql(psql, url, _postgres_document_sql(schema)))
@@ -696,6 +783,9 @@ def dump_postgres(
     }
     if row_counts:
         document["row_counts"] = json.loads(run_psql(psql, url, _ROW_COUNT_SQL))
+    if rows is not None:
+        present = [name for name in rows if f"table {schema}.{name}" in objects]
+        document["rows"] = table_rows_postgres(url, psql, schema, present)
     return document
 
 
@@ -773,14 +863,40 @@ def _sqlite_literal(name: str) -> str:
     return "'" + name.replace("'", "''") + "'"
 
 
-def dump_sqlite(path: str, row_counts: bool = False) -> dict[str, Any]:
-    """Read the schema of the SQLite database file at `path` into a document."""
+def fingerprint_sqlite(path: str) -> dict[str, str]:
+    """The structural fingerprint of the SQLite database file at `path`.
+
+    One entry per stored `CREATE` statement: the SHA-256 of its text with
+    layout and comments removed. The server computes the same digests.
+    """
+    document = dump_sqlite(path)
+    return {
+        key: hashlib.sha256(normalise_sqlite_sql(sql).encode("utf-8")).hexdigest()
+        for key, sql in sorted(document["sources"].items())
+    }
+
+
+def dump_sqlite(
+    path: str, row_counts: bool = False, rows: list[str] | None = None
+) -> dict[str, Any]:
+    """Read the schema of the SQLite database file at `path` into a document.
+
+    `rows` names tables whose contents are recorded too, each value as the
+    SQL literal `quote()` gives; a named table the database lacks is skipped.
+    """
     if not Path(path).is_file():
         raise CatalogError(f"{path} is not a SQLite database file")
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
-        return _dump_sqlite(connection, row_counts)
+        document = _dump_sqlite(connection, row_counts)
+        if rows is not None:
+            document["rows"] = {
+                name: _sqlite_table_rows(connection, name)
+                for name in rows
+                if f"table {name}" in document["objects"]
+            }
+        return document
     except sqlite3.DatabaseError as error:
         raise CatalogError(f"could not read {path}: {error}") from error
     finally:
@@ -892,6 +1008,22 @@ def _dump_sqlite(connection: sqlite3.Connection, row_counts: bool) -> dict[str, 
     if row_counts:
         document["row_counts"] = counts
     return document
+
+
+def _sqlite_table_rows(connection: sqlite3.Connection, table: str) -> list[Any]:
+    columns = [
+        row["name"]
+        for row in _sqlite_rows(
+            connection, f"SELECT name FROM pragma_table_info({_sqlite_literal(table)})"
+        )
+    ]
+    quoted = ", ".join(f"quote({quote_identifier(name)})" for name in columns)
+    return _sorted_list(
+        [
+            dict(zip(columns, row))
+            for row in connection.execute(f"SELECT {quoted} FROM {quote_identifier(table)}")
+        ]
+    )
 
 
 def _sqlite_foreign_keys(
@@ -1087,6 +1219,7 @@ def compare(
     right: dict[str, Any],
     include_environment: bool = False,
     include_row_counts: bool = False,
+    include_rows: bool = False,
 ) -> list[str]:
     """Every difference between two documents, as printable lines.
 
@@ -1131,6 +1264,13 @@ def compare(
                         f"~ rows {name}: A has {left_counts.get(name)}, "
                         f"B has {right_counts.get(name)}"
                     )
+    if include_rows:
+        left_rows, right_rows = left.get("rows") or {}, right.get("rows") or {}
+        for name in sorted(set(left_rows) | set(right_rows)):
+            if left_rows.get(name) != right_rows.get(name):
+                lines.append(f"~ contents {name}")
+                lines += _property_difference(
+                    "rows", left_rows.get(name, []), right_rows.get(name, []))
     return lines
 
 
@@ -1190,7 +1330,26 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also record how many rows each table holds",
     )
+    dump.add_argument(
+        "--rows",
+        action="append",
+        metavar="TABLE",
+        help="also record the contents of TABLE (repeatable)",
+    )
     dump.add_argument("--output", "-o", help="file to write (default: standard output)")
+
+    fingerprint = commands.add_parser(
+        "fingerprint", help="write the structural fingerprint the server's stamp checks")
+    source = fingerprint.add_mutually_exclusive_group(required=True)
+    source.add_argument("--postgres-url-env", metavar="VARIABLE",
+                        help="environment variable that holds the PostgreSQL URL")
+    source.add_argument("--sqlite", metavar="FILE", help="SQLite database file")
+    fingerprint.add_argument("--psql", help="psql executable (default: WADDLE_PSQL, then PATH)")
+    fingerprint.add_argument("--schema", default="public", help="PostgreSQL application schema")
+    fingerprint.add_argument(
+        "--expected", metavar="FILE",
+        help="compare with this fingerprint and exit 1 on any difference")
+    fingerprint.add_argument("--output", "-o", help="file to write (default: standard output)")
 
     diff = commands.add_parser("diff", help="compare two catalog documents")
     diff.add_argument("a", metavar="A")
@@ -1213,7 +1372,51 @@ def _parser() -> argparse.ArgumentParser:
     diff.add_argument(
         "--row-counts", action="store_true", help="also compare the recorded row counts"
     )
+    diff.add_argument(
+        "--rows", action="store_true", help="also compare the recorded table contents"
+    )
     return parser
+
+
+def fingerprint_differences(expected: dict[str, str], found: dict[str, str]) -> list[str]:
+    lines = []
+    for key in sorted(set(expected) | set(found)):
+        if key not in found:
+            lines.append(f"- {key}   (missing)")
+        elif key not in expected:
+            lines.append(f"+ {key}   (not expected)")
+        elif expected[key] != found[key]:
+            lines.append(f"~ {key}")
+    return lines
+
+
+def render_fingerprint(fingerprint: dict[str, str]) -> str:
+    return json.dumps(fingerprint, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _fingerprint_command(arguments: argparse.Namespace) -> int:
+    if arguments.sqlite:
+        found = fingerprint_sqlite(arguments.sqlite)
+    else:
+        url = os.environ.get(arguments.postgres_url_env)
+        if not url:
+            raise CatalogError(f"{arguments.postgres_url_env} is not set")
+        found = fingerprint_postgres(url, arguments.psql, arguments.schema)
+    if arguments.output:
+        Path(arguments.output).write_text(render_fingerprint(found), encoding="utf-8")
+    elif not arguments.expected:
+        sys.stdout.write(render_fingerprint(found))
+    if not arguments.expected:
+        return 0
+    try:
+        expected = json.loads(Path(arguments.expected).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CatalogError(f"could not read {arguments.expected}: {error}") from error
+    lines = fingerprint_differences(expected, found)
+    for line in lines:
+        print(line)
+    print(f"fingerprint: {len(lines)} difference(s)", file=sys.stderr)
+    return 1 if lines else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1221,7 +1424,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.command == "dump":
             if arguments.sqlite:
-                document = dump_sqlite(arguments.sqlite, arguments.row_counts)
+                document = dump_sqlite(arguments.sqlite, arguments.row_counts, arguments.rows)
             else:
                 url = os.environ.get(arguments.postgres_url_env)
                 if not url:
@@ -1232,6 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
                     arguments.schema,
                     parse_aliases(arguments.role_alias),
                     arguments.row_counts,
+                    arguments.rows,
                 )
             text = render(document)
             if arguments.output:
@@ -1239,13 +1443,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 sys.stdout.write(text)
             return 0
+        if arguments.command == "fingerprint":
+            return _fingerprint_command(arguments)
         left, right = load(arguments.a), load(arguments.b)
         if arguments.only_schema:
             left = only_schema(left, arguments.only_schema)
             right = only_schema(right, arguments.only_schema)
         if arguments.structure_only:
             left, right = structure_only(left), structure_only(right)
-        lines = compare(left, right, arguments.environment, arguments.row_counts)
+        lines = compare(
+            left, right, arguments.environment, arguments.row_counts, arguments.rows)
         for line in lines:
             print(line)
         print(f"result: {summarise(lines)}", file=sys.stderr)

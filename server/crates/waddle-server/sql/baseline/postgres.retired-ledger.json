@@ -1,0 +1,227 @@
+[
+ [
+  1,
+  "Hard-cut auth broker schema with roster pre-approval",
+  "830d330f7d6a049e15d08111e6fe266a7a2b92276dc306bbf1967dc430655c6d"
+ ],
+ [
+  2,
+  "Add user_avatar_source provenance table for OIDC user-managed avatar guard",
+  "540415080124f41efb3226d8f34a88837d8ad0946ae8401a05f9df128961ac3e"
+ ],
+ [
+  3,
+  "Add user_avatar_fetch_state for startup-backfill throttle",
+  "dee2216ce5675a0899de26de93ba1e3116bc4533c8f966087a7548495cc8f09a"
+ ],
+ [
+  4,
+  "Add last_fetch_policy_digest column for deploy-time throttle reset",
+  "123413eb8dea15a82f023bd11c0cfe8ec05f1b7897ff79ffc0636e390b06d7a8"
+ ],
+ [
+  5,
+  "Provider webhook delivery ledger",
+  "9c491dee3e482d8321d229a85c529a3b8c6ca087658bf6ed9f5bd35b4c6296bb"
+ ],
+ [
+  6,
+  "Widen upload slot sizes to bigint on Postgres",
+  "64ecf0e3157e79ded9b595332d91a24fba608914b5df4ac437b7a4e369528d9a"
+ ],
+ [
+  7,
+  "Track current link preview media references",
+  "ca7d689a2ad7ab276d33840e213952aebb838e6a2421fe40cdd0558d85940fed"
+ ],
+ [
+  8,
+  "Repair missing global tables after migration drift",
+  "287309b086955be31e6b797c3ac55a10f76d222db2e0d742abadd82a6d0a928a"
+ ],
+ [
+  9,
+  "Durable OIDC/OAuth handshake state shared across replicas",
+  "269da23637ef0941e5f34dfcfa4ffad6d9eb65cdc3e19c6ee53d81f15350e88e"
+ ],
+ [
+  10,
+  "Drop retired XEP-0397 ISR token store",
+  "1045078c8c6fe45189e9e38960aa0e1490848868749e91458bff94f46c813148"
+ ],
+ [
+  11,
+  "Durable non-secret auth-context references for SM resume",
+  "e511bd361f65a5bbe0d08907cfaf51785df8e42d2b4f4e08bd04c9718d44ecfe"
+ ],
+ [
+  12,
+  "Make session auth context total",
+  "b3aca9a3070893b55e2fb261c17151289e90f60515f1a2e58f2b05f80826c0d3"
+ ],
+ [
+  13,
+  "Fence occupancy by the current full-JID bind generation",
+  "d35db651ebde15596e182d73e27cd88de8dadbbd9c1562d6bc69d4ead8bca96e"
+ ],
+ [
+  14,
+  "Canonical JID lookup keys for local accounts",
+  "4e37c07c41ecc0b6a43158a795cfa15ddd65f2171b10fff28008f5e9fd4aa0a6"
+ ],
+ [
+  15,
+  "Record rooms where extension bots have posted",
+  "0ea1653bbad9f146131679ba633e52fc2bede0c0a496a4ebff9fc0ae3ea0a72c"
+ ],
+ [
+  1001,
+  "Hard-cut per-waddle schema with bare-JID principals",
+  "d6bbd577069c9fe2079053d81f4804313f1939e94de8c984da738632d0d9e30b"
+ ],
+ [
+  1002,
+  "Add channel pin permission policy",
+  "a676bcef66796dfa0536a2e262c6b84c08dc7e5c10c8445033747704fa66ce20"
+ ],
+ [
+  1003,
+  "Widen attachment sizes to bigint on Postgres",
+  "15ed1e3304d6dfd1da2bdbf5e723724a67554b9f508a7e74f04a1da29343b624"
+ ],
+ [
+  1004,
+  "Persist channel members-only policy",
+  "0bad2cfd175d0b73eb8052e8260af0a1f5b53f7cd7a09119ce0351f870907f09"
+ ],
+ [
+  1005,
+  "Persist channel public-room discovery visibility",
+  "6eca99f425e42e1a6826ed885c725e58cd6bb3da1e50b7bb77ffd8ff0ef44e5d"
+ ],
+ [
+  1006,
+  "Persist group-DM archive visibility boundaries",
+  "ccc09d88880bb403dcbfbaa33a84e730244628c3181b3da3124805e712b0a31b"
+ ],
+ [
+  1007,
+  "Persist outstanding MUC mediated invitations",
+  "c16f9a56fbe9ee4c2010a1ae41ff55655e10f6d338af2af9053e2db424eba0c6"
+ ],
+ [
+  1008,
+  "Create PostgreSQL ingress foundation tables",
+  "f238469ab01351029a333c62dd5b6d12c913381f9f720382dd166948e5946214"
+ ],
+ [
+  1009,
+  "Add inert PostgreSQL ingress epoch guards",
+  "b1f2a6109b406474fff762d64482b2dd817ff4478a3748185e786b86612a98c3"
+ ],
+ [
+  1010,
+  "Add shadow ingress streams and effect intents",
+  "c5339b03487c02b144976766fbc3c471e9634c69de77701795ae0d53d46f59e9"
+ ],
+ [
+  1011,
+  "Grant pg_monitor read access to the ingress tables",
+  "4dd9ca4077e1e41b4a3f42e8a73f7528395da26e087e3f3f964c12122459eb1d"
+ ],
+ [
+  1012,
+  "Add dialect-aware ingress authority storage",
+  "ed19a7e59e1dec66e901a88b7170e7961ed56cf716a44147957ae4123500c988"
+ ],
+ [
+  1013,
+  "Index non-terminal ingress messages by creation time",
+  "9f03bcd3497c429d7c382eb353fc81c6d7614b063977b6170d5166e21e9d300b"
+ ],
+ [
+  1014,
+  "Reset ingress state and add per-resource delivery receipts",
+  "4f773a3e4ed42768eefd43a09a92a018db6ccd563487156ebc86cc83ce852281"
+ ],
+ [
+  1015,
+  "Add the ingress SM append ledger",
+  "7beee672f0521a8c338be49ba9adecf30a44da8ad9cd38847012c89d99aadabd"
+ ],
+ [
+  1016,
+  "Index the ingress SM append ledger by accepting stream",
+  "f5595bfde435fba291cbbaa7f494f97fa0e3d463e42595bdbd31ef799df985cb"
+ ],
+ [
+  1017,
+  "Mark the per-archive commit ordinal cutover",
+  "d6c0cf9d87c3b9ddce18c19689fb996e4a72f8093bcc46bc488e6b87f0dbd028"
+ ],
+ [
+  1018,
+  "Persist revocable extension send and provider-room grants",
+  "ded2dbc448cac6b2f93c898cdf869296119be33aba72d2e047579aec4d8deb52"
+ ],
+ [
+  1019,
+  "Replace queue allocation proof with durable ingress payload custody",
+  "130d045c2c77b3e87c879e43f0f3ef20c97d3df814cc1cce6b7081580195186a"
+ ],
+ [
+  1020,
+  "Persist archive dispatch predecessors and pending barriers",
+  "7aebbd50b362bee7303d5344f10f0b81adf76a4d0bf57b21d7ba280238dbf875"
+ ],
+ [
+  1021,
+  "Persist exclusive per-resource queue attempts",
+  "84b6044164f11594efd5968c716011c35ce060f2e49d85fd0fa55ce421587f30"
+ ],
+ [
+  1022,
+  "Fence observer attempts and bound legacy ambiguity",
+  "df0f8a446388f68440b549636bbeab629953f2ef88ca0040c5b4c346a6525fb8"
+ ],
+ [
+  1023,
+  "Give settled room-observer history its own retention clock",
+  "b46e79564171c7c7343ea43ae618ce29ee1f7d5a87bb1bd1b26872a77321942a"
+ ],
+ [
+  1024,
+  "Distinguish ingress policy discard from ordinary settlement",
+  "724e45c6127f3c153277ea82c9afc612590991b2261abceee32a111805fd3a61"
+ ],
+ [
+  1025,
+  "Retain canonical evidence until descendants and SM custody settle",
+  "a088c4e0b66acb35c5f2b9f7c461b7e1c40f03580b3135386f35d94b3afd1466"
+ ],
+ [
+  1026,
+  "Version sealed room envelopes and record child policy dispositions",
+  "561189ea27fd0a1e65f0fd7e10811d019c1a31467cf86db54b71f4d4990d14ae"
+ ],
+ [
+  1027,
+  "Preserve acknowledged SM windows until pending settlement completes",
+  "64c2872c6d9c33a03e73ecf32c782813da537225deecfe8f389fbdd1cd9971e2"
+ ],
+ [
+  1028,
+  "Bind canonical room sources to immutable principals and owner decisions",
+  "af273ff055de9bf370b0692a3485a80cb84d209b795e839a91a6fea478047f2b"
+ ],
+ [
+  1029,
+  "Preserve per-frame stream-management provenance",
+  "6775e36ba4b98f5b2437495b673c9a0bd62c61010898ad3b9b038a3b2514df0c"
+ ],
+ [
+  1030,
+  "Create inert receipt-operation result journal",
+  "6f3fd1741a584f6225b1acd8b9f9f9e53351d11a7d637ed554260d034c36d42e"
+ ]
+]

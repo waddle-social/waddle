@@ -27,6 +27,7 @@ mod owner_phase;
 
 use clap::Parser;
 
+use crate::db::select_schema_baseline_from_env;
 use args::{Cli, Command};
 pub use error::{ExitStatus, OwnerCliError};
 
@@ -42,6 +43,15 @@ pub fn run_from_args() -> i32 {
             return error.exit_code();
         }
     };
+    // The schema baseline, when selected, replaces the migration catalog for
+    // every step of every subcommand, so it is chosen before any connects.
+    match select_schema_baseline_from_env() {
+        Ok(()) => {}
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitStatus::Usage.code();
+        }
+    }
     // Database connections that verify a server certificate need a process
     // default; a second installation attempt is refused and harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
