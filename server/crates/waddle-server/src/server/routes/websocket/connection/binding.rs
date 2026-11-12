@@ -10,11 +10,14 @@
 //! cannot touch a later binding on the same socket.
 //!
 //! The ledger only records. Publication itself goes through
-//! [`BindingPublisher`], which the connection registry implements until the
-//! account coordinator exists.
+//! [`BindingPublisher`], which the connection registry and the account
+//! coordinator each implement.
 
 use super::binding_messages::{ConnectionActorBindingAttempt, ConnectionActorOperationId};
 use super::retirement::RetirementRefusal;
+use crate::account_coordinator::RetireEvidence;
+use waddle_xmpp::ownership::account_resource_transition::AccountResourceRevision;
+use waddle_xmpp::ownership::joint_identity::ResourceLifetime;
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef};
 
 /// How far the current attempt has come.
@@ -292,48 +295,128 @@ pub(in crate::server::routes::websocket) enum BindingStepReply {
     Refused(BindingRefusal),
 }
 
+/// The result of publishing a binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BindingPublication<P, R> {
+    /// The binding is recorded and published, not yet confirmed.
+    Published(P),
+    /// The resource holds another binding. The resource is reserved for
+    /// this connection, which has `displaced` retired and then publishes a
+    /// new attempt.
+    ReplacementPending {
+        displaced: BindingRef,
+        revision: AccountResourceRevision,
+    },
+    /// Nothing was published.
+    Refused(R),
+}
+
+/// The result of confirming a published binding with the account's owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BindingConfirmation<C, R> {
+    /// The owner holds the binding as active. The receipt is what allows
+    /// the client to be answered.
+    Confirmed(C),
+    /// The binding is no longer the resource's current one: a later binding
+    /// of the same full JID owns the resource and confirms itself.
+    NotCurrent,
+    /// The owner did not accept the binding.
+    Refused(R),
+}
+
+/// The result of retiring a binding with the account's owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BindingRetirement<R> {
+    /// The owner no longer holds the binding.
+    Retired,
+    /// The binding was not the resource's current one. `current` names the
+    /// binding that is, when the owner reported it; it was left alone.
+    NotCurrent { current: Option<BindingRef> },
+    /// The owner refused the retirement and still holds the binding, which
+    /// stays non-routable.
+    Refused(R),
+}
+
 /// Where a connection publishes its bindings.
 ///
 /// The connection decides when a binding is published, confirmed with the
 /// account's owner and retired; this trait is the one place those decisions
-/// reach the routing state. The connection registry and its mirrors implement
-/// it today. The account coordinator takes its place by implementing it.
-pub(in crate::server::routes::websocket) trait BindingPublisher {
+/// reach the routing state. Two publishers implement it: the connection
+/// registry with its mirrors, and the account coordinator.
+///
+/// A publisher failure (`Error`) is never a decision about the binding: the
+/// outcome of the step is unknown and the caller repeats or compensates.
+pub(crate) trait BindingPublisher {
     /// What identifies a published binding to the publisher.
-    type Published: Copy;
-    /// The outcome of confirming a published binding with the account owner.
-    type Confirmation;
+    type Published: Clone + Send + Sync;
+    /// What the publisher needs to know about a committed resume in order
+    /// to move the resource's slot to the resuming binding.
+    type Resume: Send;
+    /// What a confirmation hands back as the authorization to answer the
+    /// client.
+    type Receipt;
+    /// Why the publisher refused a step.
+    type Refusal;
+    /// What the routing index held for a binding that was withdrawn.
+    type Withdrawn;
+    /// What retiring a binding at the node that owns its account reports.
+    type RemoteRetirement;
+    /// A failure that leaves the outcome of a step unknown.
+    type Error;
 
-    /// Publish `entry`, which carries its exact `BindingRef`, as the binding
-    /// of `jid`. `None` means nothing was published.
+    /// Record `binding` as the binding of `jid` for a resource of the given
+    /// lifetime and publish it.
     fn publish(
         &self,
         jid: &jid::FullJid,
-        entry: waddle_xmpp::registry::ConnectionEntry,
-    ) -> Option<Self::Published>;
+        binding: &BindingRef,
+        lifetime: ResourceLifetime,
+    ) -> impl std::future::Future<
+        Output = Result<BindingPublication<Self::Published, Self::Refusal>, Self::Error>,
+    > + Send;
+
+    /// Record a committed resume: `binding` takes the place of the
+    /// session's previous binding in the same resource slot, and is
+    /// published. It is confirmed like any other binding.
+    fn publish_resumed(
+        &self,
+        jid: &jid::FullJid,
+        binding: &BindingRef,
+        resume: Self::Resume,
+    ) -> impl std::future::Future<
+        Output = Result<BindingPublication<Self::Published, Self::Refusal>, Self::Error>,
+    > + Send;
 
     /// Confirm the published binding with the owner of the account.
     fn confirm(
         &self,
         jid: &jid::FullJid,
-        published: Self::Published,
-        resumed: bool,
-    ) -> impl std::future::Future<Output = Option<Self::Confirmation>> + Send;
+        published: &Self::Published,
+    ) -> impl std::future::Future<
+        Output = Result<BindingConfirmation<Self::Receipt, Self::Refusal>, Self::Error>,
+    > + Send;
 
-    /// Retire exactly the published binding, as compensation for a
-    /// publication that will not be acknowledged. A later binding of the
-    /// same full JID is left alone.
+    /// Take exactly the published binding out of the routing index, so
+    /// nothing more is enqueued for it. A later binding of the same full
+    /// JID is left alone and `None` is returned.
+    fn withdraw(&self, jid: &jid::FullJid, published: &Self::Published) -> Option<Self::Withdrawn>;
+
+    /// Retire exactly the published binding with the owner of the account,
+    /// stating what became of the work it accepted and of its teardown. A
+    /// later binding of the same full JID is left alone.
     fn retire(
         &self,
         jid: &jid::FullJid,
-        published: Self::Published,
-    ) -> impl std::future::Future<Output = ()> + Send;
+        published: &Self::Published,
+        evidence: RetireEvidence,
+    ) -> impl std::future::Future<Output = Result<BindingRetirement<Self::Refusal>, Self::Error>> + Send;
 
     /// Retire exactly the published binding where the account is owned by
     /// another node, which holds a proxy for it.
     fn retire_remote(
         &self,
         jid: &jid::FullJid,
-        published: Self::Published,
-    ) -> impl std::future::Future<Output = ()> + Send;
+        published: &Self::Published,
+        evidence: RetireEvidence,
+    ) -> impl std::future::Future<Output = Result<Self::RemoteRetirement, Self::Error>> + Send;
 }

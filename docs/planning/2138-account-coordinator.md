@@ -234,8 +234,13 @@ has no bindings and reads as an account without resources.
 
 ## The binding publisher
 
-`CoordinatorBindingPublisher` (`account_coordinator/publisher.rs`) has the
-four steps of the websocket `BindingPublisher` trait and maps them onto the
+A connection publishes its bindings through one trait, `BindingPublisher`
+(`W/connection/binding.rs`, `W` being
+`waddle-server/src/server/routes/websocket`). Two publishers implement it:
+`RegistryBindingPublisher` (`W/registration.rs`), which writes the
+connection registry and its mirrors, and `CoordinatorBindingPublisher`
+(`account_coordinator/publisher.rs`, trait implementation in
+`W/connection/coordinator_publisher.rs`), which maps the steps onto the
 coordinator:
 
 | Step | Coordinator calls |
@@ -243,39 +248,31 @@ coordinator:
 | `publish` | `slot_status`, `Bind`, `PublishEndpoint` |
 | `publish_resumed` | `slot_status`, `SuccessfulResume`, `PublishEndpoint` |
 | `confirm` | `slot_status`, `RegisterActor`, `bind_success` |
+| `withdraw` | none: the coordinator holds no outbound endpoint |
 | `retire`, `retire_remote` | `unregister`, then `repair` with the connection's teardown evidence |
 
 Each step reads the slot first and skips what the binding's state shows as
 done, so a repeat after a lost reply is safe.
 
-It does not implement the trait, which cannot express it as it stands. The
-trait needs these changes before the connection can select the publisher
-through it:
+The trait is shaped by what the coordinator needs:
 
-1. **Visibility.** The trait is `pub(in crate::server::routes::websocket)`
-   and reachable only inside that module. Either it becomes `pub(crate)`,
-   or the implementation moves to a file under `routes/websocket`.
-2. **`publish` must be asynchronous and fallible.** It is synchronous and
-   returns `Option<Published>`. Recording a binding commits a row, and the
-   outcome has three shapes the caller acts on differently: published, a
-   pending replacement naming the displaced `BindingRef`, and a typed
-   refusal. It returns a future of `Result<PublishOutcome, _>`.
-3. **`publish` takes the binding, not a registry entry.** It receives a
-   `ConnectionEntry`. The coordinator needs the `BindingRef` and the
-   resource's `ResourceLifetime`; the outbound endpoint stays in the
-   transport index and is not the coordinator's.
-4. **`Published` must be `Clone`, not `Copy`.** What identifies a published
-   binding to the coordinator is its `BindingRef` with the claim identity
-   and revision from `slot_status`, none of which is `Copy`.
-5. **`confirm` returns a typed outcome.** `Option<Confirmation>` cannot
-   tell "no longer the current binding" from a refusal or a store failure.
-   The `resumed` flag is not needed: a resumed binding is published by a
-   separate step that carries the `SuccessfulResumeReceipt` and the
-   previous `BindingRef`, and is confirmed like any other.
-6. **`retire` and `retire_remote` take evidence and return an outcome.**
-   They return `()`. The coordinator completes a retirement only with the
-   custody and teardown dispositions, and the caller must learn whether
-   the binding was retired, was stale, or was refused.
+- `publish` is asynchronous and fallible. It answers published, a pending
+  replacement naming the displaced `BindingRef` and the slot revision, or a
+  typed refusal; an error means the outcome is unknown.
+- `publish` takes the `BindingRef` and the resource's `ResourceLifetime`.
+  The outbound endpoint belongs to the transport index, so the registry
+  publisher is handed the entry it registers when it is constructed.
+- `Published` is `Clone`: the coordinator's value is the `BindingRef` with
+  the claim identity and revision from `slot_status`.
+- A resumed binding is published by its own step, which carries what the
+  publisher needs about the committed resume (for the coordinator the
+  `SuccessfulResumeReceipt` and the previous `BindingRef`), and is confirmed
+  like any other. `confirm` answers confirmed with a receipt, not current,
+  or refused.
+- Retirement has three steps. `withdraw` takes the binding out of the
+  routing index and returns what the index held. `retire` and
+  `retire_remote` take the custody and teardown dispositions and report
+  whether the binding was retired, was not the current one, or was refused.
 
 ## Session reference and release order
 

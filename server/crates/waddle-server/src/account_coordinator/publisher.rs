@@ -1,14 +1,11 @@
 //! Publication of a connection's bindings through the account coordinator.
 //!
-//! [`CoordinatorBindingPublisher`] has the four steps of the websocket
-//! `BindingPublisher` trait (publish, confirm, retire, retire a binding
-//! whose socket another node hosts) and maps each onto
-//! [`AccountBindingAuthority`]. It does not implement that trait: the trait
-//! is private to the websocket module, its `publish` is synchronous and
-//! takes a registry `ConnectionEntry`, its `Published` must be `Copy`, and
-//! its results cannot carry a pending replacement or a typed refusal.
-//! `docs/planning/2138-account-coordinator.md` lists the changes the trait
-//! needs before the connection can select this publisher through it.
+//! [`CoordinatorBindingPublisher`] maps the steps of a connection's
+//! binding publisher (publish, publish a resumed binding, confirm, retire,
+//! retire a binding whose socket another node hosts) onto
+//! [`AccountBindingAuthority`]. Its implementation of the websocket
+//! `BindingPublisher` trait is next to that trait, in
+//! `server/routes/websocket/connection/coordinator_publisher.rs`.
 //!
 //! Every step is safe to repeat. A step first reads the slot and skips
 //! what the binding's lifecycle state shows as done, so a repeat after a

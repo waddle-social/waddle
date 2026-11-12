@@ -53,14 +53,15 @@ use waddle_xmpp::stream_management::SmRequest;
 
 mod binding;
 mod binding_messages;
+mod coordinator_publisher;
 mod live_actor;
 mod retirement;
 
 #[cfg(test)]
 pub(super) use binding::PreparedBinding;
 pub(super) use binding::{
-    BindingLedger, BindingPublisher, BindingRefusal, BindingStage, BindingStepReply,
-    InstallOutcome, PrepareBindingReply,
+    BindingConfirmation, BindingLedger, BindingPublication, BindingPublisher, BindingRefusal,
+    BindingRetirement, BindingStage, BindingStepReply, InstallOutcome, PrepareBindingReply,
 };
 #[cfg(test)]
 pub(super) use binding_messages::ConnectionActorOperationId;
