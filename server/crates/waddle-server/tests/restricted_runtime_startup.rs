@@ -35,6 +35,9 @@ use waddle_server::db::physical_attestation::{
 };
 use waddle_server::db::runtime_startup::{RuntimeStartupError, RuntimeStartupIdentity};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool};
+use waddle_server::ingress_substrate::{
+    AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
+};
 use waddle_server::ingress_uow::{
     verify_attested_room_observation_schema, RoomObservationSchemaError,
 };
@@ -49,6 +52,7 @@ use waddle_server::server::{ResolvedXmppDatabaseUrl, WebhookDeliveryAttachError}
 use waddle_server::spaces_metadata::DatabaseSpacesMetadataStore;
 use waddle_ws_test_support::iq::{round_trip, send_iq};
 use waddle_ws_test_support::{require_test_postgres_url, TestServer, WsXmppClient};
+use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
 use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::stream_management::SM_NS;
 use xmpp_parsers::iq::Iq;
@@ -1326,6 +1330,75 @@ async fn runtime_locks_the_epoch_row_but_cannot_change_it() {
         });
     }
 
+    prepared.cleanup().await;
+}
+
+/// Alias garbage collection runs on the serving pool under the runtime role.
+/// A terminal message past its retention is recorded and collected through
+/// the production code path; the collection and the orphan-proof sweep that
+/// follows it each begin through the typed ingress entry, and the runtime
+/// grants cover every statement they issue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alias_gc_collects_an_expired_message_under_the_runtime_role() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    let pool = attach_serving_pool(&prepared).await;
+    let store = PostgresIngressSubstrate::open(pool.global().clone()).expect("ingress substrate");
+    let digest = |byte: u8| SemanticDigest::from_storage(1, [byte; 32]).expect("fixture digest");
+    let expired = MessageKey::new();
+    let retained = MessageKey::new();
+    let mut tx = store.begin().await.expect("attested ingress writer");
+    for (key, byte) in [(expired, 1), (retained, 2)] {
+        store
+            .record_message(&mut tx, key, &digest(byte), None)
+            .await
+            .expect("record a canonical message");
+    }
+    store
+        .terminalize_message(
+            &mut tx,
+            expired,
+            chrono::Utc::now() - ALIAS_RETENTION - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("terminalize past the retention cutoff");
+    tx.commit().await.expect("commit the fixture messages");
+    prepared.endpoint.reset_wire();
+
+    let outcome = store
+        .gc_expired_aliases(
+            chrono::Utc::now(),
+            AliasGcBudget {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+                lock_timeout: Duration::from_secs(5),
+                statement_timeout: Duration::from_secs(10),
+                scan_timeout: Duration::from_secs(10),
+                progress: AliasGcProgress::default(),
+            },
+        )
+        .await
+        .expect("alias GC under the runtime role");
+    assert_eq!(outcome.deleted_messages, 1);
+    assert!(outcome.completed, "the pass and its orphan sweep finish");
+
+    let remaining: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT message_key FROM {SCHEMA}.ingress_messages ORDER BY message_key"
+    ))
+    .fetch_all(&prepared.admin)
+    .await
+    .expect("read the remaining canonical messages");
+    assert_eq!(remaining, vec![retained.to_storage()]);
+    let wire = prepared.endpoint.take_wire();
+    assert!(
+        wire.errors.is_empty(),
+        "alias GC drew errors on a runtime connection: {:#?}",
+        wire.errors
+    );
+
+    drop(store);
+    drop(pool);
     prepared.cleanup().await;
 }
 

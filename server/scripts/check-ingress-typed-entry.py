@@ -5,7 +5,7 @@
 transaction begins: the entry acquires the transaction, bounds it, attests
 its connection on an attested pool, and proves the protocol epoch before it
 hands out the witness ingress repositories need. In the ingress modules this
-check finds three kinds of code that could stand in for the entry:
+check finds four kinds of code that could stand in for the entry:
 
 - `attest`: a call of `attest_transaction(`.
 - `begin`: a transaction opened directly on a database handle
@@ -17,6 +17,9 @@ check finds three kinds of code that could stand in for the entry:
   transaction without the entry's witness (`acquire_epoch_lock_first(`,
   `acquire_supported_epoch_lock_first(`, `install_epoch_proof(`,
   `read_live_epoch_for_share(`).
+- `autocommit`: a statement connection taken straight from a database
+  handle with `.guard()`. Its statements run outside any transaction, so a
+  write issued on it could never have passed through the entry.
 
 Each exception is listed in `ingress-typed-entry-allowlist.txt` as
 `<path> <kind> <count>`. A listed file must contain exactly that many
@@ -25,7 +28,7 @@ entry, also fails.
 
 Occurrences are found in code only: comments and string literals are
 ignored, and so are function definitions. `attest` is checked in every file.
-`begin` and `epoch-lock` skip test code, which opens fixtures directly:
+The other kinds skip test code, which opens fixtures directly:
 test-only files (`tests.rs`, `*_tests.rs`, `test_support.rs`,
 `*_test_hooks.rs`, and anything under a `tests` or `*_tests` directory) and
 `#[cfg(test)] mod` blocks.
@@ -46,6 +49,7 @@ ALLOWLIST = Path("scripts/ingress-typed-entry-allowlist.txt")
 ATTEST = "attest"
 BEGIN = "begin"
 EPOCH_LOCK = "epoch-lock"
+AUTOCOMMIT = "autocommit"
 PATTERNS = {
     ATTEST: re.compile(r"\battest_transaction\s*\("),
     BEGIN: re.compile(
@@ -57,6 +61,7 @@ PATTERNS = {
         r"\b(?:acquire_epoch_lock_first|acquire_supported_epoch_lock_first"
         r"|install_epoch_proof|read_live_epoch_for_share)\s*\("
     ),
+    AUTOCOMMIT: re.compile(r"\.\s*guard\s*\("),
 }
 KINDS = tuple(PATTERNS)
 DEFINITION = re.compile(r"\bfn\s+$")

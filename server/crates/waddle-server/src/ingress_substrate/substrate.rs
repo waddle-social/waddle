@@ -1587,52 +1587,63 @@ pub(in crate::ingress_substrate) async fn gc_orphan_proof_batch(
     }
     // Serialize windows sharing a traversal so a slower pass cannot rewind it.
     let mut cursor = budget.progress.orphan_cursor.lock().await;
-    let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
-    // READ COMMITTED is required so the orphan scan starts from a snapshot
-    // taken after the epoch lock below. This transaction only deletes
-    // `sm_ingress_appends` (which is not in V1009's guarded relation set),
-    // but it reads guarded canonical state and must not race activation.
-    if tx.driver() == DatabaseDriver::Postgres {
-        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-            .await
-            .map_err(gc_error_from_database)?;
-    }
-    install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
-    if Instant::now() >= budget.deadline {
-        return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
-    }
-    // The share lock and transaction-local proof are held through commit.
-    // Activation therefore cannot change the live epoch between the
-    // canonical-parent scan and deletion of its orphan proof.
-    let live_epoch = acquire_gc_epoch_lock_first(&mut tx, 0)
-        .await
-        .map_err(|failure| failure.error)?;
-    if live_epoch > supported_protocol_epoch() {
-        return Err(AliasGcError::Substrate(
-            IngressSubstrateError::UnsupportedLiveEpoch,
-        ));
-    }
-    if tx.driver() == DatabaseDriver::Postgres {
-        let mut proof = tx
-            .query(
-                r#"
+    // On a physically attested pool the sweep begins through the typed
+    // ingress entry, which attests the connection, sets READ COMMITTED and
+    // holds the epoch share lock and proof through commit, as the branch
+    // below does for every other handle.
+    let mut tx =
+        if let Some(capability) = db.attested_pg_writer_capability() {
+            if Instant::now() >= budget.deadline {
+                return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
+            }
+            begin_attested_gc_writer(db, &capability, budget).await?
+        } else {
+            let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
+            // READ COMMITTED is required so the orphan scan starts from a snapshot
+            // taken after the epoch lock below. This transaction only deletes
+            // `sm_ingress_appends` (which is not in V1009's guarded relation set),
+            // but it reads guarded canonical state and must not race activation.
+            if tx.driver() == DatabaseDriver::Postgres {
+                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                    .await
+                    .map_err(gc_error_from_database)?;
+            }
+            install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
+            if Instant::now() >= budget.deadline {
+                return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
+            }
+            // The share lock and transaction-local proof are held through commit.
+            // Activation therefore cannot change the live epoch between the
+            // canonical-parent scan and deletion of its orphan proof.
+            let live_epoch = acquire_gc_epoch_lock_first(&mut tx, 0)
+                .await
+                .map_err(|failure| failure.error)?;
+            if live_epoch > supported_protocol_epoch() {
+                return Err(AliasGcError::Substrate(
+                    IngressSubstrateError::UnsupportedLiveEpoch,
+                ));
+            }
+            if tx.driver() == DatabaseDriver::Postgres {
+                let mut proof = tx
+                    .query(
+                        r#"
                 SELECT
                     set_config('waddle.protocol_epoch', ?, true),
                     set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
                 "#,
-                crate::db_params![live_epoch.to_storage().to_string()],
-            )
-            .await
-            .map_err(gc_error_from_database)?;
-        proof
-            .next()
-            .await
-            .map_err(gc_error_from_database)?
-            .ok_or(AliasGcError::Substrate(IngressSubstrateError::Database {
-                retry_class: DbRetryClass::NotRetryable,
-            }))?;
-        drop(proof);
-    }
+                        crate::db_params![live_epoch.to_storage().to_string()],
+                    )
+                    .await
+                    .map_err(gc_error_from_database)?;
+                proof.next().await.map_err(gc_error_from_database)?.ok_or(
+                    AliasGcError::Substrate(IngressSubstrateError::Database {
+                        retry_class: DbRetryClass::NotRetryable,
+                    }),
+                )?;
+                drop(proof);
+            }
+            tx
+        };
     if Instant::now() >= budget.deadline {
         return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
     }
@@ -1830,61 +1841,72 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
                 deadline_reached: true,
             });
         }
-        let mut tx = db
-            .begin_immediate()
-            .await
-            .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        // First statement: Postgres's default READ COMMITTED mode is required
-        // so every candidate lock/recheck sees the latest committed children.
-        if tx.driver() == DatabaseDriver::Postgres {
-            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        // GC is an epoch-aware writer. On a physically attested pool its
+        // deleting transaction begins through the typed ingress entry, which
+        // attests the connection before proving the epoch; elsewhere it
+        // installs the proof itself.
+        let mut tx = if let Some(capability) = db.attested_pg_writer_capability() {
+            begin_attested_gc_writer(db, &capability, budget)
+                .await
+                .map_err(|error| gc_failure(deleted_messages, error))?
+        } else {
+            let mut tx = db
+                .begin_immediate()
                 .await
                 .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        }
-        install_gc_timeouts(&mut tx, budget, budget.statement_timeout)
-            .await
-            .map_err(|error| gc_failure(deleted_messages, error))?;
-        // GC is an epoch-aware writer: install the transaction-bound proof
-        // for the live epoch so its deletes pass the V1009 guard at
-        // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
-        // to commit, so a concurrent activation waits and the proof cannot
-        // go stale mid-transaction.  The proof only claims epochs this
-        // binary was built for: a future activation past
-        // supported_protocol_epoch() must fence this GC, not be auto-claimed.
-        let live_epoch = acquire_gc_epoch_lock_first(&mut tx, deleted_messages).await?;
-        if live_epoch > supported_protocol_epoch() {
-            return Err(gc_failure(
-                deleted_messages,
-                IngressSubstrateError::UnsupportedLiveEpoch.into(),
-            ));
-        }
-        if tx.driver() == DatabaseDriver::Postgres {
-            let mut proof = tx
-                .query(
-                    r#"
+            // First statement: Postgres's default READ COMMITTED mode is required
+            // so every candidate lock/recheck sees the latest committed children.
+            if tx.driver() == DatabaseDriver::Postgres {
+                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            }
+            install_gc_timeouts(&mut tx, budget, budget.statement_timeout)
+                .await
+                .map_err(|error| gc_failure(deleted_messages, error))?;
+            // GC is an epoch-aware writer: install the transaction-bound proof
+            // for the live epoch so its deletes pass the V1009 guard at
+            // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
+            // to commit, so a concurrent activation waits and the proof cannot
+            // go stale mid-transaction.  The proof only claims epochs this
+            // binary was built for: a future activation past
+            // supported_protocol_epoch() must fence this GC, not be auto-claimed.
+            let live_epoch = acquire_gc_epoch_lock_first(&mut tx, deleted_messages).await?;
+            if live_epoch > supported_protocol_epoch() {
+                return Err(gc_failure(
+                    deleted_messages,
+                    IngressSubstrateError::UnsupportedLiveEpoch.into(),
+                ));
+            }
+            if tx.driver() == DatabaseDriver::Postgres {
+                let mut proof = tx
+                    .query(
+                        r#"
                 SELECT
                     set_config('waddle.protocol_epoch', ?, true),
                     set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
                 "#,
-                    crate::db_params![live_epoch.to_storage().to_string()],
-                )
-                .await
-                .map_err(|error| gc_database_failure(deleted_messages, error))?;
-            proof
-                .next()
-                .await
-                .map_err(|error| gc_database_failure(deleted_messages, error))?
-                .ok_or_else(|| {
-                    gc_failure(
-                        deleted_messages,
-                        IngressSubstrateError::Database {
-                            retry_class: DbRetryClass::NotRetryable,
-                        }
-                        .into(),
+                        crate::db_params![live_epoch.to_storage().to_string()],
                     )
-                })?;
-            drop(proof);
-        }
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
+                proof
+                    .next()
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?
+                    .ok_or_else(|| {
+                        gc_failure(
+                            deleted_messages,
+                            IngressSubstrateError::Database {
+                                retry_class: DbRetryClass::NotRetryable,
+                            }
+                            .into(),
+                        )
+                    })?;
+                drop(proof);
+            }
+            tx
+        };
         match lock_eligible_terminal_message(&mut tx, message_key, cutoff)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?
@@ -2187,33 +2209,6 @@ pub(crate) fn prepared_ingress_sql(
         )),
         DatabaseDriver::Sqlite => std::borrow::Cow::Borrowed(sqlite),
     }
-}
-
-pub(in crate::ingress_substrate) async fn read_epoch_in_relation(
-    tx: &mut Transaction<'_>,
-    relation: &str,
-    for_share: bool,
-) -> Result<ProtocolEpoch, IngressSubstrateError> {
-    let lock_clause = if for_share { " FOR SHARE" } else { "" };
-    let mut rows = tx
-        .query(
-            &format!("SELECT epoch FROM {relation} WHERE id = 1{lock_clause}"),
-            (),
-        )
-        .await
-        .map_err(discard_database_error)?;
-    let epoch = rows
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })?
-        .get::<i64>(0)
-        .map_err(discard_database_error)?;
-    u32::try_from(epoch)
-        .map(ProtocolEpoch::from_storage)
-        .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
 }
 
 pub(crate) fn quote_postgres_identifier(identifier: &str) -> String {
@@ -2749,6 +2744,41 @@ pub(in crate::ingress_substrate) fn gc_failure(
         deleted_messages,
         error,
     }
+}
+
+/// Begin a GC writing transaction on a physically attested pool through the
+/// typed ingress entry. The GC's own lock and statement budgets are the
+/// transaction's bounds, unclamped, and cover the entry's preparation.
+/// Entry refusals keep the GC's classification: a database failure, whether
+/// before or during preparation, still separates lock from statement
+/// timeouts.
+async fn begin_attested_gc_writer<'a>(
+    db: &'a Database,
+    capability: &AttestedPostgresWriterCapability,
+    budget: &AliasGcBudget,
+) -> Result<Transaction<'a>, AliasGcError> {
+    use super::{
+        begin_ingress_entry, IngressEntryAcquisition, IngressEntryAuthority, IngressEntryClamp,
+        IngressEntryError, IngressEntryRequest,
+    };
+    let entry = begin_ingress_entry(
+        db,
+        IngressEntryRequest {
+            authority: IngressEntryAuthority::InstalledGuard(capability),
+            acquisition: IngressEntryAcquisition::Immediate,
+            acquisition_deadline: None,
+            explicit_timeouts: Some((budget.lock_timeout, budget.statement_timeout)),
+            clamp: IngressEntryClamp::CallerBounds,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        IngressEntryError::Database(error) | IngressEntryError::PreparationDatabase(error) => {
+            gc_error_from_database(error)
+        }
+        other => AliasGcError::Substrate(other.into_substrate_error()),
+    })?;
+    Ok(entry.into_parts().0)
 }
 
 pub(in crate::ingress_substrate) fn gc_database_failure(

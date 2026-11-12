@@ -34,6 +34,13 @@ const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// lock wait plus the nine single-row statements it issues — and margin, so
 /// slowness inside the bounds is classified by the run itself rather than
 /// cancelled from outside.  2 s + 1 s + 0.1 s + 10 × 0.25 s ≈ 5.6 s.
+///
+/// On a physically attested pool the candidate transaction begins through
+/// the typed ingress entry, which issues seven more statements under the
+/// same statement bound. If every one of them ran to its bound the path
+/// would take about 7.4 s, so there this envelope, not the run, ends such a
+/// pass; committed deletions still reach the caller through the shared
+/// progress counter.
 const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_secs(6);
 /// Strictly below the statement bound: PostgreSQL's statement timer covers
 /// the lock wait, so an equal or larger lock bound would surface every lock

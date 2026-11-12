@@ -174,6 +174,9 @@ impl From<crate::ingress_substrate::IngressEntryError> for IngressUowError {
             IngressEntryError::Database(error) => error.into(),
             IngressEntryError::BoundsUnproven => Self::TransactionBoundsUnproven,
             IngressEntryError::Preparation(error) => error.into(),
+            error @ IngressEntryError::PreparationDatabase(_) => {
+                Self::Substrate(error.into_substrate_error())
+            }
             IngressEntryError::EpochUnsupported { live, supported } => {
                 Self::EpochUnsupported { live, supported }
             }
