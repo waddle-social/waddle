@@ -146,6 +146,10 @@ pub enum ResumeRejectionReason {
     Denied(#[from] ResumeDenial),
     #[error("the stored principal changed after the caller resolved it")]
     PrincipalChanged,
+    /// The session authority could not be read, so the stored principal's
+    /// standing is unknown and the resume transaction was not run.
+    #[error("the stored principal's standing could not be resolved")]
+    PrincipalStandingUnavailable,
     #[error("this node does not hold the session claim it named")]
     ClaimFenceMissing,
     #[error("the operation was resolved as abandoned")]
@@ -167,7 +171,9 @@ pub struct ResumeRejection {
 }
 
 impl ResumeRejection {
-    fn new(reason: impl Into<ResumeRejectionReason>) -> Self {
+    /// A rejection decided without a locked session, so no handled count is
+    /// known.
+    pub(super) fn new(reason: impl Into<ResumeRejectionReason>) -> Self {
         Self {
             reason: reason.into(),
             handled_floor: None,

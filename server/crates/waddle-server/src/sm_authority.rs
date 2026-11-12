@@ -14,6 +14,7 @@
 mod custody;
 mod enable;
 mod error;
+mod inline;
 mod lifecycle;
 mod operations;
 mod record;
@@ -30,6 +31,12 @@ pub use enable::{
     EnableError, EnableOperation, EnableRejection, EnableRequest, EnableResolution, EnabledCommit,
 };
 pub use error::DurableSmError;
+pub use inline::{
+    decide_bind2, granted_resume_window, inline_results, plan_inline, principal_standing,
+    Bind2Decision, Bind2EnableOutcome, Bind2StreamManagement, InlineOutcomeUnknown, InlinePlan,
+    InlineResumeAttempt, InlineResumeFailed, InlineResumeOutcome, InlineResumeRequest,
+    InlineSession,
+};
 pub use lifecycle::{DetachSnapshot, LifecycleError, LifecycleRejection, TerminalSession};
 pub use record::{DurableSessionRecord, RecordedClaim};
 pub use resume::{
