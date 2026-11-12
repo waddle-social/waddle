@@ -23,6 +23,7 @@ mod config;
 mod directory;
 mod error;
 mod messages;
+mod publisher;
 mod reads;
 mod selection;
 
@@ -37,6 +38,10 @@ pub use error::AccountCoordinatorError;
 pub use messages::{
     AccountView, AdoptionReport, BindingReply, ReleaseSessionRequest, RepairEvidence,
     RepairOutcome, SessionRelease, SlotStatus, UnregisterOutcome, UnregisterRequest,
+};
+pub use publisher::{
+    ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome, PublishedBinding, RetireEvidence,
+    RetireOutcome,
 };
 pub use selection::{
     AccountAuthorityMode, AccountAuthoritySelection, AccountAuthoritySelectionError,

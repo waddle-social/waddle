@@ -1240,3 +1240,108 @@ async fn a_takeover_adopts_live_remote_bindings_and_reports_expired_ones() {
         "a binding of unknown liveness is kept, not deleted"
     );
 }
+
+#[tokio::test]
+async fn the_binding_publisher_maps_publish_confirm_and_retire_onto_the_coordinator() {
+    use waddle_server::account_coordinator::{
+        ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome, RetireEvidence, RetireOutcome,
+    };
+    use waddle_xmpp::ownership::joint_identity::ResourceLifetime;
+
+    let harness = harness("account-coordinator-publisher", config()).await;
+    let coordinators = Arc::new(directory(&harness.store, &harness.claims, config()));
+    let publisher = CoordinatorBindingPublisher::new(Arc::clone(&coordinators));
+    let jid = resource("published");
+    let evidence = || RetireEvidence {
+        begin: AccountResourceOperationId::fresh(),
+        complete: AccountResourceOperationId::fresh(),
+        custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+        directed_presence: DirectedPresenceTeardownDisposition::NoDirectedRecipients,
+        presentation_flush: PresentationFlushDisposition::NoPendingPresentation,
+    };
+
+    let first = fresh_binding();
+    let PublishOutcome::Published(published) = publisher
+        .publish(&jid, &first, ResourceLifetime::fresh())
+        .await
+        .expect("publish")
+    else {
+        panic!("expected the first binding to be published");
+    };
+    assert_eq!(
+        state_of(&coordinators, &jid).await,
+        Some(AccountResourceBindingState::Published)
+    );
+    assert_eq!(
+        publisher
+            .publish(&jid, &first, ResourceLifetime::fresh())
+            .await
+            .expect("repeat the publish"),
+        PublishOutcome::Published(published.clone()),
+        "a repeated publish reports the binding as it stands"
+    );
+    assert!(resources(&coordinators, &jid).await.is_empty());
+    assert!(matches!(
+        publisher.confirm(&jid, &published).await.expect("confirm"),
+        ConfirmOutcome::Confirmed(_)
+    ));
+    assert!(matches!(
+        publisher
+            .confirm(&jid, &published)
+            .await
+            .expect("repeat the confirm"),
+        ConfirmOutcome::Confirmed(_)
+    ));
+    assert_eq!(resources(&coordinators, &jid).await, vec![jid.clone()]);
+
+    let second = fresh_binding();
+    let pending = publisher
+        .publish(&jid, &second, ResourceLifetime::fresh())
+        .await
+        .expect("publish the replacement");
+    assert!(matches!(
+        &pending,
+        PublishOutcome::ReplacementPending { displaced, .. } if displaced == &first
+    ));
+    assert!(matches!(
+        publisher
+            .retire(&jid, &published, evidence())
+            .await
+            .expect("retire the displaced binding"),
+        RetireOutcome::Retired { .. }
+    ));
+    let PublishOutcome::Published(replacement) = publisher
+        .publish(&jid, &second, ResourceLifetime::fresh())
+        .await
+        .expect("publish the replacement again")
+    else {
+        panic!("expected the replacement to be published");
+    };
+    assert_eq!(
+        publisher
+            .confirm(&jid, &published)
+            .await
+            .expect("confirm the displaced binding"),
+        ConfirmOutcome::NotCurrent,
+        "a retired binding is never acknowledged to its client"
+    );
+    assert!(matches!(
+        publisher
+            .confirm(&jid, &replacement)
+            .await
+            .expect("confirm the replacement"),
+        ConfirmOutcome::Confirmed(_)
+    ));
+    assert_eq!(
+        publisher
+            .retire_remote(&jid, &published, evidence())
+            .await
+            .expect("retire the displaced binding again"),
+        RetireOutcome::Stale(BindingFenceError::Superseded),
+        "retiring an old binding leaves its replacement alone"
+    );
+    assert_eq!(
+        state_of(&coordinators, &jid).await,
+        Some(AccountResourceBindingState::Active)
+    );
+}
