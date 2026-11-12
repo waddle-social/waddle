@@ -21,6 +21,8 @@ way a deployment does, by running the real server binary:
 
 Every path is dumped with `schema_catalog.py`, with row counts, into the
 output directory, and the PostgreSQL paths are compared with each other.
+The applied migration rows of each path (version, description, checksum)
+are written beside its dump.
 
 The harness creates databases named `waddle_baseline_*` and roles named
 `waddle_baseline_*` through the administrator URL and drops them again
@@ -35,9 +37,11 @@ harness enables it. That adds rows (one account), never schema.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -421,6 +425,21 @@ class Harness:
         print(f"wrote {path}")
         return path
 
+    def ledger_postgres(self, name: str, database: str) -> list[list[object]]:
+        """The applied migration rows: version, description and checksum."""
+        rows = json.loads(schema_catalog.run_psql(
+            self.psql, self.url(database),
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(version, description, checksum) "
+            f"ORDER BY version), '[]'::jsonb)::text FROM {SCHEMA}._migrations",
+        ))
+        self.write_ledger(f"postgres-{name}", rows)
+        return rows
+
+    def write_ledger(self, name: str, rows: list[list[object]]) -> None:
+        path = self.out / f"{name}.ledger.json"
+        path.write_text(json.dumps(rows, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"wrote {path} ({len(rows)} applied migration(s))")
+
     def report(self, title: str, left: Path, right: Path, structure_only: bool) -> None:
         a, b = schema_catalog.load(str(left)), schema_catalog.load(str(right))
         if structure_only:
@@ -449,23 +468,36 @@ def run(arguments: argparse.Namespace) -> int:
         raise HarnessError("the upgraded path starts from the legacy path; select both")
     harness = Harness(arguments, postgres=selected != ["sqlite"])
     dumps: dict[str, Path] = {}
+    ledgers: dict[str, list[list[object]]] = {}
     try:
         legacy_database = None
         if "legacy" in selected:
             legacy_database = harness.build_legacy()
             dumps["legacy"] = harness.dump_postgres("legacy", legacy_database)
+            ledgers["legacy"] = harness.ledger_postgres("legacy", legacy_database)
         if "restricted" in selected:
-            dumps["restricted"] = harness.dump_postgres(
-                "restricted", harness.build_restricted()
-            )
+            restricted_database = harness.build_restricted()
+            dumps["restricted"] = harness.dump_postgres("restricted", restricted_database)
+            ledgers["restricted"] = harness.ledger_postgres("restricted", restricted_database)
         if "upgraded" in selected and legacy_database is not None:
             harness.upgrade(legacy_database)
             dumps["upgraded"] = harness.dump_postgres("upgraded", legacy_database)
+            ledgers["upgraded"] = harness.ledger_postgres("upgraded", legacy_database)
         if "sqlite" in selected:
             path = harness.out / "sqlite-history.json"
-            document = schema_catalog.dump_sqlite(str(harness.build_sqlite()), row_counts=True)
+            database = harness.build_sqlite()
+            document = schema_catalog.dump_sqlite(str(database), row_counts=True)
             path.write_text(schema_catalog.render(document), encoding="utf-8")
             print(f"wrote {path}")
+            connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+            try:
+                harness.write_ledger("sqlite-history", [list(row) for row in connection.execute(
+                    "SELECT version, description, checksum FROM _migrations ORDER BY version")])
+            finally:
+                connection.close()
+        if len({json.dumps(rows) for rows in ledgers.values()}) > 1:
+            print("the PostgreSQL paths applied different migration ledgers: "
+                  f"compare the postgres-*.ledger.json files in {harness.out}")
         if "legacy" in dumps and "restricted" in dumps:
             harness.report("legacy-vs-restricted.structure", dumps["legacy"],
                            dumps["restricted"], structure_only=True)
