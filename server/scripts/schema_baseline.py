@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
-"""Generate a candidate schema baseline from a catalog document, and check it.
+"""Generate the schema baseline from a catalog document, and check it.
 
-`generate` turns a `schema_catalog.py` document into SQL that builds the same
-schema on an empty database. For PostgreSQL it writes three files:
+`generate` turns a `schema_catalog.py` document of a database the migration
+history built into the files under `crates/waddle-server/sql/baseline/`.
 
-  postgres.sql             the application schema's structure, with no role
-                           and no schema name in it
-  postgres.ledger.sql      the migration ledger table, which the migration
-                           runner creates itself
-  postgres.privileges.sql  the roles, owners and privileges the document
-                           records, for the round-trip check
+For PostgreSQL:
 
-For SQLite it writes `sqlite.sql` and `sqlite.ledger.sql`.
+  postgres.sql                 structure and static rows of the application
+                               schema, as a template: it names no role, and
+                               the schema's name is a placeholder
+  postgres.bootstrap.sql       the lineage and ledger tables, which the
+                               server creates before it applies migrations
+  postgres.privileges.sql      the source's roles, owners and privileges,
+                               for the round-trip check
+  postgres.fingerprint.sql     the query the server and the tooling run to
+                               fingerprint a schema's structure
+  postgres.fingerprint.json    the source's fingerprint (`--fingerprint`)
+  postgres.retired-ledger.json the source's applied migrations
+                               (`--retired-ledger`)
 
-`round-trip` applies those files to an empty database, dumps it and compares
-the dump with the document they were generated from. It exits 0 when the two
-are identical and 1 when they are not.
+For SQLite: `sqlite.sql`, `sqlite.bootstrap.sql`, `sqlite.fingerprint.json`
+and `sqlite.retired-ledger.json`.
+
+The server reads `postgres.sql`, `sqlite.sql`, the fingerprints and the
+retired ledgers, and only when `WADDLE_DB_BASELINE_ACTION` selects the
+baseline.
+
+`round-trip` applies the generated SQL to an empty database, dumps it and
+compares the dump, and the rows of the static tables, with the document the
+SQL was generated from. It exits 0 when they are identical and 1 when not.
 
 `lockstep` compares a PostgreSQL document with a SQLite document by name:
 tables, columns and explicitly created indexes. Tables that one engine alone
@@ -23,15 +36,17 @@ has by design are listed in `schema-engine-differences.txt`.
 
 The generator refuses a document that holds an object kind or property it
 cannot reproduce, naming each one, so nothing is left out silently. The
-output depends only on the document: the same document gives the same bytes.
+tables it leaves to an owner preparation are listed in
+`OWNER_PREPARED_TABLES`. The output depends only on the document.
 
-Nothing here is read by the server. The cut procedure that uses the output
-is in `docs/planning/2046-schema-baseline.md`.
+The design and the cut procedure are in
+`docs/planning/2046-schema-baseline.md`.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -46,7 +61,101 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import schema_catalog  # noqa: E402
 from schema_catalog import CatalogError, quote_literal  # noqa: E402
 
-LEDGER_TABLE = "_migrations"
+# Tables the server creates itself before it applies any migration: the
+# lineage row's table and the migration ledger. The baseline leaves them out.
+BOOTSTRAP_TABLES = ("_lineage", "_migrations")
+
+# Tables whose rows are the same in every deployment and are written by the
+# retired migrations or by a store's one-time schema step, so the baseline
+# carries them. Every other table's rows come from the owner phase, from
+# deployment inputs, or from serving.
+STATIC_TABLES = {
+    "postgresql": (
+        "ingress_epoch_guard_manifest",
+        "ingress_protocol_epoch",
+    ),
+    "sqlite": (
+        "ingress_protocol_epoch",
+        # Created together with its one row; the store refuses the table
+        # without it.
+        "pending_notification_recovery_counter",
+    ),
+}
+
+# PostgreSQL tables an owner preparation creates together with the row that
+# marks them prepared, and refuses when it finds the table without that row.
+# The baseline leaves them, and everything that hangs off them, to their
+# preparation. An entry is removed when its preparation accepts the table
+# from the baseline; the list is empty when every store has been converted.
+OWNER_PREPARED_TABLES = {
+    "clustering_keypair_slots": "recreated under the keypair-pool enrollment",
+    "clustering_keypool": "created with the enrollment row",
+    "clustering_keypool_slots": "created with the enrolled slots",
+    "extension_room_observation_owner_state": "created with its owner-state row",
+    "notification_activity_owner_state": "created with its owner-state row",
+    "notification_outbox_owner_state": "created with its owner-state row",
+    "pubsub_schema_marker": "created with its marker row",
+    "push_service_schema_marker": "created with its marker row",
+    "push_service_vapid_schema_marker": "created with its marker row",
+}
+
+# Functions that belong to an owner-prepared table's preparation, which
+# takes their presence to mean the table exists.
+OWNER_PREPARED_FUNCTIONS = {
+    "clustering_keypair_slot_guard": "guards the enrolled keypair-slot table",
+    "clustering_keypair_truncate_guard": "guards the enrolled keypair-slot table",
+    "clustering_keypool_guard": "guards the keypair-pool enrollment",
+    "clustering_keypool_slots_guard": "guards the enrolled slots",
+}
+
+
+def baseline_scope(document: dict[str, Any], schema: str) -> dict[str, Any]:
+    """The PostgreSQL document without the owner-prepared tables and functions.
+
+    A table goes with its columns, constraints, indexes, triggers and the
+    sequences its columns own.
+    """
+    def outside(key: str, row: dict[str, Any]) -> bool:
+        if row.get("schema") != schema:
+            return False
+        kind = key.split(" ", 1)[0]
+        if kind == "function":
+            return row["name"] in OWNER_PREPARED_FUNCTIONS
+        owned = row.get("owned_by") or {}
+        table = {
+            "table": row.get("name"), "column": row.get("relation"),
+            "constraint": row.get("parent"), "index": row.get("relation"),
+            "trigger": row.get("relation"), "sequence": owned.get("relation"),
+        }.get(kind)
+        return table in OWNER_PREPARED_TABLES
+
+    scoped = {**document, "objects": {
+        key: row for key, row in document["objects"].items() if not outside(key, row)}}
+    for field in ("rows", "row_counts"):
+        if field in document:
+            scoped[field] = {
+                name: value for name, value in document[field].items()
+                if name.rsplit(".", 1)[-1] not in OWNER_PREPARED_TABLES}
+    return scoped
+
+
+SCHEMA_QUOTED = "__SCHEMA_QUOTED__"
+SCHEMA_LITERAL = "__SCHEMA_LITERAL__"
+SCHEMA_BARE = "__SCHEMA__"
+
+
+def render_postgres(sql: str, schema: str) -> str:
+    """Replace the schema placeholders of a PostgreSQL baseline template.
+
+    `__SCHEMA_QUOTED__` becomes the name in double quotes, `__SCHEMA_LITERAL__`
+    the name as a string literal, and `__SCHEMA__` the name as `quote_ident`
+    prints it. The server renders the same three forms.
+    """
+    return (
+        sql.replace(SCHEMA_QUOTED, schema_catalog.quote_identifier(schema))
+        .replace(SCHEMA_LITERAL, "'" + schema.replace("'", "''") + "'")
+        .replace(SCHEMA_BARE, ident(schema))
+    )
 ROUND_TRIP_PREFIX = "waddle_baseline_roundtrip_"
 
 # Words PostgreSQL will not accept as a bare identifier (reserved, or
@@ -100,6 +209,7 @@ class PostgresGenerator:
         if document.get("engine") != "postgresql":
             raise CatalogError("the document is not a PostgreSQL catalog document")
         self.schema = schema
+        self.document = document
         self.objects: dict[str, dict[str, Any]] = document["objects"]
         self.problems: list[str] = []
         self.by_kind: dict[str, list[dict[str, Any]]] = {}
@@ -267,13 +377,13 @@ class PostgresGenerator:
             out.append(self.function(row))
 
         for table in self.kind("table"):
-            if table["name"] == LEDGER_TABLE:
+            if table["name"] in BOOTSTRAP_TABLES:
                 continue
             out.append(self.table(table, constraints))
 
         foreign = [row for row in constraints if row["type"] == "f" or not row["validated"]]
         for row in foreign:
-            if row["parent"] == LEDGER_TABLE:
+            if row["parent"] in BOOTSTRAP_TABLES:
                 continue
             out.append(
                 f"ALTER TABLE {ident(row['parent'])} ADD CONSTRAINT {ident(row['name'])} "
@@ -283,12 +393,15 @@ class PostgresGenerator:
             out.append("")
 
         for row in self.kind("index"):
-            if row["constraint"] is not None or row["relation"] == LEDGER_TABLE:
+            if row["constraint"] is not None or row["relation"] in BOOTSTRAP_TABLES:
                 continue
             qualified = f" ON {ident(self.schema)}.{ident(row['relation'])} "
             bare = f" ON {ident(row['relation'])} "
             out.append(self.strip_schema(row["definition"], qualified, bare,
                                          f"index {row['name']}") + ";\n")
+
+        # Before the triggers, so a guard that refuses writes does not see them.
+        out.extend(self.static_rows())
 
         for row in self.views():
             out.append(f"CREATE VIEW {ident(row['name'])} AS\n{row['definition']}\n")
@@ -315,8 +428,48 @@ class PostgresGenerator:
                     f"{ident(owned['relation'])}.{ident(owned['column'])};\n"
                 )
 
+        out.extend(self.role_free_privileges())
         out.extend(self.comments())
         return "\n".join(out)
+
+    def role_free_privileges(self) -> list[str]:
+        """Privileges the retired migrations set that name no deployment role.
+
+        Those are grants to PUBLIC and to PostgreSQL's predefined roles, and
+        the withdrawal of a function's or type's default PUBLIC privilege.
+        Preparations that run after the migrations verify them, so they are
+        part of the structure. Privileges of deployment roles are granted by
+        the owner phase and are not written here.
+        """
+        out = []
+        defaults = {"FUNCTION": "EXECUTE", "PROCEDURE": "EXECUTE", "TYPE": "USAGE"}
+
+        def grants(target: str, word: str, row: dict[str, Any], column: str | None = None) -> None:
+            builtin = [entry for entry in row["acl"]
+                       if entry[0] == "PUBLIC" or entry[0].startswith("pg_")]
+            if column is None and word in defaults and not any(
+                    entry[0] == "PUBLIC" and entry[1] == defaults[word] for entry in row["acl"]):
+                out.append(f"REVOKE ALL ON {target} FROM PUBLIC;\n")
+            for grantee, privilege, grantable, _ in builtin:
+                if column is None and grantee == "PUBLIC" and defaults.get(word) == privilege:
+                    continue
+                name = f"{privilege} ({ident(column)})" if column else privilege
+                out.append(
+                    f"GRANT {name} ON {target} TO {grantee}"
+                    f"{' WITH GRANT OPTION' if grantable else ''};\n")
+
+        for kind, word in (("table", "TABLE"), ("view", "TABLE"), ("sequence", "SEQUENCE"),
+                           ("type", "TYPE")):
+            for row in self.kind(kind):
+                if row["name"] not in BOOTSTRAP_TABLES:
+                    grants(f"{word} {ident(row['name'])}", word, row)
+        for row in self.kind("column"):
+            if row["acl"] and row["relation"] not in BOOTSTRAP_TABLES:
+                grants(f"TABLE {ident(row['relation'])}", "TABLE", row, row["name"])
+        for row in self.kind("function"):
+            word = "PROCEDURE" if row["kind"] == "p" else "FUNCTION"
+            grants(f"{word} {ident(row['name'])}({row['identity_arguments']})", word, row)
+        return out
 
     def table(self, table: dict[str, Any], constraints: list[dict[str, Any]]) -> str:
         name = table["name"]
@@ -342,7 +495,12 @@ class PostgresGenerator:
         bare = prefix.replace("CREATE OR REPLACE ", "CREATE ").replace(
             f"{ident(self.schema)}.", "", 1
         )
-        return bare + definition[len(prefix):].rstrip() + ";\n"
+        text = bare + definition[len(prefix):].rstrip() + ";\n"
+        # A function that spells out the schema's name is written with
+        # placeholders, so the baseline can be rendered for any schema.
+        if self.names_deployment("function", row, ("source", "config")):
+            text = self.template(text)
+        return text
 
     def views(self) -> list[dict[str, Any]]:
         """Views ordered so that each follows the views it selects from."""
@@ -373,7 +531,7 @@ class PostgresGenerator:
         for kind, word in (("table", "TABLE"), ("view", "VIEW"), ("sequence", "SEQUENCE"),
                            ("index", "INDEX"), ("type", "TYPE")):
             for row in self.kind(kind):
-                if row["name"] != LEDGER_TABLE:
+                if row["name"] not in BOOTSTRAP_TABLES:
                     comment(f"{word} {ident(row['name'])}", row["comment"])
         for row in self.kind("column"):
             comment(f"COLUMN {ident(row['relation'])}.{ident(row['name'])}", row["comment"])
@@ -385,19 +543,49 @@ class PostgresGenerator:
             comment(f"FUNCTION {ident(row['name'])}({row['identity_arguments']})", row["comment"])
         return out
 
-    def ledger(self) -> str:
-        tables = [row for row in self.kind("table") if row["name"] == LEDGER_TABLE]
-        if not tables:
-            return ""
+    def bootstrap(self) -> str:
         constraints = self.kind("constraint")
-        out = [self.table(tables[0], constraints)]
-        for row in self.kind("index"):
-            if row["relation"] == LEDGER_TABLE and row["constraint"] is None:
-                qualified = f" ON {ident(self.schema)}.{ident(LEDGER_TABLE)} "
-                out.append(self.strip_schema(row["definition"], qualified,
-                                             f" ON {ident(LEDGER_TABLE)} ",
-                                             f"index {row['name']}") + ";\n")
+        out = []
+        for table in self.kind("table"):
+            if table["name"] not in BOOTSTRAP_TABLES:
+                continue
+            out.append(self.table(table, constraints))
+            for row in self.kind("index"):
+                if row["relation"] == table["name"] and row["constraint"] is None:
+                    qualified = f" ON {ident(self.schema)}.{ident(table['name'])} "
+                    out.append(self.strip_schema(row["definition"], qualified,
+                                                 f" ON {ident(table['name'])} ",
+                                                 f"index {row['name']}") + ";\n")
         return "\n".join(out)
+
+    def static_rows(self) -> list[str]:
+        """One statement per static table that holds rows in the source."""
+        out = []
+        rows = self.document.get("rows") or {}
+        for table in STATIC_TABLES["postgresql"]:
+            if f"table {self.schema}.{table}" not in self.objects:
+                continue
+            if table not in rows:
+                self.problem(f"table {table}: the document was dumped without its rows")
+                continue
+            if any(row["identity"] == "a" for row in self.columns_of(table)):
+                self.problem(f"table {table}: rows of an ALWAYS identity table are not generated")
+            if rows[table]:
+                literal = quote_literal(json.dumps(rows[table], sort_keys=True, ensure_ascii=False))
+                out.append(
+                    f"INSERT INTO {ident(table)}\n"
+                    f"SELECT * FROM jsonb_populate_recordset(NULL::{ident(table)},\n"
+                    f"    {literal}::jsonb);\n"
+                )
+        return out
+
+    def template(self, text: str) -> str:
+        """Replace the source schema's name, in its three spellings."""
+        name = self.schema
+        text = text.replace(schema_catalog.quote_identifier(name), SCHEMA_QUOTED)
+        text = text.replace("'" + name.replace("'", "''") + "'", SCHEMA_LITERAL)
+        return re.sub(
+            rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_$])", SCHEMA_BARE, text)
 
     # -- privileges ---------------------------------------------------------
 
@@ -528,17 +716,27 @@ class PostgresGenerator:
             self.problem(f"default privileges of {row['role']} are not generated")
         return "\n".join(out) + "\n"
 
-    def deployment_names(self) -> list[str]:
-        """Objects whose definition spells out the schema's or a role's name.
-
-        The structure file is meant to run under any schema and role names.
-        An object listed here carries one of the source database's names in
-        its body, so it is only correct for a deployment that uses the same
-        name.
-        """
+    def names_deployment(self, kind: str, row: dict[str, Any], fields: tuple[str, ...]) -> list[str]:
+        """The deployment names (schema, roles) a definition spells out."""
         names = {self.schema: "schema"}
-        for row in self.by_kind.get("role", []):
-            names.setdefault(row["name"], "role")
+        for role in self.by_kind.get("role", []):
+            names.setdefault(role["name"], "role")
+        text = "\n".join(str(row[field]) for field in fields if row[field])
+        if kind in ("trigger", "index"):
+            text = text.replace(f" ON {ident(self.schema)}.{ident(row['relation'])} ", " ", 1)
+        return sorted(
+            f"{what} {name}" for name, what in names.items()
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text)
+        )
+
+    def check_deployment_names(self) -> list[str]:
+        """Report the templated functions; refuse any other deployment name.
+
+        A function may name the schema: it is written as a template. A role
+        name anywhere, or the schema's name in a trigger, constraint,
+        default, index or view, has no rendering and is refused.
+        """
+        templated = []
         fields = {
             "function": ("source", "config"),
             "trigger": ("definition",),
@@ -547,29 +745,27 @@ class PostgresGenerator:
             "index": ("definition",),
             "view": ("definition",),
         }
-        found = []
         for kind, checked in fields.items():
             for row in self.kind(kind):
-                text = "\n".join(str(row[field]) for field in checked if row[field])
-                if kind in ("trigger", "index"):
-                    text = text.replace(
-                        f" ON {ident(self.schema)}.{ident(row['relation'])} ", " ", 1)
-                hits = sorted(
-                    f"{what} {name}" for name, what in names.items()
-                    if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text)
-                )
-                if hits:
-                    label = row["name"] if "relation" not in row else (
-                        f"{row['relation']}.{row['name']}")
-                    found.append(f"{kind} {label} names {', '.join(hits)}")
-        return found
+                hits = self.names_deployment(kind, row, checked)
+                if not hits:
+                    continue
+                label = row["name"] if "relation" not in row else (
+                    f"{row['relation']}.{row['name']}")
+                if kind == "function" and hits == [f"schema {self.schema}"]:
+                    templated.append(f"function {label}")
+                else:
+                    self.problem(f"{kind} {label} names {', '.join(hits)}")
+        return templated
 
 
 def generate_postgres(document: dict[str, Any], schema: str) -> dict[str, Any]:
+    document = baseline_scope(document, schema)
     generator = PostgresGenerator(document, schema)
     generator.check_supported()
+    templated = generator.check_deployment_names()
     structure = generator.structure()
-    ledger = generator.ledger()
+    bootstrap = generator.bootstrap()
     privileges = generator.privileges()
     if generator.problems:
         raise Unsupported(
@@ -583,11 +779,12 @@ def generate_postgres(document: dict[str, Any], schema: str) -> dict[str, Any]:
     return {
         "files": {
             "postgres.sql": structure,
-            "postgres.ledger.sql": ledger,
+            "postgres.bootstrap.sql": bootstrap,
             "postgres.privileges.sql": privileges,
+            "postgres.fingerprint.sql": schema_catalog.fingerprint_sql(),
         },
         "outside": outside,
-        "names": generator.deployment_names(),
+        "names": templated,
     }
 
 
@@ -609,21 +806,36 @@ def generate_sqlite(document: dict[str, Any]) -> dict[str, Any]:
     if problems:
         raise Unsupported("the document cannot be reproduced:\n  " + "\n  ".join(problems))
     structure: list[str] = []
-    ledger: list[str] = []
+    bootstrap: list[str] = []
+    rows = document.get("rows") or {}
     # A table precedes its indexes, and views and triggers follow every
     # table. SQLite does not resolve the tables a foreign key, a view or a
     # trigger names until they are used.
-    for kind in ("table", "index", "view", "trigger"):
+    # Static rows precede the triggers.
+    for kind in ("table", "index", "rows", "view", "trigger"):
+        if kind == "rows":
+            for table in STATIC_TABLES["sqlite"]:
+                if f"table {table}" not in objects:
+                    continue
+                if table not in rows:
+                    raise Unsupported(f"table {table}: the document was dumped without its rows")
+                for row in rows[table]:
+                    columns = ", ".join(schema_catalog.quote_identifier(name) for name in row)
+                    structure.append(
+                        f"INSERT INTO {schema_catalog.quote_identifier(table)} ({columns}) "
+                        f"VALUES ({', '.join(row.values())});\n")
+            continue
         for key in sorted(key for key in sources if key.startswith(kind + " ")):
             row = objects[key]
             owner = row["name"] if kind in ("table", "view") else row["relation"]
-            (ledger if owner == LEDGER_TABLE else structure).append(sources[key].rstrip() + ";\n")
+            (bootstrap if owner in BOOTSTRAP_TABLES else structure).append(
+                sources[key].rstrip() + ";\n")
     pragma = objects.get("pragma schema", {})
     for name in ("user_version", "application_id"):
         if pragma.get(name):
             structure.append(f"PRAGMA {name} = {pragma[name]};\n")
     return {
-        "files": {"sqlite.sql": "\n".join(structure), "sqlite.ledger.sql": "\n".join(ledger)},
+        "files": {"sqlite.sql": "\n".join(structure), "sqlite.bootstrap.sql": "\n".join(bootstrap)},
         "outside": [],
         "names": [],
     }
@@ -634,13 +846,19 @@ def generate_sqlite(document: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _HEADERS = {
-    "postgres.sql": "Structure of the application schema. Run it with the application\n"
-                    "-- schema first on the search path, as the role that is to own the objects.",
-    "postgres.ledger.sql": "The migration ledger table as the migration runner creates it.",
+    "postgres.sql": "Structure and static rows of the application schema, as a template:\n"
+                    "-- __SCHEMA__, __SCHEMA_QUOTED__ and __SCHEMA_LITERAL__ stand for the schema's\n"
+                    "-- name. Run it rendered, with that schema first on the search path, as the\n"
+                    "-- role that is to own the objects.",
+    "postgres.bootstrap.sql": "The lineage and migration ledger tables, which the server creates\n"
+                              "-- itself before it applies a migration.",
+    "postgres.fingerprint.sql": "The query that fingerprints the structure of the schema on the\n"
+                                "-- search path. The server runs it before it stamps a database.",
     "postgres.privileges.sql": "Roles, owners and privileges of the source database. Run as a\n"
                                "-- superuser after the structure, for the round-trip check only.",
-    "sqlite.sql": "Structure of the SQLite database.",
-    "sqlite.ledger.sql": "The migration ledger table as the migration runner creates it.",
+    "sqlite.sql": "Structure and static rows of the SQLite database.",
+    "sqlite.bootstrap.sql": "The lineage and migration ledger tables, which the server creates\n"
+                            "-- itself before it applies a migration.",
 }
 
 
@@ -650,9 +868,9 @@ def header(name: str, commit: str, source: str) -> str:
         f"-- Source commit: {commit}\n"
         f"-- Source catalog: {source}\n"
         "--\n"
-        "-- This is a CANDIDATE schema baseline. The server does not read it and no\n"
-        "-- migration refers to it. It exists so that the baseline cut described in\n"
-        "-- docs/planning/2046-schema-baseline.md can be reviewed and checked.\n"
+        "-- Part of the schema baseline (docs/planning/2046-schema-baseline.md). The\n"
+        "-- server uses the baseline only when WADDLE_DB_BASELINE_ACTION selects it;\n"
+        "-- otherwise the migration history in src/db/migrations is the catalog.\n"
         "--\n"
         f"-- {_HEADERS[name]}\n\n"
     )
@@ -667,6 +885,7 @@ def generate(document: dict[str, Any], schema: str, commit: str, source: str) ->
     result["files"] = {
         name: header(name, commit, source) + text for name, text in result["files"].items()
     }
+    result["engine"] = document.get("engine")
     return result
 
 
@@ -690,18 +909,19 @@ def round_trip_sqlite(directory: Path) -> dict[str, Any]:
         path = Path(work) / "candidate.db"
         connection = sqlite3.connect(path)
         try:
-            connection.executescript(_read(directory, "sqlite.ledger.sql"))
+            connection.executescript(_read(directory, "sqlite.bootstrap.sql"))
             connection.executescript(_read(directory, "sqlite.sql"))
             connection.commit()
         except sqlite3.DatabaseError as error:
             raise CatalogError(f"the SQLite candidate did not apply: {error}") from error
         finally:
             connection.close()
-        return schema_catalog.dump_sqlite(str(path), row_counts=True)
+        return schema_catalog.dump_sqlite(
+            str(path), row_counts=True, rows=list(STATIC_TABLES["sqlite"]))
 
 
 def round_trip_postgres(
-    directory: Path, admin_url: str, psql: str | None, schema: str
+    directory: Path, admin_url: str, psql: str | None, schema: str, privileges: bool = True
 ) -> dict[str, Any]:
     """Apply the candidate to a new database, dump it, and drop it again.
 
@@ -714,7 +934,8 @@ def round_trip_postgres(
     database = ROUND_TRIP_PREFIX + uuid.uuid4().hex[:8]
     target = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/" + database, parts.query, ""))
     # The roles the privileges file creates when they are missing.
-    wanted = sorted(set(_CREATED_ROLE.findall(_read(directory, "postgres.privileges.sql"))))
+    wanted = sorted(set(_CREATED_ROLE.findall(
+        _read(directory, "postgres.privileges.sql")))) if privileges else []
     existing = set(schema_catalog.run_psql(
         psql, admin_url,
         "SELECT rolname FROM pg_catalog.pg_roles WHERE rolname = ANY (ARRAY["
@@ -730,10 +951,16 @@ def round_trip_postgres(
             schema_catalog.run_psql(
                 psql, target, f"CREATE SCHEMA {schema_catalog.quote_identifier(schema)}")
         path = f"SET search_path = {schema_catalog.quote_identifier(schema)};\n"
-        for name in ("postgres.ledger.sql", "postgres.sql", "postgres.privileges.sql"):
-            schema_catalog.run_psql(
-                psql, target, f"{path}BEGIN;\n{_read(directory, name)}\nCOMMIT;\n")
-        return schema_catalog.dump_postgres(target, psql, schema, row_counts=True)
+        # The privileges file names its source's roles and schema, so it is
+        # applied only when the candidate is checked against that source.
+        names = ["postgres.bootstrap.sql", "postgres.sql"]
+        if privileges:
+            names.append("postgres.privileges.sql")
+        for name in names:
+            text = render_postgres(_read(directory, name), schema)
+            schema_catalog.run_psql(psql, target, f"{path}BEGIN;\n{text}\nCOMMIT;\n")
+        return schema_catalog.dump_postgres(
+            target, psql, schema, row_counts=True, rows=list(STATIC_TABLES["postgresql"]))
     finally:
         schema_catalog.run_psql(
             psql, admin_url,
@@ -754,7 +981,10 @@ def round_trip(arguments: argparse.Namespace) -> int:
         admin_url = os.environ.get(arguments.admin_url_env)
         if not admin_url:
             raise CatalogError(f"{arguments.admin_url_env} is not set")
-        candidate = round_trip_postgres(directory, admin_url, arguments.psql, arguments.schema)
+        candidate = round_trip_postgres(
+            directory, admin_url, arguments.psql, arguments.schema,
+            privileges=not arguments.structure_only)
+        document = baseline_scope(document, arguments.schema)
         expected = schema_catalog.only_schema(document, arguments.schema)
         candidate = schema_catalog.only_schema(candidate, arguments.schema)
     if arguments.structure_only:
@@ -763,15 +993,24 @@ def round_trip(arguments: argparse.Namespace) -> int:
     if arguments.candidate_output:
         Path(arguments.candidate_output).write_text(
             schema_catalog.render(candidate), encoding="utf-8")
-    lines = schema_catalog.compare(expected, candidate)
+    # The static tables' rows are part of the baseline and are compared. A
+    # source dumped without them cannot prove the generated statements.
+    if "rows" not in document:
+        raise CatalogError("the source document was dumped without --rows for the static tables")
+    static = STATIC_TABLES[document["engine"]]
+    expected = {**expected, "rows": {
+        name: rows for name, rows in document["rows"].items() if name in static}}
+    lines = schema_catalog.compare(expected, candidate, include_rows=True)
     for line in lines:
         print(line)
-    # Rows are never generated. Tables that hold rows in the source need a
-    # writer after the baseline: a seed statement or an owner preparation.
-    seeded = sorted(name for name, count in (document.get("row_counts") or {}).items() if count)
+    # Other tables that hold rows in the source get them after the baseline,
+    # from the owner phase or from serving.
+    seeded = sorted(
+        name for name, count in (document.get("row_counts") or {}).items()
+        if count and name.rsplit(".", 1)[-1] not in static + BOOTSTRAP_TABLES)
     if seeded:
-        print(f"note: the source holds rows in {len(seeded)} table(s) the candidate "
-              f"leaves empty: {', '.join(seeded)}", file=sys.stderr)
+        print(f"note: {len(seeded)} table(s) hold rows in the source that the baseline does "
+              f"not carry: {', '.join(seeded)}", file=sys.stderr)
     print(f"round trip ({document['engine']}): {schema_catalog.summarise(lines)}",
           file=sys.stderr)
     return 1 if lines else 0
@@ -861,6 +1100,13 @@ def _parser() -> argparse.ArgumentParser:
                                   help="commit the source database was built from")
     generate_command.add_argument("--schema", default="public",
                                   help="PostgreSQL application schema (default: public)")
+    generate_command.add_argument(
+        "--fingerprint", metavar="FILE",
+        help="fingerprint of the source database, stored as <engine>.fingerprint.json")
+    generate_command.add_argument(
+        "--retired-ledger", metavar="FILE",
+        help="applied migration rows of the source database, stored as "
+             "<engine>.retired-ledger.json")
     check = commands.add_parser("round-trip", help="apply the candidate and compare")
     check.add_argument("source", help="catalog document the candidate was generated from")
     check.add_argument("--directory", required=True, help="directory that holds the candidate")
@@ -903,13 +1149,31 @@ def main(argv: list[str] | None = None) -> int:
                           Path(arguments.source).name)
         out = Path(arguments.out)
         out.mkdir(parents=True, exist_ok=True)
+        engine = "postgres" if document["engine"] == "postgresql" else "sqlite"
+        for option, suffix in ((arguments.fingerprint, "fingerprint"),
+                               (arguments.retired_ledger, "retired-ledger")):
+            if option:
+                try:
+                    data = json.loads(Path(option).read_text(encoding="utf-8"))
+                except (OSError, ValueError) as error:
+                    raise CatalogError(f"could not read {option}: {error}") from error
+                result["files"][f"{engine}.{suffix}.json"] = json.dumps(
+                    data, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
         for name, text in result["files"].items():
             (out / name).write_text(text, encoding="utf-8")
             print(f"wrote {out / name}")
         for key in result["outside"]:
             print(f"note: outside the application schema, not generated: {key}", file=sys.stderr)
+        if document["engine"] == "postgresql":
+            for name, reason in sorted(OWNER_PREPARED_TABLES.items()):
+                if f"table {arguments.schema}.{name}" in document["objects"]:
+                    print(f"note: left to its owner preparation: table {name} ({reason})",
+                          file=sys.stderr)
+            for name, reason in sorted(OWNER_PREPARED_FUNCTIONS.items()):
+                print(f"note: left to its owner preparation: function {name} ({reason})",
+                      file=sys.stderr)
         for name in result["names"]:
-            print(f"note: deployment name in the structure: {name}", file=sys.stderr)
+            print(f"note: written as a schema template: {name}", file=sys.stderr)
         return 0
     except CatalogError as error:
         print(f"error: {error}", file=sys.stderr)

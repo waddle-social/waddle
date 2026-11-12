@@ -71,13 +71,13 @@ CREATE TABLE _migrations (version INTEGER PRIMARY KEY, description TEXT NOT NULL
 """
 
 
-def sqlite_document(directory, name, script):
+def sqlite_document(directory, name, script, rows=None):
     path = Path(directory) / name
     connection = sqlite3.connect(path)
     connection.executescript(script)
     connection.commit()
     connection.close()
-    return catalog.dump_sqlite(str(path), row_counts=True)
+    return catalog.dump_sqlite(str(path), row_counts=True, rows=rows)
 
 
 class SqliteCatalogTests(unittest.TestCase):
@@ -140,6 +140,37 @@ class SqliteCatalogTests(unittest.TestCase):
             ),
             "CREATE TABLE t (a TEXT DEFAULT 'x  --  y', \"b  c\" INT)",
         )
+
+    def test_normalisation_matches_the_server(self):
+        # The same vector as the server's `normalise_sqlite_sql` test.
+        self.assertEqual(
+            catalog.normalise_sqlite_sql("CREATE INDEX i ON t ( a ,b )  WHERE a = '('"),
+            "CREATE INDEX i ON t (a,b) WHERE a = '('",
+        )
+
+    def test_fingerprint_ignores_layout_and_sees_structure(self):
+        paths = {}
+        for name, script in (("direct", SQLITE_DIRECT), ("migrated", SQLITE_MIGRATED),
+                             ("changed", SQLITE_DIRECT.replace("topic TEXT", "topic BLOB"))):
+            self.document(f"{name}.db", script)
+            paths[name] = str(Path(self.directory.name) / f"{name}.db")
+        direct = catalog.fingerprint_sqlite(paths["direct"])
+        self.assertEqual(direct, catalog.fingerprint_sqlite(paths["migrated"]))
+        self.assertEqual(
+            catalog.fingerprint_differences(direct, catalog.fingerprint_sqlite(paths["changed"])),
+            ["~ table rooms"],
+        )
+
+    def test_table_contents_are_recorded_and_compared_on_request(self):
+        script = "CREATE TABLE t (a TEXT, b BLOB); INSERT INTO t VALUES ('it''s', x'00ff');"
+        first = sqlite_document(self.directory.name, "rows.db", script, rows=["t", "absent"])
+        self.assertEqual(first["rows"], {"t": [{"a": "'it''s'", "b": "X'00FF'"}]})
+        second = sqlite_document(
+            self.directory.name, "other.db", script + "INSERT INTO t VALUES ('x', NULL);",
+            rows=["t"])
+        self.assertEqual(catalog.compare(first, second), [])
+        self.assertEqual(
+            catalog.compare(first, second, include_rows=True)[0], "~ contents t")
 
     def test_row_counts_are_compared_only_on_request(self):
         empty = self.document("empty.db", "CREATE TABLE t (a TEXT);")
@@ -337,12 +368,15 @@ class PostgresFixture(unittest.TestCase):
         return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/" + database, parts.query, ""))
 
     @classmethod
-    def build(cls, label, script):
+    def build(cls, label, script, schema="public", rows=None):
         database = f"waddle_baseline_contract_{label}_{cls.tag}"
         cls.databases.append(database)
         catalog.run_psql(cls.psql, cls.admin_url, f"CREATE DATABASE {database} TEMPLATE template0")
-        catalog.run_psql(cls.psql, cls.url(database), script)
-        return catalog.dump_postgres(cls.url(database), cls.psql, row_counts=True)
+        prelude = "" if schema == "public" else f"CREATE SCHEMA {schema};\n"
+        catalog.run_psql(
+            cls.psql, cls.url(database), f"{prelude}SET search_path = {schema};\n{script}")
+        return catalog.dump_postgres(
+            cls.url(database), cls.psql, schema, row_counts=True, rows=rows)
 
 
 
@@ -373,6 +407,24 @@ class PostgresCatalogTests(PostgresFixture):
         self.assertEqual(objects["table public.rooms"]["comment"], "it's a room")
         self.assertIn(f"role {self.reader}", objects)
         self.assertEqual(set(objects["undescribed object counts"].values()), {0})
+
+    def test_fingerprint_is_the_same_for_one_structure_under_any_owner_and_schema(self):
+        direct = catalog.fingerprint_postgres(self.url(self.databases[0]), self.psql)
+        migrated = catalog.fingerprint_postgres(self.url(self.databases[1]), self.psql)
+        self.assertEqual(direct, migrated)
+        self.assertIn("column rooms.name", direct)
+        self.assertIn("function room_count()", direct)
+        self.assertEqual(direct["undescribed operator"], "0")
+        # Another schema name, no owners and no grants: the same structure.
+        self.build("tenant", POSTGRES_DIRECT, schema="tenant_x")
+        tenant = catalog.fingerprint_postgres(self.url(self.databases[-1]), self.psql, "tenant_x")
+        self.assertEqual(catalog.fingerprint_differences(direct, tenant), [])
+        self.build("drifted", POSTGRES_DIRECT.replace("CHECK (name <> '')", "CHECK (name <> 'x')"))
+        drifted = catalog.fingerprint_postgres(self.url(self.databases[-1]), self.psql)
+        self.assertEqual(
+            catalog.fingerprint_differences(direct, drifted), ["~ constraint rooms.rooms_name_check"])
+        with self.assertRaises(catalog.CatalogError):
+            catalog.fingerprint_postgres(self.url(self.databases[0]), self.psql, "Not Plain")
 
     def test_role_aliases_rename_owners_and_grantees(self):
         database = self.databases[0]
