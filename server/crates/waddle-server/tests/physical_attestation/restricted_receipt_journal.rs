@@ -24,6 +24,17 @@ const INGRESS_API_CANDIDATE: &str =
 const RECEIPT_WRITER_CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/p21_receipt_journal_postgres.sql");
 
+/// The guarded tables of the migrations above V1030. The ledger refuses an
+/// applied version above a missing one, so reapplying V1030 recreates them.
+const RECREATED_GUARDED_TABLES: [&str; 6] = [
+    "ingress_mailbox_lanes",
+    "ingress_mailbox_entries",
+    "ingress_room_requests",
+    "ingress_room_responses",
+    "ingress_room_occupants",
+    "ingress_direct_requests",
+];
+
 pub(super) async fn exercise(
     fixture: &Fixture,
     config: &PhysicalAttestationConfig,
@@ -105,6 +116,34 @@ pub(super) async fn exercise(
         Duration::from_secs(2),
     )
     .expect("strict profile pool");
+    // V1030 strips the default ACL from its own journal and function. The
+    // guarded tables that had to be recreated with it carry the hostile
+    // default ACL, no API grant and no API guard trigger, exactly like any
+    // guarded table a migration creates before the operator provisions it,
+    // and the strict profile refuses them until that provisioning is
+    // repeated.
+    assert!(matches!(
+        strict_before
+            .inspect_restricted_ingress_profile(api, epoch_oid)
+            .await,
+        Err(RestrictedIngressProfileError::Mismatch(
+            "guarded relation/ACL/row security"
+        ))
+    ));
+    for table in RECREATED_GUARDED_TABLES {
+        super::execute(
+            &fixture.admin,
+            &format!(
+                "REVOKE ALL ON {s}.{table} FROM {r}; \
+                 GRANT SELECT,INSERT,UPDATE,DELETE ON {s}.{table} TO {api_name}; \
+                 CREATE TRIGGER {table}_definer_api_guard_dml \
+                 BEFORE INSERT OR UPDATE OR DELETE ON {s}.{table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION {s}.waddle_ingress_definer_epoch_guard(); \
+                 ALTER TABLE {s}.{table} ENABLE ALWAYS TRIGGER {table}_definer_api_guard_dml;"
+            ),
+        )
+        .await;
+    }
     strict_before
         .inspect_restricted_ingress_profile(api, epoch_oid)
         .await
