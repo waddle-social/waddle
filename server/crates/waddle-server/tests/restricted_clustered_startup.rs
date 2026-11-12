@@ -605,18 +605,31 @@ async fn two_restricted_nodes_form_a_cluster_and_serve_without_ddl() {
         ),
     )
     .await;
-    // The destroy commits and its completion is delivered through the
-    // destroy outbox. The requester's IQ result is sent inline only when
-    // this node drains that completion itself; when another node's janitor
-    // leases it first, the request is answered with an error although the
-    // room is destroyed. Either reply is accepted here: what this test
-    // checks is the durable outcome and the statements behind it.
-    collect_until(&mut admin_b, "destroy reply", |stanzas| {
+    // The requesting node delivers the destroy completion itself, so the
+    // owner, who is an occupant, receives the destroy presence and then the
+    // IQ result.
+    let destroyed = collect_until(&mut admin_b, "destroy reply", |stanzas| {
         stanzas
             .iter()
             .any(|stanza| stanza.name() == "iq" && stanza.attr("id") == Some("destroy-room"))
     })
     .await;
+    let reply = destroyed
+        .iter()
+        .position(|stanza| stanza.name() == "iq" && stanza.attr("id") == Some("destroy-room"))
+        .expect("destroy reply");
+    assert_eq!(
+        destroyed[reply].attr("type"),
+        Some("result"),
+        "the destroy must be answered with a result: {destroyed:?}"
+    );
+    assert!(
+        destroyed[..reply].iter().any(|stanza| {
+            stanza.name() == "presence"
+                && has_descendant(stanza, "destroy", "http://jabber.org/protocol/muc#user")
+        }),
+        "the destroy presence must precede the result: {destroyed:?}"
+    );
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let (rooms, tombstones): (i64, i64) = sqlx::query_as(&format!(

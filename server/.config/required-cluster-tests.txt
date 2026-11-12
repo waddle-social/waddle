@@ -536,3 +536,11 @@ waddle-server::restricted_runtime_startup clustered::clustered_restricted_startu
 # ship.
 waddle-server clustering::claims::tests::schema_bootstrap_on_a_current_schema_neither_waits_for_nor_deadlocks_a_claim_acquire
 waddle-server clustering::claims::tests::schema_bootstrap_on_a_current_schema_does_not_block_a_node_heartbeat
+
+# XEP-0045 §10.9 destroy reply on a cluster: the owner who destroys a room
+# must receive the destroy presence and then an IQ result, whichever node's
+# completion janitor ticks between the commit and the handler's claim. An
+# image that answers a committed destroy with an unrelated error must not
+# ship.
+waddle-server::clustering_cluster_e2e room_destroy_reply_survives_janitor_ticks_between_commit_and_inline_claim
+waddle-server::clustering_cluster_e2e consecutive_room_destroys_are_each_answered_with_a_result

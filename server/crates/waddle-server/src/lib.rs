@@ -21,6 +21,10 @@ pub mod ingress_uow;
 pub mod mam_runtime;
 pub mod metrics;
 pub mod muc_destroy_completion_outbox;
+/// File-armed seam on the owner-IQ room destroy reply, for the cluster
+/// suite. Absent from every build without the `test-support` feature.
+#[cfg(feature = "test-support")]
+pub(crate) mod muc_destroy_completion_seam;
 /// Postgres-backed durable MUC room ownership state (ADR-0017 Phase 3
 /// Slice 7). Gated behind the `clustering` Cargo feature for the same
 /// reason as `sm_persistence_fenced`: it depends on `clustering::relay`/

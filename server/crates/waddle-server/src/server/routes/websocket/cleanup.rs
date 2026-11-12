@@ -4138,12 +4138,25 @@ pub(crate) async fn drain_destroy_completion_attempt(
             return Err(());
         }
     }
-    let Some(lease) =
-        super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
-            state, attempt,
-        )
-        .await
-    else {
+    #[cfg(feature = "test-support")]
+    crate::muc_destroy_completion_seam::hold_inline_claim(attempt).await;
+    // The destroy armed this row leased to its requester, so no janitor
+    // can have it while that lease is live. A row armed without that lease,
+    // or one whose lease lapsed unclaimed, is claimed like any due row.
+    let lease = match super::handlers::iq::muc_owner_moderation::claim_inline_destroy_completion(
+        state, attempt,
+    )
+    .await
+    {
+        Some(lease) => Some(lease),
+        None => {
+            super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
+                state, attempt,
+            )
+            .await
+        }
+    };
+    let Some(lease) = lease else {
         if local_completion.is_some() {
             match super::handlers::iq::muc_owner_moderation::persisted_destroy_completion_exists(
                 state, attempt,

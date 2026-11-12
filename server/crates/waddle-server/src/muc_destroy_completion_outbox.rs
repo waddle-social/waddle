@@ -508,6 +508,21 @@ impl MucDestroyCompletionOutboxStore {
     }
 }
 
+/// Lease token under which a committed destroy completion is armed for the
+/// owner-IQ handler that requested it.
+///
+/// The row becomes due in the transaction that commits the destroy, and
+/// every node's completion janitor leases due rows. Arming the row already
+/// leased keeps it out of every janitor's reach for one lease window, so the
+/// handler is the one that delivers the completion and can put the
+/// requester's destroy presence ahead of its IQ result. The token is derived
+/// from the attempt, which only the committing handler and the row itself
+/// know; the handler exchanges it for a private token when it claims. If the
+/// handler never claims, the lease lapses and a janitor completes the work.
+pub(crate) fn inline_destroy_lease_token(attempt: &waddle_xmpp::muc::DestroyAttemptId) -> String {
+    format!("inline:{}", attempt.as_uuid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
