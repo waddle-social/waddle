@@ -363,7 +363,13 @@ pub(crate) async fn create_ingress_inbox_storage(
                 if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
                     return Err(IngressColocationError::AttestedInboxRequiresInheritedGlobal.into());
                 }
-                let storage = DatabaseInboxStorage::attach_runtime_postgres(global.clone()).await?;
+                let storage = DatabaseInboxStorage::attach_runtime_postgres(global.clone())
+                    .await
+                    .inspect_err(|_| {
+                        waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                            waddle_xmpp::telemetry::attributes::RestrictedStore::Inbox,
+                        )
+                    })?;
                 return Ok(InboxStartup::AttachedGlobal(Arc::new(storage)));
             }
             if global.ingress_pool_size().is_some() {
@@ -555,15 +561,20 @@ pub(crate) async fn select_websocket_mam_storage(
                 owner_handoff.mam_owner.clone(),
                 owner_handoff.claim_schema.clone(),
             )
-            .await?
+            .await
         } else {
             DatabaseMamStorage::attach_single_node(
                 global_db,
                 owner_handoff.mam_owner.clone(),
                 owner_handoff.claim_schema.clone(),
             )
-            .await?
-        };
+            .await
+        }
+        .inspect_err(|_| {
+            waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                waddle_xmpp::telemetry::attributes::RestrictedStore::Mam,
+            )
+        })?;
         return Ok(MamStartupStorage::Attested(Arc::new(storage)));
     }
 
@@ -1078,6 +1089,11 @@ async fn create_websocket_state(
         if call_teardown_db.uses_attested_postgres_pool() {
             CallTeardownOutboxStore::attach_existing(call_teardown_db, call_teardown_node_identity)
                 .await
+                .inspect_err(|_| {
+                    waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                        waddle_xmpp::telemetry::attributes::RestrictedStore::CallTeardown,
+                    )
+                })
         } else {
             CallTeardownOutboxStore::new_with_node_identity(
                 call_teardown_db,
@@ -1097,6 +1113,11 @@ async fn create_websocket_state(
     let room_effect_outbox = Arc::new(if runtime_role {
         RoomEffectOutboxStore::attach_serving(state.db_pool.global().clone())
             .await
+            .inspect_err(|_| {
+                waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                    waddle_xmpp::telemetry::attributes::RestrictedStore::RoomEffectOutbox,
+                )
+            })
             .map_err(|error| anyhow::anyhow!("failed to attach room effect outbox: {error}"))?
     } else {
         RoomEffectOutboxStore::try_new(state.db_pool.global().clone())
@@ -1344,6 +1365,11 @@ async fn create_websocket_state(
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(if runtime_role {
         DatabasePushRegistrationStore::attach_existing(state.db_pool.global().clone())
             .await
+            .inspect_err(|_| {
+                waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                    waddle_xmpp::telemetry::attributes::RestrictedStore::PushRegistrations,
+                )
+            })
             .map_err(|error| anyhow::anyhow!("failed to attach XEP-0357 storage: {error}"))?
     } else {
         DatabasePushRegistrationStore::try_new(state.db_pool.global().clone())
@@ -1399,6 +1425,11 @@ async fn create_websocket_state(
             Arc::clone(&pubsub_storage),
         )
         .await
+        .inspect_err(|_| {
+            waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                waddle_xmpp::telemetry::attributes::RestrictedStore::PushService,
+            )
+        })
         .map_err(|error| anyhow::anyhow!("failed to attach XMPP Push Service: {error}"))?
     } else {
         DatabasePushServiceStore::new_with_secret_key_and_pubsub(
@@ -1487,6 +1518,11 @@ async fn create_websocket_state(
         None if runtime_role => {
             NotificationOutboxStore::attach_existing(state.db_pool.global().clone())
                 .await
+                .inspect_err(|_| {
+                    waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                        waddle_xmpp::telemetry::attributes::RestrictedStore::NotificationOutbox,
+                    )
+                })
                 .map_err(|error| {
                     anyhow::anyhow!("failed to attach notification candidate outbox: {error}")
                 })?
@@ -1515,6 +1551,11 @@ async fn create_websocket_state(
     let notification_activity = Arc::new(if runtime_role {
         NotificationActivityStore::attach_existing(state.db_pool.global().clone())
             .await
+            .inspect_err(|_| {
+                waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                    waddle_xmpp::telemetry::attributes::RestrictedStore::NotificationActivity,
+                )
+            })
             .map_err(|error| {
                 anyhow::anyhow!("failed to attach notification activity projection: {error}")
             })?
@@ -2197,7 +2238,12 @@ async fn create_ingress_sm_storage(
                         node_identity,
                         authority,
                     )
-                    .await?,
+                    .await
+                    .inspect_err(|_| {
+                        waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                            waddle_xmpp::telemetry::attributes::RestrictedStore::StreamManagement,
+                        )
+                    })?,
                 ));
             }
             #[cfg(not(feature = "clustering"))]
@@ -2205,7 +2251,12 @@ async fn create_ingress_sm_storage(
         }
         return Ok(Arc::new(
             crate::sm_persistence::DatabaseSmPersistence::attach_runtime_postgres(global.clone())
-                .await?,
+                .await
+                .inspect_err(|_| {
+                    waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                        waddle_xmpp::telemetry::attributes::RestrictedStore::StreamManagement,
+                    )
+                })?,
         ));
     }
     Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
@@ -2228,7 +2279,12 @@ async fn create_ingress_pending_storage(
             global.clone(),
             waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
         )
-        .await?);
+        .await
+        .inspect_err(|_| {
+            waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                waddle_xmpp::telemetry::attributes::RestrictedStore::PendingDelivery,
+            )
+        })?);
     }
     // Sharing the pool also preserves private in-memory SQLite identity.
     Ok(DatabasePendingDeliveryStorage::from_database(

@@ -76,8 +76,11 @@ Which of these are recorded today:
 | Metric | Recorded |
 |---|---|
 | `waddle.ingress.entry.transactions`, `waddle.ingress.entry.preparation.duration` | Yes, in `begin_ingress_entry` (`waddle-server/src/ingress_substrate/typed_entry.rs`) |
-| `waddle.clustering.keypair_lease.outcomes` | `acquired`, `exhausted` and `fencing_lost`, in `waddle-server/src/clustering/lease.rs`. `released` has no call site |
+| `waddle.clustering.keypair_lease.outcomes` | Yes, in `waddle-server/src/clustering/lease.rs`: `acquired`, `exhausted`, `fencing_lost` and `released` |
 | `waddle.restricted_runtime.startup.refusals` | Yes, in `waddle-server/src/main.rs`, which flushes metrics before the process exits |
+| `waddle.restricted_runtime.attach.failures` | Yes, at each attachment under the attested pool in `server/http.rs`, `server/lifecycle.rs`, `clustering/node.rs` and `clustering/swarm.rs`. `room_observation`, `webhook_deliveries` and the claim authority's own attachment have no call site. The process exits after a failed attachment and `main.rs` flushes first |
+| `waddle.muc.destroy_completion.outcomes` | `completed`, `retried` and `failed`, in `drain_destroy_completions` and `drain_persisted_destroy_completions`. `lease_taken_over` has no call site: the claim does not tell a free row from a lapsed lease |
+| `waddle.muc.destroy_completion.depth`, `.oldest_age` | Yes, by the destroy-completion janitor after each successful reading of the queue |
 | `waddle.janitor.sweeps{janitor="destroy_completion"}` | Yes, as a heartbeat of the destroy-completion janitor |
 | Every other metric in the table above | Declared with its recording function; no call site yet. Until one exists only the zero-registered failure series are exported |
 

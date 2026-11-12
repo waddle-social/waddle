@@ -157,6 +157,11 @@ pub async fn start_with_config_and_owner_outbox(
             db_pool.global().clone(),
         )
         .await
+        .inspect_err(|_| {
+            waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                waddle_xmpp::telemetry::attributes::RestrictedStore::MucDestroyOutbox,
+            )
+        })
         .map_err(|error| {
             anyhow::anyhow!("failed to attach MUC destroy completion outbox: {error}")
         })?;
@@ -565,6 +570,11 @@ pub async fn create_pubsub_storage(
         }
         let storage = crate::pubsub::DatabasePubSubStorage::attach_existing(global.clone())
             .await
+            .inspect_err(|_| {
+                waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                    waddle_xmpp::telemetry::attributes::RestrictedStore::PubSub,
+                )
+            })
             .map_err(|error| anyhow::anyhow!("failed to attach PubSub storage: {error}"))?;
         Ok((Arc::new(storage), true))
     } else if global.ingress_pool_size().is_some() {
@@ -606,6 +616,11 @@ pub(crate) async fn create_space_stores(
         }
         let spaces = DatabaseSpacesMetadataStore::attach_existing(global.clone())
             .await
+            .inspect_err(|_| {
+                waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                    waddle_xmpp::telemetry::attributes::RestrictedStore::Spaces,
+                )
+            })
             .map_err(|error| {
                 anyhow::anyhow!("failed to attach spaces metadata storage: {error}")
             })?;
@@ -613,6 +628,11 @@ pub(crate) async fn create_space_stores(
             global.clone(),
         )
         .await
+        .inspect_err(|_| {
+            waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                waddle_xmpp::telemetry::attributes::RestrictedStore::Spaces,
+            )
+        })
         .map_err(|error| anyhow::anyhow!("failed to attach channel-space link storage: {error}"))?;
         Ok((spaces, links, true))
     } else if global.ingress_pool_size().is_some() {

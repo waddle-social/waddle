@@ -712,6 +712,7 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
             )
             .await?;
         }
+        record_keypair_lease(KeypairLeaseOutcome::Released);
         Ok(())
     }
 }

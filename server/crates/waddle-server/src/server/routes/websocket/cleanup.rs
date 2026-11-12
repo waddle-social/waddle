@@ -4060,6 +4060,13 @@ pub(crate) async fn drain_destroy_completions(
         {
             Ok(completion_frames) => {
                 let persisted_acknowledged = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, true).await;
+                waddle_xmpp::telemetry::authority::record_destroy_completion(
+                    if persisted_acknowledged {
+                        waddle_xmpp::telemetry::attributes::DestroyCompletionOutcome::Completed
+                    } else {
+                        waddle_xmpp::telemetry::attributes::DestroyCompletionOutcome::Retried
+                    },
+                );
                 if persisted_acknowledged {
                     if let Err(error) =
                         RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -4080,6 +4087,9 @@ pub(crate) async fn drain_destroy_completions(
                 batch.append_batch(completion_frames);
             }
             Err(()) => {
+                waddle_xmpp::telemetry::authority::record_destroy_completion(
+                    waddle_xmpp::telemetry::attributes::DestroyCompletionOutcome::Failed,
+                );
                 let _ = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, false).await;
                 if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                     .requeue_destroy_completion(attempt)

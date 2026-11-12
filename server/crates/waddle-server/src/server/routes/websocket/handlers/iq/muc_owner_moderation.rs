@@ -1152,6 +1152,11 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
         let completed = complete_leased_destroy_completion(state, &completion, None)
             .await
             .is_ok();
+        waddle_xmpp::telemetry::authority::record_destroy_completion(if completed {
+            waddle_xmpp::telemetry::attributes::DestroyCompletionOutcome::Completed
+        } else {
+            waddle_xmpp::telemetry::attributes::DestroyCompletionOutcome::Failed
+        });
         let _ = finalize_persisted_destroy_completion(state, &completion, completed).await;
     }
     reconcile_foreign_inert_destroy_completions(state).await;

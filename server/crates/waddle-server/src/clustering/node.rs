@@ -1013,6 +1013,11 @@ pub async fn start_if_enabled(
             match &claim_authority {
                 Some(authority) => {
                     claims::PostgresClaimStore::attach_runtime(db.clone(), authority)
+                        .inspect_err(|_| {
+                            waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                                waddle_xmpp::telemetry::attributes::RestrictedStore::Claims,
+                            )
+                        })
                         .map_err(ClusteringError::ClaimStoreAttach)
                 }
                 None => Ok(claims::PostgresClaimStore::new(db.clone())),
@@ -1128,6 +1133,11 @@ pub async fn start_if_enabled(
                     authority,
                 )
                 .await
+                .inspect_err(|_| {
+                    waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                        waddle_xmpp::telemetry::attributes::RestrictedStore::MucRooms,
+                    )
+                })
                 .map_err(ClusteringError::MucDurableStoreAttach)?,
             ),
             None => Arc::new(
