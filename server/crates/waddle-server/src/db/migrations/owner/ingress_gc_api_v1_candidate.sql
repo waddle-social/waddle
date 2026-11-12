@@ -89,6 +89,7 @@ BEGIN
           AND NOT pending_delivery
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_sm_refs r WHERE r.message_key = member)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_mailbox_entries e WHERE e.message_key = member AND e.disposition < 3)
+          AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_direct_requests q WHERE q.message_key = member)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.sm_ingress_appends a WHERE a.message_key = member::text AND a.disposition = 0)
           AND NOT EXISTS (SELECT 1 FROM __SCHEMA__.ingress_effect_descendants d WHERE d.message_key = member AND d.settled_at IS NULL)
           AND NOT EXISTS (

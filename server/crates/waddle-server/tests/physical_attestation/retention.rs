@@ -445,6 +445,15 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
     .execute(&fixture.admin)
     .await
     .expect("grant paired-GC mapping read without mapping mutation");
+    // The retention proof reads the mailbox: an entry that is not yet
+    // consumed retains its canonical message.
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}.ingress_mailbox_entries TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant mailbox retention read");
     let lab = RetentionLab::postgres(
         fixture.runtime_options.clone(),
         config.clone(),

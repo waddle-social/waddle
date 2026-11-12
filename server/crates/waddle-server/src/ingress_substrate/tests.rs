@@ -1008,7 +1008,16 @@ fn gc_monitoring_predicate_matches_collector() {
         std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"))
             .join("../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"),
     ).expect("read deployed ingress monitoring SQL");
+    // Other queries in the file define an `eligible` flag of their own, so
+    // the comparison reads only the collector's query.
     let monitoring = normalized(&monitoring);
+    let monitoring = monitoring
+        .split_once(" waddle_ingress_gc: ")
+        .expect("ingress collector monitoring query")
+        .1
+        .split_once(" primary: true ")
+        .expect("end of the ingress collector monitoring query")
+        .0;
     assert!(
         monitoring.contains(&format!("({monitored}) AS eligible")),
         "CNPG must use the same complete pair predicate"

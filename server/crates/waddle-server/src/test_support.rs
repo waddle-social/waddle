@@ -631,14 +631,18 @@ pub async fn attested_raw_ingress_candidate_write(
     Ok(())
 }
 
-/// Run the pre-capability raw writer against a disposable relation-guard
-/// candidate. The candidate must reject it for lacking the schema prelock.
+/// Run the raw writer of a handle without physical attestation against a
+/// disposable relation-guard candidate. That writer takes the epoch row
+/// lock and installs the epoch proof but never the schema prelock, so the
+/// candidate must reject its guarded write. An attested handle selects the
+/// typed ingress entry by itself; this names the unattested begin directly
+/// so the candidate's refusal is observed on any handle.
 #[cfg(feature = "test-support")]
 pub async fn legacy_ingress_candidate_write(
     database: &Database,
     key: uuid::Uuid,
 ) -> Result<(), IngressUowError> {
-    let mut transaction = crate::ingress_uow::begin_raw_ingress_writer(database).await?;
+    let mut transaction = crate::ingress_substrate::begin_unattested_raw_writer(database).await?;
     transaction
         .execute(
             "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",

@@ -460,6 +460,31 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::telemetry::test_support::MetricsTestGuard;
+
+    /// The exported values of the series of `metric` carrying every pair in
+    /// `attributes`. A counter that shares its name with zero-registered
+    /// series still exports, so the presence of one series is read from its
+    /// own samples and never from a sum over the metric.
+    fn series_values(
+        guard: &MetricsTestGuard,
+        metric: &str,
+        attributes: &[(&str, &str)],
+    ) -> Vec<u64> {
+        guard
+            .counter_samples(metric)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, sample)| {
+                attributes.iter().all(|(key, value)| {
+                    sample.iter().any(|(sample_key, sample_value)| {
+                        sample_key == key && sample_value == value
+                    })
+                })
+            })
+            .map(|(value, _)| value)
+            .collect()
+    }
 
     #[tokio::test]
     async fn failure_series_exist_at_zero_and_progress_series_do_not() {
@@ -498,7 +523,12 @@ mod tests {
                 vec![("outcome", "uncertain")],
             ),
         ] {
-            assert_eq!(guard.counter_sum(metric, &attributes), Some(0), "{metric}");
+            let values = series_values(&guard, metric, &attributes);
+            assert!(!values.is_empty(), "{metric} {attributes:?} is registered");
+            assert!(
+                values.iter().all(|value| *value == 0),
+                "{metric} {attributes:?} starts at zero: {values:?}"
+            );
         }
         for (metric, attributes) in [
             (
@@ -511,7 +541,11 @@ mod tests {
             ),
             ("waddle.relay.ordered.outcomes", vec![("outcome", "acked")]),
         ] {
-            assert_eq!(guard.counter_sum(metric, &attributes), None, "{metric}");
+            assert_eq!(
+                series_values(&guard, metric, &attributes),
+                Vec::<u64>::new(),
+                "{metric} {attributes:?} has no series before progress"
+            );
         }
     }
 

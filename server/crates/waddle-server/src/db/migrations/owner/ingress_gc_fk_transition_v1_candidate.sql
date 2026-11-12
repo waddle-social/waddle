@@ -12,6 +12,7 @@ LOCK TABLE ONLY
     __SCHEMA__.ingress_carbon_receipts,
     __SCHEMA__.ingress_deliveries,
     __SCHEMA__.ingress_delivery_receipts,
+    __SCHEMA__.ingress_direct_requests,
     __SCHEMA__.ingress_effect_descendants,
     __SCHEMA__.ingress_effect_intents,
     __SCHEMA__.ingress_effect_receipts,
@@ -47,6 +48,7 @@ BEGIN
         ('ingress_effect_receipts', 'ingress_effect_receipts_message_key_kind_semantic_identity_fkey', 'ingress_effect_intents', ARRAY[1,2,3]::smallint[], ARRAY[1,3,4]::smallint[], 'c'::"char", false, true),
         ('ingress_send_attempts', 'ingress_send_attempts_message_key_kind_semantic_identity_h_fkey', 'ingress_effect_intents', ARRAY[1,2,3]::smallint[], ARRAY[1,3,4]::smallint[], 'c'::"char", false, true),
         ('ingress_deliveries', 'ingress_deliveries_message_key_fkey', 'ingress_messages', ARRAY[2]::smallint[], ARRAY[1]::smallint[], 'a'::"char", false, true),
+        ('ingress_direct_requests', 'ingress_direct_requests_message_key_fkey', 'ingress_messages', ARRAY[5]::smallint[], ARRAY[1]::smallint[], 'c'::"char", false, true),
         ('ingress_effect_intents', 'ingress_effect_intents_message_key_fkey', 'ingress_messages', ARRAY[1]::smallint[], ARRAY[1]::smallint[], 'c'::"char", false, true),
         ('ingress_mailbox_entries', 'ingress_mailbox_entries_message_key_fkey', 'ingress_messages', ARRAY[4]::smallint[], ARRAY[1]::smallint[], 'c'::"char", false, true),
         ('ingress_origin_aliases', 'ingress_origin_aliases_message_key_fkey', 'ingress_messages', ARRAY[6]::smallint[], ARRAY[1]::smallint[], 'a'::"char", false, true),
@@ -133,6 +135,13 @@ ALTER TABLE __SCHEMA__.ingress_send_attempts
 ALTER TABLE __SCHEMA__.ingress_effect_intents
     DROP CONSTRAINT ingress_effect_intents_message_key_fkey,
     ADD CONSTRAINT ingress_effect_intents_message_key_fkey FOREIGN KEY (message_key)
+    REFERENCES __SCHEMA__.ingress_messages(message_key) ON DELETE NO ACTION NOT DEFERRABLE;
+-- A direct request stops cascading with its message. The v1 collector
+-- supports no epoch at which a direct request is recorded, so it deletes
+-- none and retains a message that one refers to.
+ALTER TABLE __SCHEMA__.ingress_direct_requests
+    DROP CONSTRAINT ingress_direct_requests_message_key_fkey,
+    ADD CONSTRAINT ingress_direct_requests_message_key_fkey FOREIGN KEY (message_key)
     REFERENCES __SCHEMA__.ingress_messages(message_key) ON DELETE NO ACTION NOT DEFERRABLE;
 -- A mailbox entry stops cascading with its message: the collector deletes
 -- consumed entries explicitly and an entry that is not consumed keeps the
