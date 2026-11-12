@@ -81,6 +81,9 @@ pub struct IngressAuthority {
     pub(in crate::ingress) frame_receipt_retries:
         StdMutex<frame_receipt_retry::FrameReceiptRetries>,
     pub(in crate::ingress) receipt_custody: receipt_custody::ReceiptCustody,
+    /// Where origin commits send mailbox hints; unset without clustering.
+    pub(in crate::ingress) mailbox_hints:
+        std::sync::OnceLock<Arc<dyn super::origin_gate::MailboxHintSink>>,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     pub(in crate::ingress) stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -401,6 +404,7 @@ impl IngressAuthority {
             executing: RwLock::new(true),
             clustered,
             receipt_custody,
+            mailbox_hints: std::sync::OnceLock::new(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -457,6 +461,7 @@ impl IngressAuthority {
             executing: RwLock::new(true),
             clustered: false,
             receipt_custody,
+            mailbox_hints: std::sync::OnceLock::new(),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),

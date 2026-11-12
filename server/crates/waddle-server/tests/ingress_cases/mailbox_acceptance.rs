@@ -327,3 +327,162 @@ async fn retransmission_after_the_owner_decided_consumes_in_its_own_commit() {
     );
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn poller_works_the_lane_head_from_canonical_rows_and_parks_it_after_its_retries() {
+    use waddle_server::ingress::mailbox_worker::{
+        MailboxAttemptRecord, MailboxLaneHead, MAILBOX_ATTEMPT_LIMIT,
+    };
+    use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
+    let Some((fixture, room_fence)) = mailbox_fixture("mailbox_poller").await else {
+        return;
+    };
+    let owner_identity = room_fence.owner.clone();
+    // An ingress authority on the fixture's database that runs as the room's
+    // owner in a cluster with the mailbox selected.
+    let deployment = fixture
+        .optional_text("SELECT deployment_uuid FROM _lineage WHERE id = 1")
+        .await
+        .expect("enrolled deployment")
+        .parse::<uuid::Uuid>()
+        .expect("deployment UUID");
+    let authority = waddle_server::ingress::IngressAuthority::try_new(
+        waddle_server::config::IngressConfig {
+            remote_room_acceptance: RemoteRoomAcceptance::DurableMailbox,
+            ..Default::default()
+        },
+        fixture.db.clone(),
+        waddle_server::config::LineageConfig {
+            deployment_uuid: Some(waddle_server::db::lineage::DeploymentUuid(deployment)),
+            action: None,
+        },
+        Some(SharedNodeIdentity::new(owner_identity.clone())),
+    )
+    .await
+    .expect("mailbox ingress authority");
+    assert!(authority.mailbox_acceptance_enabled());
+
+    let origin = origin_groupchat(&fixture, "mailbox-poller", "polled body");
+    let committed = commit_submission(&fixture.uow, &origin, 5)
+        .await
+        .expect("origin commit");
+    let key = committed.message_key.expect("canonical message");
+    let lane = committed
+        .remote_acceptance
+        .as_ref()
+        .expect("pending acceptance")
+        .lane;
+
+    // The scan names the lane only to the node it targets. No hint was sent.
+    assert_eq!(
+        authority
+            .scan_mailbox_backlog(&owner_identity, None)
+            .await
+            .expect("scan"),
+        vec![lane]
+    );
+    let stranger = NodeIdentity::new("another-node", "another-incarnation");
+    assert!(authority
+        .scan_mailbox_backlog(&stranger, None)
+        .await
+        .expect("scan")
+        .is_empty());
+    assert!(matches!(
+        authority
+            .claim_room_acceptance(lane, &stranger)
+            .await
+            .expect("claim"),
+        MailboxLaneHead::Idle
+    ));
+
+    // The head entry is rebuilt from canonical rows alone.
+    let MailboxLaneHead::Ready(claimed) = authority
+        .claim_room_acceptance(lane, &owner_identity)
+        .await
+        .expect("claim")
+    else {
+        panic!("the pending head entry is ready for the owner");
+    };
+    assert_eq!(claimed.operation, MailboxOperationKey::RoomAcceptance(key));
+    assert_eq!(claimed.room, room());
+    assert_eq!(claimed.message, origin.plan.sanitized_message);
+    assert_eq!(claimed.admission.canonical.message_key, key);
+    assert_eq!(
+        claimed.admission.canonical.origin_id.as_ref(),
+        origin.digest_input.origin()
+    );
+    assert_eq!(&claimed.admission.principal, &fixture.principal);
+    assert_eq!(claimed.admission.stanza_lang, None);
+
+    // A failed attempt defers the next one; the entry keeps its place.
+    assert_eq!(
+        authority
+            .record_room_acceptance_failure(lane, claimed.operation, &owner_identity)
+            .await
+            .expect("record failure"),
+        MailboxAttemptRecord::Deferred { attempts: 1 }
+    );
+    assert!(matches!(
+        authority
+            .claim_room_acceptance(lane, &owner_identity)
+            .await
+            .expect("claim"),
+        MailboxLaneHead::Idle
+    ));
+    // The retry budget ends in a dead letter, never in a skipped entry.
+    let mut last = MailboxAttemptRecord::Deferred { attempts: 1 };
+    for _ in 1..MAILBOX_ATTEMPT_LIMIT {
+        last = authority
+            .record_room_acceptance_failure(lane, claimed.operation, &owner_identity)
+            .await
+            .expect("record failure");
+    }
+    assert_eq!(last, MailboxAttemptRecord::DeadLettered);
+    assert_eq!(
+        entry_state(&fixture, key).await,
+        (Some(MailboxEntryDisposition::Pending), Some(0)),
+        "a dead letter stays pending at the lane head"
+    );
+    assert_eq!(
+        authority
+            .scan_mailbox_backlog(&owner_identity, None)
+            .await
+            .expect("scan"),
+        vec![lane],
+        "the cursor did not pass the dead letter"
+    );
+    assert!(matches!(
+        authority
+            .claim_room_acceptance(lane, &owner_identity)
+            .await
+            .expect("claim"),
+        MailboxLaneHead::Idle
+    ));
+
+    // Only an operator repair returns it to work.
+    assert!(authority
+        .repair_mailbox_dead_letter(lane, claimed.operation, &owner_identity)
+        .await
+        .expect("repair"));
+    let MailboxLaneHead::Ready(repaired) = authority
+        .claim_room_acceptance(lane, &owner_identity)
+        .await
+        .expect("claim")
+    else {
+        panic!("a repaired entry is ready again");
+    };
+
+    // The owner's commit, driven from the claimed entry, decides it and
+    // drains the lane.
+    let mut owner = owner_groupchat(&origin, key, &room_fence);
+    owner.plan.sanitized_message = repaired.message.clone();
+    commit_submission(&fixture.uow, &owner, 5)
+        .await
+        .expect("owner acceptance");
+    assert!(authority
+        .scan_mailbox_backlog(&owner_identity, None)
+        .await
+        .expect("scan")
+        .is_empty());
+    fixture.close().await;
+}

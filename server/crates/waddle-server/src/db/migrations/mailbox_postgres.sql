@@ -50,6 +50,11 @@ CREATE INDEX ingress_mailbox_lanes_backlog
 -- `disposition`: 0 pending, 1 owner accepted, 2 owner rejected, 3 consumed
 -- after acceptance, 4 consumed after rejection. A dead-lettered entry stays
 -- pending and keeps its place at the lane head until an operator repairs it.
+--
+-- `request_language` is the stanza's top-level `xml:lang`. The canonical
+-- message does not retain it, and the semantic digest that binds the request
+-- to its canonical message is computed with it, so a target that works from
+-- the entry alone needs it to prove the same request.
 CREATE TABLE ingress_mailbox_entries (
     lane_id UUID NOT NULL REFERENCES ingress_mailbox_lanes (lane_id) ON DELETE RESTRICT,
     sequence NUMERIC(20,0) NOT NULL,
@@ -60,6 +65,7 @@ CREATE TABLE ingress_mailbox_entries (
     next_attempt_at TIMESTAMPTZ NULL,
     dead_lettered_at TIMESTAMPTZ NULL,
     dead_letter_reason SMALLINT NULL,
+    request_language TEXT NULL,
     appended_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (lane_id, sequence),
     CONSTRAINT ingress_mailbox_entries_operation_key UNIQUE (message_key, operation_kind),
@@ -68,6 +74,9 @@ CREATE TABLE ingress_mailbox_entries (
     CONSTRAINT ingress_mailbox_entries_operation_check CHECK (operation_kind = 1),
     CONSTRAINT ingress_mailbox_entries_disposition_check CHECK (disposition BETWEEN 0 AND 4),
     CONSTRAINT ingress_mailbox_entries_attempt_check CHECK (attempt_count >= 0),
+    CONSTRAINT ingress_mailbox_entries_language_check
+        CHECK (request_language IS NULL
+            OR (request_language <> '' AND octet_length(request_language) <= 64)),
     CONSTRAINT ingress_mailbox_entries_dead_letter_check
         CHECK ((dead_lettered_at IS NULL AND dead_letter_reason IS NULL)
             OR (dead_lettered_at IS NOT NULL AND dead_letter_reason IS NOT NULL

@@ -78,6 +78,8 @@ const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 mod delivery;
 mod extension_room;
+mod mailbox;
+pub use mailbox::spawn_mailbox_poller;
 mod muc_admin_query;
 mod presence;
 mod reassert;
@@ -243,6 +245,8 @@ pub struct OrderedRelayDeliveryServices {
 }
 
 pub struct OrderedRelayDeliveryBridge {
+    /// Wakes this node's mailbox poller when a peer's hint arrives.
+    mailbox_wake: Arc<tokio::sync::Notify>,
     services: OnceLock<Arc<OrderedRelayDeliveryServices>>,
     origin_signer: OnceLock<RelayOriginSigner>,
     sender_state: Mutex<OrderedRelaySenderState>,
@@ -286,6 +290,7 @@ pub struct OrderedRelayDeliveryBridge {
 impl OrderedRelayDeliveryBridge {
     pub fn new(stop_token: CancellationToken, messaging: &ClusteringMessagingConfig) -> Arc<Self> {
         Arc::new(Self {
+            mailbox_wake: Arc::new(tokio::sync::Notify::new()),
             services: OnceLock::new(),
             origin_signer: OnceLock::new(),
             sender_state: Mutex::new(OrderedRelaySenderState::default()),

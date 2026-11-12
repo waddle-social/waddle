@@ -9023,10 +9023,37 @@
           }
         },
         {
+          "default": null,
+          "properties": {
+            "attlen": -1,
+            "attnum": 10,
+            "attname": "request_language",
+            "attalign": "i",
+            "attbyval": false,
+            "attndims": 0,
+            "atttypid": "25",
+            "atthasdef": false,
+            "atttypmod": -1,
+            "attislocal": true,
+            "attnotnull": false,
+            "attoptions": null,
+            "attstorage": "x",
+            "attidentity": "",
+            "attinhcount": 0,
+            "attcollation": "100",
+            "attgenerated": "",
+            "attisdropped": false,
+            "attfdwoptions": null,
+            "atthasmissing": false,
+            "attmissingval": null,
+            "attcompression": ""
+          }
+        },
+        {
           "default": "now()",
           "properties": {
             "attlen": 8,
-            "attnum": 10,
+            "attnum": 11,
             "attname": "appended_at",
             "attalign": "d",
             "attbyval": true,
@@ -9467,6 +9494,36 @@
           },
           "foreign_table": "ingress_mailbox_lanes",
           "foreign_schema": "__SCHEMA_NAME__"
+        },
+        {
+          "index": null,
+          "parent": false,
+          "definition": "CHECK (((request_language IS NULL) OR ((request_language <> ''::text) AND (octet_length(request_language) <= 64))))",
+          "properties": {
+            "conkey": [
+              10
+            ],
+            "confkey": null,
+            "conname": "ingress_mailbox_entries_language_check",
+            "contype": "c",
+            "contypid": "0",
+            "conexclop": null,
+            "conffeqop": null,
+            "conpfeqop": null,
+            "conppeqop": null,
+            "conislocal": true,
+            "condeferred": false,
+            "confdeltype": " ",
+            "confupdtype": " ",
+            "coninhcount": 0,
+            "connoinherit": false,
+            "convalidated": true,
+            "condeferrable": false,
+            "confmatchtype": " ",
+            "confdelsetcols": null
+          },
+          "foreign_table": null,
+          "foreign_schema": null
         },
         {
           "index": "ingress_messages_pkey",

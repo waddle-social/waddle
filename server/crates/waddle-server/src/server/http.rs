@@ -1695,6 +1695,15 @@ async fn create_websocket_state(
                 blocking_storage: Arc::clone(&websocket_state.deps.protocol.blocking_storage),
                 web_socket_state: Arc::downgrade(&websocket_state),
             }));
+            // The durable mailbox: this node's poller finds the entries it
+            // owes a decision, and origin commits hint the owner through the
+            // relay. Both idle while remote room acceptance uses the relay.
+            websocket_state
+                .deps
+                .protocol
+                .ingress
+                .bind_mailbox_hints(Arc::clone(bridge) as Arc<_>);
+            crate::clustering::route_bridge::spawn_mailbox_poller(Arc::clone(bridge));
         } else {
             warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");
         }

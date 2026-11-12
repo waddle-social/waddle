@@ -60,6 +60,9 @@ pub struct PendingRoomAcceptance {
     pub lane: crate::ingress_uow::MailboxLaneId,
     /// Claim epoch of the origin's stream when it committed.
     pub origin_epoch: waddle_xmpp::ownership::ClaimEpoch,
+    /// The node incarnation the lane records as the room's owner. It is
+    /// where a wake-up hint is sent and proves nothing.
+    pub target_owner: waddle_xmpp::ownership::NodeIdentity,
     /// The handled checkpoint the commit persisted, which excludes this
     /// stanza. `None` for a stream without stream management.
     pub persisted_checkpoint: Option<waddle_xmpp::ingress::WireHandledCount>,

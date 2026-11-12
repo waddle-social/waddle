@@ -172,12 +172,29 @@ pub async fn await_room_acceptance(
     }
 }
 
+/// Where an origin sends its wake-up after appending a mailbox entry. A hint
+/// is best effort and proves nothing; the target's poller is the authority.
+pub trait MailboxHintSink: Send + Sync {
+    fn hint(&self, target: waddle_xmpp::ownership::NodeIdentity);
+}
+
 /// The reserved inbound slot of a stanza that awaits its remote room owner,
 /// with the set its connection's tracker consults for withheld slots.
 #[cfg(feature = "clustering")]
 pub struct InboundAcceptanceSlot {
     pub handoff: crate::server::routes::interpret::OrderedRelayHandoffHandle,
     pub withheld: crate::server::routes::interpret::WithheldInbound,
+}
+
+impl IngressAuthority {
+    /// Bind where this node's origin commits send their mailbox hints. Bound
+    /// once, when clustering wires its relay; without it no hint is sent and
+    /// the target's poller still finds the entry.
+    pub fn bind_mailbox_hints(&self, hints: Arc<dyn MailboxHintSink>) {
+        if self.mailbox_hints.set(hints).is_err() {
+            tracing::error!("mailbox hint sink bound more than once; keeping the first");
+        }
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -198,6 +215,9 @@ impl IngressAuthority {
         pending: PendingRoomAcceptance,
         slot: Option<InboundAcceptanceSlot>,
     ) {
+        if let Some(hints) = self.mailbox_hints.get() {
+            hints.hint(pending.target_owner.clone());
+        }
         let authority = Arc::clone(self);
         tokio::spawn(async move {
             let outcome = await_room_acceptance(

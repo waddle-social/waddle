@@ -544,6 +544,66 @@ async fn h_does_not_advance_while_owner_commit_paused() {
     assert_eq!(h, Some(1), "h covers the stanza once the owner accepted it");
 }
 
+/// The relay's delivery of a groupchat message is lost: the owner is stopped
+/// before its commit until its receiver budget has ended, so the relayed
+/// stanza and the hint that accompanied it are both spent without a commit.
+/// Nothing then tells the owner about the message except its own mailbox
+/// poll. The owner still accepts it exactly once, from the canonical rows,
+/// and only then does the sender's handled count cover the stanza.
+#[tokio::test]
+async fn lost_delivery_and_hint_are_repaired_by_the_owner_poller() {
+    let mut scenario = Scenario::start_with(Acceptance::Mailbox).await;
+    scenario.seams.arm(HOLD_BEFORE_COMMIT);
+    let body = scenario
+        .send_groupchat("lost-hint", uuid::Uuid::new_v4())
+        .await;
+    scenario
+        .seams
+        .wait_for("held before-commit lost-hint", Duration::from_secs(10))
+        .await;
+    // Past the owner's six-second receiver budget the held delivery is
+    // abandoned with nothing committed.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+    assert_eq!(h, Some(0), "an abandoned delivery is not an acceptance");
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &body).await,
+        Vec::<String>::new()
+    );
+
+    scenario.seams.release(HOLD_BEFORE_COMMIT);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let archived = loop {
+        let archived = archived_ids(&scenario.db, &scenario.room, &body).await;
+        if !archived.is_empty() {
+            break archived;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owner's poller must accept the pending entry"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(archived.len(), 1, "accepted once: {archived:?}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (h, _) = scenario.sender.request_h(Duration::from_secs(10)).await;
+        if h == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "h covers the stanza once the origin has read the acceptance; got {h:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        archived_ids(&scenario.db, &scenario.room, &body).await,
+        archived,
+        "later poll passes do not accept it again"
+    );
+}
+
 /// Characterizes the relay selector, which
 /// `h_does_not_advance_while_owner_commit_paused` shows the mailbox selector
 /// does not share: the origin answers `<r/>` with a handled count that

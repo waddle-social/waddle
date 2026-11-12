@@ -579,7 +579,11 @@ pub(in crate::ingress::commit) async fn commit_attempt(
             if let super::super::commit_mailbox::OriginEntry::Awaiting(entry) =
                 super::super::commit_mailbox::record_origin(&mut tx, acceptance, key).await?
             {
-                awaiting_owner = Some((entry, acceptance.origin_epoch()));
+                awaiting_owner = Some((
+                    entry,
+                    acceptance.origin_epoch(),
+                    acceptance.target_owner().clone(),
+                ));
             }
         }
     }
@@ -820,15 +824,15 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         awaiting_owner.is_some(),
     )
     .await?;
-    let remote_acceptance =
-        awaiting_owner.map(
-            |(entry, origin_epoch)| super::super::decision::PendingRoomAcceptance {
-                operation: entry.operation,
-                lane: entry.lane,
-                origin_epoch,
-                persisted_checkpoint: stream.as_ref().map(|stream| stream.checkpoint(true)),
-            },
-        );
+    let remote_acceptance = awaiting_owner.map(|(entry, origin_epoch, target_owner)| {
+        super::super::decision::PendingRoomAcceptance {
+            operation: entry.operation,
+            lane: entry.lane,
+            origin_epoch,
+            target_owner,
+            persisted_checkpoint: stream.as_ref().map(|stream| stream.checkpoint(true)),
+        }
+    });
     let class = rejection.unwrap_or_else(|| {
         decision_class(
             submission,

@@ -22,6 +22,7 @@ mod commit_room;
 mod commit_stream;
 pub mod decision;
 mod durable;
+pub mod mailbox_worker;
 pub mod origin_gate;
 pub(crate) use durable::receipt_key;
 pub mod execute;

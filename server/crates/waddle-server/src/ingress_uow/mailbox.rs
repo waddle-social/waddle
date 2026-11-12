@@ -501,12 +501,12 @@ impl MailboxRepository {
 
     /// Lock a lane a poller selected, or return `None` when another worker
     /// holds it or its backlog was drained meanwhile. A lane whose recorded
-    /// target is not `presented` is left alone: the hint or scan that named
-    /// it confers no authority.
+    /// target is not `target` is left alone. Claiming a lane confers no
+    /// authority over its room: the owner's commit still asserts its claim.
     pub async fn claim_backlogged_lane(
         transaction: &mut IngressUowTransaction<'_>,
         lane: MailboxLaneId,
-        presented: &MailboxTargetFence,
+        target: &NodeIdentity,
     ) -> Result<Option<LockedMailboxLane>, IngressUowError> {
         let transaction_identity = transaction.identity();
         let (tx, prepared) = transaction.prepared_parts();
@@ -516,10 +516,7 @@ impl MailboxRepository {
         else {
             return Ok(None);
         };
-        if locked.pending() == 0
-            || locked.fence.target_epoch != presented.target_epoch
-            || locked.fence.target_owner != presented.target_owner
-        {
+        if locked.pending() == 0 || locked.fence.target_owner != *target {
             return Ok(None);
         }
         Ok(Some(locked))
@@ -1015,6 +1012,60 @@ impl MailboxRepository {
             return Err(MailboxError::EntryMissing.into());
         }
         Ok(())
+    }
+
+    /// Record the top-level `xml:lang` of the request a pending entry
+    /// carries. The canonical message does not retain it.
+    pub async fn record_request_language(
+        transaction: &mut IngressUowTransaction<'_>,
+        lane: &LockedMailboxLane,
+        entry: &StoredMailboxEntry,
+        language: &str,
+    ) -> Result<(), IngressUowError> {
+        Self::assert_locked_here(transaction, lane)?;
+        if entry.lane != lane.id {
+            return Err(MailboxError::LaneMismatch.into());
+        }
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        tx.execute(
+            &format!(
+                "UPDATE {} SET request_language = ? \
+                 WHERE lane_id = ?::uuid AND sequence = ?::numeric \
+                   AND disposition = 0 AND request_language IS NULL",
+                relations.entries
+            ),
+            crate::db_params![
+                language.to_owned(),
+                entry.lane.to_storage(),
+                entry.sequence.to_storage(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The top-level `xml:lang` recorded for an entry's request, if any.
+    pub async fn request_language(
+        transaction: &mut IngressUowTransaction<'_>,
+        entry: &StoredMailboxEntry,
+    ) -> Result<Option<String>, IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT request_language FROM {} \
+                     WHERE lane_id = ?::uuid AND sequence = ?::numeric",
+                    relations.entries
+                ),
+                crate::db_params![entry.lane.to_storage(), entry.sequence.to_storage()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Err(MailboxError::EntryMissing.into());
+        };
+        Ok(row.get(0)?)
     }
 
     /// Entries of the locked lane strictly after its cursor, in sequence

@@ -605,3 +605,12 @@ waddle-server::ingress_commit mailbox_acceptance::origin_reads_the_owner_decisio
 waddle-server::ingress_commit mailbox_acceptance::retransmission_after_the_owner_decided_consumes_in_its_own_commit
 waddle-server::xep0045_xep0198_remote_acceptance h_does_not_advance_while_owner_commit_paused
 waddle-server::xep0045_xep0198_remote_acceptance owner_sigkill_before_commit
+
+# #2118 mailbox reconciliation: the owner's poller must find a pending entry
+# without any hint, rebuild the request from canonical rows, defer after a
+# failure, end its retry budget in a dead letter that keeps the lane head, and
+# resume only after an operator repair; and a delivery whose relay and hint
+# were both lost must still be accepted exactly once. An image that can skip
+# a pending entry or lose an accepted submission to a lost hint must not ship.
+waddle-server::ingress_commit mailbox_acceptance::poller_works_the_lane_head_from_canonical_rows_and_parks_it_after_its_retries
+waddle-server::xep0045_xep0198_remote_acceptance lost_delivery_and_hint_are_repaired_by_the_owner_poller

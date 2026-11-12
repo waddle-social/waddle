@@ -148,6 +148,77 @@ Separate registered and handled frontiers are not built: the single
 checkpoint excludes the one open stanza, and the tracker's contiguity rule
 keeps `h` behind it.
 
+### Hints, poller and dead letters
+
+- **Poller** (`clustering/route_bridge/mailbox.rs`). Each clustered node runs
+  one. It wakes on a hint or every second, scans at most 128 lanes that record
+  this node as target and still owe a disposition
+  (`ingress_mailbox_lanes_backlog`), and works them two at a time. The poller
+  is the authority for finding work; it idles while the relay selector is in
+  force.
+- **Work** (`ingress/mailbox_worker.rs`). A worker claims a lane with
+  `SKIP LOCKED`, reads its head entry and rebuilds the request from canonical
+  rows: the message from the canonical envelope, the sender's principal from
+  the source binding, the origin id from the alias and the stanza language
+  from the entry's `request_language`, which the canonical message does not
+  retain. It then runs the owner's ordinary relayed-groupchat commit, which
+  asserts the room claim and records the decision. Claiming a lane proves
+  nothing about the room. Frames the owner produces for the sender are not
+  written by the worker; their receipts stay pending and ingress recovery
+  delivers them.
+- **Hint** (`waddle.clustering.relay.mailbox_hint.v1`). After a commit that
+  leaves a stanza awaiting its owner, the origin sends the node recorded as
+  the lane's target a message with no payload. Its only effect is to wake that
+  node's poller. It is a relay message of its own, so `deliver_ordered` is not
+  touched; a peer without it answers with an unknown-message error, which the
+  sender ignores.
+- **Retry.** A failed attempt is counted on the entry and the next attempt is
+  deferred by 250 ms doubling to 30 s. After eight failures, or when the
+  canonical evidence cannot be read, the entry is dead-lettered: it stays
+  `Pending` at its lane head and the cursor does not move, so nothing behind
+  it on that lane is decided. Only `repair_mailbox_dead_letter`, an operator
+  action, returns it to work.
+- **Telemetry.** `ingress.mailbox.deliveries{outcome}` (`decided`, `retried`,
+  `dead_lettered`) and `ingress.mailbox.room_acceptances{outcome}` are
+  registered at zero. `ingress.mailbox.hints{outcome}` is context only.
+
+### Limits of the current implementation
+
+These hold today and bound what the mailbox selector may be used for.
+
+- **Not the default.** The relay selector is the default, the production
+  hook that disables clustered manifests outside the mailbox selector is still
+  in place (`commit_hooks::allow_clustered_room_manifests`), and the ingress
+  protocol epoch is unchanged. Nothing adopts `DispatchToRoomRemote` intents
+  recorded under the relay selector: such a message has no source binding, so
+  it gets no entry and no owner decision is ever recorded for it.
+- **Relay still carries the stanza.** The origin still relays the groupchat
+  stanza through `deliver_ordered`; the mailbox entry and the poller make the
+  owner's acceptance durable and recoverable beside it. No ordered-relay kind
+  is removed and its wire id is unchanged.
+- **Owner transfer.** A lane records the owner incarnation the origin saw.
+  The poller of a successor owner does not scan lanes recorded for its
+  predecessor. The lane moves to the successor when the origin commits the
+  same stanza again with the new room claim (the fence is adopted and the
+  first entry returned); until then the entry stays pending and the stanza
+  unacknowledged.
+- **Unconsumed decisions.** A decided entry is consumed by the origin's
+  watcher or by a retransmission of the stanza. If the origin node stops
+  between the owner's decision and that read and the sender never
+  retransmits, the entry stays decided and keeps its canonical message from
+  collection. No sweep consumes such entries.
+- **Lane rows.** Lane rows are never deleted. A lane exists per
+  stream-management session and room, so the table grows with sessions.
+- **Refusal after a lost reply.** The owner's refusal reaches the sender in
+  the relay reply. When that reply is lost, the origin's lookup still counts
+  the stanza as handled once it reads the refusal, and the error stanza is
+  re-emitted only when ingress recovery repairs the owner's recorded
+  `ErrorReply` obligation.
+- **Other lanes.** Only `RoomAcceptance(MessageKey)` exists as an operation.
+  MUC joins and occupant presence, Muji signaling and the bare-JID and
+  full-JID lanes have no canonical request to refer to and are still served
+  by the ordered relay alone.
+
 ### Guard, roles and manifest
 
 Both tables are in `EPOCH_GUARDED_TABLES` and in

@@ -90,6 +90,8 @@ pub use implementation::IngressUnrecoverableReason;
 pub use implementation::IngressUnresolvedEffectKind;
 pub use implementation::Janitor;
 pub use implementation::MailboxAcceptanceOutcome;
+pub use implementation::MailboxDeliveryOutcome;
+pub use implementation::MailboxHintOutcome;
 pub use implementation::MentionAudienceCheck;
 pub use implementation::MessageKind;
 pub use implementation::MetricAttribute;

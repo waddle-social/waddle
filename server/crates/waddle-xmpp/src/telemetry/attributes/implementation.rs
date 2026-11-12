@@ -921,6 +921,63 @@ impl MetricAttribute for MailboxAcceptanceOutcome {
     }
 }
 
+/// `outcome` — how a mailbox poller's attempt at a lane head ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxDeliveryOutcome {
+    /// The room owner committed its decision for the entry.
+    Decided,
+    /// The attempt failed and the next one was deferred.
+    Retried,
+    /// The entry was parked for an operator.
+    DeadLettered,
+}
+
+impl MailboxDeliveryOutcome {
+    pub const ALL: [Self; 3] = [Self::Decided, Self::Retried, Self::DeadLettered];
+}
+
+impl sealed::Sealed for MailboxDeliveryOutcome {}
+impl MetricAttribute for MailboxDeliveryOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Decided => "decided",
+            Self::Retried => "retried",
+            Self::DeadLettered => "dead_lettered",
+        }
+    }
+}
+
+/// `outcome` — whether a mailbox wake-up hint reached its peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxHintOutcome {
+    Delivered,
+    /// The peer did not acknowledge the hint; its poller finds the entry on
+    /// its next interval.
+    Lost,
+}
+
+impl MailboxHintOutcome {
+    pub const ALL: [Self; 2] = [Self::Delivered, Self::Lost];
+}
+
+impl sealed::Sealed for MailboxHintOutcome {}
+impl MetricAttribute for MailboxHintOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Lost => "lost",
+        }
+    }
+}
+
 /// `outcome` — how an ingress retention GC run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressGcOutcome {

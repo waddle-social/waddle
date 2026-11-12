@@ -1346,6 +1346,64 @@ impl CanonicalMessageRepository {
         }))
     }
 
+    /// The authenticated principal a bound message was created by and the
+    /// origin id its alias records, or `None` for a message without a source
+    /// binding. A room owner that works from a mailbox entry rebuilds the
+    /// sender's admission from these.
+    pub(crate) async fn acceptance_source(
+        transaction: &mut IngressUowTransaction<'_>,
+        source: MessageKey,
+    ) -> Result<Option<(AuthenticatedPrincipalRef, Option<OriginId>)>, IngressUowError> {
+        use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
+        let malformed = || ingress_substrate::IngressSubstrateError::RelayedAliasUnproven;
+        let (tx, prepared) = transaction.prepared_parts();
+        if tx.driver() != DatabaseDriver::Postgres {
+            return Err(IngressUowError::PostgresRequired);
+        }
+        let messages = ingress_substrate::prepared_ingress_relation(
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Messages,
+        );
+        let aliases = ingress_substrate::prepared_ingress_relation(
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Aliases,
+        );
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT m.source_binding_version::int, m.source_bare_jid, \
+                     m.source_auth_context_id::text, m.source_auth_context_version::text, \
+                     m.source_auth_epoch::text, \
+                     (SELECT a.origin_id FROM {aliases} a WHERE a.message_key = m.message_key LIMIT 1) \
+                     FROM {messages} m WHERE m.message_key = ?::uuid"
+                ),
+                crate::db_params![source.to_storage().to_string()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let version: Option<i32> = row.get(0)?;
+        let bare: Option<String> = row.get(1)?;
+        let context: Option<String> = row.get(2)?;
+        let context_version: Option<String> = row.get(3)?;
+        let epoch: Option<String> = row.get(4)?;
+        let origin_id: Option<String> = row.get(5)?;
+        let (Some(1), Some(bare), Some(context), Some(context_version), Some(epoch)) =
+            (version, bare, context, context_version, epoch)
+        else {
+            return Ok(None);
+        };
+        let principal = AuthenticatedPrincipalRef::new(
+            bare.parse().map_err(|_| malformed())?,
+            AuthContextId::new(context.parse::<Uuid>().map_err(|_| malformed())?),
+            AuthContextVersion::new(context_version.parse().map_err(|_| malformed())?),
+            PrincipalAuthEpoch::new(epoch.parse().map_err(|_| malformed())?),
+        );
+        let origin_id = origin_id.map(OriginId::new);
+        Ok(Some((principal, origin_id)))
+    }
+
     /// Open the owner decision of a bound source that records a dispatch to
     /// its remote room. The decision starts undecided.
     pub(crate) async fn initialize_room_owner_decision(

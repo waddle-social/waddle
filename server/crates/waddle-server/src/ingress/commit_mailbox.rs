@@ -49,6 +49,9 @@ pub(super) struct OriginAcceptance {
     lane: LockedMailboxLane,
     room: BareJid,
     source: CanonicalSourceBinding,
+    /// The stanza's top-level `xml:lang`, which the canonical message does
+    /// not retain and the owner needs to prove the same request.
+    request_language: Option<String>,
 }
 
 impl OriginAcceptance {
@@ -176,6 +179,10 @@ pub(super) async fn begin_origin(
                 principal.clone(),
                 stream.map(|stream| (stream.id, stream.ordinal)),
             ),
+            request_language: submission
+                .digest_input
+                .stanza_lang()
+                .map(|language| language.0.clone()),
         },
     ))))
 }
@@ -234,6 +241,12 @@ pub(super) async fn record_origin(
         *MailboxRepository::append(tx, &mut acceptance.lane, operation, &ROOM_ACCEPTANCE_LIMITS)
             .await?
             .entry();
+    if entry.disposition == MailboxEntryDisposition::Pending && entry.lane == acceptance.lane.id() {
+        if let Some(language) = acceptance.request_language.as_deref() {
+            MailboxRepository::record_request_language(tx, &acceptance.lane, &entry, language)
+                .await?;
+        }
+    }
     match entry.disposition {
         MailboxEntryDisposition::Pending => Ok(OriginEntry::Awaiting(entry)),
         MailboxEntryDisposition::Consumed(_) => Ok(OriginEntry::Settled),
@@ -255,6 +268,11 @@ impl OriginAcceptance {
     /// The claim epoch the origin presented for its lane.
     pub(super) fn origin_epoch(&self) -> waddle_xmpp::ownership::ClaimEpoch {
         self.lane.fence().origin_epoch
+    }
+
+    /// The node incarnation the lane records as the room's owner.
+    pub(super) fn target_owner(&self) -> &waddle_xmpp::ownership::NodeIdentity {
+        &self.lane.fence().target_owner
     }
 }
 

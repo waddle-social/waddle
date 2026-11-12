@@ -175,6 +175,8 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.decisions{class}` | `ingress_decisions_total` | `IngressInfraDecisions`, `IngressFenceDecisions`, `IngressIdentityDecisions`, `IngressRetryExhausted`, `IngressSeriesMissing` |
 | `ingress.alias.outcomes{outcome}` | `ingress_alias_outcomes_total` | `IngressAliasConflicts` |
 | `ingress.mailbox.room_acceptances{outcome}` | `ingress_mailbox_room_acceptances_total` | None; `unresolved` counts stanzas left unacknowledged because no room-owner decision could be read |
+| `ingress.mailbox.deliveries{outcome}` | `ingress_mailbox_deliveries_total` | None; `dead_lettered` counts entries parked at a lane head for operator repair |
+| `ingress.mailbox.hints{outcome}` | `ingress_mailbox_hints_total` | None; a lost hint is repaired by the peer's poll interval |
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
