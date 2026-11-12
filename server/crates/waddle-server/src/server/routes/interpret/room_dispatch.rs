@@ -464,7 +464,7 @@ pub(super) async fn dispatch_to_room(
                     .map(super::effects::room::RoomFenceRequirement::Guarded)
                     .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
                 snapshot_generation: snapshot.admission_revision,
-                manifest_snapshot: Some(RoomManifestSnapshot::from(&snapshot)),
+                manifest_snapshot: Some(Box::new(RoomManifestSnapshot::from(&snapshot))),
             });
     }
 

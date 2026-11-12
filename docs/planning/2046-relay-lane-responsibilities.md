@@ -86,21 +86,38 @@ an owner transfer does, and what must hold before the relay path is deleted.
   manifest was sealed by, that actor checks the child's occupancy watermark
   in the turn that writes the copy. The incarnation and the watermarks exist
   only in that actor, so any other node proves the child against the room's
-  durable occupancy (`room_manifest_replay`): the copy is written to a
-  connection while `ingress_room_occupants` seats the target under that
-  connection's generation. A seat held by another generation, or no seat,
-  leaves the copy undelivered as for a target that is not connected. Once
-  the room's claim has left the incarnation that sealed the manifest, a
-  child whose target has no seat is settled as departed
-  (`OccupancyDeparted`); while that claim stands the owner's actor decides.
-  The manifest does not record the generation that held the seat when it
-  was sealed, so a resource that left and joined the room again on the same
-  connection before a recovery pass receives the copy.
+  durable occupancy (`room_manifest_replay`). Each child records the
+  generation of the connection that held its target's seat when the
+  manifest was sealed (`seat`). The copy is written to a connection while
+  `ingress_room_occupants` seats the target under that generation and the
+  connection is of that generation. A seat held by another generation, or
+  no seat, leaves the copy undelivered as for a target that is not
+  connected: the full JID was bound again and joined again, and the copy
+  was not frozen for that occupancy. Once the room's claim has left the
+  incarnation that sealed the manifest, a child is settled as departed
+  (`OccupancyDeparted`) when its target has no seat or a seat of another
+  generation; while that claim stands the owner's actor decides.
+- **A child without a recorded seat.** The stored manifest versions its
+  child records in place (`children_version`): version 1 has no `seat`,
+  version 2 has it. A manifest stored without the field is version 1 and
+  is still read. Its children name no occupant the durable rows could be
+  compared with, so a node without the sealing actor never delivers them
+  and settles them as departed once the claim has left the sealing
+  incarnation. The sealing actor delivers them by their watermark as
+  before.
+- **What the seat does not tell apart.** `ingress_room_occupants`
+  identifies a seat by its connection, so a resource that leaves and joins
+  again on the same connection has the same row as before. The sealing
+  actor settles the old child by its watermark the next time it executes
+  it; when that actor ends first, a node that proves the child from durable
+  rows delivers it to the rejoined occupancy. Excluding that needs a
+  per-seat identity in the table.
 - **Detached sessions.** A target whose session is detached is appended
   to through the stream-management registry under the child's key. Without
   the sealing actor the append requires that the recorded seat is held by
-  the generation the occupancy authority (`xmpp_occupancy_authority`) holds
-  as current for the full JID.
+  the generation the child was sealed with and that the occupancy
+  authority (`xmpp_occupancy_authority`) holds that generation as current
+  for the full JID.
 - **Lost hint.** The owner's poller scans its backlog every second. A pass
   hands each lane to one of two workers and does not wait for them, so a
   lane held for its receiver budget occupies one worker while the other

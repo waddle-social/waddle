@@ -9,6 +9,7 @@ use waddle_xmpp::muc::durable::{
 use waddle_xmpp::muc::room_actor::OccupancyWatermark;
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 use waddle_xmpp_core::xep0359::StanzaId;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::decision::EffectReceiptKey;
 use crate::ingress_substrate::IngressSubstrateError;
@@ -20,6 +21,9 @@ pub struct RoomManifestSnapshot {
     pub coordinates: Option<RoomCommittedCoordinates>,
     pub occupancy_incarnation: AdminMutationId,
     pub occupants: Vec<(FullJid, OccupancyWatermark)>,
+    /// Generation of the connection that holds each occupant's seat, for the
+    /// occupants whose generation the room knows.
+    pub seats: Vec<(FullJid, OccupancySessionGeneration)>,
     /// Trusted original room HostOwnedCopy effects, classified before acceptance.
     pub host_no_transport: Vec<FullJid>,
 }
@@ -34,6 +38,11 @@ impl From<&waddle_xmpp::muc::room_actor::RoomChainSnapshot> for RoomManifestSnap
                 .occupants
                 .iter()
                 .map(|occupant| (occupant.full_jid.clone(), occupant.watermark))
+                .collect(),
+            seats: snapshot
+                .occupants
+                .iter()
+                .filter_map(|occupant| Some((occupant.full_jid.clone(), occupant.session?)))
                 .collect(),
         }
     }
@@ -53,6 +62,13 @@ pub struct RoomManifestChild {
     pub delivery_key: DeliveryKey,
     pub target: Option<FullJid>,
     pub occupancy: Option<OccupancyWatermark>,
+    /// Generation of the connection that held the target's seat when the
+    /// manifest was sealed. It identifies the frozen occupant to a node that
+    /// cannot ask the sealing actor about `occupancy`. `None` for a child
+    /// without a room occupancy, for a seat whose generation the sealing
+    /// actor did not know, and for every child of a manifest stored before
+    /// seats were recorded.
+    pub seat: Option<OccupancySessionGeneration>,
     pub disposition: RoomManifestChildDisposition,
 }
 
@@ -150,6 +166,7 @@ impl FrozenRoomManifest {
                     delivery_key,
                     target: None,
                     occupancy: None,
+                    seat: None,
                     disposition: RoomManifestChildDisposition::Delivery,
                 });
             }
@@ -200,10 +217,20 @@ impl FrozenRoomManifest {
                     receipt.semantic_identity_hash,
                     Some(target.clone()),
                 )) {
+                    // The seat belongs to the occupancy: a child without one
+                    // records none.
+                    let seat = occupancy.and_then(|_| {
+                        snapshot
+                            .seats
+                            .iter()
+                            .find(|(jid, _)| jid == &target)
+                            .map(|(_, generation)| *generation)
+                    });
                     children.push(RoomManifestChild {
                         receipt: receipt.clone(),
                         delivery_key: DeliveryKey::resource(message_key, &effect, &target),
                         occupancy,
+                        seat,
                         disposition: if requires_no_transport {
                             RoomManifestChildDisposition::HostRoomCopyRequiresNoTransport
                         } else {
@@ -262,9 +289,20 @@ pub(crate) struct StoredRoomManifest {
     coordinates: Option<StoredCoordinates>,
     claim_fence: Option<StoredFence>,
     occupancy_incarnation: uuid::Uuid,
+    /// Version of the child records. A manifest stored without this field is
+    /// version 1.
+    #[serde(default = "StoredRoomManifest::children_without_seats")]
+    children_version: u8,
     children: Vec<StoredChild>,
     intents: Vec<StoredIntent>,
 }
+
+/// Child records without `seat`: every manifest stored before seats were
+/// recorded.
+const CHILDREN_WITHOUT_SEATS: u8 = 1;
+/// Child records whose `seat` is the generation of the connection that held
+/// the target's seat at sealing, or null when the sealing actor knew none.
+const CHILDREN_WITH_SEATS: u8 = 2;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -289,6 +327,9 @@ struct StoredChild {
     delivery_key: DeliveryKey,
     target: Option<FullJid>,
     occupancy: Option<u64>,
+    /// Present from child version 2 on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seat: Option<OccupancySessionGeneration>,
     disposition: RoomManifestChildDisposition,
 }
 
@@ -300,6 +341,10 @@ struct StoredIntent {
 }
 
 impl StoredRoomManifest {
+    fn children_without_seats() -> u8 {
+        CHILDREN_WITHOUT_SEATS
+    }
+
     pub(crate) fn from_domain(
         manifest: &FrozenRoomManifest,
     ) -> Result<Self, IngressSubstrateError> {
@@ -331,6 +376,7 @@ impl StoredRoomManifest {
                 node_epoch: fence.owner.node_epoch.clone(),
             }),
             occupancy_incarnation: manifest.occupancy_incarnation.as_uuid(),
+            children_version: CHILDREN_WITH_SEATS,
             children: manifest
                 .children
                 .iter()
@@ -339,6 +385,7 @@ impl StoredRoomManifest {
                     delivery_key: child.delivery_key,
                     target: child.target.clone(),
                     occupancy: child.occupancy.map(OccupancyWatermark::revision),
+                    seat: child.seat,
                     disposition: child.disposition,
                 })
                 .collect(),
@@ -396,14 +443,33 @@ impl StoredRoomManifest {
                 delivery_key: child.delivery_key,
                 target: child.target,
                 occupancy: child.occupancy.map(OccupancyWatermark::from_revision),
+                seat: child.seat,
                 disposition: child.disposition,
             })
             .collect();
+        match self.children_version {
+            CHILDREN_WITHOUT_SEATS if children.iter().all(|child| child.seat.is_none()) => {}
+            CHILDREN_WITH_SEATS => {}
+            _ => return Err(invalid()),
+        }
         let mut keys = HashSet::new();
         let mut receipt_targets = HashSet::new();
         let mut occupants = Vec::new();
+        let mut seats: Vec<(FullJid, OccupancySessionGeneration)> = Vec::new();
         let mut host_no_transport = Vec::new();
         for child in &children {
+            if child.seat.is_some() && child.occupancy.is_none() {
+                return Err(invalid());
+            }
+            if let (Some(target), Some(seat)) = (&child.target, child.seat) {
+                if seats
+                    .iter()
+                    .any(|(jid, generation)| jid == target && *generation != seat)
+                {
+                    return Err(invalid());
+                }
+                seats.push((target.clone(), seat));
+            }
             if !keys.insert(child.delivery_key)
                 || !receipt_targets.insert((
                     child.receipt.kind.to_storage(),
@@ -436,6 +502,7 @@ impl StoredRoomManifest {
             coordinates,
             occupancy_incarnation: AdminMutationId::from_uuid(self.occupancy_incarnation),
             occupants,
+            seats,
             host_no_transport,
         };
         let rebuilt = FrozenRoomManifest::build(
@@ -451,5 +518,103 @@ impl StoredRoomManifest {
             return Err(invalid());
         }
         Ok(rebuilt)
+    }
+}
+
+#[cfg(test)]
+mod stored_child_version_tests {
+    use super::*;
+    use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration};
+
+    fn manifest_with_a_seat() -> (FrozenRoomManifest, FullJid, OccupancySessionGeneration) {
+        let room: BareJid = "room@muc.example.test".parse().expect("room");
+        let sender: FullJid = "sender@example.test/web".parse().expect("sender");
+        let peer: FullJid = "peer@example.test/phone".parse().expect("peer");
+        let stamp = StanzaId::new("sealed", room.clone().into());
+        let route = IngressEffectIntent::RouteMucGroupchat {
+            room: room.clone(),
+            occupants: vec![sender.clone(), peer.clone()],
+            reflection: sender.clone(),
+            room_generation: EntityGeneration::INITIAL,
+            route_identity: EffectMessageIdentity::stanza(stamp.clone()),
+        };
+        let seat = OccupancySessionGeneration::mint();
+        let manifest = FrozenRoomManifest::build(
+            MessageKey::new(),
+            room,
+            stamp,
+            &RoomManifestSnapshot {
+                coordinates: None,
+                occupancy_incarnation: AdminMutationId::generate(),
+                occupants: vec![
+                    (sender, OccupancyWatermark::from_revision(1)),
+                    (peer.clone(), OccupancyWatermark::from_revision(2)),
+                ],
+                seats: vec![(peer.clone(), seat)],
+                host_no_transport: Vec::new(),
+            },
+            None,
+            &[route],
+        )
+        .expect("manifest");
+        (manifest, peer, seat)
+    }
+
+    fn seats(manifest: &FrozenRoomManifest) -> Vec<(FullJid, OccupancySessionGeneration)> {
+        manifest
+            .children
+            .iter()
+            .filter_map(|child| Some((child.target.clone()?, child.seat?)))
+            .collect()
+    }
+
+    #[test]
+    fn a_stored_manifest_keeps_the_seat_each_child_was_sealed_with() {
+        let (manifest, peer, seat) = manifest_with_a_seat();
+        assert_eq!(seats(&manifest), vec![(peer, seat)]);
+        let stored =
+            serde_json::to_value(StoredRoomManifest::from_domain(&manifest).expect("store"))
+                .expect("encode");
+        assert_eq!(stored["children_version"], 2);
+        let read: StoredRoomManifest = serde_json::from_value(stored).expect("decode");
+        assert_eq!(read.into_domain().expect("domain"), manifest);
+    }
+
+    /// A manifest stored before seats were recorded has neither the version
+    /// field nor a `seat` on any child. It is read as it was written, and
+    /// its children name no seat.
+    #[test]
+    fn a_manifest_stored_without_seats_is_read_with_no_seat_on_any_child() {
+        let (manifest, _, _) = manifest_with_a_seat();
+        let mut stored =
+            serde_json::to_value(StoredRoomManifest::from_domain(&manifest).expect("store"))
+                .expect("encode");
+        let object = stored.as_object_mut().expect("manifest object");
+        object.remove("children_version").expect("version field");
+        for child in object["children"].as_array_mut().expect("children") {
+            child.as_object_mut().expect("child").remove("seat");
+        }
+        let read: StoredRoomManifest = serde_json::from_value(stored).expect("decode version 1");
+        let read = read.into_domain().expect("domain");
+        assert!(seats(&read).is_empty());
+        let mut expected = manifest;
+        for child in &mut expected.children {
+            child.seat = None;
+        }
+        assert_eq!(read, expected, "nothing but the seats differs");
+    }
+
+    #[test]
+    fn a_seat_in_a_version_one_manifest_and_an_unknown_version_are_refused() {
+        let (manifest, _, _) = manifest_with_a_seat();
+        let stored =
+            serde_json::to_value(StoredRoomManifest::from_domain(&manifest).expect("store"))
+                .expect("encode");
+        for version in [serde_json::json!(1), serde_json::json!(3)] {
+            let mut changed = stored.clone();
+            changed["children_version"] = version;
+            let read: StoredRoomManifest = serde_json::from_value(changed).expect("decode");
+            assert!(read.into_domain().is_err());
+        }
     }
 }

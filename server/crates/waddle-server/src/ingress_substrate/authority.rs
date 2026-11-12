@@ -416,6 +416,7 @@ mod room_manifest_tests {
             prepared: None,
         }];
         let snapshot = RoomManifestSnapshot {
+            seats: Vec::new(),
             host_no_transport: Vec::new(),
             coordinates: None,
             occupancy_incarnation: AdminMutationId::generate(),

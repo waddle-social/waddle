@@ -417,6 +417,7 @@ mod tests {
         };
         let receipt = crate::ingress::receipt_key(&route).expect("receipt");
         let mut snapshot = RoomManifestSnapshot {
+            seats: Vec::new(),
             coordinates: None,
             occupancy_incarnation: AdminMutationId::generate(),
             occupants: [sender.clone(), human.clone(), bot.clone()]

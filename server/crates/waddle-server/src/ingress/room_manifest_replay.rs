@@ -117,20 +117,42 @@ async fn durable_seat(
     Ok(seat)
 }
 
-/// Hand a frozen child to the connection `endpoint` on this node when the
-/// room's durable occupancy still seats the target under that connection's
-/// generation.
+/// Whether the room's durable occupancy still seats the occupant a child was
+/// frozen for.
 ///
-/// The child was frozen for a full JID. A recorded seat held by the
-/// connection that is bound to that full JID here is that occupant; a seat
-/// held by another generation, or no seat, means the occupant the copy was
-/// frozen for has left, and the copy is reported as not connected. The seat
-/// is read and the socket written without the room actor, so a leave that
-/// commits between the two is not excluded: the copy then reaches a
-/// connection that was an occupant when the message was accepted.
+/// `sealed` is the generation of the connection that held the target's seat
+/// when the manifest was sealed. The frozen occupant is still seated while
+/// the recorded seat is held by that generation. A seat held by another
+/// generation belongs to a connection that joined later, and a child that
+/// records no generation names no occupant these rows could be compared
+/// with: neither is the frozen occupant, so neither receives the copy.
+///
+/// A leave followed by a join of the same connection leaves the same row
+/// behind, because `ingress_room_occupants` identifies a seat by its
+/// connection only. The sealing actor tells the two apart by the child's
+/// occupancy watermark; a node without that actor cannot.
+fn frozen_seat_stands(
+    sealed: Option<OccupancySessionGeneration>,
+    seat: &crate::ingress_uow::RoomOccupantRecord,
+) -> bool {
+    sealed == Some(seat.generation)
+}
+
+/// Hand a frozen child to the connection `endpoint` on this node when the
+/// room's durable occupancy still seats the occupant the child was frozen
+/// for, and that occupant is this connection.
+///
+/// The recorded seat must be held by the generation the child was sealed
+/// with (`sealed`) and by the connection the copy is written to. Any other
+/// seat, or none, means the frozen occupant has left or is not this
+/// connection, and the copy is reported as not connected. The seat is read
+/// and the socket written without the room actor, so a leave that commits
+/// between the two is not excluded: the copy then reaches a connection that
+/// was an occupant when the message was accepted.
 async fn enqueue_at_durable_seat(
     uow: &IngressUnitOfWork,
     manifest: &FrozenRoomManifest,
+    sealed: Option<OccupancySessionGeneration>,
     target: &FullJid,
     endpoint: Option<OccupancySessionGeneration>,
     action: impl FnOnce() -> BroadcastOutcome + Send + 'static,
@@ -140,7 +162,11 @@ async fn enqueue_at_durable_seat(
         return Err(IngressUowError::RoomGenerationStale);
     };
     match durable_seat(uow, manifest, target).await? {
-        RoomOccupantLookup::Seated(seat) if seat.generation == endpoint => Ok(action()),
+        RoomOccupantLookup::Seated(seat)
+            if frozen_seat_stands(sealed, &seat) && seat.generation == endpoint =>
+        {
+            Ok(action())
+        }
         RoomOccupantLookup::Seated(_) | RoomOccupantLookup::Absent => {
             Ok(BroadcastOutcome::NotConnected)
         }
@@ -155,15 +181,18 @@ async fn enqueue_at_durable_seat(
 /// Nothing is retired while the claim the manifest was sealed under is still
 /// the room's claim: that owner's actor holds the roster and decides. Once
 /// the claim has moved, the successor's roster is the recorded occupancy, so
-/// a target without a row is not an occupant any more. A target with a row
-/// stays owed; a row whose connection is gone is removed by the owner's
-/// ghost sweep or by the next owner's seating.
+/// the frozen occupant has left when the target has no row, when its row is
+/// held by another generation than the child was sealed with, and when the
+/// child records no generation to compare the row with. A row of the sealed
+/// generation stays owed; a row whose connection is gone is removed by the
+/// owner's ghost sweep or by the next owner's seating.
 #[cfg(feature = "clustering")]
 async fn retire_departed_durable_seat(
     uow: &IngressUnitOfWork,
     manifest: &FrozenRoomManifest,
     key: waddle_xmpp::ingress::MessageKey,
     progress: &super::recorded::RouteProgress,
+    sealed_seat: Option<OccupancySessionGeneration>,
     target: &FullJid,
 ) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
     use crate::ingress_uow::RoomOccupantLookup;
@@ -188,7 +217,13 @@ async fn retire_departed_durable_seat(
     let sealed_claim_current = claim
         .as_ref()
         .is_some_and(|(owner, epoch)| *owner == sealed.owner && *epoch == sealed.epoch);
-    if sealed_claim_current || !matches!(seat, RoomOccupantLookup::Absent) {
+    let frozen_occupant_left = match &seat {
+        RoomOccupantLookup::Absent => true,
+        RoomOccupantLookup::Seated(seat) => !frozen_seat_stands(sealed_seat, seat),
+        // An unreadable row proves neither a seat nor its absence.
+        RoomOccupantLookup::Unparseable => false,
+    };
+    if sealed_claim_current || !frozen_occupant_left {
         return Ok(None);
     }
     crate::ingress_uow::run_with_retry(5, || {
@@ -212,6 +247,7 @@ async fn retire_departed_durable_seat(
     _manifest: &FrozenRoomManifest,
     _key: waddle_xmpp::ingress::MessageKey,
     _progress: &super::recorded::RouteProgress,
+    _sealed_seat: Option<OccupancySessionGeneration>,
     _target: &FullJid,
 ) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
     Ok(None)
@@ -359,6 +395,7 @@ pub(super) async fn settle_superseded(
     let watermark = child
         .occupancy
         .ok_or(IngressUowError::EffectIntentConflict)?;
+    let sealed_seat = child.seat;
     let intent = manifest
         .recorded_intents()
         .iter()
@@ -390,8 +427,15 @@ pub(super) async fn settle_superseded(
         crate::ingress_uow::IngressFencing::SingleNode
     );
     let Some(registry) = registry else {
-        return retire_departed_durable_seat(uow, manifest, context.message_key, &progress, target)
-            .await;
+        return retire_departed_durable_seat(
+            uow,
+            manifest,
+            context.message_key,
+            &progress,
+            sealed_seat,
+            target,
+        )
+        .await;
     };
     if allow_lost_occupancy
         && !registry
@@ -420,7 +464,15 @@ pub(super) async fn settle_superseded(
     let key = context.message_key;
     let Some(actor) = actor else {
         if !allow_lost_occupancy {
-            return retire_departed_durable_seat(uow, manifest, key, &progress, target).await;
+            return retire_departed_durable_seat(
+                uow,
+                manifest,
+                key,
+                &progress,
+                sealed_seat,
+                target,
+            )
+            .await;
         }
         return registry
             .ask(RunAbsentRoomGuardedAsync {
@@ -456,7 +508,8 @@ pub(super) async fn settle_superseded(
         .await
         .map_err(|_| IngressUowError::Timeout)?;
     if !allow_lost_occupancy && validate_current_snapshot(manifest, &snapshot).is_err() {
-        return retire_departed_durable_seat(uow, manifest, key, &progress, target).await;
+        return retire_departed_durable_seat(uow, manifest, key, &progress, sealed_seat, target)
+            .await;
     }
     let fence = snapshot.claim_fence;
     let result = actor
@@ -527,7 +580,8 @@ pub(super) async fn settle_superseded(
 /// On a node that does not run the actor the manifest was sealed by, the
 /// room's durable occupancy stands in for that proof: the copy is handed to
 /// `endpoint`, the generation of the connection the caller writes to, while
-/// the recorded seat of the target is held by that connection.
+/// the recorded seat of the target is held by that connection and by the
+/// generation the child was sealed with.
 pub(super) async fn enqueue(
     manifest: &FrozenRoomManifest,
     uow: &IngressUnitOfWork,
@@ -546,7 +600,8 @@ pub(super) async fn enqueue(
     let (actor, fence) = match current_actor(manifest, registry, target).await {
         Ok(current) => current,
         Err(IngressUowError::RoomGenerationStale) if durable_occupancy_applies(uow, manifest) => {
-            return enqueue_at_durable_seat(uow, manifest, target, endpoint, action).await;
+            return enqueue_at_durable_seat(uow, manifest, child.seat, target, endpoint, action)
+                .await;
         }
         Err(error) => return Err(error),
     };
@@ -694,15 +749,30 @@ pub(super) async fn release_transient_reflection(
     Ok(Some(released))
 }
 
+/// The stream-management ledger key of a child's append to `target`.
+fn detached_append_key(
+    context: &SmIngressAppendContext,
+    target: &FullJid,
+) -> waddle_xmpp::stream_management::SmIngressAppendKey {
+    waddle_xmpp::stream_management::SmIngressAppendKey {
+        message_key: context.message_key,
+        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+            context.receipt.kind.to_storage(),
+        ),
+        semantic_identity_hash: context.receipt.semantic_identity_hash,
+        resource: target.clone(),
+    }
+}
+
 /// Append a frozen child to the target's detached stream-management session
 /// on a node that does not run the actor the manifest was sealed by.
 ///
 /// A detached session has no connection to compare with the recorded seat.
 /// The session belongs to the connection that last bound the full JID, so
 /// the copy is appended while the room's durable occupancy seats the target
-/// under the generation the occupancy authority holds as current for that
-/// full JID. The append is keyed by the child, so a repeat allocates
-/// nothing.
+/// under the generation the child was sealed with (`sealed`) and the
+/// occupancy authority holds that generation as current for the full JID.
+/// The append is keyed by the child, so a repeat allocates nothing.
 async fn queue_detached_at_durable_seat(
     manifest: &FrozenRoomManifest,
     uow: &IngressUnitOfWork,
@@ -710,12 +780,15 @@ async fn queue_detached_at_durable_seat(
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-    key: waddle_xmpp::stream_management::SmIngressAppendKey,
+    sealed: Option<OccupancySessionGeneration>,
 ) -> Result<FullJidDeliveryOutcome, IngressUowError> {
     use crate::ingress_uow::RoomOccupantLookup;
     let RoomOccupantLookup::Seated(seat) = durable_seat(uow, manifest, target).await? else {
         return Ok(FullJidDeliveryOutcome::Unavailable);
     };
+    if !frozen_seat_stands(sealed, &seat) {
+        return Ok(FullJidDeliveryOutcome::Unavailable);
+    }
     let current = crate::occupancy_authority::is_current(uow.database(), target, seat.generation)
         .await
         .map_err(|_| IngressUowError::RoomGenerationStale)?;
@@ -724,7 +797,12 @@ async fn queue_detached_at_durable_seat(
     }
     let received_at = context.received_at.unwrap_or_else(chrono::Utc::now);
     match sm
-        .record_keyed_stanza_for_detached_bound_resource(target, stanza, received_at, key)
+        .record_keyed_stanza_for_detached_bound_resource(
+            target,
+            stanza,
+            received_at,
+            detached_append_key(context, target),
+        )
         .await
     {
         Ok(outcome)
@@ -758,23 +836,25 @@ pub(super) async fn queue_detached(
     let Some(sm) = deps.sm_session_registry.cloned() else {
         return Ok(FullJidDeliveryOutcome::Unavailable);
     };
-    let watermark = manifest
+    let child = manifest
         .child(&context.receipt, Some(target))
-        .and_then(|child| child.occupancy)
         .ok_or(IngressUowError::EffectIntentConflict)?;
-    let key = waddle_xmpp::stream_management::SmIngressAppendKey {
-        message_key: context.message_key,
-        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
-            context.receipt.kind.to_storage(),
-        ),
-        semantic_identity_hash: context.receipt.semantic_identity_hash,
-        resource: target.clone(),
-    };
+    let watermark = child
+        .occupancy
+        .ok_or(IngressUowError::EffectIntentConflict)?;
+    let sealed_seat = child.seat;
+    let key = detached_append_key(context, target);
     let (actor, fence) = match current_actor(manifest, deps.room_registry, target).await {
         Ok(current) => current,
         Err(IngressUowError::RoomGenerationStale) if durable_occupancy_applies(uow, manifest) => {
             return queue_detached_at_durable_seat(
-                manifest, uow, &sm, context, target, stanza, key,
+                manifest,
+                uow,
+                &sm,
+                context,
+                target,
+                stanza,
+                sealed_seat,
             )
             .await;
         }
@@ -906,7 +986,7 @@ mod tests {
             ..
         } = &mut submission.plan.room_execution
         {
-            *manifest_snapshot = Some(RoomManifestSnapshot::from(&snapshot));
+            *manifest_snapshot = Some(Box::new(RoomManifestSnapshot::from(&snapshot)));
             *snapshot_generation = snapshot.admission_revision;
         }
         let route = submission
@@ -1087,6 +1167,7 @@ mod tests {
             room.clone(),
             waddle_xmpp_core::xep0359::StanzaId::new("sealed", room.into()),
             &super::super::RoomManifestSnapshot {
+                seats: Vec::new(),
                 host_no_transport: Vec::new(),
                 coordinates: Some(coordinates),
                 occupancy_incarnation: incarnation,
@@ -1380,6 +1461,7 @@ mod tests {
             room,
             stamp,
             &super::super::RoomManifestSnapshot {
+                seats: Vec::new(),
                 host_no_transport: Vec::new(),
                 coordinates: None,
                 occupancy_incarnation: AdminMutationId::generate(),
@@ -1418,3 +1500,7 @@ mod tests {
 #[cfg(test)]
 #[path = "room_manifest_replay_transient_tests.rs"]
 mod transient_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+#[path = "room_manifest_replay_seat_tests.rs"]
+mod seat_tests;

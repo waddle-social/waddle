@@ -1454,7 +1454,7 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
             ..
         } = &mut submission.plan.room_execution
         {
-            *manifest_snapshot = Some(RoomManifestSnapshot::from(&snapshot));
+            *manifest_snapshot = Some(Box::new(RoomManifestSnapshot::from(&snapshot)));
             *snapshot_generation = snapshot.admission_revision;
         }
         let mut message = submission
