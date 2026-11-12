@@ -40,6 +40,29 @@ pub enum MucDestroyRuntimeAttachError {
 /// (`6_841_445_497_037_937_994`) because it protects only this outbox.
 const MUC_DESTROY_COMPLETION_OUTBOX_SCHEMA_ADVISORY_LOCK_KEY: i64 = 6_841_445_497_037_937_995;
 
+/// Completions waiting in the outbox and the age of the oldest, on the
+/// caller's clock. A row armed for a destroy that has not committed carries
+/// `available_at_ms = i64::MAX` and is not waiting.
+pub(crate) async fn destroy_completion_backlog(
+    db: &Database,
+    now_ms: i64,
+) -> Result<(u64, std::time::Duration), DatabaseError> {
+    let connection = db.guard().await?;
+    let mut rows = connection
+        .query(
+            "SELECT CAST(COUNT(*) AS BIGINT), CAST(COALESCE(MIN(available_at_ms), ?) AS BIGINT) \
+             FROM clustering_muc_destroy_outbox WHERE available_at_ms <> ?",
+            crate::db_params![now_ms, i64::MAX],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok((0, std::time::Duration::ZERO));
+    };
+    let waiting = u64::try_from(row.get::<i64>(0)?).unwrap_or_default();
+    let oldest_ms = u64::try_from(now_ms.saturating_sub(row.get::<i64>(1)?)).unwrap_or_default();
+    Ok((waiting, std::time::Duration::from_millis(oldest_ms)))
+}
+
 /// Owns startup schema bootstrap for the MUC destroy completion outbox.
 #[derive(Clone)]
 pub struct MucDestroyCompletionOutboxStore {

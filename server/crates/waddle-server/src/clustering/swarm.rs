@@ -479,7 +479,13 @@ async fn node_keypair(
     // to the owner's enrollment, which also checks the configured pool
     // against the enrolled PeerId order before any slot is leased.
     let lease = if db.uses_attested_postgres_pool() {
-        PostgresKeypairSlotLease::attach_existing(db.clone(), &config.keypair_pool).await?
+        PostgresKeypairSlotLease::attach_existing(db.clone(), &config.keypair_pool)
+            .await
+            .inspect_err(|_| {
+                waddle_xmpp::telemetry::authority::record_restricted_attach_failure(
+                    waddle_xmpp::telemetry::attributes::RestrictedStore::KeypairLease,
+                )
+            })?
     } else {
         let lease = PostgresKeypairSlotLease::new(db.clone());
         lease.ensure_schema().await?;

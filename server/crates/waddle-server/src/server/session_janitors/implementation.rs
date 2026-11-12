@@ -6000,6 +6000,19 @@ pub(crate) fn spawn_destroy_completion_janitor(websocket_state: &Arc<WebSocketSt
                 break;
             };
             let _ = crate::server::routes::websocket::drain_destroy_completions(&state, None).await;
+            // A failed reading records nothing, so the previous depth and
+            // age stand instead of a fabricated zero.
+            if let Ok((waiting, oldest)) =
+                crate::muc_destroy_completion_outbox::destroy_completion_backlog(
+                    state.deps.app_state.db_pool.global(),
+                    crate::time::now_ms(),
+                )
+                .await
+            {
+                waddle_xmpp::telemetry::authority::record_destroy_completion_backlog(
+                    waiting, oldest,
+                );
+            }
             // A heartbeat: the drain reports no outcome, so this proves
             // only that the janitor still runs.
             waddle_xmpp::telemetry::reliability::record_janitor_sweep(
