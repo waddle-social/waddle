@@ -59,7 +59,7 @@ pub use occupancy_handlers::{
     InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId,
     LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome,
     OccupancyOrder, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
-    RecoveredOccupant, ResolverAffiliationSyncOutcome, SeedRecoveredOccupants,
+    RecoveredOccupant, RecoveredSeating, ResolverAffiliationSyncOutcome, SeedRecoveredOccupants,
     SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
 pub use occupancy_record::ReportOccupancy;
@@ -148,6 +148,7 @@ pub use implementation::PendingAdminProjection;
 pub use implementation::PresenceUpdateOutcome;
 pub(super) use implementation::ProjectionGate;
 pub use implementation::ProjectionRefusal;
+use implementation::RecoveredJoinRefusal;
 pub use implementation::RestoreDurableRoomState;
 pub use implementation::RestoreLiveRoster;
 pub(super) use implementation::RetainedDeparture;

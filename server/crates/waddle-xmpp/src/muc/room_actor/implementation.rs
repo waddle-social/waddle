@@ -811,6 +811,18 @@ pub enum DurablePersistError {
     CommitOutcomeUnknown,
 }
 
+/// Why an occupant recovered from the durable occupancy record was not
+/// seated.
+#[derive(Debug)]
+pub(in crate::muc::room_actor) enum RecoveredJoinRefusal {
+    /// The recorded connection generation is no longer the one the
+    /// occupancy authority holds for the full JID.
+    StaleGeneration,
+    /// The projection did not commit; the recorded seat is neither proven
+    /// nor disproven.
+    Persist(DurablePersistError),
+}
+
 impl From<DurablePersistError> for RoomMutationError {
     fn from(error: DurablePersistError) -> Self {
         match error {
@@ -1633,6 +1645,87 @@ impl RoomActor {
                     Err(DurablePersistError::PersistFailed)
                 }
             },
+        }
+    }
+
+    /// Whether this actor created the room: its fenced load proved that no
+    /// durable room existed, so no earlier owner of this room can have
+    /// recorded occupants for it.
+    pub(in crate::muc::room_actor) fn created_by_this_actor(&self) -> bool {
+        matches!(
+            self.restore_state,
+            DurableRestoreState::Ready(DurableRoomOrigin::New)
+        )
+    }
+
+    /// Commit the join projection of an occupant recovered from the durable
+    /// occupancy record. Unlike [`Self::commit_projection`] it tells a
+    /// connection generation that is no longer current apart from a failed
+    /// commit: the first means the recorded seat is stale, the second says
+    /// nothing about the seat.
+    pub(in crate::muc::room_actor) async fn commit_recovered_join(
+        &mut self,
+        projection: RoomProjection,
+    ) -> Result<ProjectionGate, RecoveredJoinRefusal> {
+        match self.seal_state {
+            RoomSealState::Open => {}
+            RoomSealState::OwnershipLost => {
+                return Err(RecoveredJoinRefusal::Persist(DurablePersistError::NotOwner))
+            }
+            RoomSealState::Inactive | RoomSealState::Destroying { .. } => {
+                return Err(RecoveredJoinRefusal::Persist(
+                    DurablePersistError::OwnershipUnavailable,
+                ))
+            }
+        }
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(ProjectionGate::Unfenced);
+        };
+        let fence = self
+            .durable_claim_fence
+            .clone()
+            .ok_or(RecoveredJoinRefusal::Persist(
+                DurablePersistError::OwnershipUnavailable,
+            ))?;
+        let kind = projection.kind();
+        let intent = RoomDurableMutation::Projection(projection);
+        let commit_kind = super::super::durable::RoomCommitKind::of(&intent);
+        let outcome = match store
+            .commit_room_mutation(
+                &self.room.room_jid,
+                &fence,
+                intent,
+                super::super::RoomMutationEffects::none(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(super::super::durable::RoomCommitError::StaleOccupancyGeneration) => {
+                crate::metrics::record_muc_projection_commit(kind.as_str(), "stale_generation");
+                return Err(RecoveredJoinRefusal::StaleGeneration);
+            }
+            Err(error) => {
+                let error = self.classify_durable_persist_error(error);
+                crate::metrics::record_muc_projection_commit(
+                    kind.as_str(),
+                    projection_commit_failure_label(&error),
+                );
+                return Err(RecoveredJoinRefusal::Persist(error));
+            }
+        };
+        let commit = mint_room_mutation_commit(fence, outcome.coordinates, commit_kind);
+        self.durable_coordinates = Some(outcome.coordinates);
+        match authorize_ephemeral_projection(commit) {
+            Ok(authorization) => {
+                crate::metrics::record_muc_projection_commit(kind.as_str(), "ok");
+                Ok(ProjectionGate::Authorized(authorization))
+            }
+            Err(_) => {
+                crate::metrics::record_muc_projection_commit(kind.as_str(), "not_projection");
+                Err(RecoveredJoinRefusal::Persist(
+                    DurablePersistError::PersistFailed,
+                ))
+            }
         }
     }
 

@@ -1308,24 +1308,52 @@ pub struct RecoveredOccupant {
     pub session: OccupancySessionGeneration,
 }
 
+/// What seating a room's recovered occupants did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveredSeating {
+    /// Occupants seated by this call.
+    pub seated: usize,
+    /// Rows that were not seated and were removed from the record: the
+    /// connection generation is no longer the one the occupancy authority
+    /// holds for the full JID, the nick is held by another account, or the
+    /// row belongs to an earlier room of the same address.
+    pub discarded: usize,
+    /// Whether the record matches the roster after this call.
+    pub recorded: bool,
+}
+
 /// Seat occupants a node recovered from durable occupancy after it took the
 /// room's claim.
 ///
-/// The predecessor's actor held these occupants in memory only. Seating
-/// restores membership, nick, role and affiliation, so the occupants' later
-/// stanzas are accepted without a rejoin. Nothing is broadcast and no
-/// durable projection is committed: the rows are already the record of
-/// these joins. Voice requests, pending mediated invitations, call and Muji
-/// session state and rate-limit state are not restored.
+/// The predecessor's actor held these occupants in memory only. Each one is
+/// seated the way a join seats it: a join projection commits under the
+/// room's claim, which also proves that the row's connection generation is
+/// still the one the occupancy authority holds for the full JID, and the
+/// occupant is added with its affiliation from the room's restored
+/// affiliation list, the remote-occupant flags a join derives from
+/// `local_domain`, a new occupancy watermark and a new occupancy order.
+/// The recorded role is kept when the recorded affiliation is still the
+/// occupant's affiliation; otherwise the role follows the affiliation.
+/// Nothing is broadcast.
 ///
-/// An occupant is skipped when its full JID is already seated or when its
-/// nick is held by another bare JID. The reply is how many were seated.
+/// What a join establishes outside durable state is not restored: an
+/// affiliation the channel resolver granted, voice requests, pending
+/// mediated invitations, call and Muji session state and rate-limit state.
+///
+/// A row is not seated when its generation is no longer current, when its
+/// nick is held by another account, or when this actor created the room
+/// (the row then belongs to an earlier room of the same address). The
+/// report that ends this call removes such rows from the record and adds
+/// occupants the record lacks. A commit that fails for another reason ends
+/// the call with an error and removes nothing.
 pub struct SeedRecoveredOccupants {
     pub occupants: Vec<RecoveredOccupant>,
+    /// The server's own domain, as a join handler passes it.
+    pub local_domain: String,
 }
 
 impl kameo::message::Message<SeedRecoveredOccupants> for RoomActor {
-    type Reply = Result<usize, RoomActorError>;
+    type Reply = Result<RecoveredSeating, RoomActorError>;
 
     async fn handle(
         &mut self,
@@ -1333,44 +1361,104 @@ impl kameo::message::Message<SeedRecoveredOccupants> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.reject_sealed_effects().await?;
+        self.ensure_restored_before_join().await?;
         self.gate_join_ownership().await?;
-        let mut seated = 0;
+        let created_here = self.created_by_this_actor();
+        self.adopt_recorded_occupancy(msg.occupants.iter().map(|recovered| {
+            crate::muc::durable::RoomOccupancySeat {
+                occupant: recovered.real_jid.clone(),
+                nick: recovered.nick.clone(),
+                role: recovered.role,
+                affiliation: recovered.affiliation,
+                session: recovered.session,
+            }
+        }));
+        let mut seating = RecoveredSeating::default();
         for recovered in msg.occupants {
-            if self
+            let already_seated = self
                 .room
                 .find_nick_by_real_jid(&recovered.real_jid)
                 .is_some()
-            {
+                && self.room.session_generation(&recovered.real_jid) == Some(recovered.session);
+            if already_seated {
                 continue;
             }
             let held_by_another = self
                 .room
                 .occupant(&recovered.nick)
                 .is_some_and(|holder| holder.real_jid.to_bare() != recovered.real_jid.to_bare());
-            if held_by_another {
+            let seated_under_another_nick = self
+                .room
+                .find_nick_by_real_jid(&recovered.real_jid)
+                .is_some();
+            let Some(durable_nick) =
+                crate::muc::durable::MucOccupantNick::try_new(recovered.nick.clone())
+            else {
+                seating.discarded += 1;
+                continue;
+            };
+            if created_here || held_by_another || seated_under_another_nick {
+                seating.discarded += 1;
                 continue;
             }
-            let occupant_count_before = self.room.occupant_count();
-            let joined_at = OccupancyWatermark::from_revision(self.occupancy_revision);
-            self.room.add_occupant_with_affiliation(
-                recovered.real_jid.clone(),
-                recovered.nick.clone(),
-                None,
-                joined_at,
-                recovered.session,
-            );
-            if let Some(occupant) = self.room.occupants.get_mut(&recovered.nick) {
-                occupant.role = recovered.role;
-                occupant.affiliation = recovered.affiliation;
-            }
-            self.room
-                .set_session_generation(&recovered.real_jid, recovered.session);
-            self.note_session_joined(&recovered.real_jid);
-            crate::metrics::adjust_muc_occupant_total(
-                self.room.occupant_count() as i64 - occupant_count_before as i64,
-            );
-            seated += 1;
+            let join_order = next_occupancy_order();
+            let gate = match self
+                .commit_recovered_join(RoomProjection::OccupancyJoin {
+                    occupant: recovered.real_jid.clone(),
+                    nick: durable_nick,
+                    session: recovered.session,
+                })
+                .await
+            {
+                Ok(gate) => gate,
+                Err(super::RecoveredJoinRefusal::StaleGeneration) => {
+                    seating.discarded += 1;
+                    continue;
+                }
+                Err(super::RecoveredJoinRefusal::Persist(error)) => {
+                    return Err(Self::map_projection_commit_error(error));
+                }
+            };
+            let local_domain = msg.local_domain.as_str();
+            self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+                let occupant_count_before = actor.room.occupant_count();
+                let nick_was_held = actor.room.occupant(&recovered.nick).is_some();
+                let joined_at =
+                    OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
+                let affiliation = actor
+                    .room
+                    .add_occupant_with_affiliation(
+                        recovered.real_jid.clone(),
+                        recovered.nick.clone(),
+                        Some(local_domain),
+                        joined_at,
+                        recovered.session,
+                    )
+                    .affiliation;
+                // A second session of a seated nick shares that occupant's
+                // role. A first session keeps its recorded role while the
+                // affiliation it was recorded with still holds.
+                if !nick_was_held && affiliation == recovered.affiliation {
+                    if let Some(occupant) = actor.room.occupants.get_mut(&recovered.nick) {
+                        occupant.role = recovered.role;
+                    }
+                }
+                actor
+                    .room
+                    .set_session_order(&recovered.real_jid, join_order);
+                actor
+                    .room
+                    .set_session_generation(&recovered.real_jid, recovered.session);
+                actor.note_session_joined(&recovered.real_jid);
+                actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
+                crate::metrics::adjust_muc_occupant_total(
+                    actor.room.occupant_count() as i64 - occupant_count_before as i64,
+                );
+            })
+            .map_err(Self::map_projection_refusal)?;
+            seating.seated += 1;
         }
-        Ok(seated)
+        seating.recorded = self.report_occupancy().await;
+        Ok(seating)
     }
 }

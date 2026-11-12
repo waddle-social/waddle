@@ -68,6 +68,24 @@ Where the code differs from the decisions below:
   the mailbox answers `JoinPresence`, `OccupantPresence` and `MujiJingleIq`
   on the ordered relay with the unsupported-envelope refusal, before the
   envelope's sequence is reserved.
+- **Seating at claim takeover.** A recovered occupant is seated through a
+  join projection (`SeedRecoveredOccupants`), not written into the roster
+  directly. The projection commits under the room claim and proves, in the
+  room store's transaction, that the row's connection generation is still
+  the one `xmpp_occupancy_authority` holds for the full JID. A generation
+  is an opaque identifier, so "older" means "not the current one". The
+  occupant gets its affiliation from the room's restored affiliation list,
+  the remote-occupant flags a join derives from the server's domain, a new
+  watermark and a new occupancy order; its recorded role is kept while the
+  recorded affiliation still holds. A row that is not seated (stale
+  generation, nick held by another account, or a room this actor created)
+  is deleted by the report that ends the same actor call, in one ingress
+  transaction under the room claim; that is the seeding write, since the
+  projection itself commits on the room store's connection. A projection
+  that fails for another reason ends the seeding without deleting
+  anything, and the room's lanes stay unadopted until a later pass. An
+  affiliation the channel resolver granted is not durable and is not
+  restored.
 - **Source binding.** A request records the authenticated principal
   reference and no stream-management occurrence.
 - **Unconsumed decisions.** The mailbox poller counts decided requests no

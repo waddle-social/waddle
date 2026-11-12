@@ -1019,3 +1019,45 @@ async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
         0
     );
 }
+
+/// A row whose connection generation the occupancy authority no longer
+/// holds for the full JID is not seated by the owner's successor, and the
+/// successor removes it from the table when it seats the room.
+#[tokio::test]
+async fn row_of_a_superseded_connection_is_not_seated_and_is_removed() {
+    let mut scenario = Scenario::start().await;
+    let mut first = scenario.origin_client("rebound").await;
+    join_fanout_room(&mut first, &scenario.room, "rebound").await;
+    assert_eq!(scalar(&scenario.db, OCCUPANTS).await, 1);
+    // A later connection binds the same resource and does not join. The
+    // row keeps the earlier connection's generation.
+    drop(first);
+    let mut second = scenario.origin_client("rebound").await;
+    wait_for_scalar(
+        &scenario.db,
+        "SELECT count(*) FROM ingress_room_occupants o JOIN xmpp_occupancy_authority a \
+         ON a.full_jid = o.occupant_jid \
+         WHERE o.occupant_jid NOT LIKE 'admin@%' AND a.generation <> o.occupancy_generation",
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    scenario.replace_owner().await;
+
+    second
+        .send(&String::from(&fanout_message(
+            &scenario.room,
+            "not-rejoined",
+            Some("without a join"),
+        )))
+        .await
+        .expect("send without a join");
+    let refused = drain(&mut second, Duration::from_secs(30)).await;
+    assert!(
+        refused
+            .iter()
+            .any(|frame| frame.attr("id") == Some("not-rejoined") && is_error(frame)),
+        "the later connection is not an occupant: {refused:?}"
+    );
+    wait_for_scalar(&scenario.db, OCCUPANTS, 0, Duration::from_secs(20)).await;
+}

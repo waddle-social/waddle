@@ -366,12 +366,17 @@ async fn record_attempt(
 /// `target` must hold.
 ///
 /// A node that took a room's claim has an actor without the occupants its
-/// predecessor held in memory. The rows restore membership, nick, role and
-/// affiliation. Voice requests, pending mediated invitations, call and Muji
-/// session state and rate-limit state are not stored and stay empty, so work
-/// that depends on them is answered as for unknown state. A row that cannot
-/// be parsed is not seated; its occupant's requests are refused until it
-/// joins again.
+/// predecessor held in memory. Each row is seated through a join projection
+/// (`SeedRecoveredOccupants`), which restores membership and nick, takes the
+/// affiliation from the room's restored affiliation list and keeps the
+/// recorded role while that affiliation still holds. A row whose connection
+/// generation is no longer current is not seated, and the actor removes it
+/// from the table when it reports its roster at the end of the same call.
+/// Voice requests, pending mediated invitations, call and Muji session
+/// state and rate-limit state are not stored and stay empty, so work that
+/// depends on them is answered as for unknown state. A row that cannot be
+/// parsed is not seated; its occupant's requests are refused until it joins
+/// again.
 async fn seat_room_occupancy(
     services: &Arc<OrderedRelayDeliveryServices>,
     authority: &Arc<crate::ingress::IngressAuthority>,
@@ -441,12 +446,23 @@ async fn seat_room_occupancy(
             })
             .collect();
         match actor
-            .ask(SeedRecoveredOccupants { occupants })
+            .ask(SeedRecoveredOccupants {
+                occupants,
+                local_domain: state.deps.auth_state.xmpp_domain.clone(),
+            })
             .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
             .await
         {
-            Ok(seated) => {
-                tracing::info!(room = %room, seated, "seated recovered room occupants");
+            Ok(seating) => {
+                tracing::info!(
+                    room = %room,
+                    seated = seating.seated,
+                    discarded = seating.discarded,
+                    "seated recovered room occupants"
+                );
+                if !seating.recorded {
+                    return false;
+                }
             }
             Err(error) => {
                 tracing::warn!(%error, room = %room, "recovered room occupants not seated");

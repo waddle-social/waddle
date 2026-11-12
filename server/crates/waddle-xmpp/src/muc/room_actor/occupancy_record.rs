@@ -98,6 +98,19 @@ impl RoomActor {
         }
     }
 
+    /// Start from what the record holds, as its loader read it. The next
+    /// report removes rows the actor did not seat and adds occupants the
+    /// record lacks.
+    pub(in crate::muc::room_actor) fn adopt_recorded_occupancy(
+        &mut self,
+        recorded: impl IntoIterator<Item = RoomOccupancySeat>,
+    ) {
+        self.recorded_occupancy = recorded
+            .into_iter()
+            .map(|seat| (seat.occupant.clone(), seat))
+            .collect();
+    }
+
     /// Remove every seat this actor recorded, for a room that is about to
     /// be destroyed. A failed write leaves the rows; the room's next owner
     /// does not seat rows of a room it created.
