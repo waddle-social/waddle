@@ -20,10 +20,10 @@ use super::super::replay::load_terminal_recovery_blocklist;
 use super::super::stream_management::{selected_store, DurableSmOwner, OwnerRelease};
 use super::{
     cleanup_invalidated_detached_session, debug, drain_outbound_into_replay, finish_detached_route,
-    mpsc, redrive_terminal_pending_rows_to_live_resource, retire_ingress_stream, sm_show_from_name,
-    unregister_remote_user_resource_if_owner, warn, ConnectionPhase, ConnectionShutdownOutcome,
-    DetachedRoute, FullJid, OutboundStanza, PendingRowDrainPolicy, ReplayDrainSink, WebSocketState,
-    WsConnState,
+    mpsc, redrive_terminal_pending_rows_to_live_resource, retire_binding, retire_ingress_stream,
+    retire_remote_binding, sm_show_from_name, warn, withdraw_binding, ConnectionPhase,
+    ConnectionShutdownOutcome, DetachedRoute, FullJid, OutboundStanza, PendingRowDrainPolicy,
+    ReplayDrainSink, WebSocketState, WsConnState,
 };
 use crate::sm_authority::{DurableSmError, DurableSmStore, LifecycleError, LifecycleRejection};
 
@@ -174,13 +174,7 @@ pub(super) async fn settle_owned_session(
     let tail_admitted = owner.admit_unwritten_tail(&conn.sm_state).await;
     match owner.detach(&conn.sm_state, resource).await {
         OwnerRelease::Committed => {
-            if state
-                .deps
-                .protocol
-                .connection_registry
-                .unregister_if_owner(&jid, &owner_token)
-                .is_none()
-            {
+            if withdraw_binding(state, &jid, &owner_token).is_none() {
                 // A newer bind of the resource holds the route. It replaces
                 // the resource's sessions, this one included.
                 debug!(jid = %jid, %stream_id, "detached durable SM session lost its route to a newer bind");
@@ -277,20 +271,9 @@ async fn leave_session_to_its_owner(
     conn: &mut WsConnState,
 ) -> ConnectionShutdownOutcome {
     if let (Some(jid), Some(owner)) = (conn.phase.cleanup_jid().cloned(), conn.registry_owner) {
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister_if_owner(&jid, &owner)
-            .is_some()
-        {
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                &jid,
-                Some(owner),
-            )
-            .await;
-            unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
+        if withdraw_binding(state, &jid, &owner).is_some() {
+            retire_binding(state, &jid, &owner).await;
+            retire_remote_binding(state, &jid, &owner).await;
         }
     }
     ConnectionShutdownOutcome::NotPersisted

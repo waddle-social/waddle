@@ -1,4 +1,5 @@
 use super::frame::ResponseBatch;
+use super::registration::{retire_binding, retire_remote_binding, withdraw_binding};
 use super::replay::{
     drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
     ReplayDrainSink, TerminalDrainContext,
@@ -18,8 +19,6 @@ use crate::clustering::ordered_relay::MucProxyOrigin;
 use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::MucProxyRouteDecision;
-#[cfg(feature = "clustering")]
-use crate::clustering::route_bridge::RemoteResourceUnregisterOutcome;
 #[cfg(feature = "clustering")]
 use crate::clustering::ClusteringHandles;
 use crate::pending_delivery::FlushOutcome;
@@ -91,34 +90,6 @@ where
         return outcome;
     }
     unreachable!("force-detach busy retry loop always returns")
-}
-
-#[cfg(feature = "clustering")]
-async fn unregister_remote_user_resource_if_owner(
-    state: &WebSocketState,
-    jid: &FullJid,
-    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) -> RemoteResourceUnregisterOutcome {
-    if let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    {
-        return bridge
-            .unregister_remote_user_resource_if_owner(jid, owner)
-            .await;
-    }
-    RemoteResourceUnregisterOutcome::NotRegistered
-}
-
-#[cfg(not(feature = "clustering"))]
-async fn unregister_remote_user_resource_if_owner(
-    _state: &WebSocketState,
-    _jid: &FullJid,
-    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
-) -> () {
 }
 
 fn muji_reflection_rank(muji: &Muji) -> u8 {
@@ -1148,13 +1119,7 @@ async fn cleanup_connection_shutdown_inner(
                             cleanup_invalidated_detached_session(state, dead, None).await;
                         }
                     }
-                    if state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .unregister_if_owner(&jid, owner)
-                        .is_none()
-                    {
+                    if withdraw_binding(state, &jid, owner).is_none() {
                         // Ownership moved: the same client fresh-bound on a
                         // newer connection before this cleanup stored its
                         // detached session, so the newer bind's
@@ -1248,12 +1213,7 @@ async fn cleanup_connection_shutdown_inner(
                     // this receiver is never drained or promoted again, so
                     // every stanza routing could still enqueue during the
                     // drain would be silently dropped on task exit.
-                    let detach_fail_removed = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .unregister_if_owner(&jid, owner)
-                        .is_some();
+                    let detach_fail_removed = withdraw_binding(state, &jid, owner).is_some();
                     // The failed fenced store has already inserted the
                     // detached session into the in-memory registry (the
                     // durable snapshot rolled back), so a fence check that
@@ -1375,13 +1335,8 @@ async fn cleanup_connection_shutdown_inner(
                         // resource leaks in the actor tree forever. Owner-gated
                         // (the same token that owned the DashMap slot) so a
                         // superseding newcomer's actor-tree entry is not clobbered.
-                        crate::server::dual_registration::mirror_unregister(
-                            &state.deps.protocol.user_registry,
-                            &jid,
-                            Some(*owner),
-                        )
-                        .await;
-                        unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+                        retire_binding(state, &jid, owner).await;
+                        retire_remote_binding(state, &jid, owner).await;
                     }
                     // PR #438 review (Copilot): when SM detachment
                     // fails we fall back to a full unregister, so the
@@ -1415,14 +1370,10 @@ async fn cleanup_connection_shutdown_inner(
         }
     }
 
-    let removed = conn.registry_owner.as_ref().and_then(|owner| {
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister_if_owner(&jid, owner)
-            .map(|entry| (entry, *owner))
-    });
+    let removed = conn
+        .registry_owner
+        .as_ref()
+        .and_then(|owner| withdraw_binding(state, &jid, owner).map(|entry| (entry, *owner)));
     if let Some((removed_entry, owner)) = removed {
         // Capture presence availability from the entry we just owned and
         // removed — NOT from a fresh registry lookup, which after the
@@ -1456,13 +1407,8 @@ async fn cleanup_connection_shutdown_inner(
         // the dominant disconnect teardown path. Owner-gated (the same token
         // that owned the DashMap entry) so a superseding newcomer that
         // already replaced this FullJid's actor-tree entry is not clobbered.
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            &jid,
-            Some(owner),
-        )
-        .await;
-        unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
+        retire_binding(state, &jid, &owner).await;
+        retire_remote_binding(state, &jid, &owner).await;
     } else {
         cleanup_terminal_muc_presence(state, &jid, conn).await;
         debug!(jid = %jid, "Skipped registry cleanup for non-owned registry entry");
@@ -1519,18 +1465,12 @@ async fn finish_detached_route(
     // `mirror_register`, so pruning here does not affect resume.
     // Owner-gated so a superseding newcomer is untouched.
     if !force_detach {
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            &jid,
-            Some(*owner),
-        )
-        .await;
+        retire_binding(state, &jid, owner).await;
     }
     #[cfg(feature = "clustering")]
-    let remote_unregister_outcome =
-        unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+    let remote_unregister_outcome = retire_remote_binding(state, &jid, owner).await;
     #[cfg(not(feature = "clustering"))]
-    unregister_remote_user_resource_if_owner(state, &jid, owner).await;
+    retire_remote_binding(state, &jid, owner).await;
     outbound_rx.close();
     // Second detach drain: anything that arrived
     // between the first drain and the registry
@@ -1915,12 +1855,7 @@ async fn promote_terminal_recovery_inner(
     // The owner token keeps a same-FullJID replacement untouched.
     let terminal_route_removed = conn.registry_owner.as_ref().and_then(|owner| {
         conn.sm_recovery_required.then(|| {
-            state
-                .deps
-                .protocol
-                .connection_registry
-                .unregister_if_owner(jid, owner)
-                .map(|entry| (entry.is_presence_available(), *owner))
+            withdraw_binding(state, jid, owner).map(|entry| (entry.is_presence_available(), *owner))
         })?
     });
     // Settle released rows BEFORE any incremental promotion can run: the
@@ -2691,11 +2626,7 @@ async fn refuse_detach_without_principal(
     let terminal_removed = match terminal_route_removal {
         TerminalRouteRemoval::NotAttempted => conn.registry_owner.as_ref().and_then(|owner| {
             conn.sm_recovery_required.then(|| {
-                state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .unregister_if_owner(jid, owner)
+                withdraw_binding(state, jid, owner)
                     .map(|entry| (entry.is_presence_available(), *owner))
             })?
         }),
@@ -2827,7 +2758,7 @@ async fn refuse_detach_without_principal(
         .await;
         if !replacement_took_over {
             state.deps.protocol.caps_resolver.drop_resource(jid);
-            unregister_remote_user_resource_if_owner(state, jid, &owner).await;
+            retire_remote_binding(state, jid, &owner).await;
         } else {
             debug!(
                 jid = %jid,
@@ -2838,12 +2769,7 @@ async fn refuse_detach_without_principal(
         // not mean that the replacement has advertised presence. The helper
         // performs the required presence-aware suppression check.
         broadcast_unavailable_if_no_replacement(state, jid, was_presence_available).await;
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            jid,
-            Some(owner),
-        )
-        .await;
+        retire_binding(state, jid, &owner).await;
         outbound_rx.close();
         return ConnectionShutdownOutcome::NotPersisted;
     }
@@ -3937,14 +3863,8 @@ pub(super) async fn cleanup_invalidated_detached_session(
                 &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
             );
         if let Some(entry) = removed_entry {
-            crate::server::dual_registration::mirror_unregister(
-                &state.deps.protocol.user_registry,
-                &detached.jid,
-                Some(entry.binding_id()),
-            )
-            .await;
-            unregister_remote_user_resource_if_owner(state, &detached.jid, &entry.binding_id())
-                .await;
+            retire_binding(state, &detached.jid, &entry.binding_id()).await;
+            retire_remote_binding(state, &detached.jid, &entry.binding_id()).await;
         }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an

@@ -259,6 +259,17 @@ pub(super) struct RegistryPublication {
     pub(super) resumed: bool,
 }
 
+impl RegistryPublication {
+    /// The publication of an entry the registry already holds under
+    /// `owner`, for retiring it.
+    pub(super) fn of_owner(owner: waddle_xmpp::registry::LocalConnectionBindingId) -> Self {
+        Self {
+            owner,
+            resumed: false,
+        }
+    }
+}
+
 /// Why the registry publisher refused a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(super) enum RegistryRefusal {
@@ -283,6 +294,17 @@ pub(super) enum RemoteBindingRetirement {
     NoRemoteOwner,
     #[cfg(feature = "clustering")]
     Relay(crate::clustering::route_bridge::RemoteResourceUnregisterOutcome),
+}
+
+#[cfg(feature = "clustering")]
+impl RemoteBindingRetirement {
+    /// Whether a detached session's force-detach may be acknowledged after
+    /// this retirement.
+    pub(super) fn permits_detached_force_ack(self) -> bool {
+        match self {
+            Self::Relay(outcome) => outcome.permits_detached_force_ack(),
+        }
+    }
 }
 
 /// Publishes bindings into the connection registry, mirrors them into the
@@ -526,6 +548,55 @@ async fn rollback_registered_connection(
         .retire_remote(jid, published, recovery_owned_retirement())
         .await;
     conn.registry_owner = None;
+}
+
+/// Take the binding the registry holds under `owner` out of the routing
+/// index. `None` means a later binding of the full JID holds the route.
+pub(super) fn withdraw_binding(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+) -> Option<waddle_xmpp::registry::ConnectionEntry> {
+    binding_publisher(state).withdraw(jid, &RegistryPublication::of_owner(*owner))
+}
+
+/// Retire the binding the registry held under `owner` with the account's
+/// owner on this node.
+pub(super) async fn retire_binding(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+) {
+    report_retirement(
+        jid,
+        binding_publisher(state)
+            .retire(
+                jid,
+                &RegistryPublication::of_owner(*owner),
+                recovery_owned_retirement(),
+            )
+            .await,
+    );
+}
+
+/// Retire the binding the registry held under `owner` at the remote node
+/// that owns its account.
+pub(super) async fn retire_remote_binding(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+) -> RemoteBindingRetirement {
+    match binding_publisher(state)
+        .retire_remote(
+            jid,
+            &RegistryPublication::of_owner(*owner),
+            recovery_owned_retirement(),
+        )
+        .await
+    {
+        Ok(retirement) => retirement,
+        Err(never) => match never {},
+    }
 }
 
 /// Log a retirement the account's owner did not complete. The binding is
