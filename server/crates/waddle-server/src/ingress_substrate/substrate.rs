@@ -2483,17 +2483,28 @@ pub(in crate::ingress_substrate) async fn expired_candidates(
 /// A mailbox entry that is not yet consumed retains its message: the origin
 /// may still need the owner's decision, and the owner's poller still reads
 /// the message through the entry. Terminal entries do not retain it; they
-/// leave with the message through the cascade. A pending-delivery row that an
-/// archive dispatch points at retains its message until the row is gone.
+/// leave with the message through the cascade. A direct request that carries
+/// a copy of the message refers to it and has an entry of its own: while that
+/// entry is not consumed the target's worker still proves the copy against
+/// the message and the origin still reads the decision, so it retains the
+/// message as well; the request and its entry leave with the message once
+/// the entry is consumed. A pending-delivery row that an archive dispatch
+/// points at retains its message until the row is gone.
 pub(in crate::ingress_substrate) fn retained_child_unions(
     alias: &str,
     has_mailbox: bool,
+    has_direct: bool,
     has_pending: bool,
 ) -> String {
     let mut unions = String::new();
     if has_mailbox {
         unions.push_str(&format!(
             " UNION ALL SELECT 1 FROM ingress_mailbox_entries entry WHERE entry.message_key = {alias}.message_key AND entry.disposition < 3"
+        ));
+    }
+    if has_mailbox && has_direct {
+        unions.push_str(&format!(
+            " UNION ALL SELECT 1 FROM ingress_direct_requests request JOIN ingress_mailbox_entries entry ON entry.direct_key = request.request_key WHERE request.message_key = {alias}.message_key AND entry.disposition < 3"
         ));
     }
     if has_pending {
@@ -2535,6 +2546,18 @@ pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
     } else {
         false
     };
+    // Direct requests exist from a later migration than the mailbox.
+    let has_direct = if has_mailbox {
+        let mut rows = tx
+            .query(
+                "SELECT 1 WHERE to_regclass('ingress_direct_requests') IS NOT NULL",
+                (),
+            )
+            .await?;
+        rows.next().await?.is_some()
+    } else {
+        false
+    };
     if !has_pending && !has_mailbox {
         return Ok(base.to_owned());
     }
@@ -2546,7 +2569,7 @@ pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
             &reference,
             &format!(
                 "{reference}{}",
-                retained_child_unions(alias, has_mailbox, has_pending)
+                retained_child_unions(alias, has_mailbox, has_direct, has_pending)
             ),
         );
     }

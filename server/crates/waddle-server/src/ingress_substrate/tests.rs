@@ -990,8 +990,9 @@ fn gc_monitoring_predicate_matches_collector() {
         predicate(GC_CANDIDATES_SQLITE),
         "both collector dialects use the same pair predicate"
     );
-    // The deployed database holds both the mailbox and pending delivery, so
-    // the monitored predicate carries both retained-child subqueries.
+    // The deployed database holds the mailbox, direct requests and pending
+    // delivery, so the monitored predicate carries every retained-child
+    // subquery.
     let mut monitored = postgres;
     for alias in ["m", "child"] {
         let reference =
@@ -1000,7 +1001,7 @@ fn gc_monitoring_predicate_matches_collector() {
             &reference,
             &format!(
                 "{reference}{}",
-                super::substrate::retained_child_unions(alias, true, true)
+                super::substrate::retained_child_unions(alias, true, true, true)
             ),
         );
     }

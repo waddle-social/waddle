@@ -91,7 +91,11 @@ with `DefinerApiUnsupported` there.
   is what a full relay channel reports today.
 - **Retention.** As for room requests: collected with its entry once the
   entry is `Consumed` and `settled_at` is an hour old. A request that
-  refers to a canonical message also leaves with that message.
+  refers to a canonical message also leaves with that message, and keeps
+  the message from collection while its entry is not consumed
+  (`retained_child_unions` in `S/ingress_substrate/substrate.rs`): the
+  target's worker proves the copy against the message and the origin
+  reads the decision through the entry.
 - **Dead letters.** The entry stays `Pending` at its lane head. The origin's
   wait has already ended as uncertain.
 
