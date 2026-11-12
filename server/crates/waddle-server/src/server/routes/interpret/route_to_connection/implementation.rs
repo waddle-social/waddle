@@ -1600,6 +1600,18 @@ pub(crate) async fn deliver_registered_remote_resource_at(
         return None;
     }
     #[cfg(all(test, feature = "clustering"))]
+    let _ = super::CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS.try_with(|exported| {
+        exported
+            .lock()
+            .expect("controlled registered-remote obligations")
+            .push(
+                deps.ingress_append_context
+                    .as_ref()
+                    .filter(|context| context.authority.permits_remote_obligation())
+                    .map(|context| (context.message_key, context.receipt.clone())),
+            );
+    });
+    #[cfg(all(test, feature = "clustering"))]
     if let Ok(outcome) = CONTROLLED_REGISTERED_REMOTE_DELIVERY.try_with(|(outcome, targets)| {
         targets
             .lock()

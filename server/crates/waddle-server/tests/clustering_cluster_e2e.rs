@@ -2756,7 +2756,7 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     .expect("warm broadcast terminalizes");
 
     // A healthy same-origin retry must use completed canonical progress rather
-    // than sending the legacy remote wire a second time.
+    // than sending the remote occupant's copy a second time.
     send_partial_fanout_with_origin(&mut sender, &room, "m1", baseline).await;
     for (client, label) in [(&mut local, "local"), (&mut remote, "remote")] {
         let duplicate = client

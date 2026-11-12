@@ -36,6 +36,26 @@ tokio::task_local! {
     );
 }
 
+/// The canonical obligation each controlled registered-remote delivery would
+/// export to the hosting node: the message and receipt of the copy, or `None`
+/// for a copy sent without one.
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) type ControlledRemoteObligations = std::sync::Arc<
+    std::sync::Mutex<
+        Vec<
+            Option<(
+                waddle_xmpp::ingress::MessageKey,
+                crate::ingress::EffectReceiptKey,
+            )>,
+        >,
+    >,
+>;
+
+#[cfg(all(test, feature = "clustering"))]
+tokio::task_local! {
+    pub(crate) static CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS: ControlledRemoteObligations;
+}
+
 #[cfg(test)]
 #[path = "routing_plan_failure_tests.rs"]
 mod routing_plan_failure_tests;

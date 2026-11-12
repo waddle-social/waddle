@@ -262,7 +262,8 @@ pub(crate) struct CrossNodeReceiver {
     receiver: tokio::sync::Mutex<OrderedRelayReceiverState>,
     origin_state: Arc<crate::server::routes::websocket::WebSocketState>,
     delivered_sequences: tokio::sync::Mutex<Vec<u64>>,
-    expects_keyed_obligation: bool,
+    /// The canonical obligation of every copy offered to this node, in order.
+    obligations: tokio::sync::Mutex<Vec<crate::ingress::identity::IngressAppendObligationRef>>,
 }
 
 #[cfg(feature = "clustering")]
@@ -294,7 +295,6 @@ impl CrossNodeReceiver {
         )
         .await;
         let store = Arc::new(InProcessClaimStore::new());
-        let expects_keyed_obligation = room_origin.is_none();
         let origin = match room_origin {
             Some(room) => Entity::new(EntityType::RoomActor, room.to_string()),
             None => Entity::new(
@@ -358,7 +358,7 @@ impl CrossNodeReceiver {
             receiver: Default::default(),
             origin_state,
             delivered_sequences: Default::default(),
-            expects_keyed_obligation,
+            obligations: Default::default(),
         }
     }
 
@@ -366,10 +366,12 @@ impl CrossNodeReceiver {
         let OrderedRelayPayload::Message { ingress_append, .. } = &envelope.payload else {
             panic!("message relay payload");
         };
-        assert_eq!(
-            ingress_append.is_some(),
-            self.expects_keyed_obligation,
-            "sealed legacy wire must not export manifest acceptance authority"
+        // The hosting node completes a copy under the copy's own key, so a
+        // copy an ingress transaction owns never travels without it.
+        self.obligations.lock().await.push(
+            ingress_append
+                .clone()
+                .expect("an ingress-owned copy carries its canonical obligation on the wire"),
         );
         let envelope: RemoteStanzaEnvelope =
             serde_json::from_slice(&serde_json::to_vec(&envelope).expect("encode wire envelope"))
@@ -426,9 +428,88 @@ tokio::task_local! {
     pub(crate) static CROSS_NODE_RECEIVER: Arc<CrossNodeReceiver>;
 }
 
+/// Stands in for the node that hosts a registered remote resource: it answers
+/// every offer of a copy with one outcome and records what was offered and
+/// the canonical obligation the offer carried.
 #[cfg(feature = "clustering")]
-#[tokio::test]
-async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keyed_custody() {
+#[derive(Default)]
+struct HostingNode {
+    offers: Arc<std::sync::Mutex<Vec<(jid::FullJid, Stanza)>>>,
+    obligations: crate::server::routes::interpret::ControlledRemoteObligations,
+}
+
+#[cfg(feature = "clustering")]
+impl HostingNode {
+    async fn answering<T>(
+        &self,
+        outcome: FullJidDeliveryOutcome,
+        execution: impl std::future::Future<Output = T>,
+    ) -> T {
+        use crate::server::routes::interpret::{
+            CONTROLLED_REGISTERED_REMOTE_DELIVERY, CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS,
+        };
+        CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS
+            .scope(
+                Arc::clone(&self.obligations),
+                CONTROLLED_REGISTERED_REMOTE_DELIVERY
+                    .scope((outcome, Arc::clone(&self.offers)), execution),
+            )
+            .await
+    }
+
+    /// The target and the message of every offer, in order.
+    fn offers(&self) -> Vec<(jid::FullJid, xmpp_parsers::message::Message)> {
+        self.offers
+            .lock()
+            .expect("offers")
+            .iter()
+            .map(|(target, stanza)| match stanza {
+                Stanza::Message(message) => (target.clone(), message.clone()),
+                _ => panic!("a room copy is a message"),
+            })
+            .collect()
+    }
+
+    /// The canonical obligation each offer carried, in order.
+    fn obligations(
+        &self,
+    ) -> Vec<
+        Option<(
+            waddle_xmpp::ingress::MessageKey,
+            crate::ingress::EffectReceiptKey,
+        )>,
+    > {
+        self.obligations.lock().expect("obligations").clone()
+    }
+}
+
+/// The resources recorded as having received their copy of `receipt`.
+#[cfg(feature = "clustering")]
+async fn recorded_copies(
+    fixture: &IngressFixture,
+    key: waddle_xmpp::ingress::MessageKey,
+    receipt: &crate::ingress::EffectReceiptKey,
+) -> Vec<jid::FullJid> {
+    let mut tx = fixture.uow.begin().await.expect("read delivery progress");
+    let recorded = crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, receipt)
+        .await
+        .expect("delivery progress");
+    tx.commit().await.expect("read commit");
+    recorded
+}
+
+/// A copy of a sealed room message for a resource whose session is detached
+/// on another node. The owner sends it over the room's ordered channel with
+/// the copy's canonical obligation; the hosting node appends it to the
+/// session under that key, and its acknowledgement is the copy's outcome.
+///
+/// With `lose_first_record` the owner's record of the acknowledged copy
+/// fails, so the execution reports the copy's outcome as unknown. The
+/// hosting node's append is recorded under the copy's key, and the owner's
+/// next execution settles the child from that record without another offer.
+#[cfg(feature = "clustering")]
+async fn sealed_copy_for_a_session_detached_on_another_node(lose_first_record: bool) {
+    use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
     use crate::ingress::xep0045_room_manifest_tests::room_submission;
     use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
     use waddle_xmpp::ownership::{Entity, EntityType};
@@ -508,8 +589,9 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
         .await
         .expect("seal room manifest");
     let key = decision.message_key.expect("message key");
+    let receipt = decision.external_receipts[0][0].clone();
     let receiver = Arc::new(
-        CrossNodeReceiver::new_with_origin(&fixture, sm.clone(), &target, Some(room)).await,
+        CrossNodeReceiver::new_with_origin(&fixture, sm.clone(), &target, Some(room.clone())).await,
     );
     let mut deps = Deps::new(
         &receiver.origin_state.deps.protocol.connection_registry,
@@ -518,27 +600,36 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
     deps.web_socket_state = Some(&receiver.origin_state);
     let report = relay_scope(
         Some(&receiver),
-        execute_effects(
-            &fixture.uow,
-            &fixture.db,
-            &decision,
-            &ImmediateSink,
-            &deps,
-            Duration::from_secs(5),
+        FAIL_DELIVERY_PROGRESS_TX.scope(
+            lose_first_record,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
         ),
     )
     .await;
-    assert_eq!(
-        report.outcomes[0].1,
-        ExternalOutcome::Uncertain,
-        "legacy ACK is not a manifest child receipt"
-    );
-    assert_eq!(
-        queue_len(&sm, &target).await,
-        1,
-        "existing remote wire remains delivered"
-    );
+
+    // The wire carried the copy's canonical obligation.
     assert_eq!(*receiver.delivered_sequences.lock().await, vec![1]);
+    {
+        let exported = receiver.obligations.lock().await;
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].message_key, key);
+        assert_eq!(exported[0].receipt, receipt);
+        assert_eq!(
+            exported[0].sender_bare, room,
+            "the obligation is bound to the room whose claim the sender holds"
+        );
+    }
+
+    // The hosting node appended the copy to the detached session under the
+    // copy's key, with the frame receipt and the original receipt time.
+    assert_eq!(queue_len(&sm, &target).await, 1);
     let accepted = sm
         .peek_session(&target.to_string())
         .await
@@ -546,7 +637,7 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
         .expect("receiver session");
     assert!(
         accepted.unacked_stanzas[0].ingress_receipts.is_empty(),
-        "legacy replay carries no manifest frame receipt"
+        "the keyed append is the copy's acceptance; its frame owes no further receipt"
     );
     assert_eq!(
         accepted.unacked_stanzas[0].original_receipt_at,
@@ -555,22 +646,89 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
             .iter()
             .find_map(|progress| progress.received_at)
             .expect("canonical receipt time"),
-        "legacy delivery preserves the original XEP-0203 replay timestamp"
+        "the copy keeps the original XEP-0203 replay timestamp"
     );
+    let append_key = SmIngressAppendKey {
+        message_key: key,
+        kind: SmIngressReceiptKind::from_storage(receipt.kind.to_storage()),
+        semantic_identity_hash: receipt.semantic_identity_hash,
+        resource: target.clone(),
+    };
+    assert!(
+        crate::sm_persistence::ingress_append::get(&fixture.db, &append_key)
+            .await
+            .expect("ledger lookup")
+            .is_some(),
+        "the append is recorded under the child's key"
+    );
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
     assert_eq!(
-        fixture.count("sm_ingress_appends").await,
+        fixture.count("ingress_send_attempts").await,
         0,
-        "receiver has no canonical child key"
+        "a detached append is recorded in the stream-management ledger, not as a socket attempt"
     );
-    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+
+    if lose_first_record {
+        // The acknowledged copy could not be recorded: its outcome is not
+        // known to the owner, and nothing claims it was delivered.
+        assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+        assert!(recorded_copies(&fixture, key, &receipt).await.is_empty());
+    } else {
+        // The hosting node's acknowledgement is the child's outcome.
+        assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+        assert_eq!(
+            recorded_copies(&fixture, key, &receipt).await,
+            vec![target.clone()]
+        );
+    }
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        if lose_first_record { 0 } else { 1 },
+        "the route's receipt follows the record of its last copy"
+    );
     assert!(
         !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
-            .expect("pending manifest")
+            .expect("terminalisation check"),
+        "the message stays open for the obligations this execution did not carry"
     );
+
+    // A repeat by the owner's live retry and by its recovery.
+    let retry = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("retry sealed acceptance");
+    assert_eq!(retry.alias, crate::ingress::AliasOutcomeClass::Existing);
+    let repeated = relay_scope(
+        Some(&receiver),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &retry,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    )
+    .await;
+    if lose_first_record {
+        // The hosting node's append is recorded under the child's key in
+        // the database both nodes share. The owner finds it there, records
+        // the child and offers nothing again.
+        assert_eq!(repeated.outcomes[0].1, ExternalOutcome::Done);
+    } else {
+        assert!(
+            repeated.outcomes.is_empty(),
+            "a settled child is not executed again"
+        );
+    }
+    assert_eq!(
+        *receiver.delivered_sequences.lock().await,
+        vec![1],
+        "the copy is offered to the hosting node once"
+    );
+    assert_eq!(receiver.obligations.lock().await.len(), 1);
     deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let sequences_before_recovery = receiver.delivered_sequences.lock().await.clone();
     let _ = relay_scope(
         Some(&receiver),
         execute_effects(
@@ -585,21 +743,74 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
     .await;
     assert_eq!(
         *receiver.delivered_sequences.lock().await,
-        vec![1],
-        "maintenance cannot resend legacy wire"
+        sequences_before_recovery,
+        "recovery does not send a settled child"
     );
-    assert_eq!(queue_len(&sm, &target).await, 1);
+    assert_eq!(
+        queue_len(&sm, &target).await,
+        1,
+        "the session holds the copy once"
+    );
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert_eq!(
+        recorded_copies(&fixture, key, &receipt).await,
+        vec![target],
+        "the copy is recorded once"
+    );
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     fixture.close().await;
 }
 
+/// Run the exchange on a stack of the size the server gives its workers
+/// (`main.rs`). The receiving node's delivery runs inside the owner's
+/// execution here, which is deeper than either node goes on its own and
+/// deeper than a test thread's default stack.
 #[cfg(feature = "clustering")]
-#[tokio::test]
-async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending() {
+fn run_sealed_copy_for_a_session_detached_on_another_node(lose_first_record: bool) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(sealed_copy_for_a_session_detached_on_another_node(
+                    lose_first_record,
+                ));
+        })
+        .expect("exchange thread")
+        .join()
+        .expect("exchange");
+}
+
+#[cfg(feature = "clustering")]
+#[test]
+fn xep0045_sealed_live_remote_copy_exports_its_obligation_and_the_hosting_ack_settles_it() {
+    run_sealed_copy_for_a_session_detached_on_another_node(false);
+}
+
+#[cfg(feature = "clustering")]
+#[test]
+fn xep0045_sealed_live_remote_copy_with_an_unrecorded_ack_is_settled_from_its_keyed_append() {
+    run_sealed_copy_for_a_session_detached_on_another_node(true);
+}
+
+/// One sealed room message whose only planned copy is for `alice`'s phone, a
+/// resource registered from another node.
+#[cfg(feature = "clustering")]
+struct SealedPeerCopy {
+    submission: crate::ingress::IngressSubmission,
+    target: jid::FullJid,
+    message: xmpp_parsers::message::Message,
+}
+
+#[cfg(feature = "clustering")]
+fn sealed_peer_copy(fixture: &IngressFixture) -> SealedPeerCopy {
     use crate::ingress::xep0045_room_manifest_tests::room_submission;
     use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
-    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
-    let fixture = IngressFixture::sqlite().await;
-    let mut submission = room_submission(&fixture);
+    let mut submission = room_submission(fixture);
     let IngressEffectIntent::RouteMucGroupchat {
         occupants,
         route_identity,
@@ -614,33 +825,54 @@ async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending()
         .expect("captured peer")
         .clone();
     let identity = route_identity.clone();
-    let mut copy = submission
+    let mut message = submission
         .plan
         .room_canonical_message
         .as_ref()
         .expect("canonical")
         .as_ref()
         .clone();
-    copy.to = Some(target.clone().into());
-    let stanza = Stanza::Message(copy);
+    message.to = Some(target.clone().into());
     submission.plan.plan = vec![PlannedEffect::new(Effect::External(
         ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
             route_identity: Some(identity),
             jid: target.clone(),
-            stanza: Box::new(stanza.clone()),
+            stanza: Box::new(Stanza::Message(message.clone())),
             kind: PeerDeliveryKind::PeerStanza,
             call_setup: None,
         }),
     ))];
+    SealedPeerCopy {
+        submission,
+        target,
+        message,
+    }
+}
+
+/// A sealed room copy for a resource registered from another node is offered
+/// to that node with its canonical obligation. The hosting node's
+/// acknowledgement settles the child, and neither the owner's retry nor its
+/// recovery offers a settled child again.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_registered_remote_peer_ack_settles_the_child_once() {
+    let fixture = IngressFixture::sqlite().await;
+    let SealedPeerCopy {
+        submission,
+        target,
+        message,
+    } = sealed_peer_copy(&fixture);
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("sealed peer route");
+    let key = decision.message_key.expect("message key");
+    let receipt = decision.external_receipts[0][0].clone();
     let connections = waddle_xmpp::registry::ConnectionRegistry::new();
     let mut deps = Deps::new(&connections, "example.com");
-    let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-        .scope(
-            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+    let hosting = HostingNode::default();
+    let report = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
             execute_effects(
                 &fixture.uow,
                 &fixture.db,
@@ -651,23 +883,63 @@ async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending()
             ),
         )
         .await;
-    {
-        let delivered = wire.lock().expect("wire deliveries");
-        assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].0, target);
-        let (Stanza::Message(offered), Stanza::Message(expected)) = (&delivered[0].1, &stanza)
-        else {
-            panic!("typed room wire message");
-        };
-        assert_eq!(offered, expected);
-    }
-    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    assert_eq!(
+        hosting.offers(),
+        vec![(target.clone(), message)],
+        "the frozen copy is offered once to its frozen endpoint"
+    );
+    assert_eq!(
+        hosting.obligations(),
+        vec![Some((key, receipt.clone()))],
+        "the offer carries the child's canonical obligation"
+    );
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(
+        recorded_copies(&fixture, key, &receipt).await,
+        vec![target.clone()]
+    );
+    assert_eq!(
+        fixture.count("ingress_send_attempts").await,
+        0,
+        "the send attempt is claimed by the node that writes to the socket"
+    );
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        1,
+        "the route's receipt follows its last copy"
+    );
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("terminalisation check"),
+        "the message stays open for the obligations this execution did not carry"
+    );
+
+    let retry = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("retry sealed acceptance");
+    assert_eq!(retry.alias, crate::ingress::AliasOutcomeClass::Existing);
+    let repeated = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &retry,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert!(
+        repeated.outcomes.is_empty(),
+        "a settled child is not executed again"
+    );
     deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
-    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-        .scope(
-            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+    let _ = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
             execute_effects(
                 &fixture.uow,
                 &fixture.db,
@@ -678,28 +950,166 @@ async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending()
             ),
         )
         .await;
-    assert_eq!(wire.lock().expect("wire deliveries").len(), 1);
+    assert_eq!(
+        hosting.offers().len(),
+        1,
+        "neither a retry nor recovery offers a settled child again"
+    );
+    assert_eq!(
+        recorded_copies(&fixture, key, &receipt).await,
+        vec![target],
+        "the copy is recorded once"
+    );
     fixture.close().await;
 }
 
+/// While the hosting node's answer to an offer is unknown the child stays
+/// owed and nothing records it. Every further offer is the same frozen copy
+/// for the same endpoint under the same canonical obligation, so the hosting
+/// node's one send attempt for that key decides whether a socket is written;
+/// the first definite answer settles the child once.
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_without_retirement() {
+async fn xep0045_sealed_registered_remote_peer_unknown_outcome_stays_owed_under_one_key() {
+    let fixture = IngressFixture::sqlite().await;
+    let SealedPeerCopy {
+        submission,
+        target,
+        message,
+    } = sealed_peer_copy(&fixture);
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("sealed peer route");
+    let key = decision.message_key.expect("message key");
+    let receipt = decision.external_receipts[0][0].clone();
+    let connections = waddle_xmpp::registry::ConnectionRegistry::new();
+    let mut deps = Deps::new(&connections, "example.com");
+    let hosting = HostingNode::default();
+    let report = hosting
+        .answering(
+            FullJidDeliveryOutcome::MaybeCommitted,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert!(recorded_copies(&fixture, key, &receipt).await.is_empty());
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending manifest")
+    );
+
+    // The owner's live retry: still no answer.
+    let retry = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("retry sealed acceptance");
+    assert_eq!(retry.alias, crate::ingress::AliasOutcomeClass::Existing);
+    let repeated = hosting
+        .answering(
+            FullJidDeliveryOutcome::MaybeCommitted,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &retry,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(repeated.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert!(recorded_copies(&fixture, key, &receipt).await.is_empty());
+
+    // The owner's recovery: the hosting node answers.
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let recovered = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(recovered.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(
+        hosting.offers(),
+        vec![(target.clone(), message); 3],
+        "every offer is the same frozen copy for the same endpoint"
+    );
+    assert_eq!(
+        hosting.obligations(),
+        vec![Some((key, receipt.clone())); 3],
+        "every offer carries the same canonical obligation"
+    );
+    assert_eq!(
+        recorded_copies(&fixture, key, &receipt).await,
+        vec![target.clone()]
+    );
+    let _ = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(
+        hosting.offers().len(),
+        3,
+        "a settled child is not offered again"
+    );
+    assert_eq!(
+        recorded_copies(&fixture, key, &receipt).await,
+        vec![target],
+        "the copy is recorded once"
+    );
+    fixture.close().await;
+}
+
+/// Two sealed room messages with consecutive archive positions and a copy
+/// each for the same remote resource. The second copy is the first's
+/// successor in the room's archive order: it is not offered while the first
+/// copy's outcome is unknown, neither to the hosting node nor to a local
+/// connection of the target, and it is offered once the hosting node's
+/// acknowledgement has settled the first.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_live_remote_successor_follows_its_settled_archive_predecessor() {
     use crate::ingress::xep0045_room_manifest_tests::room_submission;
     use crate::ingress_uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
     };
     use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
-    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
     use waddle_xmpp::ingress::{DigestContext, DigestInput};
     let fixture = IngressFixture::sqlite().await;
     let connections = waddle_xmpp::registry::ConnectionRegistry::new();
     let mut deps = Deps::new(&connections, "example.com");
     let target: jid::FullJid = "alice@example.com/phone".parse().expect("remote occupant");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
-    let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hosting = HostingNode::default();
     let mut decisions = Vec::new();
     let mut submissions = Vec::new();
+    let mut copies = Vec::new();
     for ordinal in [1, 2] {
         let mut submission = room_submission(&fixture);
         submission
@@ -740,7 +1150,7 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
             ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
                 route_identity: Some(identity),
                 jid: target.clone(),
-                stanza: Box::new(Stanza::Message(message)),
+                stanza: Box::new(Stanza::Message(message.clone())),
                 kind: PeerDeliveryKind::PeerStanza,
                 call_setup: None,
             }),
@@ -781,63 +1191,55 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
             );
         }
         tx.commit().await.expect("position commit");
-        let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-            .scope(
-                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+        // The hosting node does not answer the first copy; the second is
+        // executed behind it.
+        let report = hosting
+            .answering(
+                FullJidDeliveryOutcome::MaybeCommitted,
                 execute_effects(
                     &fixture.uow,
                     &fixture.db,
                     &decision,
                     &ImmediateSink,
                     &deps,
-                    Duration::from_secs(2),
+                    Duration::from_millis(500),
                 ),
             )
             .await;
-        assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+        if ordinal == 1 {
+            assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+        } else {
+            assert_eq!(
+                report.outcomes[0].1,
+                ExternalOutcome::AwaitingPredecessor,
+                "the successor waits for the copy before it in the archive"
+            );
+        }
         submissions.push(submission);
         decisions.push(decision);
+        copies.push((key, receipt, message));
     }
     assert_eq!(
-        wire.lock().expect("live wire").len(),
-        2,
-        "pending P2 predecessor cannot silence the second live remote copy"
+        hosting.offers(),
+        vec![(target.clone(), copies[0].2.clone())],
+        "only the first copy was offered"
     );
+    for (key, receipt, _) in &copies {
+        assert!(recorded_copies(&fixture, *key, receipt).await.is_empty());
+    }
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(fixture.count("ingress_send_attempts").await, 0);
     assert_eq!(fixture.count("sm_ingress_appends").await, 0);
-    let retry = commit_submission(&fixture.uow, &submissions[1], 1)
+
+    // The saved manifest is the audience: a retry that names another
+    // resource plans nothing for it, while the unchanged retry still owes
+    // the frozen copy.
+    let unchanged = commit_submission(&fixture.uow, &submissions[1], 1)
         .await
         .expect("live original retry");
-    assert_eq!(retry.alias, crate::ingress::AliasOutcomeClass::Existing);
-    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-        .scope(
-            (FullJidDeliveryOutcome::Delivered, wire.clone()),
-            execute_effects(
-                &fixture.uow,
-                &fixture.db,
-                &retry,
-                &ImmediateSink,
-                &deps,
-                Duration::from_secs(2),
-            ),
-        )
-        .await;
-    {
-        let attempts = wire.lock().expect("original retry wire");
-        assert_eq!(attempts.len(), 3);
-        assert_eq!(
-            attempts[1].0, attempts[2].0,
-            "retry retains the original endpoint"
-        );
-        let (Stanza::Message(original), Stanza::Message(replayed)) =
-            (&attempts[1].1, &attempts[2].1)
-        else {
-            panic!("typed room copies");
-        };
-        assert_eq!(original, replayed, "retry retains the exact frozen payload");
-    }
+    assert_eq!(unchanged.alias, crate::ingress::AliasOutcomeClass::Existing);
+    assert_eq!(unchanged.external.len(), 1);
     let mut widened = submissions[1].clone();
     let sibling = target
         .to_bare()
@@ -868,11 +1270,14 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
         rejected_target.external.is_empty(),
         "live retry cannot add a sibling target"
     );
+
+    // A connection of the target on this node does not receive the
+    // successor ahead of its predecessor either.
     let (local_tx, mut local_rx) = tokio::sync::mpsc::channel(4);
     connections.register(target.clone(), local_tx);
-    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-        .scope(
-            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+    let _ = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
             execute_effects(
                 &fixture.uow,
                 &fixture.db,
@@ -887,13 +1292,82 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
         local_rx.try_recv().is_err(),
         "local fallback still waits for its archive predecessor"
     );
-    assert_eq!(wire.lock().expect("local fallback").len(), 3);
+    assert_eq!(hosting.offers().len(), 1);
     connections.unregister(&target);
+
+    // The first copy is offered again, unchanged, and the hosting node's
+    // acknowledgement settles it.
+    let retry = commit_submission(&fixture.uow, &submissions[0], 1)
+        .await
+        .expect("retry the first acceptance");
+    assert_eq!(retry.alias, crate::ingress::AliasOutcomeClass::Existing);
+    let report = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &retry,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(2),
+            ),
+        )
+        .await;
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+    {
+        let offers = hosting.offers();
+        assert_eq!(offers.len(), 2);
+        assert_eq!(
+            offers[0].0, offers[1].0,
+            "retry retains the original endpoint"
+        );
+        assert_eq!(
+            offers[0].1, offers[1].1,
+            "retry retains the exact frozen payload"
+        );
+    }
+
+    // Its successor is now sent and settled the same way.
+    let report = hosting
+        .answering(
+            FullJidDeliveryOutcome::Delivered,
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &unchanged,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(2),
+            ),
+        )
+        .await;
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+    assert_eq!(
+        hosting.offers(),
+        vec![
+            (target.clone(), copies[0].2.clone()),
+            (target.clone(), copies[0].2.clone()),
+            (target.clone(), copies[1].2.clone()),
+        ],
+        "the copies reach the hosting node in archive order"
+    );
+    assert_eq!(
+        hosting.obligations(),
+        vec![
+            Some((copies[0].0, copies[0].1.clone())),
+            Some((copies[0].0, copies[0].1.clone())),
+            Some((copies[1].0, copies[1].1.clone())),
+        ],
+        "each offer carries its own child's canonical obligation"
+    );
+
+    // Recovery finds both children settled and offers nothing.
     deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
     for decision in decisions {
-        let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-            .scope(
-                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+        let _ = hosting
+            .answering(
+                FullJidDeliveryOutcome::Delivered,
                 execute_effects(
                     &fixture.uow,
                     &fixture.db,
@@ -905,18 +1379,30 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
             )
             .await;
     }
-    assert_eq!(wire.lock().expect("maintenance wire").len(), 3);
+    assert_eq!(hosting.offers().len(), 3);
+    for (key, receipt, _) in &copies {
+        assert_eq!(
+            recorded_copies(&fixture, *key, receipt).await,
+            vec![target.clone()],
+            "each copy is recorded once"
+        );
+    }
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 0);
     fixture.close().await;
 }
 
+/// A copy whose hosting node did not answer is still owed when its target
+/// leaves the room and joins it again. The copy was frozen for the occupancy
+/// that left: the retry settles the child as superseded and offers nothing
+/// to the occupancy that replaced it.
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_wire_attempt() {
     use crate::ingress::xep0045_room_manifest_tests::room_submission;
     use crate::ingress::RoomManifestSnapshot;
-    use crate::ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository};
+    use crate::ingress_uow::CanonicalMessageRepository;
     use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
-    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
     use waddle_xmpp::muc::room_actor::{
         GetRoomSnapshot, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
     };
@@ -988,14 +1474,14 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
                 route_identity: Some(route_identity),
                 bare: target.to_bare(),
                 resources: vec![target.clone()],
-                stanza: Box::new(Stanza::Message(message)),
+                stanza: Box::new(Stanza::Message(message.clone())),
                 call_setup: None,
             }
         } else {
             ExternalDeliveryEffect::RouteToPeer {
                 route_identity: Some(route_identity),
                 jid: target.clone(),
-                stanza: Box::new(Stanza::Message(message)),
+                stanza: Box::new(Stanza::Message(message.clone())),
                 kind: PeerDeliveryKind::PeerStanza,
                 call_setup: None,
             }
@@ -1017,10 +1503,12 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
         let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
         deps.room_registry = Some(&state.deps.protocol.room_registry);
         deps.web_socket_state = Some(&state);
-        let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-            .scope(
-                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+        let hosting = HostingNode::default();
+        // The copy is offered to the occupancy it was frozen for, and the
+        // hosting node's answer is lost.
+        let report = hosting
+            .answering(
+                FullJidDeliveryOutcome::MaybeCommitted,
                 execute_effects(
                     &fixture.uow,
                     &fixture.db,
@@ -1031,7 +1519,10 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
                 ),
             )
             .await;
-        assert_eq!(wire.lock().expect("original wire").len(), 1);
+        assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+        assert_eq!(hosting.offers(), vec![(target.clone(), message)]);
+        assert_eq!(hosting.obligations(), vec![Some((key, receipt.clone()))]);
+        assert!(recorded_copies(&fixture, key, &receipt).await.is_empty());
         actor
             .ask(LeaveByRealJid {
                 sender_jid: target.clone(),
@@ -1055,9 +1546,9 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
         let retry = commit_submission(&fixture.uow, &submission, 1)
             .await
             .expect("live frozen retry");
-        let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
-            .scope(
-                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+        let report = hosting
+            .answering(
+                FullJidDeliveryOutcome::Delivered,
                 execute_effects(
                     &fixture.uow,
                     &fixture.db,
@@ -1069,18 +1560,17 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
             )
             .await;
         assert_eq!(
-            wire.lock().expect("replacement wire").len(),
+            hosting.offers().len(),
             1,
             "old child cannot reach replacement occupancy"
         );
         assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
-        let mut tx = fixture.uow.begin().await.expect("logical disposition");
         assert_eq!(
-            DeliveryProgressRepository::load(&mut tx, key, &receipt)
-                .await
-                .expect("progress"),
-            vec![target]
+            recorded_copies(&fixture, key, &receipt).await,
+            vec![target],
+            "the child is settled for the occupancy it was frozen for"
         );
+        let mut tx = fixture.uow.begin().await.expect("saved manifest");
         let saved = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load")
