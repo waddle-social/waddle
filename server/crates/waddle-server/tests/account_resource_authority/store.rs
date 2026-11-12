@@ -740,12 +740,16 @@ async fn recorded_operations_are_bounded_per_resource(fixture: &Fixture) {
         .load_account(&jid.to_bare())
         .await
         .expect("load the account");
+    // The cases share one account, so its listing also holds the rows the
+    // other cases left; this case owns `busy` and `quiet`.
     assert_eq!(
         account
             .iter()
             .map(|stored| stored.image.full_jid.clone())
+            .filter(|full_jid| full_jid == &jid || full_jid == &other)
             .collect::<Vec<_>>(),
-        vec![jid, other]
+        vec![jid, other],
+        "both resources keep their rows, listed in full-JID order"
     );
 }
 
