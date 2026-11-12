@@ -196,6 +196,45 @@ impl IngressAuthority {
         })))
     }
 
+    /// Deliver what the owner's commit of `operation` still owes, from this
+    /// node, as soon as the commit has executed.
+    ///
+    /// The worker has no connection to answer: the sender's reflection and
+    /// any copy its live execution could not hand over are left as
+    /// unreceipted obligations on the canonical message. This runs the
+    /// ingress recovery of that one message now, which rebuilds exactly the
+    /// frozen copies and routes each to the node that hosts its recipient,
+    /// instead of leaving them to the maintenance pass a minute later. A
+    /// failure here loses nothing; the maintenance pass retries the same
+    /// rows.
+    pub async fn deliver_owner_obligations(&self, operation: MailboxOperationKey) -> bool {
+        const BUDGET: Duration = Duration::from_secs(5);
+        let Some(environment) = self.recovery.environment() else {
+            return false;
+        };
+        let deps = environment.recovery_deps();
+        let deadline = tokio::time::Instant::now() + BUDGET;
+        let recovered = tokio::time::timeout_at(
+            deadline,
+            super::recovery_executor::recover_row(
+                &self.database,
+                &self.uow,
+                &deps,
+                operation.message_key(),
+                deadline,
+            ),
+        )
+        .await;
+        match recovered {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "owner obligations of a mailbox entry not delivered yet");
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Count a failed attempt at `operation` and defer the next one, or park
     /// the entry for an operator once [`MAILBOX_ATTEMPT_LIMIT`] is reached.
     /// The lane's cursor never moves here.

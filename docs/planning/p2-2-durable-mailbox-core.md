@@ -94,6 +94,12 @@ In a transaction that uses the mailbox (`ingress/commit_mailbox.rs`):
   `owner_decision = 0` and appends the entry `Pending`. A message that already
   exists without a source binding keeps the relay's behaviour and gets no
   entry.
+- **Transport.** A commit that appends or finds the entry drops the relayed
+  dispatch from its external effects (`without_relayed_dispatch`), so the
+  origin sends the owner no stanza. The entry is the transport: the owner
+  reads the request from the canonical rows, woken by the hint or found by
+  its poller. The recorded `DispatchToRoomRemote` intent stays and is
+  receipted by the owner's first decision.
 - **Admission.** Under the lane lock, a lane at 64 or an owner node at 16 384
   pending entries refuses the stanza: the commit records an ordinary denial
   with a `resource-constraint` error of type `wait` and appends nothing. A
@@ -146,6 +152,12 @@ while its room owner is undecided (`ingress/origin_gate.rs`):
   (and a refusal to have its rejection child), consumes the entry and
   commits. The same read serves a lost relay reply and an indeterminate owner
   commit; a relay reply, a relay failure and a timeout are never evidence.
+- **Refusal.** When the decision read is a refusal, the origin loads the
+  owner's frozen error from the rejection child, receipts the source's
+  `ErrorReply` obligation in the same transaction and answers the sender
+  with it: in the slot's completion, in the handler's own response after an
+  inline wait, or on the sender's local connection for a stream without
+  stream management. No relay reply carries the error.
 - **Settlement.** A read decision completes the slot and `h` advances; the
   existing checkpoint flush then persists it. If no decision can be proven
   within 60 seconds, or the entry is missing, dead-lettered, contradicted by
@@ -168,9 +180,11 @@ keeps `h` behind it.
 - **Poller** (`clustering/route_bridge/mailbox.rs`). Each clustered node runs
   one. It wakes on a hint or every second, scans at most 128 lanes that record
   this node as target and still owe a disposition
-  (`ingress_mailbox_lanes_backlog`), and works them two at a time. The poller
-  is the authority for finding work; it idles while the relay selector is in
-  force.
+  (`ingress_mailbox_lanes_backlog`), and works them two at a time. A worker
+  stays on its lane while each head entry is decided, up to 64 entries (the
+  lane's pending cap), so a burst from one sender behind one coalesced hint
+  is decided in one visit and in lane order. The poller is the authority for
+  finding work; it idles while the relay selector is in force.
 - **Work** (`ingress/mailbox_worker.rs`). A worker claims a lane with
   `SKIP LOCKED`, reads its head entry and rebuilds the request from canonical
   rows: the message from the canonical envelope, the sender's principal from
@@ -179,8 +193,11 @@ keeps `h` behind it.
   retain. It then runs the owner's ordinary relayed-groupchat commit, which
   asserts the room claim and records the decision. Claiming a lane proves
   nothing about the room. Frames the owner produces for the sender are not
-  written by the worker; their receipts stay pending and ingress recovery
-  delivers them.
+  written by the worker; their receipts stay pending. Right after a decided
+  commit the worker runs the ingress recovery of that one message
+  (`deliver_owner_obligations`), which rebuilds the frozen copies still owed
+  and routes each to the node that hosts its recipient. What that attempt
+  cannot deliver is retried by the maintenance pass.
 - **Hint** (`waddle.clustering.relay.mailbox_hint.v1`). After a commit that
   leaves a stanza awaiting its owner, the origin sends the node recorded as
   the lane's target a message with no payload. Its only effect is to wake that
@@ -307,21 +324,24 @@ their receipts stay pending and the same recovery delivers them.
 
 These hold today and bound what the mailbox selector may be used for.
 
-- **Relay still carries the stanza.** The origin still relays the groupchat
-  stanza through `deliver_ordered`; the mailbox entry and the poller make the
-  owner's acceptance durable and recoverable beside it. No ordered-relay kind
-  is removed and its wire id is unchanged.
+- **Relay kinds.** The origin relays no groupchat stanza in a transaction
+  that uses the mailbox. The `GroupchatMessage` kind is still sent below
+  epoch 2 and under the `relay` selector, so no ordered-relay kind is removed
+  and its wire id is unchanged.
+- **Retransmission of a decided stanza.** A retransmission whose entry is
+  already decided is counted as handled and gets no answer from the origin:
+  a refusal is not repeated, and the reflection of an acceptance is only
+  what the owner's obligation delivers.
+- **Latency of the sender's reflection.** The reflection is delivered by the
+  owner's obligation repair, not in the origin's response. If that repair
+  fails, the next attempt is the maintenance pass, at least a minute later.
 - **Lane rows.** Lane rows are never deleted. A lane exists per
   stream-management session and room, so the table grows with sessions.
-- **Refusal after a lost reply.** The owner's refusal reaches the sender in
-  the relay reply. When that reply is lost, the origin's lookup still counts
-  the stanza as handled once it reads the refusal, and the error stanza is
-  re-emitted only when ingress recovery repairs the owner's recorded
-  `ErrorReply` obligation.
 - **Other lanes.** Only `RoomAcceptance(MessageKey)` exists as an operation.
   MUC joins and occupant presence, Muji signaling and the bare-JID and
-  full-JID lanes have no canonical request to refer to and are still served
-  by the ordered relay alone.
+  full-JID lanes are still served by the ordered relay alone;
+  [`2046-relay-lane-responsibilities.md`](2046-relay-lane-responsibilities.md)
+  records what each needs first.
 
 ### Guard, roles and manifest
 

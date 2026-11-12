@@ -165,6 +165,45 @@ pub(super) async fn consume_proven_decision(
     Ok(None)
 }
 
+/// Read the frozen error of a refused `operation` and receipt the source's
+/// `ErrorReply` obligation. `None` when the owner recorded no rejection
+/// child.
+#[cfg(feature = "clustering")]
+async fn read_frozen_refusal(
+    uow: &IngressUnitOfWork,
+    operation: MailboxOperationKey,
+) -> Result<Option<xmpp_parsers::message::Message>, IngressUowError> {
+    use crate::ingress_uow::{EffectIntentRepository, EffectReceiptRepository};
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    let key = operation.message_key();
+    let mut tx = uow
+        .begin_with_timeouts(Duration::from_millis(250), Duration::from_millis(500))
+        .await?;
+    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
+        return Ok(None);
+    }
+    let Some(child) = CanonicalMessageRepository::rejection_child(&mut tx, key).await? else {
+        return Ok(None);
+    };
+    let Some(envelope) = CanonicalMessageRepository::load_envelope(&mut tx, child).await? else {
+        return Ok(None);
+    };
+    for intent in EffectIntentRepository::load(&mut tx, key).await? {
+        if matches!(intent, IngressEffectIntent::ErrorReply { .. }) {
+            let receipt = super::durable::receipt_key(&intent)?;
+            EffectReceiptRepository::record_receipt(
+                &mut tx,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash,
+            )
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(Some(envelope.message().clone()))
+}
+
 /// Look for the owner's decision until it is read, proven impossible, or the
 /// budget ends. A storage failure is retried: it is not evidence either way.
 pub async fn await_room_acceptance(
@@ -337,6 +376,30 @@ impl IngressAuthority {
         outcome
     }
 
+    /// The owner's frozen refusal of `pending`, for the origin to answer its
+    /// sender with.
+    ///
+    /// No relay reply carries the owner's error when the mailbox is the
+    /// transport, so the origin reads it from the rejection child the owner
+    /// stored with its decision. The same transaction receipts the source's
+    /// `ErrorReply` obligation: the caller hands the returned stanza to the
+    /// sender's connection, which is the last point this node can observe,
+    /// and no other path delivers that obligation. `None` when the refusal
+    /// cannot be read; the stanza is then counted without its error, and the
+    /// obligation stays unreceipted.
+    pub async fn frozen_room_refusal(
+        &self,
+        pending: &PendingRoomAcceptance,
+    ) -> Option<xmpp_parsers::message::Message> {
+        match read_frozen_refusal(&self.uow, pending.operation).await {
+            Ok(refusal) => refusal,
+            Err(error) => {
+                tracing::warn!(%error, "frozen room refusal unreadable; sender gets no error stanza");
+                None
+            }
+        }
+    }
+
     /// Wait, inside the caller's own handler, for the owner's decision on a
     /// stanza whose connection could not reserve a deferred slot for it.
     ///
@@ -353,6 +416,38 @@ impl IngressAuthority {
         pending: &PendingRoomAcceptance,
     ) -> Result<MailboxOwnerDecision, RoomAcceptanceUnresolved> {
         self.read_room_acceptance(pending, || false).await
+    }
+
+    /// Queue the owner's refusal on the sender's locally hosted connection.
+    /// Used for a stream without stream management, which has no reserved
+    /// slot to carry it. Best effort: a sender that is gone gets nothing.
+    fn send_refusal_to_local_sender(&self, refusal: waddle_xmpp::Stanza) {
+        let waddle_xmpp::Stanza::Message(message) = &refusal else {
+            return;
+        };
+        let Some(sender) = message
+            .to
+            .as_ref()
+            .and_then(|jid| jid.clone().try_into_full().ok())
+        else {
+            return;
+        };
+        let Some(environment) = self.recovery.environment() else {
+            return;
+        };
+        let deps = environment.recovery_deps();
+        let outcome = deps
+            .connection_registry
+            .try_send_outbound_to_locally_hosted(
+                &sender,
+                waddle_xmpp::registry::OutboundStanza::new(refusal),
+            );
+        if !matches!(outcome, waddle_xmpp::registry::BroadcastOutcome::Delivered) {
+            tracing::debug!(
+                ?outcome,
+                "room refusal not queued; sender connection is gone"
+            );
+        }
     }
 
     /// Watch a stanza that awaits its remote room owner and settle it.
@@ -378,10 +473,23 @@ impl IngressAuthority {
                     slot.as_ref().is_some_and(|slot| slot.handoff.is_closed())
                 })
                 .await;
-            if let Some(slot) = slot {
-                match outcome {
-                    Ok(_) => slot.handoff.complete(Vec::new()),
-                    Err(_) => slot.handoff.withhold(&slot.withheld),
+            // A refusal is answered from the owner's frozen error. The
+            // reflection of an accepted stanza is the owner's own obligation
+            // and reaches the sender through its keyed route.
+            let refusal = match outcome {
+                Ok(MailboxOwnerDecision::Rejected) => authority
+                    .frozen_room_refusal(&pending)
+                    .await
+                    .map(waddle_xmpp::Stanza::Message),
+                _ => None,
+            };
+            match (slot, outcome) {
+                (Some(slot), Ok(_)) => slot.handoff.complete(refusal.into_iter().collect()),
+                (Some(slot), Err(_)) => slot.handoff.withhold(&slot.withheld),
+                (None, _) => {
+                    if let Some(refusal) = refusal {
+                        authority.send_refusal_to_local_sender(refusal);
+                    }
                 }
             }
         });
