@@ -82,6 +82,7 @@
 //! `test`/`test-utils`).
 
 pub mod attributes;
+pub mod authority;
 pub mod call;
 pub mod messages;
 pub mod push_pipeline;

@@ -6000,6 +6000,12 @@ pub(crate) fn spawn_destroy_completion_janitor(websocket_state: &Arc<WebSocketSt
                 break;
             };
             let _ = crate::server::routes::websocket::drain_destroy_completions(&state, None).await;
+            // A heartbeat: the drain reports no outcome, so this proves
+            // only that the janitor still runs.
+            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                Janitor::DestroyCompletion,
+                SweepOutcome::Completed,
+            );
         }
     });
 }

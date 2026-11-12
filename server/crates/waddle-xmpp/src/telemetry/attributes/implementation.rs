@@ -177,6 +177,8 @@ pub enum Janitor {
     RemoteMucMembership,
     /// Retained local MUC departure reconciliation.
     LocalMucDeparture,
+    /// Room-destroy completions drained outside the requesting session.
+    DestroyCompletion,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -199,6 +201,7 @@ impl MetricAttribute for Janitor {
             Self::RemoteOwnerMirror => "remote_owner_mirror",
             Self::RemoteMucMembership => "remote_muc_membership",
             Self::LocalMucDeparture => "local_muc_departure",
+            Self::DestroyCompletion => "destroy_completion",
         }
     }
 }
