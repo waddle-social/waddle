@@ -8,7 +8,7 @@
 
 use std::str::FromStr;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use thiserror::Error;
 use uuid::Uuid;
@@ -28,6 +28,12 @@ use super::physical_attestation::{
     PhysicalAttestationConfig, PhysicalAttestationError, PinnedRuntimeAuthority,
 };
 use super::DarkMigrationLedgerPins;
+
+mod handoff;
+pub use handoff::{
+    compose_handoff, database_identity_from_json, database_identity_json, verify_handoff,
+    ComposedHandoff, HandoffError, HandoffInputs, OperatorRecord,
+};
 
 /// Restricted-startup handoff and preflight errors.
 #[derive(Debug, Error)]
@@ -72,7 +78,7 @@ pub enum RuntimeStartupError {
 /// recorded database pins and cutoff references to a reported release and
 /// endpoint. The cutoff references remain operator records; parsing them does
 /// not prove their claims or establish ongoing enforcement.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct IdentityDocument {
     version: u8,
@@ -92,7 +98,7 @@ struct IdentityDocument {
     pins: OperatorPinsDocument,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorCutoverDocument {
     transition_id: String,
@@ -104,7 +110,7 @@ struct OperatorCutoverDocument {
     mutator_policy: OperatorMutatorPolicyDocument,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorPrimaryObservationDocument {
     provider: String,
@@ -116,7 +122,7 @@ struct OperatorPrimaryObservationDocument {
     observation_record_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorOldRuntimeDocument {
     login: String,
@@ -124,14 +130,14 @@ struct OperatorOldRuntimeDocument {
     credential_cutoff_record_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorMutatorPolicyDocument {
     mode: OperatorMutatorPolicyMode,
     record_id: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum OperatorMutatorPolicyMode {
     CooperativeCatalogFenceV1,
@@ -521,7 +527,7 @@ fn parse_record_id(value: &str) -> Result<Uuid, RuntimeStartupError> {
     Uuid::parse_str(value).map_err(|_| RuntimeStartupError::InvalidDocument)
 }
 
-fn valid_git_sha(value: &str) -> bool {
+pub(crate) fn valid_git_sha(value: &str) -> bool {
     value.len() == 40
         && value
             .bytes()
@@ -579,7 +585,7 @@ mod tests {
 
 /// The operator records these values outside the runtime connection. They are
 /// not derived from or trusted because of the connection being checked.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OperatorPinsDocument {
     database_owner_role_oid: u32,

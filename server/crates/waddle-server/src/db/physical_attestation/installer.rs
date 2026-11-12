@@ -582,6 +582,16 @@ async fn inspect_locked(
     Ok(InstallationStatus::Committed)
 }
 
+/// The catalog comment that an installation by `operation_id` leaves on the
+/// attestor function for `config`. A function carrying another comment was
+/// installed by another operation, or for another identity or role set.
+pub(crate) fn installation_marker(
+    config: &PhysicalAttestationConfig,
+    operation_id: Uuid,
+) -> String {
+    marker(config, operation_id)
+}
+
 pub(super) fn marker(config: &PhysicalAttestationConfig, operation_id: Uuid) -> String {
     let mut digest = Sha256::new();
     for part in [

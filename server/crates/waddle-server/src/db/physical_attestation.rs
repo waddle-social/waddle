@@ -21,6 +21,7 @@ use super::lineage::{
 use super::DatabaseError;
 
 mod installer;
+pub(crate) use installer::installation_marker;
 pub use installer::{
     inspect_installation, inspect_pinned_installation, install, observe_installation,
     prepare_pinned_install, DarkInstallationStatus, DarkInstallerError, DarkInstallerFence,
