@@ -1,9 +1,20 @@
+use super::frame::{ResponseBatch, ResponseFrame};
+use super::state::WsConnState;
+use super::stream_management::InlineResumeStep;
 use super::transport_xml::{sasl_failure_element, sasl_success_element};
 use crate::server::routes::auth_telemetry::{
     record_auth_failure, record_auth_success, AuthFailure,
 };
+use crate::sm_authority::{
+    decide_bind2, inline_results, plan_inline, Bind2Decision, Bind2EnableOutcome,
+    Bind2StreamManagement, DurableSmError, EnabledCommit, InlineOutcomeUnknown, InlinePlan,
+    InlineResumeFailed, InlineResumeOutcome, InlineSession,
+};
 use waddle_xmpp::auth::OAuthBearerParseError;
 use waddle_xmpp::telemetry::attributes::AuthStage;
+use waddle_xmpp_core::xep0388_inline::{
+    Sasl2InlineRequests, Sasl2InlineResults, SmInlineEnable, SmInlineFailed, SmInlineResumeResult,
+};
 
 fn oauth_failure(
     sasl2: bool,
@@ -494,6 +505,399 @@ pub(super) async fn handle_sasl_scram_response(
             .append(success_b64)
             .build(),
         server_final: Some(server_final),
+    }
+}
+
+/// The XEP-0198 and XEP-0386 requests of a SASL2 `<authenticate/>`, if the
+/// request is one this connection processes.
+///
+/// Inline requests are processed only where the durable session authority is
+/// selected: an inline resume or enable is a durable operation. Elsewhere a
+/// child other than `<user-agent/>` is refused, as is a malformed or repeated
+/// inline request anywhere. `None` is a malformed request.
+pub(super) fn sasl2_inline_requests(
+    state: &WebSocketState,
+    request: &waddle_xmpp_core::xep0388::Sasl2Authenticate,
+) -> Option<Sasl2InlineRequests> {
+    use waddle_xmpp_core::xep0388::NS_SASL2;
+    use waddle_xmpp_core::xep0388_inline::{NS_BIND2, NS_SM};
+
+    let durable = super::stream_management::selected_store(state).is_some();
+    let processed = |child: &Element| {
+        child.is("user-agent", NS_SASL2)
+            || (durable && (child.is("resume", NS_SM) || child.is("bind", NS_BIND2)))
+    };
+    if !request.additional_children().iter().all(processed) {
+        return None;
+    }
+    if !durable {
+        return Some(Sasl2InlineRequests::default());
+    }
+    Sasl2InlineRequests::from_authenticate(request).ok()
+}
+
+/// A SASL2 `<success/>` whose inline results are not all known yet.
+///
+/// Authentication has succeeded. The reply waits for the inline requests:
+/// a resume is reported once its endpoint is published and the resume is
+/// completed, and a Bind 2 `<bound/>` once the resource is registered and
+/// its stream-management session, if requested, has committed.
+pub(super) struct PendingSasl2Success {
+    additional_data: Option<Vec<u8>>,
+    authorization_identifier: BareJid,
+    requests: Sasl2InlineRequests,
+    progress: InlineProgress,
+}
+
+enum InlineProgress {
+    /// The requests have not been processed.
+    Requested,
+    /// The resume committed; publication decides what is reported.
+    Resuming,
+    /// The resume's commit outcome is unknown. Nothing is reported and no
+    /// bind is made until it is settled.
+    ResumeHeld,
+    /// A held resume was settled as a known failure; the bind decision
+    /// follows.
+    ResumeFailed(InlineResumeFailed),
+    /// A resource is bound for Bind 2 and awaits registration.
+    Binding {
+        enable: Option<SmInlineEnable>,
+        resume_failed: Option<InlineResumeFailed>,
+    },
+    /// The enable's commit outcome is unknown; `<bound/>` waits for it.
+    EnableHeld {
+        resumable: bool,
+        resume_failed: Option<InlineResumeFailed>,
+    },
+    /// Every result is known.
+    Ready {
+        results: Sasl2InlineResults,
+        /// A session resumed: the reply opens its replay batch, and no
+        /// stream features follow.
+        resumed: bool,
+    },
+}
+
+/// The `<success/>` of a SASL2 exchange and what follows it.
+///
+/// Without inline requests that is the reply and the post-authentication
+/// stream features, at once. With them nothing is answered here: the reply
+/// is staged on the connection and written when its inline results are
+/// known.
+pub(super) fn sasl2_success_responses(
+    staged: &mut Option<PendingSasl2Success>,
+    requests: Sasl2InlineRequests,
+    additional_data: Option<Vec<u8>>,
+    authorization_identifier: BareJid,
+) -> ResponseBatch {
+    if requests.is_empty() {
+        return vec![
+            sasl2_success_element(additional_data, authorization_identifier, Vec::new()),
+            super::transport_xml::build_stream_features_element(true),
+        ]
+        .into();
+    }
+    *staged = Some(PendingSasl2Success {
+        additional_data,
+        authorization_identifier,
+        requests,
+        progress: InlineProgress::Requested,
+    });
+    ResponseBatch::default()
+}
+
+fn sasl2_success_element(
+    additional_data: Option<Vec<u8>>,
+    authorization_identifier: BareJid,
+    inline_results: Vec<Element>,
+) -> Element {
+    waddle_xmpp_core::xep0388::Sasl2Success {
+        additional_data: additional_data.map(waddle_xmpp_core::xep0388::Sasl2Data::new),
+        authorization_identifier: authorization_identifier.into(),
+        inline_results,
+    }
+    .to_element()
+}
+
+/// The inline result of a resume that cannot be reported as resumed for a
+/// reason the authority did not decide.
+fn resume_not_published() -> Sasl2InlineResults {
+    Sasl2InlineResults {
+        resume: Some(SmInlineResumeResult::Failed(SmInlineFailed {
+            h: None,
+            condition: Some(xmpp_parsers::stanza_error::DefinedCondition::InternalServerError),
+        })),
+        ..Sasl2InlineResults::default()
+    }
+}
+
+/// Build inline results, reporting nothing inline if they cannot be built.
+fn results_or_none(session: InlineSession<'_>) -> Sasl2InlineResults {
+    inline_results(session).unwrap_or_else(|error| {
+        warn!(%error, "SASL2 inline results could not be built");
+        Sasl2InlineResults::default()
+    })
+}
+
+/// Process a staged exchange's inline requests up to the point registration
+/// can act on them: run the resume, and bind a resource if Bind 2 applies.
+///
+/// A committed resume leaves the connection staged for publication and
+/// skips the bind. A known resume failure, or no resume request, lets the
+/// bind proceed. An unknown resume outcome holds the exchange: nothing is
+/// bound and nothing is answered.
+pub(super) async fn advance_sasl2_inline(state: &WebSocketState, conn: &mut WsConnState) {
+    let Some(mut pending) = conn.sasl2_success.take() else {
+        return;
+    };
+    let resume_failed = match std::mem::replace(&mut pending.progress, InlineProgress::Requested) {
+        InlineProgress::Requested => match plan_inline(&pending.requests) {
+            InlinePlan::Resume { resume, .. } => {
+                match super::stream_management::inline_resume(state, conn, resume).await {
+                    InlineResumeStep::Resumed => {
+                        pending.progress = InlineProgress::Resuming;
+                        conn.sasl2_success = Some(pending);
+                        return;
+                    }
+                    InlineResumeStep::Held => {
+                        pending.progress = InlineProgress::ResumeHeld;
+                        conn.sasl2_success = Some(pending);
+                        return;
+                    }
+                    InlineResumeStep::Failed(failed) => Some(failed),
+                }
+            }
+            InlinePlan::Bind(_) | InlinePlan::None => None,
+        },
+        InlineProgress::ResumeFailed(failed) => Some(failed),
+        other => {
+            pending.progress = other;
+            conn.sasl2_success = Some(pending);
+            return;
+        }
+    };
+    let outcome = resume_failed.map(InlineResumeOutcome::Failed);
+    let enable = match decide_bind2(plan_inline(&pending.requests), outcome.as_ref()) {
+        Ok(Bind2Decision::Bind { enable, .. }) => Some(enable),
+        Ok(Bind2Decision::NotRequested | Bind2Decision::SkippedForResume) => None,
+        Err(InlineOutcomeUnknown) => {
+            pending.progress = InlineProgress::ResumeHeld;
+            conn.sasl2_success = Some(pending);
+            return;
+        }
+    };
+    let resume_failed = match outcome {
+        Some(InlineResumeOutcome::Failed(failed)) => Some(failed),
+        _ => None,
+    };
+    pending.progress = match enable {
+        Some(enable) if bind2_resource(conn) => InlineProgress::Binding {
+            enable,
+            resume_failed,
+        },
+        // No bind was requested, or the connection cannot bind now: the
+        // client is told of the resume failure, if any, and binds itself.
+        _ => InlineProgress::Ready {
+            results: match &resume_failed {
+                Some(failed) => results_or_none(InlineSession::ResumeFailed(failed)),
+                None => Sasl2InlineResults::default(),
+            },
+            resumed: false,
+        },
+    };
+    conn.sasl2_success = Some(pending);
+}
+
+/// Bind a server-generated resource for Bind 2. Registration publishes it
+/// in the same turn.
+fn bind2_resource(conn: &mut WsConnState) -> bool {
+    if conn.resume_endpoint_handoff_blocked || !conn.phase.allows_resource_binding() {
+        return false;
+    }
+    let Some(bare_jid) = conn.phase.authenticated_bare_jid() else {
+        return false;
+    };
+    let Ok(full_jid) = bare_jid.with_resource_str(&format!("ws-{}", uuid::Uuid::new_v4())) else {
+        return false;
+    };
+    info!(jid = %full_jid, "Resource bound by Bind 2");
+    conn.phase = ConnectionPhase::ready(full_jid, false);
+    true
+}
+
+/// Write a staged `<success/>` into `responses` once its inline results are
+/// known, after registration ran for the turn.
+///
+/// A resource bound for Bind 2 gets its stream-management session here, on
+/// the binding registration just published. A resumed session's reply takes
+/// the place of the `<resumed/>` nonza at the head of its replay batch and
+/// no stream features follow; every other reply is followed by the
+/// post-authentication stream features. An exchange that is still held
+/// writes nothing.
+pub(super) async fn finish_sasl2_inline(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    responses: &mut ResponseBatch,
+) {
+    let Some(mut pending) = conn.sasl2_success.take() else {
+        return;
+    };
+    // Whether the reply announces a session enabled on this binding. Such a
+    // reply is written under the binding's permit, as `<enabled/>` is, so a
+    // binding replaced meanwhile never announces it.
+    let mut announces_session = false;
+    let (results, resumed) = match pending.progress {
+        InlineProgress::Ready { results, resumed } => {
+            announces_session = !resumed && conn.pending_sm_enable_commit.is_some();
+            (results, resumed)
+        }
+        // The resume was staged and this turn did not publish it.
+        InlineProgress::Resuming => (resume_not_published(), false),
+        InlineProgress::Binding {
+            enable,
+            resume_failed,
+        } => {
+            if conn.registry_owner.is_none() {
+                // The resource was not registered, so no `<bound/>` is due.
+                let results = match &resume_failed {
+                    Some(failed) => results_or_none(InlineSession::ResumeFailed(failed)),
+                    None => Sasl2InlineResults::default(),
+                };
+                (results, false)
+            } else {
+                let outcome = match enable {
+                    Some(enable) => Some((
+                        enable.resume,
+                        super::stream_management::inline_enable(state, conn, enable).await,
+                    )),
+                    None => None,
+                };
+                if let Some((resumable, Bind2EnableOutcome::Unknown(_))) = outcome {
+                    pending.progress = InlineProgress::EnableHeld {
+                        resumable,
+                        resume_failed,
+                    };
+                    conn.sasl2_success = Some(pending);
+                    return;
+                }
+                let stream_management = match &outcome {
+                    Some((resumable, Bind2EnableOutcome::Enabled(commit))) => {
+                        announces_session = true;
+                        Some(Bind2StreamManagement::Enabled {
+                            commit,
+                            resumable: *resumable,
+                        })
+                    }
+                    Some((_, Bind2EnableOutcome::Failed(failed))) => {
+                        Some(Bind2StreamManagement::Failed(failed))
+                    }
+                    Some((_, Bind2EnableOutcome::Unknown(_))) | None => None,
+                };
+                (
+                    results_or_none(InlineSession::Bound {
+                        resume_failed: resume_failed.as_ref(),
+                        stream_management,
+                    }),
+                    false,
+                )
+            }
+        }
+        held @ (InlineProgress::Requested
+        | InlineProgress::ResumeHeld
+        | InlineProgress::ResumeFailed(_)
+        | InlineProgress::EnableHeld { .. }) => {
+            pending.progress = held;
+            conn.sasl2_success = Some(pending);
+            return;
+        }
+    };
+    let success = sasl2_success_element(
+        pending.additional_data,
+        pending.authorization_identifier,
+        results.to_elements(),
+    );
+    if resumed {
+        match responses.frames.first_mut() {
+            Some(first) => *first = success.into(),
+            None => responses.frames.push(success.into()),
+        }
+    } else {
+        *responses = ResponseBatch::from_frames(vec![
+            if announces_session {
+                ResponseFrame::SmEnabled(success)
+            } else {
+                ResponseFrame::from(success)
+            },
+            ResponseFrame::from(super::transport_xml::build_stream_features_element(true)),
+        ]);
+    }
+}
+
+impl PendingSasl2Success {
+    /// The resume completed: `results` report it, or nothing if they could
+    /// not be built.
+    pub(super) fn resumed(&mut self, results: Result<Sasl2InlineResults, DurableSmError>) {
+        self.progress = InlineProgress::Ready {
+            results: results.unwrap_or_else(|error| {
+                warn!(%error, "SASL2 inline resume result could not be built");
+                Sasl2InlineResults::default()
+            }),
+            resumed: true,
+        };
+    }
+
+    /// The committed resume was not published and has been returned to the
+    /// authority.
+    pub(super) fn resume_not_published(&mut self) {
+        if matches!(
+            self.progress,
+            InlineProgress::Resuming | InlineProgress::ResumeHeld
+        ) {
+            self.progress = InlineProgress::Ready {
+                results: resume_not_published(),
+                resumed: false,
+            };
+        }
+    }
+
+    /// A held resume was settled as committed and staged for publication.
+    pub(super) fn held_resume_committed(&mut self) {
+        if matches!(self.progress, InlineProgress::ResumeHeld) {
+            self.progress = InlineProgress::Resuming;
+        }
+    }
+
+    /// A held resume was settled as a known failure.
+    pub(super) fn held_resume_failed(&mut self, failed: InlineResumeFailed) {
+        if matches!(self.progress, InlineProgress::ResumeHeld) {
+            self.progress = InlineProgress::ResumeFailed(failed);
+        }
+    }
+
+    /// A held enable was settled: `commit` if it committed.
+    pub(super) fn held_enable_settled(&mut self, commit: Option<&EnabledCommit>) {
+        let InlineProgress::EnableHeld {
+            resumable,
+            resume_failed,
+        } = std::mem::replace(&mut self.progress, InlineProgress::Requested)
+        else {
+            return;
+        };
+        let failed = SmInlineFailed {
+            h: None,
+            condition: Some(xmpp_parsers::stanza_error::DefinedCondition::InternalServerError),
+        };
+        self.progress = InlineProgress::Ready {
+            results: results_or_none(InlineSession::Bound {
+                resume_failed: resume_failed.as_ref(),
+                stream_management: Some(match commit {
+                    Some(commit) => Bind2StreamManagement::Enabled { commit, resumable },
+                    None => Bind2StreamManagement::Failed(&failed),
+                }),
+            }),
+            resumed: false,
+        };
     }
 }
 

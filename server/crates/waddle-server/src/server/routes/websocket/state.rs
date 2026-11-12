@@ -1864,6 +1864,14 @@ pub(super) struct WsConnState {
     /// remains guarded and SM stays locally disabled; dropping the
     /// connection or failing the write terminalizes the exact claim.
     pub(super) pending_sm_enable_commit: Option<super::stream_management::SmEnableCommit>,
+    /// The connection's handle on the durable stream-management authority.
+    /// `Unbound` whenever the selector is `legacy`.
+    pub(super) durable_sm: super::stream_management::DurableSmLink,
+    /// The XEP-0198 and XEP-0386 requests of the SASL2 `<authenticate/>` in
+    /// progress, kept across a mechanism's challenge.
+    pub(super) sasl2_inline_requests: waddle_xmpp_core::xep0388_inline::Sasl2InlineRequests,
+    /// A SASL2 `<success/>` whose inline results are not all known yet.
+    pub(super) sasl2_success: Option<super::sasl::PendingSasl2Success>,
     /// Inbound text frames pulled off the socket by the mid-batch ack
     /// drain (issue #1089) that were NOT `<a/>` acks. The batch writer
     /// may only consume acks out of order; everything else must reach
@@ -2007,6 +2015,9 @@ impl WsConnState {
             live_resume_control,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
+            durable_sm: super::stream_management::DurableSmLink::default(),
+            sasl2_inline_requests: Default::default(),
+            sasl2_success: None,
             deferred_inbound: VecDeque::new(),
             sm_recovery_required: false,
             terminal_sm_recovery: StreamManagementState::new(),

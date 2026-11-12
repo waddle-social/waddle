@@ -2138,7 +2138,21 @@ async fn create_sm_session_registry(
         );
         sm_session_registry = sm_session_registry.with_remote_resume_asker(Arc::new(asker));
     }
-    if let Err(error) = sm_session_registry.restore_from_persistence().await {
+    // The durable authority keeps its sessions' snapshots and retained frames
+    // in the relations this registry restores from. Its sessions are not
+    // hydrated here: the authority alone resumes, expires and releases them.
+    let durable_stream_ids = match state.durable_sm().store() {
+        Some(store) => store
+            .stream_ids()
+            .await?
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        None => std::collections::HashSet::new(),
+    };
+    if let Err(error) = sm_session_registry
+        .restore_from_persistence_except(&durable_stream_ids)
+        .await
+    {
         warn!(
             error = %error,
             "restore_from_persistence failed at startup; continuing with empty \

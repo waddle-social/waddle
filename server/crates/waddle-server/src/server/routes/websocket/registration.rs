@@ -109,6 +109,12 @@ async fn prepare_socket_bind(
             guard.retain_retirement(incumbent.generation);
         }
     }
+    if !resumed {
+        // The resource is bound again: its durable stream-management sessions
+        // end, and what they retained moves to offline delivery. The
+        // incumbent has stopped, so its own teardown has run first.
+        super::cleanup::replace_durable_resource_sessions(state, jid).await;
+    }
     #[cfg(feature = "clustering")]
     if !resumed {
         if let Some(bridge) = state

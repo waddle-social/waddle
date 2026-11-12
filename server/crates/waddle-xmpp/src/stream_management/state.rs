@@ -326,6 +326,27 @@ impl StreamManagementState {
         self.ack_request_cadence()
     }
 
+    /// Record a frame whose outbound counter value an external authority
+    /// already committed. The counter becomes `sequence` and the frame joins
+    /// the unacked queue under it, so the queue mirrors the authority's
+    /// window rather than counting on its own.
+    pub fn record_committed_outbound(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: chrono::DateTime<chrono::Utc>,
+        eviction_path: SmEvictionPath,
+        provenance: super::SmFrameProvenance,
+    ) -> RecordOutboundResult {
+        self.outbound_count = sequence.wrapping_sub(1);
+        self.record_outbound_with_provenance(
+            stanza_xml,
+            original_receipt_at,
+            eviction_path,
+            provenance,
+        )
+    }
+
     /// Keep a relayed ingress obligation with the recovery-owned entry at `sequence`
     /// (issue #1789). A no-op when that entry is already gone.
     pub fn attach_ingress_append(

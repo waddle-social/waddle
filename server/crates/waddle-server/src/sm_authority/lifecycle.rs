@@ -311,6 +311,45 @@ impl DurableSmStore {
         Ok(frames)
     }
 
+    /// Terminal sessions that still hold custody for the consumer to
+    /// transfer and release: retained frames, a resource snapshot or
+    /// operation outcomes.
+    pub async fn terminal_with_custody(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SmSessionKey>, DurableSmError> {
+        let mut tx = self.db.begin().await?;
+        let sessions = record::terminal_with_custody(&mut tx, limit).await?;
+        tx.rollback().await?;
+        Ok(sessions)
+    }
+
+    /// The resource snapshot a terminal session still holds: the state its
+    /// last owner stored when it detached. Absent when the session ended
+    /// without detaching, or after its custody was released.
+    pub async fn terminal_resource(
+        &self,
+        session: SmSessionKey,
+    ) -> Result<Option<PersistedSession>, DurableSmError> {
+        let mut tx = self.db.begin().await?;
+        let resource =
+            durable_rows::load_resource_snapshot(&mut tx, &record::stream_id(session)).await?;
+        tx.rollback().await?;
+        Ok(resource)
+    }
+
+    /// The `sm_sessions` and `sm_unacked` stream id of every session this
+    /// authority holds. Another reader of those relations uses it to leave
+    /// the authority's rows alone.
+    pub async fn stream_ids(
+        &self,
+    ) -> Result<Vec<waddle_xmpp::pending_delivery::SmSessionId>, DurableSmError> {
+        let mut tx = self.db.begin().await?;
+        let ids = record::all_stream_ids(&mut tx).await?;
+        tx.rollback().await?;
+        Ok(ids)
+    }
+
     /// Release a terminal session's custody after its frames were
     /// transferred: delete the frames and the resource snapshot and close
     /// the window. The session row remains as a tombstone.

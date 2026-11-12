@@ -90,7 +90,8 @@ mod registration;
 
 pub(super) use observe::observe_sm_resume_finalized;
 pub(super) use registration::{
-    finalize_sm_after_registry_registration, reject_unregistered_resume, SmRegistrationFinalization,
+    abandon_unpublished_resume, finalize_sm_after_registry_registration,
+    reject_unregistered_resume, SmRegistrationFinalization,
 };
 
 #[cfg(test)]
@@ -215,6 +216,11 @@ mod ingress_checkpoint_tests {
             &mut sm,
             &phase,
             &mut pending,
+            implementation::SmEnableOwner {
+                durable_sm: &mut DurableSmLink::default(),
+                binding: None,
+                session: None,
+            },
         )
         .await;
         let enabled = frames
@@ -279,7 +285,14 @@ mod ingress_checkpoint_tests {
     }
 }
 
+mod durable;
 mod implementation;
+pub(super) use durable::{
+    close_unannounced_session, inline_enable, inline_resume, release_unresolved_resume,
+    selected_store, settle_unresolved_enable, settle_unresolved_resume, CustodyFrame,
+    CustodyRefusal, DurableResumeSettlement, DurableSmLink, DurableSmOwner, EnableSettlement,
+    InlineResumeStep, LiveCustody, OwnerRelease,
+};
 #[cfg(test)]
 pub(super) use implementation::apply_sm_ack;
 pub(super) use implementation::apply_sm_ack_with_fence;

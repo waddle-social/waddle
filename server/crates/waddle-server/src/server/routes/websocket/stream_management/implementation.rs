@@ -374,6 +374,8 @@ pub(in crate::server::routes::websocket) struct SmCtx<'a> {
     pub(in crate::server::routes::websocket) blocklist_interested: &'a mut bool,
     pub(in crate::server::routes::websocket) pending_sm_enable_commit:
         &'a mut Option<SmEnableCommit>,
+    /// The connection's handle on the durable session authority.
+    pub(in crate::server::routes::websocket) durable_sm: &'a mut super::durable::DurableSmLink,
 }
 
 /// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
@@ -392,16 +394,25 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
                 ctx.sm_state,
                 ctx.phase,
                 ctx.pending_sm_enable_commit,
+                SmEnableOwner {
+                    durable_sm: ctx.durable_sm,
+                    binding: ctx.binding_ref.as_ref(),
+                    session: ctx.authenticated_session.as_ref(),
+                },
             )
             .await
         }
-        SmStanza::Request => {
-            handle_sm_request(state, ctx.phase, ctx.sm_state, ctx.sm_inbound_completion)
-                .await
-                .map(|ack| ResponseFrame::from_serialized_xml(ack.to_xml()))
-                .into_iter()
-                .collect()
-        }
+        SmStanza::Request => handle_sm_request(
+            state,
+            ctx.phase,
+            ctx.sm_state,
+            ctx.sm_inbound_completion,
+            ctx.durable_sm,
+        )
+        .await
+        .map(|ack| ResponseFrame::from_serialized_xml(ack.to_xml()))
+        .into_iter()
+        .collect(),
         SmStanza::Ack(ack) => {
             apply_sm_ack_with_fence(
                 state,
@@ -409,6 +420,7 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
                 ctx.phase,
                 ack.h,
                 ctx.sm_ingress_fence.as_ref(),
+                ctx.durable_sm,
             )
             .await
         }
@@ -426,12 +438,21 @@ pub(in crate::server::routes::websocket) async fn handle_sm_request(
     phase: &mut ConnectionPhase,
     sm_state: &mut StreamManagementState,
     completion: &mut SmInboundCompletionTracker,
+    durable_sm: &mut super::durable::DurableSmLink,
 ) -> Option<waddle_xmpp::stream_management::SmAck> {
     if flush_ingress_checkpoint(state, sm_state, completion)
         .await
         .is_err()
     {
         *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+        return None;
+    }
+    durable_sm
+        .report_inbound_handled(sm_state.inbound_count())
+        .await;
+    if durable_sm.is_superseded() {
+        // Another generation owns the session; this binding answers nothing
+        // more for it and retires.
         return None;
     }
     Some(waddle_xmpp::stream_management::SmAck::new(
@@ -522,7 +543,15 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack(
     phase: &mut ConnectionPhase,
     h: u32,
 ) -> Vec<ResponseFrame> {
-    apply_sm_ack_with_fence(state, sm_state, phase, h, None).await
+    apply_sm_ack_with_fence(
+        state,
+        sm_state,
+        phase,
+        h,
+        None,
+        &mut super::durable::DurableSmLink::default(),
+    )
+    .await
 }
 
 pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
@@ -531,7 +560,49 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
     phase: &mut ConnectionPhase,
     h: u32,
     expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    durable_sm: &mut super::durable::DurableSmLink,
 ) -> Vec<ResponseFrame> {
+    // A durable session validates the count against its committed exposure
+    // ceiling and releases the acknowledged frames before the connection's
+    // projection moves.
+    match durable_sm.settle_ack(h).await {
+        super::durable::AckVerdict::Apply => {}
+        super::durable::AckVerdict::HandledInvalid => {
+            let observation = SmAckObservation::TooHigh {
+                acknowledged: h,
+                send_count: sm_state.outbound_count,
+            };
+            observe_sm_ack(observation);
+            info!(
+                stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+                outcome = ?observation.outcome(),
+                client_h = h,
+                send_count = sm_state.outbound_count,
+                "SM ack rejected by the durable authority: handled count was never exposed"
+            );
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            return vec![
+                ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
+                    acknowledged: h,
+                    send_count: sm_state.outbound_count,
+                }),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ];
+        }
+        // The binding retires; it owes this stream no further frame.
+        super::durable::AckVerdict::Superseded => return Vec::new(),
+        super::durable::AckVerdict::Unavailable => {
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            return vec![
+                ResponseFrame::from(Element::from(xmpp_parsers::stream_error::StreamError {
+                    condition: xmpp_parsers::stream_error::DefinedCondition::InternalServerError,
+                    texts: Default::default(),
+                    application_specific: Vec::new(),
+                })),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ];
+        }
+    }
     if !sm_state.ack_regresses_last_acked(h) && !sm_state.ack_exceeds_outbound(h) {
         // Keep the old acknowledgement window on a failed custody write so a
         // resume can retry it. Acknowledging only in memory would leave the
@@ -555,6 +626,14 @@ pub(in crate::server::routes::websocket) async fn apply_sm_ack_with_fence(
     }
     let observation = apply_sm_ack_observation(sm_state, h);
     observe_sm_ack(observation);
+    if matches!(
+        observation,
+        SmAckObservation::Advanced { .. } | SmAckObservation::Duplicate { .. }
+    ) {
+        waddle_xmpp::telemetry::authority::record_sm_unacked_depth(
+            sm_state.unacked_count() as usize
+        );
+    }
 
     match observation {
         SmAckObservation::Regressed => {
@@ -696,27 +775,43 @@ pub(in crate::server::routes::websocket::stream_management) async fn settle_pend
     Ok(())
 }
 
+/// The binding and principal an `<enable/>` is made for, with the
+/// connection's handle on the durable authority.
+pub(in crate::server::routes::websocket::stream_management) struct SmEnableOwner<'a> {
+    pub(in crate::server::routes::websocket::stream_management) durable_sm:
+        &'a mut super::durable::DurableSmLink,
+    pub(in crate::server::routes::websocket::stream_management) binding:
+        Option<&'a waddle_xmpp::ownership::BindingRef>,
+    pub(in crate::server::routes::websocket::stream_management) session: Option<&'a Session>,
+}
+
 pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_enable(
     enable: SmEnable,
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
     phase: &ConnectionPhase,
     pending_commit: &mut Option<SmEnableCommit>,
+    owner: SmEnableOwner<'_>,
 ) -> Vec<ResponseFrame> {
     use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
+    use waddle_xmpp::telemetry::attributes::SmEnableOutcome;
+    use waddle_xmpp::telemetry::authority::record_sm_enable;
 
     if !phase.allows_stream_management_enable() {
+        record_sm_enable(SmEnableOutcome::Refused);
         return vec![ResponseFrame::from(
             SmFailed::with_condition("unexpected-request").to_element(),
         )];
     }
-    if sm_state.enabled || pending_commit.is_some() {
+    // An enable whose durable commit outcome is unknown holds the binding:
+    // a second one could commit a second session for it.
+    if sm_state.enabled || pending_commit.is_some() || !owner.durable_sm.admits_enable() {
+        record_sm_enable(SmEnableOutcome::Refused);
         return vec![ResponseFrame::from(
             SmFailed::with_condition("unexpected-request").to_element(),
         )];
     }
 
-    let stream_id = uuid::Uuid::new_v4().to_string();
     let max_resume_secs = max_resume_secs_from_env();
     let max = match enable.max {
         Some(m) if m > max_resume_secs => {
@@ -726,6 +821,24 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
         Some(m) => m,
         None => max_resume_secs,
     };
+    if enable.resume {
+        if let Some(store) = super::durable::selected_store(state) {
+            return super::durable::enable(
+                store,
+                state,
+                super::durable::DurableEnable {
+                    link: owner.durable_sm,
+                    binding: owner.binding,
+                    session: owner.session,
+                    full_jid: phase.bound_jid(),
+                    max_resume_secs: max,
+                    pending_commit,
+                },
+            )
+            .await;
+        }
+    }
+    let stream_id = uuid::Uuid::new_v4().to_string();
     // ADR-0017 Phase 3 Slice 6, element 8: for a resumable enable, ensure
     // this node's `ClaimStore` claim at `<enable/>` time — not only at detach
     // time (Slice 5's `acquire_claim_store_entry_for_detach`). Without a
@@ -753,6 +866,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
                 stream_id = %stream_id,
                 "SM enable rejected because exact claim admission did not complete"
             );
+            record_sm_enable(SmEnableOutcome::Refused);
             return vec![ResponseFrame::from(
                 SmFailed::with_condition("resource-constraint").to_element(),
             )];
@@ -784,6 +898,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
             .await
             .is_err()
     {
+        record_sm_enable(SmEnableOutcome::Failed);
         return vec![ResponseFrame::from(
             SmFailed::with_condition("resource-constraint").to_element(),
         )];
@@ -805,8 +920,10 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
         max,
     ));
     if enable.resume {
+        record_sm_enable(SmEnableOutcome::Enabled);
         vec![ResponseFrame::SmEnabled(enabled.to_element())]
     } else {
+        record_sm_enable(SmEnableOutcome::EnabledWithoutResume);
         vec![ResponseFrame::from(enabled.to_element())]
     }
 }
@@ -920,6 +1037,28 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     ctx: SmCtx<'_>,
     finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
+    // Under the durable selector every resumable session belongs to the
+    // durable authority, so every `<resume/>` is its decision.
+    if let Some(store) = super::durable::selected_store(state) {
+        return match super::durable::resume(store, resume, state, ctx).await {
+            // The reply is decided when the endpoint is published, or when
+            // an unknown commit outcome is settled.
+            super::durable::DurableResumeStep::Staged => Vec::new(),
+            super::durable::DurableResumeStep::Failed(terminal) => {
+                observe::observe_sm_resume(&terminal);
+                match terminal.outcome() {
+                    observe::SmResumeOutcome::ShutdownAbandoned => {
+                        observe::observe_sm_resume_finalized(
+                            observe::SmResumeOutcome::ShutdownAbandoned,
+                            None,
+                        );
+                    }
+                    outcome => *finalized_resume_outcome = Some(outcome),
+                }
+                terminal.into_frames()
+            }
+        };
+    }
     let terminal = handle_sm_resume_terminal(resume, state, ctx).await;
     observe::observe_sm_resume(&terminal);
     // Terminal results are recorded only once the frame carrying them is
@@ -975,6 +1114,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
         blocklist_interested,
         pending_sm_enable_commit: _,
         sm_inbound_completion: _,
+        durable_sm: _,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a

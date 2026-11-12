@@ -281,6 +281,27 @@ pub async fn websocket_state_with_sasl2() -> Arc<WebSocketState> {
     .await
 }
 
+/// [`websocket_state_with_sasl2`] with the durable stream-management
+/// authority selected on the fixture's database, as
+/// `WADDLE_XMPP_DURABLE_SM=durable` selects it at startup. The dark SASL2
+/// handshake then processes XEP-0198 inline resume and XEP-0386 Bind 2.
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_sasl2_and_durable_sm() -> Arc<WebSocketState> {
+    let state = websocket_state_with_sasl2().await;
+    let selection = crate::sm_authority::DurableSmSelection::open(
+        crate::sm_authority::DurableSmMode::Durable,
+        state.deps.app_state.db_pool.global(),
+        false,
+    )
+    .await
+    .expect("open the durable SM store on the fixture database");
+    assert!(
+        state.deps.app_state.publish_durable_sm(selection),
+        "the fixture selects its stream-management authority once"
+    );
+    state
+}
+
 /// Resolve store URL provenance with the same normalization used by startup.
 #[cfg(feature = "test-support")]
 pub fn resolve_xmpp_database_url_for_test(

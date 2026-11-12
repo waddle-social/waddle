@@ -1094,6 +1094,10 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 break;
             };
             run_sm_expiry_sweep_with_custody_cursor(&state, &mut custody_cursor).await;
+            // Sessions of the durable authority are never in the registry
+            // the sweep above drains; they expire, transfer their retained
+            // frames and release their custody here.
+            crate::server::routes::websocket::run_durable_sm_sweep(&state).await;
         }
     });
 }

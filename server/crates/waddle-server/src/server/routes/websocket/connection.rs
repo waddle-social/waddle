@@ -485,6 +485,12 @@ struct TurnGates {
     send_window_pause_deadline: Option<tokio::time::Instant>,
     /// Deferred inbound frames are queued ahead of the socket.
     deferred_pending: bool,
+    /// When a durable stream-management operation with an unknown commit
+    /// outcome is next settled.
+    durable_sm_settlement_due: Option<tokio::time::Instant>,
+    /// A resume's outcome is unknown, so no client input is read: the next
+    /// request may be the bind only a known rejection permits.
+    inbound_held: bool,
 }
 
 /// What the live owner shares with, or borrows from, the rest of the
@@ -553,6 +559,9 @@ enum LoopEvent {
     OrderedRelayHandoff(Option<OrderedRelayHandoffCompletion>),
     TimerExpired(TimerId),
     SendWindowPauseDeadline,
+    /// A durable stream-management operation whose commit outcome is unknown
+    /// is due another settlement attempt.
+    DurableSmSettlement,
 }
 
 impl LoopEvent {
@@ -571,7 +580,9 @@ impl LoopEvent {
                 ActorTurnEvent::InboundFrame
             }
             Self::Outbound(_) => ActorTurnEvent::OutboundDelivery,
-            Self::TimerExpired(_) | Self::SendWindowPauseDeadline => ActorTurnEvent::Timer,
+            Self::TimerExpired(_) | Self::SendWindowPauseDeadline | Self::DurableSmSettlement => {
+                ActorTurnEvent::Timer
+            }
         }
     }
 }
@@ -618,6 +629,9 @@ fn handler_exit_cause(
     }
     if let Some(reason) = pump_stop.reason() {
         return RetirementCause::from_pump_stop(reason);
+    }
+    if conn.durable_sm.is_superseded() {
+        return RetirementCause::SessionSuperseded;
     }
     match exit {
         HandlerExit::Write => RetirementCause::WriteFailure,
@@ -1030,11 +1044,13 @@ impl LiveSocketState {
             send_window_paused,
             send_window_pause_deadline,
             deferred_pending,
+            durable_sm_settlement_due: conn.durable_sm.settlement_due(),
+            inbound_held: conn.durable_sm.holds_inbound(),
         };
         // The wait prefers client input to its timers. A frame the socket
         // already holds must therefore be ready before the wait is polled,
         // as it would be for a task reading its own socket.
-        if !deferred_pending {
+        if !deferred_pending && !conn.durable_sm.holds_inbound() {
             ws_receiver.settle_inbound().await;
         }
         ControlFlow::Continue(())
@@ -1066,6 +1082,8 @@ impl LiveSocketState {
             send_window_paused,
             send_window_pause_deadline,
             deferred_pending,
+            durable_sm_settlement_due,
+            inbound_held,
         } = self.turn;
         let Some(socket_halves) = self.socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
@@ -1118,11 +1136,26 @@ impl LiveSocketState {
 
             command = commands, if commands_offered => return TurnEvent::Command(command),
 
+            // An enable or resume whose commit outcome is unknown owes the
+            // client its reply. The attempt is spaced by its own backoff, and
+            // sits ahead of the data sources so a busy client cannot keep its
+            // own stream-management outcome waiting.
+            _ = async {
+                match durable_sm_settlement_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => LoopEvent::DurableSmSettlement,
+
             // A bounded drain-deferred inbound chunk is due.
-            _ = std::future::ready(()), if deferred_pending => LoopEvent::DeferredInbound,
+            _ = std::future::ready(()), if deferred_pending && !inbound_held => {
+                LoopEvent::DeferredInbound
+            }
 
             // Inbound WebSocket messages from the client.
-            msg = ws_receiver.next(), if !deferred_pending => LoopEvent::Inbound(msg),
+            msg = ws_receiver.next(), if !deferred_pending && !inbound_held => {
+                LoopEvent::Inbound(msg)
+            }
 
             // Outbound messages routed from other connections. Gated by the
             // send-window pause (issue #1219): while paused no new outbound
@@ -1182,7 +1215,14 @@ impl LiveSocketState {
             ..
         } = self;
         let handler_exit = |conn: &WsConnState, exit| {
-            Retire::settled(handler_exit_cause(ctx, pump_stop, conn, exit))
+            match handler_exit_cause(ctx, pump_stop, conn, exit) {
+                // The peer of a superseded binding is told the stream ended
+                // in conflict, as a displaced binding is.
+                cause @ RetirementCause::SessionSuperseded => {
+                    Retire::owing(cause, OwedClose::Conflict)
+                }
+                cause => Retire::settled(cause),
+            }
         };
         let Some(socket_halves) = socket_io.as_mut() else {
             unreachable!("the live connection owns its socket halves");
@@ -1555,6 +1595,140 @@ impl LiveSocketState {
                      closing into detach-for-resume"
                 );
                 return ControlFlow::Break(Retire::settled(RetirementCause::PeerUnresponsive));
+            }
+
+            LoopEvent::DurableSmSettlement => {
+                // Each resolution is idempotent under its operation id, so
+                // the control sources may end it early; the next turn then
+                // retires the connection for the control event itself.
+                if conn.durable_sm.holds_inbound() {
+                    let settlement = tokio::select! {
+                        biased;
+                        _ = pump_stop.stopped() => return ControlFlow::Continue(()),
+                        _ = admission.identity_revoked() => return ControlFlow::Continue(()),
+                        _ = admission_permit.revoked() => return ControlFlow::Continue(()),
+                        _ = shutdown_token.cancelled() => return ControlFlow::Continue(()),
+                        settlement = super::stream_management::settle_unresolved_resume(
+                            state.as_ref(),
+                            &mut *conn,
+                        ) => settlement,
+                    };
+                    let responses = match settlement {
+                        None => return ControlFlow::Continue(()),
+                        // The staged resume is published and answered by the
+                        // same steps that follow a resume handled in its
+                        // own turn.
+                        Some(super::stream_management::DurableResumeSettlement::Staged) => {
+                            if let Some(success) = conn.sasl2_success.as_mut() {
+                                success.held_resume_committed();
+                            }
+                            ResponseBatch::default()
+                        }
+                        Some(super::stream_management::DurableResumeSettlement::Failed {
+                            frames,
+                            inline,
+                        }) => match conn.sasl2_success.as_mut() {
+                            // The exchange reports the failure in its
+                            // `<success/>` and goes on to its bind request.
+                            Some(success) => {
+                                success.held_resume_failed(inline);
+                                conn.pending_finalized_resume_outcome = None;
+                                ResponseBatch::default()
+                            }
+                            None => ResponseBatch::from(frames),
+                        },
+                    };
+                    if !complete_inbound_turn(
+                        responses,
+                        domain,
+                        state,
+                        &mut *conn,
+                        RegistrationChannels {
+                            pending_tx: &mut *pending_tx,
+                            outbound_receiver: Some(&*outbound_rx),
+                            force_detach_rx: &mut *force_detach_rx,
+                        },
+                        ConnectionIo {
+                            sender: &mut ws_sender,
+                            receiver: &mut ws_receiver,
+                        },
+                        FrameAuthority {
+                            permit: admission_permit,
+                            shutdown: shutdown_token,
+                        },
+                    )
+                    .await
+                    {
+                        return ControlFlow::Break(handler_exit(conn, HandlerExit::Inbound));
+                    }
+                    return ControlFlow::Continue(());
+                }
+                let settlement = tokio::select! {
+                    biased;
+                    _ = pump_stop.stopped() => return ControlFlow::Continue(()),
+                    _ = admission.identity_revoked() => return ControlFlow::Continue(()),
+                    _ = admission_permit.revoked() => return ControlFlow::Continue(()),
+                    _ = shutdown_token.cancelled() => return ControlFlow::Continue(()),
+                    settlement = super::stream_management::settle_unresolved_enable(
+                        state.as_ref(),
+                        &mut conn.durable_sm,
+                        &mut conn.pending_sm_enable_commit,
+                    ) => settlement,
+                };
+                let (reply, commit) = match settlement {
+                    super::stream_management::EnableSettlement::Pending => {
+                        return ControlFlow::Continue(());
+                    }
+                    super::stream_management::EnableSettlement::Enabled { reply, commit } => {
+                        (reply, Some(commit))
+                    }
+                    super::stream_management::EnableSettlement::Failed(reply) => (reply, None),
+                };
+                if let Some(success) = conn.sasl2_success.as_mut() {
+                    // The enable was made for a Bind 2 resource: its outcome
+                    // completes the exchange's `<success/>`, which is written
+                    // by the steps that follow any turn.
+                    success.held_enable_settled(commit.as_ref());
+                    if !complete_inbound_turn(
+                        ResponseBatch::default(),
+                        domain,
+                        state,
+                        &mut *conn,
+                        RegistrationChannels {
+                            pending_tx: &mut *pending_tx,
+                            outbound_receiver: Some(&*outbound_rx),
+                            force_detach_rx: &mut *force_detach_rx,
+                        },
+                        ConnectionIo {
+                            sender: &mut ws_sender,
+                            receiver: &mut ws_receiver,
+                        },
+                        FrameAuthority {
+                            permit: admission_permit,
+                            shutdown: shutdown_token,
+                        },
+                    )
+                    .await
+                    {
+                        return ControlFlow::Break(handler_exit(conn, HandlerExit::Inbound));
+                    }
+                    return ControlFlow::Continue(());
+                }
+                if !matches!(
+                    send_ws_message_with_authority(
+                        &mut ws_sender,
+                        Message::Text(reply.into_serialized_xml().into()),
+                        "Failed to send settled SM enable reply",
+                        Some((admission_permit, shutdown_token)),
+                    )
+                    .await,
+                    AuthoritySendOutcome::Sent
+                ) {
+                    return ControlFlow::Break(handler_exit(conn, HandlerExit::Write));
+                }
+                // `<enabled/>` is on the wire: the projection starts counting
+                // exactly as it does after an enable answered in its own turn.
+                conn.publish_pending_sm_enable(state.as_ref());
             }
         }
         ControlFlow::Continue(())
@@ -2545,7 +2719,7 @@ where
     conn.note_transport_activity();
 
     // Handle XMPP framing (RFC 7395)
-    let mut responses = handle_xmpp_frame_with_admission(
+    let responses = handle_xmpp_frame_with_admission(
         text,
         domain,
         state.as_ref(),
@@ -2566,6 +2740,63 @@ where
     {
         return false;
     }
+
+    complete_inbound_turn(
+        responses,
+        domain,
+        state,
+        conn,
+        RegistrationChannels {
+            pending_tx,
+            outbound_receiver,
+            force_detach_rx,
+        },
+        ConnectionIo {
+            sender: ws_sender,
+            receiver: ws_receiver,
+        },
+        FrameAuthority {
+            permit: admission_permit,
+            shutdown: shutdown_token,
+        },
+    )
+    .await
+}
+
+/// Finish a turn whose handler produced `responses`: register a connection
+/// the handler bound or resumed, finalize stream management for it, write
+/// the batch and settle what it carried. Returns whether the loop continues.
+async fn complete_inbound_turn<S, SE, R, RE>(
+    mut responses: ResponseBatch,
+    domain: &str,
+    state: &Arc<WebSocketState>,
+    conn: &mut WsConnState,
+    channels: RegistrationChannels<'_>,
+    io: ConnectionIo<'_, S, R>,
+    authority: FrameAuthority<'_>,
+) -> bool
+where
+    S: futures::Sink<Message, Error = SE> + Unpin,
+    SE: super::send::WebSocketWriteError,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin + SettleInbound,
+    RE: std::fmt::Display,
+{
+    let RegistrationChannels {
+        pending_tx,
+        outbound_receiver,
+        force_detach_rx,
+    } = channels;
+    let ConnectionIo {
+        sender: ws_sender,
+        receiver: ws_receiver,
+    } = io;
+    let FrameAuthority {
+        permit: admission_permit,
+        shutdown: shutdown_token,
+    } = authority;
+    // A SASL2 exchange that authenticated with inline requests runs its
+    // resume, or binds its resource, before registration looks at the phase.
+    super::sasl::advance_sasl2_inline(state.as_ref(), conn).await;
 
     // Mirror any phase transition `handle_xmpp_frame` performed (most
     // importantly Ready → Closing on SASL failure / stream error)
@@ -2727,6 +2958,22 @@ where
         }
     }
 
+    // A durable resume that committed but whose endpoint registration did
+    // not run is returned to the authority, and the client is told it failed.
+    if super::stream_management::abandon_unpublished_resume(state.as_ref(), conn).await {
+        responses = ResponseBatch::from_frames(vec![
+            waddle_xmpp::stream_management::SmFailed::with_condition("internal-server-error")
+                .to_element(),
+        ]);
+        conn.pending_finalized_resume_outcome =
+            Some(waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal);
+    }
+
+    // A staged SASL2 `<success/>` is written once its inline results are
+    // known: after the resume it reports was completed, or after the resource
+    // it reports as bound was registered.
+    super::sasl::finish_sasl2_inline(state.as_ref(), conn, &mut responses).await;
+
     ensure_websocket_stream_close_for_closing_phase(conn, &mut responses.frames);
 
     // Write the batch through the chunked XEP-0198-aware writer
@@ -2849,7 +3096,9 @@ where
         .await;
         return false;
     }
-    true
+    // A durable session this binding no longer owns ends the loop; the
+    // retirement names the cause and writes the conflict close.
+    !conn.durable_sm.is_superseded()
 }
 
 async fn close_if_frame_authority_revoked<S, E>(
@@ -2875,8 +3124,11 @@ where
 async fn cleanup_frame_authority_revocation(_state: &WebSocketState, conn: &mut WsConnState) {
     // `<enable/>` has not reached its wire commit point yet. Dropping this
     // typed guard inventories exact claim release; a stale generation must
-    // never send `<enabled/>`.
-    drop(conn.pending_sm_enable_commit.take());
+    // never send `<enabled/>`. A session the durable authority already
+    // committed for that reply is closed, since no client can name it.
+    if conn.pending_sm_enable_commit.take().is_some() {
+        super::stream_management::close_unannounced_session(&mut conn.durable_sm).await;
+    }
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         conn.pending_resume_h = None;
         drop(conn.pending_resume_claim.take());

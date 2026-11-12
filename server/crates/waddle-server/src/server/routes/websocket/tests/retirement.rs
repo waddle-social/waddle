@@ -27,7 +27,7 @@ use waddle_xmpp::registry::{
 };
 use waddle_xmpp::telemetry::attributes::ActorRetirementCause;
 
-const EVERY_CAUSE: [RetirementCause; 14] = [
+const EVERY_CAUSE: [RetirementCause; 15] = [
     RetirementCause::PeerClose,
     RetirementCause::StreamClosed,
     RetirementCause::Shutdown,
@@ -41,6 +41,7 @@ const EVERY_CAUSE: [RetirementCause; 14] = [
     RetirementCause::OwnerCancelled,
     RetirementCause::PeerUnresponsive,
     RetirementCause::DispatchTimeout,
+    RetirementCause::SessionSuperseded,
     RetirementCause::OwnerPanicked,
 ];
 
@@ -79,9 +80,9 @@ fn each_cause_retires_exactly_once_with_its_own_outcome() {
             | RetirementCause::IdentityRevoked
             | RetirementCause::PermitRevoked
             | RetirementCause::LeaseLost => ActorRetirementCause::ServerShutdown,
-            RetirementCause::ForceDetach | RetirementCause::Replaced => {
-                ActorRetirementCause::Replaced
-            }
+            RetirementCause::ForceDetach
+            | RetirementCause::Replaced
+            | RetirementCause::SessionSuperseded => ActorRetirementCause::Replaced,
             RetirementCause::WriteFailure | RetirementCause::PumpExit => {
                 ActorRetirementCause::TransportError
             }

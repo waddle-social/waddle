@@ -77,6 +77,9 @@ pub(in crate::server::routes::websocket) enum RetirementCause {
     /// responsibility for the stanza, so the stream cannot continue without
     /// acknowledging a stanza it did not handle.
     DispatchTimeout,
+    /// The durable stream-management authority refused this binding's fence:
+    /// a later resume owns its session.
+    SessionSuperseded,
     /// The hosting actor panicked or was killed. Nothing settled.
     OwnerPanicked,
 }
@@ -112,7 +115,9 @@ impl RetirementCause {
             Self::Shutdown | Self::IdentityRevoked | Self::PermitRevoked | Self::LeaseLost => {
                 ActorRetirementCause::ServerShutdown
             }
-            Self::ForceDetach | Self::Replaced => ActorRetirementCause::Replaced,
+            Self::ForceDetach | Self::Replaced | Self::SessionSuperseded => {
+                ActorRetirementCause::Replaced
+            }
             Self::WriteFailure | Self::PumpExit => ActorRetirementCause::TransportError,
             Self::OwnerCancelled => ActorRetirementCause::Abandoned,
             Self::PeerUnresponsive | Self::DispatchTimeout => ActorRetirementCause::Deadline,

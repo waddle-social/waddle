@@ -17,7 +17,9 @@ use super::send::{
     send_ws_message_with_authority, send_ws_message_with_binding, AuthoritySendOutcome,
 };
 use super::state::WsConnState;
-use super::stream_management::{apply_sm_ack_with_fence, is_countable_stanza};
+use super::stream_management::{
+    apply_sm_ack_with_fence, is_countable_stanza, CustodyFrame, CustodyRefusal, LiveCustody,
+};
 use super::{
     debug, error, info, warn, Message, Sink, SmStanza, StreamExt, WebSocketState, MAX_FRAME_SIZE,
 };
@@ -49,6 +51,16 @@ pub(super) enum BatchSmPolicy {
     /// stanzas already sit in the restored unacked queue with their
     /// original sequence numbers.
     ReplaySuppressed,
+}
+
+impl BatchSmPolicy {
+    /// The receipt time a frame recorded under this policy carries.
+    fn receipt_at(self) -> chrono::DateTime<chrono::Utc> {
+        match self {
+            Self::RecordAt(received_at) => received_at,
+            Self::Record | Self::ReplaySuppressed => chrono::Utc::now(),
+        }
+    }
 }
 
 /// Outcome of writing a response batch.
@@ -420,12 +432,60 @@ where
         }
         let current_was_recorded = current_should_record;
         let request_ack = if current_was_recorded {
+            // A durable session takes custody of the frame before the
+            // connection's queue or the transport may hold it.
+            let provenance = frame.provenance();
+            let custody = conn
+                .durable_sm
+                .take_live_custody(
+                    &conn.sm_state,
+                    CustodyFrame {
+                        xml: &frame_xml,
+                        original_receipt_at: policy.receipt_at(),
+                        provenance: &provenance,
+                        ingress_receipts: frame.ingress_receipts(),
+                    },
+                )
+                .await;
+            let committed_sequence = match custody {
+                LiveCustody::Unmanaged => None,
+                LiveCustody::Exposed { sequence } => Some(sequence),
+                LiveCustody::Retained => {
+                    // The authority holds the frame; a resume in progress
+                    // writes it after its replay.
+                    accepted_frame_indices.push(frame_index);
+                    continue;
+                }
+                LiveCustody::Refused(refusal) => {
+                    // The frame is in no custody and is not written. Unless
+                    // another generation owns the session, the rest of the
+                    // batch is kept for the admission that precedes detach.
+                    if refusal != CustodyRefusal::Superseded {
+                        accepted_frame_indices.extend(
+                            record_current_and_remaining_for_replay_indexed(
+                                conn,
+                                frame_index,
+                                frame,
+                                frames,
+                                policy,
+                                false,
+                            ),
+                        );
+                    }
+                    return BatchWriteReport {
+                        outcome: BatchWriteOutcome::TransportClosed,
+                        accepted_frame_indices,
+                        written_frame_count,
+                    };
+                }
+            };
             let (request_ack, accepted) = record_live_sm_frame(
                 conn,
                 frame_xml.clone(),
                 SmEvictionPath::Batch,
                 policy,
-                frame.provenance(),
+                provenance,
+                committed_sequence,
             );
             if accepted {
                 // Only an entry inside the replay window can carry the
@@ -727,6 +787,7 @@ where
                         &mut conn.phase,
                         h,
                         conn.sm_ingress_fence.as_ref(),
+                        &mut conn.durable_sm,
                     )
                     .await;
                     if !batch_authoritative(authority) {
@@ -883,23 +944,33 @@ fn should_record(conn: &WsConnState, frame_xml: &str, policy: BatchSmPolicy) -> 
         && is_countable_stanza(frame_xml)
 }
 
+/// Record a counted frame in the connection's queue. `committed_sequence` is
+/// the outbound counter value a durable session committed for it; without
+/// one the queue counts the frame itself.
 fn record_live_sm_frame(
     conn: &mut WsConnState,
     frame_xml: String,
     eviction_path: SmEvictionPath,
     policy: BatchSmPolicy,
     provenance: waddle_xmpp::stream_management::SmFrameProvenance,
+    committed_sequence: Option<u32>,
 ) -> (bool, bool) {
-    let received_at = match policy {
-        BatchSmPolicy::RecordAt(received_at) => received_at,
-        BatchSmPolicy::Record | BatchSmPolicy::ReplaySuppressed => chrono::Utc::now(),
+    let received_at = policy.receipt_at();
+    let recorded = match committed_sequence {
+        Some(sequence) => conn.sm_state.record_committed_outbound(
+            sequence,
+            frame_xml,
+            received_at,
+            eviction_path,
+            provenance,
+        ),
+        None => conn.sm_state.record_outbound_with_provenance(
+            frame_xml,
+            received_at,
+            eviction_path,
+            provenance,
+        ),
     };
-    let recorded = conn.sm_state.record_outbound_with_provenance(
-        frame_xml,
-        received_at,
-        eviction_path,
-        provenance,
-    );
     let request_ack = recorded.request_ack;
     // A replay gap means resume can no longer guarantee recovery of newly
     // recorded-but-unwritten frames. Keep them in recovery inventory, but do
@@ -996,6 +1067,7 @@ where
                     SmEvictionPath::ReplayTail,
                     policy,
                     provenance,
+                    None,
                 );
                 if accepted {
                     conn.sm_state.attach_ingress_receipts(ingress_receipts);
@@ -1106,6 +1178,7 @@ where
                         &mut conn.phase,
                         h,
                         conn.sm_ingress_fence.as_ref(),
+                        &mut conn.durable_sm,
                     )
                     .await;
                     if !batch_authoritative(authority) {
