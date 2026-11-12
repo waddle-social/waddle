@@ -55,7 +55,6 @@ use crate::server::AppState;
 use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
 
-pub(crate) mod actor_local_endpoint;
 mod batch_write;
 mod call_signaling_telemetry;
 #[cfg(feature = "test-support")]
@@ -76,32 +75,6 @@ mod parse_errors;
 mod registration;
 #[cfg(feature = "clustering")]
 pub(crate) use registration::complete_bind_retirements;
-// The private owner is compiled now, but startup remains on the live loop.
-// The feature-gated fixture is its only caller until that migration is ready.
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(
-        dead_code,
-        reason = "the connection actor core is not wired into startup yet"
-    )
-)]
-mod connection_actor_core;
-#[expect(
-    dead_code,
-    reason = "the supervised actor driver remains dormant until the /ws cutover"
-)]
-mod connection_actor_driver_task;
-#[cfg(feature = "test-support")]
-pub use connection_actor_core::fixture as connection_actor;
-#[cfg(feature = "test-support")]
-pub use connection_actor_driver_task::{
-    ConnectionActorDriverTestAdmissionError, ConnectionActorDriverTestGate,
-    ConnectionActorDriverTestHandle, ConnectionActorDriverTestSnapshot,
-    ConnectionActorDriverTestTicket, ConnectionActorDriverTestUnknownReason,
-    PhysicalControlRecovery, PhysicalEnrollment, PhysicalLimits, PhysicalProducerRecovery,
-    PhysicalRecovery, PhysicalReplayPayload, PhysicalReplayRecovery, PhysicalSnapshot,
-    PhysicalWriteKind, PhysicalWriteRecovery,
-};
 #[cfg(feature = "clustering")]
 mod remote_muc_retry;
 pub(crate) mod replay;

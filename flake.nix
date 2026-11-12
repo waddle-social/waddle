@@ -889,11 +889,9 @@
                 ''}
                 # Match the archive's compiler improvements while retaining
                 # this lane's default-feature coverage and dependency cache.
-                # `test-support` adds no dependencies. It exposes test fixtures and
-                # in-server test seams, and it makes every server state read
-                # WADDLE_TEST_LIVE_CONNECTION_HOST and refuse to start on a value
-                # other than `actor` or `plain-task`. The public suites gated on
-                # it run here too (#1777).
+                # `test-support` adds no dependencies; it exposes test fixtures and
+                # in-server test seams, so the public suites gated on it run here
+                # too (#1777).
                 nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests
                   --config profile.ci-test.package.waddle-server.opt-level=0
                   --config profile.ci-test.package.waddle-xmpp.opt-level=0)

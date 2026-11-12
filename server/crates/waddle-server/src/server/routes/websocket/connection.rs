@@ -32,7 +32,6 @@ use super::{
 use crate::clustering::NodeAdmissionPermit;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
-use crate::server::LiveConnectionHost;
 use crate::websocket_transport::{
     InputError, IoCustodianInventory, IoCustodianObserver, LegacySocketAdmission, Limits,
     LiveSocketCleanup, LiveSocketTransport, TransportLimits, WebSocketInput, WebSocketMessageSink,
@@ -42,7 +41,6 @@ use axum::response::IntoResponse;
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use tokio_util::sync::CancellationToken;
@@ -50,6 +48,11 @@ use waddle_xmpp::protocol::TimerId;
 use waddle_xmpp::registry::{LocalSocketIo, SocketOutboundEndpoint, SocketOutboundReceiver};
 use waddle_xmpp::stream_management::SmRequest;
 
+#[expect(
+    dead_code,
+    reason = "the binding messages have no handler until the actor owns the outbound endpoint"
+)]
+mod binding_messages;
 mod live_actor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +174,7 @@ async fn xmpp_websocket_handler(
             .callback_waiter
             .clone();
         let waiter = LiveWebSocketConnection {
-            phase: LiveSocketPhase::Upgraded(Box::new(socket)),
+            socket: Box::new(socket),
             state,
             admission,
             _connection_guard: connection_guard,
@@ -331,10 +334,13 @@ async fn recv_optional<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     }
 }
 
-/// Owns an upgraded socket and its connection lifecycle in one task.
+/// Owns an upgraded socket and its connection lifecycle in one task. Once the
+/// socket has started, the task runs the connection actor, which holds the
+/// live state until it stops.
 struct LiveWebSocketConnection {
-    // Drop the connection's live resources before releasing the drain guard.
-    phase: LiveSocketPhase,
+    // Declared first: an unstarted socket drops before the capacity and the
+    // drain guard below are released.
+    socket: Box<WebSocket>,
     state: Arc<WebSocketState>,
     // Keep capacity reserved through connection cleanup and release it before
     // the drain guard, after the physical socket and connection state drop.
@@ -345,15 +351,6 @@ struct LiveWebSocketConnection {
     // been closed AND its SM state handed to the session registry for
     // Q6 promotion.
     _connection_guard: waddle_ecdysis::ConnectionGuard,
-}
-
-enum LiveSocketPhase {
-    Upgraded(Box<WebSocket>),
-    Active(Box<LiveSocketState>),
-    // Holds the place of a value being moved out: the upgraded socket on its
-    // way into the active state, and the active state on its way into
-    // settlement. Neither move awaits, so cancellation cannot observe it.
-    Transitioning,
 }
 
 type LiveSocketIo = LocalSocketIo<
@@ -459,7 +456,7 @@ struct LiveOwnerCtx<'a> {
 }
 
 /// What one wait of the live loop produced: an event of the connection, or a
-/// value from the host's own command source.
+/// value from the hosting actor's command source, its mailbox.
 enum TurnEvent<C> {
     Loop(LoopEvent),
     Command(C),
@@ -467,9 +464,9 @@ enum TurnEvent<C> {
     Idle,
 }
 
-/// Whether a wait offers the host's command source.
+/// Whether a wait offers the hosting actor's command source.
 ///
-/// A host that just took a command withholds the source for one wait. That
+/// An actor that just took a command withholds the source for one wait. That
 /// wait polls the control sources, then every data source and timer in their
 /// usual order, and returns [`TurnEvent::Idle`] at once when none is ready.
 /// Commands and the rest of the loop therefore alternate while both stay
@@ -487,7 +484,7 @@ enum CommandTurn {
 enum OwnerExit {
     /// The connection settled, or closed before it started.
     Settled,
-    /// The host stopped without settling. The caller treats this exactly as
+    /// The actor stopped without settling. The caller treats this exactly as
     /// an owner panic.
     Abandoned,
 }
@@ -555,8 +552,8 @@ impl LiveWebSocketConnection {
             .owner_panic_fenced
             .clone();
         let owner = tokio::spawn(async move {
-            // A host that stopped without settling, such as a killed or
-            // panicked hosting actor, counts as a panic: cleanup completion
+            // An actor that stopped without settling, because it was killed
+            // or panicked, counts as a panic: cleanup completion
             // is just as unconfirmed. A panic during settlement unwinds
             // through the hosting actor's stop hook to this point as well.
             let panicked = !matches!(
@@ -644,10 +641,7 @@ impl LiveWebSocketConnection {
             // HTTP 101 is already on the wire. RFC 7395 therefore requires a
             // WebSocket close handshake rather than silently dropping the
             // upgraded TCP stream; no XMPP stream exists at this boundary.
-            let LiveSocketPhase::Upgraded(socket) = &mut self.phase else {
-                unreachable!("run starts with the upgraded socket");
-            };
-            close_unstarted_upgraded_socket(socket.as_mut()).await;
+            close_unstarted_upgraded_socket(self.socket.as_mut()).await;
             return OwnerExit::Settled;
         }
         if caller_gone.is_cancelled() {
@@ -655,17 +649,9 @@ impl LiveWebSocketConnection {
                 connection_ref = ?self.admission.connection_ref(),
                 "WebSocket upgrade waiter dropped before XMPP start"
             );
-            let LiveSocketPhase::Upgraded(socket) = &mut self.phase else {
-                unreachable!("run starts with the upgraded socket");
-            };
-            close_unstarted_upgraded_socket(socket.as_mut()).await;
+            close_unstarted_upgraded_socket(self.socket.as_mut()).await;
             return OwnerExit::Settled;
         }
-        let LiveSocketPhase::Upgraded(socket) =
-            std::mem::replace(&mut self.phase, LiveSocketPhase::Transitioning)
-        else {
-            unreachable!("run starts with the upgraded socket");
-        };
         let limits = match (
             Limits::new(TRANSPORT_INBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
             Limits::new(TRANSPORT_OUTBOUND_FRAMES, TRANSPORT_QUEUE_BYTES),
@@ -681,7 +667,7 @@ impl LiveWebSocketConnection {
         } = match self
             .admission
             .start_socket(
-                *socket,
+                *self.socket,
                 &self.state.deps.app_state.websocket_inventory,
                 limits,
                 TRANSPORT_RETIREMENT_DEADLINE,
@@ -737,7 +723,7 @@ impl LiveWebSocketConnection {
             &self.state.deps.protocol.dispatcher,
             self.state.deps.ws_keepalive,
         );
-        self.phase = LiveSocketPhase::Active(Box::new(LiveSocketState {
+        let live = Box::new(LiveSocketState {
             outbound_rx,
             superseded: false,
             timers: TransportTimers::new(),
@@ -751,77 +737,21 @@ impl LiveWebSocketConnection {
             force_detach_rx: None,
             pending_tx: Some(outbound_endpoint),
             turn: TurnGates::default(),
-        }));
-        match self.state.deps.app_state.live_connection_host {
-            LiveConnectionHost::PlainTask => {
-                let ctx = LiveOwnerCtx {
-                    state: &self.state,
-                    admission: &self.admission,
-                    admission_permit: self.admission.permit(),
-                    domain: &domain,
-                    shutdown_token: &shutdown_token,
-                    caller_gone: &caller_gone,
-                };
-                let LiveSocketPhase::Active(live) = &mut self.phase else {
-                    unreachable!("the connection was just activated");
-                };
-
-                live.start(&ctx).await;
-                loop {
-                    if live.prepare_turn(&ctx).await.is_break() {
-                        break;
-                    }
-                    // This host has no command source of its own, so the
-                    // source it offers never yields.
-                    let event = live
-                        .next_event(
-                            &ctx,
-                            std::future::pending::<Infallible>(),
-                            CommandTurn::Offered,
-                        )
-                        .await;
-                    let event = match event {
-                        TurnEvent::Loop(event) => event,
-                        TurnEvent::Command(never) => match never {},
-                        // Only a wait that withholds commands is ever idle.
-                        TurnEvent::Idle => continue,
-                    };
-                    if live.handle_event(&ctx, event).await.is_break() {
-                        break;
-                    }
-                }
-
-                let LiveSocketPhase::Active(live) =
-                    std::mem::replace(&mut self.phase, LiveSocketPhase::Transitioning)
-                else {
-                    unreachable!("the connection stays active until settlement");
-                };
-                live.settle(&ctx).await;
-                OwnerExit::Settled
-            }
-            LiveConnectionHost::Actor => {
-                let LiveSocketPhase::Active(live) =
-                    std::mem::replace(&mut self.phase, LiveSocketPhase::Transitioning)
-                else {
-                    unreachable!("the connection was just activated");
-                };
-                // The actor is run on this task and dropped before `host`
-                // returns, so the connection's resources are released before
-                // the admission it also owns, and both before the drain
-                // guard this owner keeps.
-                live_actor::host(
-                    live,
-                    live_actor::LiveOwner {
-                        state: self.state,
-                        admission: self.admission,
-                        domain,
-                        shutdown_token,
-                        caller_gone,
-                    },
-                )
-                .await
-            }
-        }
+        });
+        // The actor is run on this task and dropped before `host` returns, so
+        // the connection's resources are released before the admission it
+        // also owns, and both before the drain guard this owner keeps.
+        live_actor::host(
+            live,
+            live_actor::LiveOwner {
+                state: self.state,
+                admission: self.admission,
+                domain,
+                shutdown_token,
+                caller_gone,
+            },
+        )
+        .await
     }
 }
 
@@ -950,7 +880,7 @@ impl LiveSocketState {
     /// borrows (`timers`, the live-resume control), so no value is lost
     /// between turns.
     ///
-    /// `commands` is the host's own source. When offered it is polled after
+    /// `commands` is the hosting actor's mailbox. When offered it is polled after
     /// the control sources and before the data sources and timers: a full
     /// command queue cannot delay revocation, shutdown or detach, and a
     /// client that keeps the socket and the outbound queue busy cannot keep a

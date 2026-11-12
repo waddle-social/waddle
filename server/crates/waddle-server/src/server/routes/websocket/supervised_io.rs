@@ -247,6 +247,13 @@ impl StopSignal {
     }
 
     #[cfg(feature = "test-support")]
+    #[cfg_attr(
+        not(all(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "connection retirement does not use the custodian stop listener yet"
+        )
+    )]
     fn set_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -258,9 +265,9 @@ impl StopSignal {
         }
     }
 
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    #[expect(
+        dead_code,
+        reason = "connection retirement does not use the custodian stop listener yet"
     )]
     fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         let mut state = match self.state.lock() {
@@ -317,6 +324,7 @@ impl<T> QueueItem<T> {
 
     /// Transform a retained item without releasing its count or byte permits.
     #[cfg(feature = "test-support")]
+    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
     pub(crate) fn map<U>(self, transform: impl FnOnce(T) -> U) -> QueueItem<U> {
         QueueItem {
             value: transform(self.value),
@@ -1027,6 +1035,13 @@ struct CustodianClient {
     auxiliary_join_started: Arc<AtomicBool>,
     auxiliary_task_registered: Arc<Notify>,
     #[cfg(feature = "test-support")]
+    #[cfg_attr(
+        not(all(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "connection retirement does not use the custodian stop listener yet"
+        )
+    )]
     physical_stop: Arc<PhysicalStopHandoff>,
 }
 
@@ -1057,6 +1072,13 @@ impl PhysicalStopHandoff {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
+    #[cfg_attr(
+        not(all(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "connection retirement does not use the custodian stop listener yet"
+        )
+    )]
     fn enable(&self) -> bool {
         let mut state = self.lock();
         if state.enabled || state.retiring || state.closed {
@@ -1066,6 +1088,13 @@ impl PhysicalStopHandoff {
         true
     }
 
+    #[cfg_attr(
+        not(all(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "connection retirement does not use the custodian stop listener yet"
+        )
+    )]
     fn request(&self, reason: StopReason) -> bool {
         let mut state = self.lock();
         if !state.enabled || state.closed {
@@ -1710,6 +1739,10 @@ impl IoCustodianHandle {
     /// Clone the exact physical connection's first-wins stop signal for
     /// independently owned cleanup tasks.
     #[cfg(feature = "test-support")]
+    #[expect(
+        dead_code,
+        reason = "connection retirement does not use the custodian stop listener yet"
+    )]
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
     }
@@ -1799,6 +1832,13 @@ impl IoCustodianHandle {
     /// Enable the parked dark driver's handoff only while the committed
     /// reaper is still running. Its lifecycle lock arbitrates concurrent exit.
     #[cfg(feature = "test-support")]
+    #[cfg_attr(
+        not(all(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "connection retirement does not use the custodian stop listener yet"
+        )
+    )]
     pub(crate) fn enable_physical_stop_handoff(&self) -> bool {
         self.state() == CustodianState::Running
             && self
@@ -1812,20 +1852,31 @@ impl IoCustodianHandle {
     /// Queue a request to the reaper without waiting for the sink stop fence.
     /// Acceptance is not evidence that this reason won the physical fence.
     #[cfg(feature = "test-support")]
+    #[cfg_attr(
+        not(all(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "connection retirement does not use the custodian stop listener yet"
+        )
+    )]
     pub(crate) fn request_physical_stop(&self, reason: StopReason) -> bool {
         self.client.physical_stop.request(reason)
     }
 
     #[cfg(feature = "test-support")]
+    #[expect(
+        dead_code,
+        reason = "connection retirement does not use the custodian stop listener yet"
+    )]
     pub(crate) fn set_stop_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_listener(listener);
     }
 
     /// Install the app-owned retirement fence. It runs once, synchronously,
     /// before either pump-stop cancellation or graceful shutdown is visible.
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
+    #[expect(
+        dead_code,
+        reason = "connection retirement does not use the custodian stop listener yet"
     )]
     pub(crate) fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_retirement_listener(listener);

@@ -20,8 +20,8 @@ Abbreviations: `S/` is `server/crates/waddle-server/src/`, `W/` is
 | Boundary | State on main | Evidence |
 | --- | --- | --- |
 | Restricted database runtime | Refused before any pool escapes | `S/main.rs:94`, `S/server/lifecycle.rs:95-97` |
-| Connection actor on `/ws` | No selector; the gate always returns the legacy admission. The dark driver admits one XEP-0198 `<r/>` and refuses bind, SM enable/resume, ordinary dispatch and peer delivery | `S/server/state.rs:259-271`, `W/connection_actor/prebind.rs:675-691`, `W/connection_actor_driver_task.rs:597-626` |
-| Connection state | The dark core owns a whole `WsConnState` by value and calls the legacy handlers; there is no separate state type | `W/connection_actor_core.rs:34-37` |
+| Connection actor on `/ws` | Every started connection is hosted by the connection actor, which runs the live loop and the legacy handlers. The gate returns the legacy admission, and registration still installs the binding and owns the outbound endpoint | `W/connection/live_actor.rs`, `W/connection.rs` (`LiveWebSocketConnection::run`), `S/server/state.rs` (`WebSocketAdmissionGate::reserve`) |
+| Connection state | The actor owns a whole `WsConnState` by value inside `LiveSocketState`; there is no separate state type | `W/connection.rs` (`LiveSocketState`) |
 | Durable mailbox (P2.2–P2.4) | Absent: `MailboxLane`, `mailbox_entries`, `AcceptanceUow` and `TargetConsumptionUow` have no hits under `server/crates` | grep |
 | Clustered frozen room manifests | Off outside tests | `S/ingress/commit/commit_hooks.rs:24-34` |
 | Hosted CI | Actions disabled, workflow files removed | [`2046-ci-pause.md`](2046-ci-pause.md) |
@@ -361,29 +361,42 @@ interruption and live-resume control end a pending write as before.
 
 ### The actor hosts the live loop
 
-The dark connection actor already owns a whole `WsConnState` and calls the
-legacy handlers (`W/connection_actor_core.rs`), but its driver admits only
-`<r/>` and receives frames pushed into its mailbox by a forwarder. The handlers
-need to pull: the mid-batch acknowledgement drain settles the reader and takes
-a ready frame while a batch is being written (`W/batch_write.rs`,
-`drain_ready_inbound`). Growing the dark driver to parity would rewrite the
-batch writer and converge on the actor hosting the legacy handlers anyway.
+Every started `/ws` connection is owned by a Kameo actor
+(`W/connection/live_actor.rs`) that the connection task runs in place. The
+actor's `next` hook runs the live loop as turns (`LiveSocketState` in
+`W/connection.rs`): prepare the turn, wait for one event, handle it. A normal
+stop settles the connection in `on_stop`; a panic or a kill settles nothing
+and the connection task fences the node as for any owner panic. The handlers
+pull: the mid-batch acknowledgement drain settles the reader and takes a ready
+frame while a batch is being written (`W/batch_write.rs`,
+`drain_ready_inbound`), so inbound frames stay pulled from the socket and
+outbound stanzas stay in the endpoint queue, where the send-window pause gates
+them.
 
-The live loop therefore moves into the actor as a unit. Control does not need a
-mailbox turn while a handler awaits a write: writes race the binding permit and
-shutdown tokens, and the sink polls write interruption and live-resume control
-on every poll. The reverse does not hold for the mailbox: Kameo handles a
-message between two turns of the loop, with no control source, socket or timer
-polled meanwhile, so a message handler on the connection actor must not await
-unbounded work; such work runs as a turn of the loop instead.
+The mailbox is bounded at 256 and carries commands and lifecycle only. Each
+wait polls the control sources first, then the mailbox, then the data sources
+and timers, and the wait after a mailbox signal withholds the mailbox, so
+commands and connection events alternate while both stay ready. Control does
+not need a mailbox turn while a handler awaits a write: writes race the
+binding permit and shutdown tokens, and the sink polls write interruption and
+live-resume control on every poll. The reverse does not hold for the mailbox:
+Kameo handles a message between two turns of the loop, with no control source,
+socket or timer polled meanwhile, so a message handler on the connection actor
+must not await unbounded work; such work runs as a turn of the loop instead.
+
+What the later slices build on is kept without a user: the typed binding
+messages (`W/connection/binding_messages.rs`: prepare, install, confirm and
+retire, each naming its exact attempt), the actor outbound endpoint and its
+custody stages in the registry (`ActorSocketOutboundEndpoint`,
+`ActorOutboundStage`), the retained-input and actor data-frame paths of the
+transport (`S/websocket_transport.rs`), and the custodian's stop and
+retirement listeners (`W/supervised_io.rs`). Each carries a dead-code
+expectation that names the slice that will use it.
 
 | # | Slice | Deletes | Proof | Size | Gate |
 | --- | --- | --- | --- | --- | --- |
-| S1 | The loop is expressed as prepare turn, wait for one event, handle the event, settle (`LiveSocketState`, `LoopEvent`) | Inline arm bodies | Every `*_ws`, characterization and WebSocket unit suite | M | Behaviour-neutral |
-| S2 | A Kameo actor hosts S1 by overriding `Actor::next`, with an explicit 256-entry mailbox that carries commands and lifecycle only; inbound stays pulled and outbound stays in the endpoint queue so the send-window pause can gate it; a kill is treated as a panic | Nothing | Every `*_ws` suite under the selector, `websocket_admission_live`, a saturation test for control progress | M | Selector |
-| S3 | The actor is the default; the loop driver and the dark driver are removed | Legacy driver, `connection_actor_core.rs`, `connection_actor_driver_task.rs`, the fixture forwarder | All suites | M | Flip |
 | S4 | One `retire(cause)`: typed cause, idempotent, fenced on `ConnectionRef`; a same-node transfer is acknowledged only after observed pump termination within a deadline, else the terminal path (D4) | Scattered close paths | `websocket_admission_live`, `clustering_shutdown_deadline`, `supervised_io`, `xep0198_cross_node_resume` | M | Selector |
-| S5 | Actor-owned endpoint: the actor mints `BindingRef`; prepare, install, confirm and retire are mailbox messages; sink receipts map to typed attempt evidence; pump queues get real byte bounds | `pending_tx`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ingress_generation` | `characterization_bind`, `characterization_routing`, `xep0198_attached_resume_ws`, `xep0198_replay_bytes`, `physical_continuation` | L | Selector, then flip |
+| S5 | Actor-owned endpoint: the actor mints `BindingRef`; prepare, install, confirm and retire are mailbox messages; sink receipts map to typed attempt evidence; pump queues get real byte bounds | `pending_tx`, `registry_owner`, `recovered_pending_endpoint`, `resume_endpoint_handoff_blocked`, `ingress_generation` | `characterization_bind`, `characterization_routing`, `xep0198_attached_resume_ws`, `xep0198_replay_bytes` | L | Selector, then flip |
 | S6 | The D5 rows owned by the connection actor move out of `WsConnState` | `LiveSocketState` scaffolding | All suites | M | Behaviour-neutral |
 
 Open before S4: the join deadline and its effect on force-detach

@@ -196,9 +196,6 @@ where
                     state.clustering_claims.node_identity = identity;
                 }
                 state.websocket_admission_test_barriers = config.barriers;
-                if let Some(host) = config.live_connection_host {
-                    state.live_connection_host = host;
-                }
             }
             if let Some(clustering) = clustering_override {
                 state.clustering_claims = clustering;

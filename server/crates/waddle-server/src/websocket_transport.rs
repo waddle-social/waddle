@@ -226,6 +226,7 @@ impl<E> WebSocketInput<E> {
 /// One raw transport item retained under its original pump budget. Terminal
 /// values are separate because the reader holds them in its ordered slot.
 #[cfg(feature = "test-support")]
+#[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
 pub(crate) enum RetainedWebSocketInput {
     Frame(QueueItem<Message>),
     Close(Message),
@@ -233,6 +234,7 @@ pub(crate) enum RetainedWebSocketInput {
 
 #[cfg(feature = "test-support")]
 impl<E> WebSocketInput<E> {
+    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
     pub(crate) async fn recv_retained(
         &mut self,
     ) -> Option<Result<RetainedWebSocketInput, InputError<E>>> {
@@ -501,50 +503,6 @@ pub(crate) struct SocketAdmission {
     reservation: IoCustodianReservation,
 }
 
-/// Exact socket authority retained by the dormant actor endpoint owner after
-/// the one-shot admission is consumed by physical startup. It can authorize
-/// only synchronous local publication work under the current node gate.
-#[derive(Clone)]
-pub(crate) struct ActorSocketPublicationAuthority {
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
-    )]
-    authority: Arc<TransportAuthority>,
-}
-
-impl ActorSocketPublicationAuthority {
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
-    )]
-    pub(crate) fn connection_ref(&self) -> &ConnectionRef {
-        &self.authority.connection_ref
-    }
-
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
-    )]
-    pub(crate) fn admission_permit(&self) -> NodeAdmissionPermit {
-        match &self.authority.source {
-            IdentitySource::Clustered { source, stamp } => self
-                .authority
-                .permit
-                .with_identity(source.clone(), stamp.clone()),
-            IdentitySource::Standalone => self.authority.permit.clone(),
-        }
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(crate) fn with_current<R>(
-        &self,
-        operation: impl FnOnce() -> R,
-    ) -> Result<R, SocketAdmissionError> {
-        self.authority.with_start_authority(operation)
-    }
-}
-
 /// Owns split halves until the supervised startup has taken responsibility.
 /// Before that handoff, a dropped real socket starts one independent bounded
 /// Close attempt while keeping its reservation alive until the attempt ends.
@@ -740,16 +698,6 @@ impl SocketAdmission {
         &self.authority.connection_ref
     }
 
-    pub(crate) fn revalidate(&self) -> Result<(), SocketAdmissionError> {
-        self.authority.with_start_authority(|| ())
-    }
-
-    pub(crate) fn actor_publication_authority(&self) -> ActorSocketPublicationAuthority {
-        ActorSocketPublicationAuthority {
-            authority: Arc::clone(&self.authority),
-        }
-    }
-
     #[cfg(feature = "test-support")]
     pub(crate) fn install_actor_write_probe(&self, probe: Arc<ActorWriteProbe>) {
         let mut saved = self
@@ -760,22 +708,10 @@ impl SocketAdmission {
         *saved = Some(probe);
     }
 
-    #[cfg(feature = "test-support")]
-    pub(crate) fn inject_actor_reaper_exit(
-        &self,
-        exit: crate::server::routes::websocket::supervised_io::ReservedReaperExitPoint,
-    ) {
-        let mut saved = self
-            .authority
-            .actor_reaper_exit
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        *saved = Some(exit);
-    }
-
     /// Keep the eventual pump inventory nonterminal until every dark actor-side
     /// task has returned and its independent cleanup owner is joined.
     #[cfg(feature = "test-support")]
+    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
     pub(crate) fn retain_actor_cleanup(
         &mut self,
     ) -> Result<
@@ -924,37 +860,6 @@ impl SocketAdmission {
         .await?;
         input.demand = demand;
         Ok((custodian, input, output))
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(crate) async fn start_socket_for_actor_with_split_hook<
-        AfterSplitHook,
-        AfterSplitFuture,
-        Hook,
-        HookFuture,
-    >(
-        self,
-        socket: WebSocket,
-        limits: TransportLimits,
-        retirement_deadline: Duration,
-        after_split: AfterSplitHook,
-        hook: Hook,
-    ) -> Result<
-        (
-            IoCustodianHandle,
-            WebSocketInput<axum::Error>,
-            WebSocketOutput<axum::Error>,
-        ),
-        SocketAdmissionError,
-    >
-    where
-        AfterSplitHook: FnOnce() -> AfterSplitFuture + Send,
-        AfterSplitFuture: Future<Output = ()> + Send,
-        Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
-        HookFuture: Future<Output = ()> + Send,
-    {
-        self.start_socket_with_hook(socket, limits, retirement_deadline, None, after_split, hook)
-            .await
     }
 }
 
@@ -1292,34 +1197,6 @@ impl TestSocketAdmission {
     pub fn with_actor_write_probe(self, probe: Arc<ActorWriteProbe>) -> Self {
         self.0.install_actor_write_probe(probe);
         self
-    }
-
-    pub async fn start_actor_local_endpoint(
-        self,
-        socket: WebSocket,
-        limits: TransportLimits,
-        retirement_deadline: Duration,
-        index: &crate::server::routes::websocket::actor_local_endpoint::ActorEndpointCleanupIndex,
-        max_count: usize,
-        max_payload_bytes: usize,
-    ) -> Result<
-        (
-            crate::server::routes::websocket::actor_local_endpoint::ActorLocalEndpointOwner,
-            WebSocketInput<axum::Error>,
-            WebSocketOutput<axum::Error>,
-        ),
-        crate::server::routes::websocket::actor_local_endpoint::ActorLocalEndpointError,
-    > {
-        crate::server::routes::websocket::actor_local_endpoint::ActorLocalEndpointOwner::start(
-            self.0,
-            socket,
-            limits,
-            retirement_deadline,
-            index,
-            max_count,
-            max_payload_bytes,
-        )
-        .await
     }
 
     pub fn clustered(
@@ -1833,10 +1710,7 @@ impl WebSocketOutboundFrame {
         }
     }
 
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
-    )]
+    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
     fn actor_data(
         frame: Message,
         transport: &Arc<TransportAuthority>,
@@ -1932,10 +1806,7 @@ where
         ))
     }
 
-    #[cfg_attr(
-        not(feature = "test-support"),
-        expect(dead_code, reason = "actor endpoint awaits /ws cutover")
-    )]
+    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
     pub(crate) fn actor_data_frame(
         &self,
         frame: Message,

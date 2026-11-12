@@ -45,10 +45,7 @@ use kameo::error::SendError;
 use minidom::Element;
 use tokio::sync::{oneshot, watch, Notify};
 use waddle_server::auth::{NativeUserStore, RegisterRequest};
-use waddle_server::server::LiveConnectionHost;
-use waddle_server::test_support::{
-    router, seed_local_account, websocket_state, with_live_connection_host, WebSocketState,
-};
+use waddle_server::test_support::{router, seed_local_account, websocket_state, WebSocketState};
 use waddle_ws_test_support::raw_ws::Message as WsFrame;
 use waddle_ws_test_support::WsXmppClient;
 use waddle_xmpp::ownership::{
@@ -764,21 +761,6 @@ async fn second_bind_on_bound_stream_is_refused_not_authorized_and_keeps_first_b
 /// the route delivers to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer() {
-    rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer_case().await;
-}
-
-/// The same case with the live loop hosted by the connection actor.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer_under_the_actor_host(
-) {
-    with_live_connection_host(
-        LiveConnectionHost::Actor,
-        rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer_case(),
-    )
-    .await;
-}
-
-async fn rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer_case() {
     let harness = start().await;
     harness.add_account("alice").await;
     harness.add_account("bob").await;
@@ -1020,21 +1002,6 @@ async fn failed_resume_then_fresh_bind_keeps_the_reserved_socket_identity() {
 /// written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other() {
-    concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other_case().await;
-}
-
-/// The same case with the live loop hosted by the connection actor.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other_under_the_actor_host(
-) {
-    with_live_connection_host(
-        LiveConnectionHost::Actor,
-        concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other_case(),
-    )
-    .await;
-}
-
-async fn concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other_case() {
     let harness = start().await;
     harness.add_account("alice").await;
     harness.add_account("bob").await;
