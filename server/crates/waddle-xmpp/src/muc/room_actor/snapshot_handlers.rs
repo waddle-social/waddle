@@ -78,6 +78,9 @@ pub struct RoomChainSnapshot {
 pub struct RoomChainOccupant {
     pub full_jid: FullJid,
     pub watermark: OccupancyWatermark,
+    /// Generation of the connection that holds this seat, when the room
+    /// knows it.
+    pub session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     pub nick: String,
     pub role: Role,
     pub affiliation: Affiliation,
@@ -119,9 +122,11 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
                         let watermark = room
                             .session_watermark(&full_jid)
                             .unwrap_or(OccupancyWatermark::initial());
+                        let session = room.session_generation(&full_jid);
                         RoomChainOccupant {
                             full_jid,
                             watermark,
+                            session,
                             nick: nick.clone(),
                             role,
                             affiliation,

@@ -53,7 +53,8 @@ pub(super) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {
         client_origin: None,
         fence: RoomFenceRequirement::Unfenced,
         snapshot_generation: 1,
-        manifest_snapshot: Some(RoomManifestSnapshot {
+        manifest_snapshot: Some(Box::new(RoomManifestSnapshot {
+            seats: Vec::new(),
             host_no_transport: Vec::new(),
             coordinates: None,
             occupancy_incarnation: AdminMutationId::generate(),
@@ -64,7 +65,7 @@ pub(super) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {
                 ),
                 (peer, OccupancyWatermark::from_revision(2)),
             ],
-        }),
+        })),
     };
     submission
 }

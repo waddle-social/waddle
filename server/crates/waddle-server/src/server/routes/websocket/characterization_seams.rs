@@ -39,6 +39,13 @@ const FAILED_RESUME_CONTINUE_FILE_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_CO
 const FAILED_RESUME_CLEANUP_RELEASE_FILE_ENV: &str =
     "WADDLE_TEST_SEAM_FAILED_RESUME_CLEANUP_RELEASE_FILE";
 const FAILED_RESUME_EVENTS_FILE_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_EVENTS_FILE";
+/// File the teardown observer appends one line to for every custody path a
+/// connection's teardown takes for its stream-management session:
+/// `durable-end <session> terminal=<bool>` when the durable authority was
+/// asked to close the session, and `connection-promotion <jid>` when the
+/// connection starts the promotion of its own queue. `teardown-finished`
+/// follows once a connection's teardown has returned.
+const TEARDOWN_CUSTODY_EVENTS_FILE_ENV: &str = "WADDLE_TEST_SEAM_TEARDOWN_CUSTODY_EVENTS_FILE";
 
 /// Poll interval while a held batch waits for its release condition. The
 /// condition, not the interval, is the synchronisation.
@@ -338,6 +345,47 @@ pub(in crate::server::routes::websocket) async fn pause_published_resume_finaliz
         Ok(false) => seam.record("gap-not-injected", stream_id, jid, "claim-missing"),
         Err(error) => seam.record("gap-not-injected", stream_id, jid, &error.to_string()),
     }
+}
+
+static TEARDOWN_CUSTODY_EVENTS: LazyLock<Option<PathBuf>> =
+    LazyLock::new(|| std::env::var_os(TEARDOWN_CUSTODY_EVENTS_FILE_ENV).map(PathBuf::from));
+
+fn record_teardown_custody(line: &str) {
+    let Some(path) = TEARDOWN_CUSTODY_EVENTS.as_ref() else {
+        return;
+    };
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        tracing::error!(%error, path = %path.display(), "teardown custody event not recorded");
+    }
+}
+
+/// Record that a connection's teardown asked the durable authority to close
+/// its session, and whether the session is terminal there afterwards.
+pub(in crate::server::routes::websocket) fn observe_durable_session_end(
+    session: waddle_xmpp::ownership::SmSessionKey,
+    terminal: bool,
+) {
+    record_teardown_custody(&format!(
+        "durable-end {} terminal={terminal}\n",
+        session.as_uuid()
+    ));
+}
+
+/// Record that a connection's teardown starts the promotion of its own
+/// stream-management queue.
+pub(in crate::server::routes::websocket) fn observe_connection_promotion(jid: &FullJid) {
+    record_teardown_custody(&format!("connection-promotion {jid}\n"));
+}
+
+/// Record that a connection's teardown has returned: no custody event of
+/// that connection follows.
+pub(in crate::server::routes::websocket) fn observe_teardown_finished() {
+    record_teardown_custody("teardown-finished\n");
 }
 
 /// Record the accepted-frame handback decision while the socket still owns

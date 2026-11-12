@@ -27,6 +27,22 @@ use crate::server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendCo
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(1);
 const LEASE_DURATION: Duration = Duration::from_secs(5);
 
+/// What proves that a sealed room child still belongs to the occupant it was
+/// frozen for when it is written to a sink.
+///
+/// On the node that runs the actor the manifest was sealed by, the actor in
+/// `registry` checks the frozen occupancy in the turn that writes the copy.
+/// On any other node the room's durable occupancy must seat the target under
+/// `endpoint`, the generation of the connection the sink writes to; a sink
+/// that is not a connection has none and is proven only by the actor.
+#[derive(Clone, Copy)]
+pub(crate) struct RoomChildProof<'a> {
+    pub registry: Option<
+        &'a kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    >,
+    pub endpoint: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+}
+
 impl IngressAuthority {
     /// Admitted execution keeps its parent admission guard and carries this
     /// token to the sink instead of reacquiring the writer-preferring lock.
@@ -47,7 +63,7 @@ impl IngressAuthority {
         .await
     }
 
-    #[cfg(any(test, feature = "clustering"))]
+    #[cfg(test)]
     pub(crate) async fn accept_live_delivery(
         &self,
         context: &SmIngressAppendContext,
@@ -77,9 +93,7 @@ impl IngressAuthority {
         context: &SmIngressAppendContext,
         target: &FullJid,
         stanza: &Stanza,
-        registry: Option<
-            &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-        >,
+        proof: RoomChildProof<'_>,
         enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
     ) -> FullJidDeliveryOutcome {
         let stopped = self.force_stop.clone();
@@ -99,7 +113,7 @@ impl IngressAuthority {
                 context,
                 target,
                 stanza,
-                registry,
+                proof,
                 enqueue,
                 || self.check_live_admission(*admission),
             )
@@ -147,9 +161,7 @@ pub(crate) async fn accept_live_delivery_guarded(
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-    registry: Option<
-        &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    >,
+    proof: RoomChildProof<'_>,
     enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
 ) -> FullJidDeliveryOutcome {
     let stopped = stop.cloned();
@@ -169,7 +181,7 @@ pub(crate) async fn accept_live_delivery_guarded(
             context,
             target,
             stanza,
-            registry,
+            proof,
             enqueue,
             || check_stop(stop),
         )))
@@ -184,9 +196,7 @@ async fn accept_live_delivery_guarded_inner(
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-    registry: Option<
-        &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    >,
+    proof: RoomChildProof<'_>,
     enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
     check_admission: impl Fn() -> Result<(), IngressUowError>,
 ) -> Result<FullJidDeliveryOutcome, IngressUowError> {
@@ -203,9 +213,10 @@ async fn accept_live_delivery_guarded_inner(
                     super::room_manifest_replay::enqueue(
                         &manifest,
                         uow,
-                        registry,
+                        proof.registry,
                         &context.receipt,
                         target,
+                        proof.endpoint,
                         enqueue,
                     )
                     .await

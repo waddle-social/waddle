@@ -110,7 +110,7 @@ pub enum RoomExecutionPath {
         fence: RoomFenceRequirement,
         snapshot_generation: u64,
         /// Frozen room authority and recipient occupancy guards captured in Phase A.
-        manifest_snapshot: Option<RoomManifestSnapshot>,
+        manifest_snapshot: Option<Box<RoomManifestSnapshot>>,
     },
     Remote {
         room: BareJid,

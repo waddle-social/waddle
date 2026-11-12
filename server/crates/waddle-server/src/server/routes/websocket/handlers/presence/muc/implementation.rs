@@ -834,6 +834,34 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) fn record_join
     );
 }
 
+/// Seat `room_jid`'s durable occupancy in `room_actor` when this node has
+/// not done so under the actor's claim. A failure is logged by the seating
+/// and leaves the join to the roster the actor holds.
+#[cfg(feature = "clustering")]
+async fn seat_recorded_occupancy(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    sender_jid: &jid::FullJid,
+) {
+    if !state.deps.protocol.ingress.mailbox_acceptance_enabled() {
+        return;
+    }
+    let Ok(snapshot) = room_actor
+        .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
+            sender_jid: sender_jid.clone(),
+        })
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await
+    else {
+        return;
+    };
+    if let Some(fence) = snapshot.claim_fence {
+        crate::clustering::route_bridge::ensure_room_occupancy_seated(state, room_jid, fence.epoch)
+            .await;
+    }
+}
+
 pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handle_muc_join_unlocked(
     state: &WebSocketState,
     request: MucJoinWork<'_>,
@@ -1369,6 +1397,14 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 (acquisition.actor_ref, room_created)
             }
         };
+        // A node that took this room's claim without the mailbox poller
+        // holds none of the recorded occupants. They are seated before the
+        // join reads the roster, so the joiner is told who occupies the
+        // room and a nick a recorded occupant holds stays taken.
+        #[cfg(feature = "clustering")]
+        if !created_instant_room {
+            seat_recorded_occupancy(state, room_jid, &room_actor, sender_jid).await;
+        }
 
         let affiliation_grant = if created_instant_room {
             // The registry committed the owner before publication whenever a

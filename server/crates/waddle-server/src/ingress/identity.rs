@@ -94,8 +94,8 @@ impl IngressAppendObligationRef {
         Some(Self::from_context(context, sender)).filter(Self::kind_is_append_eligible)
     }
 
-    /// Legacy sealed-room wire copies cannot export a canonical child key.
-    /// Their original context remains available for guarded local fallback.
+    /// The obligation a copy carries to the node that hosts its target. A
+    /// context whose authority is local to this node exports none.
     #[cfg(feature = "clustering")]
     pub(crate) fn for_remote_message(
         context: Option<&SmIngressAppendContext>,

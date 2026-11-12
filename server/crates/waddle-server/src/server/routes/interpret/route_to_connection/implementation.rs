@@ -1532,6 +1532,12 @@ pub(crate) async fn deliver_ordered_local_copy(
     outbound.kind = kind;
     outbound.ingress_append = IngressAppendObligationRef::for_message(Some(context), stanza)
         .map(|obligation| obligation.into_relayed_for(target.clone()));
+    // The generation of the connection this copy is written to. A sealed
+    // room child is proven against it where the sealing actor is elsewhere.
+    let proof = crate::ingress::live_delivery::RoomChildProof {
+        registry: deps.room_registry,
+        endpoint: entry.occupancy_session(),
+    };
     let socket_enqueue = deps.connection_registry.capture_owned_enqueue_if_owner(
         target.clone(),
         entry.binding_id(),
@@ -1555,14 +1561,14 @@ pub(crate) async fn deliver_ordered_local_copy(
                 context,
                 target,
                 stanza,
-                deps.room_registry,
+                proof,
                 enqueue,
             )
             .await
         }
         (None, Some(authority)) => {
             authority
-                .accept_live_delivery_guarded(context, target, stanza, deps.room_registry, enqueue)
+                .accept_live_delivery_guarded(context, target, stanza, proof, enqueue)
                 .await
         }
         (None, None) => FullJidDeliveryOutcome::MaybeCommitted,
@@ -1593,6 +1599,18 @@ pub(crate) async fn deliver_registered_remote_resource_at(
         // its eventual executor resolves the remote socket registration.
         return None;
     }
+    #[cfg(all(test, feature = "clustering"))]
+    let _ = super::CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS.try_with(|exported| {
+        exported
+            .lock()
+            .expect("controlled registered-remote obligations")
+            .push(
+                deps.ingress_append_context
+                    .as_ref()
+                    .filter(|context| context.authority.permits_remote_obligation())
+                    .map(|context| (context.message_key, context.receipt.clone())),
+            );
+    });
     #[cfg(all(test, feature = "clustering"))]
     if let Ok(outcome) = CONTROLLED_REGISTERED_REMOTE_DELIVERY.try_with(|(outcome, targets)| {
         targets

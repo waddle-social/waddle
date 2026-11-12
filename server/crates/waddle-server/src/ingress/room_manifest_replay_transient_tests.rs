@@ -78,7 +78,7 @@ impl Case {
             ..
         } = &mut submission.plan.room_execution
         {
-            *manifest_snapshot = Some(RoomManifestSnapshot::from(&snapshot));
+            *manifest_snapshot = Some(Box::new(RoomManifestSnapshot::from(&snapshot)));
             *snapshot_generation = snapshot.admission_revision;
         }
         add_hint(&mut submission.plan.sanitized_message, hint);

@@ -5,8 +5,6 @@ use crate::ingress_uow::IngressUnitOfWork;
 use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
 use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
 use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
-use crate::server::routes::interpret::effects::SettledCompletion;
-use crate::server::routes::interpret::effects::SettledOutcome;
 use crate::server::routes::interpret::effects::{EffectOutcome, ExternalEffect};
 use crate::server::routes::interpret::Deps;
 
@@ -30,45 +28,6 @@ pub(crate) use recovery::fail_after_recovery_update;
 
 #[path = "execute_relay_copy.rs"]
 mod relay_copy;
-
-pub(super) async fn execute_legacy_remote(
-    uow: &IngressUnitOfWork,
-    decision: &IngressDecision,
-    index: usize,
-    effect: &ExternalEffect,
-    deps: &Deps<'_>,
-) -> Option<EffectOutcome> {
-    let ExternalEffect::Delivery(
-        delivery @ (ExternalDeliveryEffect::RelayFullJid { target, .. }
-        | ExternalDeliveryEffect::RouteToPeer { jid: target, .. }),
-    ) = effect
-    else {
-        return None;
-    };
-    match relay_copy::attempt_before_readiness(uow, decision, index, delivery, target, deps).await {
-        Ok(Some(relay_copy::LegacyRemoteAttempt::Wire(outcome))) => {
-            Some(EffectOutcome::Settled(SettledOutcome {
-                refusal: None,
-                persisted: Vec::new(),
-                completion: SettledCompletion::Uncertain,
-                detached: Some(vec![(target.clone(), outcome)]),
-            }))
-        }
-        Ok(Some(relay_copy::LegacyRemoteAttempt::Superseded(persisted))) => {
-            Some(EffectOutcome::Settled(SettledOutcome {
-                refusal: None,
-                persisted,
-                completion: SettledCompletion::Complete,
-                detached: None,
-            }))
-        }
-        Ok(None) => None,
-        Err(error) => {
-            tracing::debug!(%error, "live legacy remote child authority unavailable");
-            Some(EffectOutcome::Unavailable)
-        }
-    }
-}
 
 #[path = "execute_invite.rs"]
 mod invite;

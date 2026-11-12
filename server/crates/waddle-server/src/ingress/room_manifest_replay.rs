@@ -19,6 +19,7 @@ use waddle_xmpp::muc::room_registry_actor::{
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::ingress_substrate::MessageEnvelope;
 use crate::ingress_uow::{
@@ -81,6 +82,175 @@ async fn current_actor(
         .map_err(|_| IngressUowError::Timeout)?;
     validate_current_snapshot(manifest, &snapshot)?;
     Ok((actor, snapshot.claim_fence))
+}
+
+/// Whether a child of `manifest` may be proven from durable rows on a node
+/// that does not run the actor the manifest was sealed by.
+///
+/// A clustered manifest is sealed by the room's owner, while a copy's target
+/// may be connected to any node, and the owner's process may have ended
+/// since. The occupancy incarnation and the watermarks in the manifest exist
+/// only in that owner's memory, so they cannot be checked anywhere else. The
+/// room's durable occupancy can: the owner records every seat it grants or
+/// removes in `ingress_room_occupants`, with the generation of the
+/// connection that holds it.
+fn durable_occupancy_applies(uow: &IngressUnitOfWork, manifest: &FrozenRoomManifest) -> bool {
+    manifest.claim_fence.is_some() && !matches!(uow.fencing(), IngressFencing::SingleNode)
+}
+
+/// The recorded seat of `target` in the manifest's room.
+async fn durable_seat(
+    uow: &IngressUnitOfWork,
+    manifest: &FrozenRoomManifest,
+    target: &FullJid,
+) -> Result<crate::ingress_uow::RoomOccupantLookup, IngressUowError> {
+    let mut transaction = uow
+        .begin_with_timeouts(Duration::from_millis(100), PROBE_TIMEOUT)
+        .await?;
+    let seat = crate::ingress_uow::RoomOccupantRepository::lookup(
+        &mut transaction,
+        &manifest.room,
+        target,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(seat)
+}
+
+/// Whether the room's durable occupancy still seats the occupant a child was
+/// frozen for.
+///
+/// `sealed` is the generation of the connection that held the target's seat
+/// when the manifest was sealed. The frozen occupant is still seated while
+/// the recorded seat is held by that generation. A seat held by another
+/// generation belongs to a connection that joined later, and a child that
+/// records no generation names no occupant these rows could be compared
+/// with: neither is the frozen occupant, so neither receives the copy.
+///
+/// A leave followed by a join of the same connection leaves the same row
+/// behind, because `ingress_room_occupants` identifies a seat by its
+/// connection only. The sealing actor tells the two apart by the child's
+/// occupancy watermark; a node without that actor cannot.
+fn frozen_seat_stands(
+    sealed: Option<OccupancySessionGeneration>,
+    seat: &crate::ingress_uow::RoomOccupantRecord,
+) -> bool {
+    sealed == Some(seat.generation)
+}
+
+/// Hand a frozen child to the connection `endpoint` on this node when the
+/// room's durable occupancy still seats the occupant the child was frozen
+/// for, and that occupant is this connection.
+///
+/// The recorded seat must be held by the generation the child was sealed
+/// with (`sealed`) and by the connection the copy is written to. Any other
+/// seat, or none, means the frozen occupant has left or is not this
+/// connection, and the copy is reported as not connected. The seat is read
+/// and the socket written without the room actor, so a leave that commits
+/// between the two is not excluded: the copy then reaches a connection that
+/// was an occupant when the message was accepted.
+async fn enqueue_at_durable_seat(
+    uow: &IngressUnitOfWork,
+    manifest: &FrozenRoomManifest,
+    sealed: Option<OccupancySessionGeneration>,
+    target: &FullJid,
+    endpoint: Option<OccupancySessionGeneration>,
+    action: impl FnOnce() -> BroadcastOutcome + Send + 'static,
+) -> Result<BroadcastOutcome, IngressUowError> {
+    use crate::ingress_uow::RoomOccupantLookup;
+    let Some(endpoint) = endpoint else {
+        return Err(IngressUowError::RoomGenerationStale);
+    };
+    match durable_seat(uow, manifest, target).await? {
+        RoomOccupantLookup::Seated(seat)
+            if frozen_seat_stands(sealed, &seat) && seat.generation == endpoint =>
+        {
+            Ok(action())
+        }
+        RoomOccupantLookup::Seated(_) | RoomOccupantLookup::Absent => {
+            Ok(BroadcastOutcome::NotConnected)
+        }
+        RoomOccupantLookup::Unparseable => Err(IngressUowError::RoomGenerationStale),
+    }
+}
+
+/// Retire a frozen child whose occupant the room's durable occupancy no
+/// longer seats, on a node that cannot ask the actor the manifest was sealed
+/// by.
+///
+/// Nothing is retired while the claim the manifest was sealed under is still
+/// the room's claim: that owner's actor holds the roster and decides. Once
+/// the claim has moved, the successor's roster is the recorded occupancy, so
+/// the frozen occupant has left when the target has no row, when its row is
+/// held by another generation than the child was sealed with, and when the
+/// child records no generation to compare the row with. A row of the sealed
+/// generation stays owed; a row whose connection is gone is removed by the
+/// owner's ghost sweep or by the next owner's seating.
+#[cfg(feature = "clustering")]
+async fn retire_departed_durable_seat(
+    uow: &IngressUnitOfWork,
+    manifest: &FrozenRoomManifest,
+    key: waddle_xmpp::ingress::MessageKey,
+    progress: &super::recorded::RouteProgress,
+    sealed_seat: Option<OccupancySessionGeneration>,
+    target: &FullJid,
+) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
+    use crate::ingress_uow::RoomOccupantLookup;
+    let Some(sealed) = manifest.claim_fence.as_ref() else {
+        return Ok(None);
+    };
+    if !durable_occupancy_applies(uow, manifest) {
+        return Ok(None);
+    }
+    let mut transaction = uow
+        .begin_with_timeouts(Duration::from_millis(100), PROBE_TIMEOUT)
+        .await?;
+    let claim =
+        crate::ingress_uow::ClaimRepository::room_claim(&mut transaction, &manifest.room).await?;
+    let seat = crate::ingress_uow::RoomOccupantRepository::lookup(
+        &mut transaction,
+        &manifest.room,
+        target,
+    )
+    .await?;
+    transaction.commit().await?;
+    let sealed_claim_current = claim
+        .as_ref()
+        .is_some_and(|(owner, epoch)| *owner == sealed.owner && *epoch == sealed.epoch);
+    let frozen_occupant_left = match &seat {
+        RoomOccupantLookup::Absent => true,
+        RoomOccupantLookup::Seated(seat) => !frozen_seat_stands(sealed_seat, seat),
+        // An unreadable row proves neither a seat nor its absence.
+        RoomOccupantLookup::Unparseable => false,
+    };
+    if sealed_claim_current || !frozen_occupant_left {
+        return Ok(None);
+    }
+    crate::ingress_uow::run_with_retry(5, || {
+        super::execute_uow::record_policy_progress(
+            uow,
+            key,
+            progress,
+            std::slice::from_ref(target),
+            DeliveryPolicyDiscardReason::OccupancyDeparted,
+        )
+    })
+    .await
+    .map(Some)
+    .map_err(|failure| failure.last_error)
+}
+
+/// Without cluster claims a room has one owner and its actor decides.
+#[cfg(not(feature = "clustering"))]
+async fn retire_departed_durable_seat(
+    _uow: &IngressUnitOfWork,
+    _manifest: &FrozenRoomManifest,
+    _key: waddle_xmpp::ingress::MessageKey,
+    _progress: &super::recorded::RouteProgress,
+    _sealed_seat: Option<OccupancySessionGeneration>,
+    _target: &FullJid,
+) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
+    Ok(None)
 }
 
 /// The actor action owns this transaction so an asking task's timeout cannot
@@ -225,6 +395,7 @@ pub(super) async fn settle_superseded(
     let watermark = child
         .occupancy
         .ok_or(IngressUowError::EffectIntentConflict)?;
+    let sealed_seat = child.seat;
     let intent = manifest
         .recorded_intents()
         .iter()
@@ -251,13 +422,21 @@ pub(super) async fn settle_superseded(
     if envelope.room_manifest() != Some(manifest) {
         return Err(IngressUowError::EffectIntentConflict);
     }
-    let Some(registry) = registry else {
-        return Ok(None);
-    };
     let allow_lost_occupancy = matches!(
         uow.fencing(),
         crate::ingress_uow::IngressFencing::SingleNode
     );
+    let Some(registry) = registry else {
+        return retire_departed_durable_seat(
+            uow,
+            manifest,
+            context.message_key,
+            &progress,
+            sealed_seat,
+            target,
+        )
+        .await;
+    };
     if allow_lost_occupancy
         && !registry
             .ask(GetSingleNodeRoomRetirementAuthority)
@@ -285,7 +464,15 @@ pub(super) async fn settle_superseded(
     let key = context.message_key;
     let Some(actor) = actor else {
         if !allow_lost_occupancy {
-            return Ok(None);
+            return retire_departed_durable_seat(
+                uow,
+                manifest,
+                key,
+                &progress,
+                sealed_seat,
+                target,
+            )
+            .await;
         }
         return registry
             .ask(RunAbsentRoomGuardedAsync {
@@ -321,7 +508,8 @@ pub(super) async fn settle_superseded(
         .await
         .map_err(|_| IngressUowError::Timeout)?;
     if !allow_lost_occupancy && validate_current_snapshot(manifest, &snapshot).is_err() {
-        return Ok(None);
+        return retire_departed_durable_seat(uow, manifest, key, &progress, sealed_seat, target)
+            .await;
     }
     let fence = snapshot.claim_fence;
     let result = actor
@@ -388,12 +576,19 @@ pub(super) async fn settle_superseded(
 
 /// The actor validates lifecycle and monotonic occupancy immediately before the
 /// synchronous socket enqueue, with no roster mutation between proof and sink.
+///
+/// On a node that does not run the actor the manifest was sealed by, the
+/// room's durable occupancy stands in for that proof: the copy is handed to
+/// `endpoint`, the generation of the connection the caller writes to, while
+/// the recorded seat of the target is held by that connection and by the
+/// generation the child was sealed with.
 pub(super) async fn enqueue(
     manifest: &FrozenRoomManifest,
     uow: &IngressUnitOfWork,
     registry: Option<&ActorRef<RoomRegistryActor>>,
     receipt: &EffectReceiptKey,
     target: &FullJid,
+    endpoint: Option<OccupancySessionGeneration>,
     action: impl FnOnce() -> BroadcastOutcome + Send + 'static,
 ) -> Result<BroadcastOutcome, IngressUowError> {
     let child = manifest
@@ -402,7 +597,14 @@ pub(super) async fn enqueue(
     let watermark = child
         .occupancy
         .ok_or(IngressUowError::EffectIntentConflict)?;
-    let (actor, fence) = current_actor(manifest, registry, target).await?;
+    let (actor, fence) = match current_actor(manifest, registry, target).await {
+        Ok(current) => current,
+        Err(IngressUowError::RoomGenerationStale) if durable_occupancy_applies(uow, manifest) => {
+            return enqueue_at_durable_seat(uow, manifest, child.seat, target, endpoint, action)
+                .await;
+        }
+        Err(error) => return Err(error),
+    };
     let uow = uow.clone();
     let room = manifest.room.clone();
     let result = actor
@@ -517,6 +719,7 @@ pub(super) async fn release_transient_reflection(
         deps.room_registry,
         &receipt,
         target,
+        None,
         move || {
             if stop
                 .as_ref()
@@ -546,6 +749,76 @@ pub(super) async fn release_transient_reflection(
     Ok(Some(released))
 }
 
+/// The stream-management ledger key of a child's append to `target`.
+fn detached_append_key(
+    context: &SmIngressAppendContext,
+    target: &FullJid,
+) -> waddle_xmpp::stream_management::SmIngressAppendKey {
+    waddle_xmpp::stream_management::SmIngressAppendKey {
+        message_key: context.message_key,
+        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+            context.receipt.kind.to_storage(),
+        ),
+        semantic_identity_hash: context.receipt.semantic_identity_hash,
+        resource: target.clone(),
+    }
+}
+
+/// Append a frozen child to the target's detached stream-management session
+/// on a node that does not run the actor the manifest was sealed by.
+///
+/// A detached session has no connection to compare with the recorded seat.
+/// The session belongs to the connection that last bound the full JID, so
+/// the copy is appended while the room's durable occupancy seats the target
+/// under the generation the child was sealed with (`sealed`) and the
+/// occupancy authority holds that generation as current for the full JID.
+/// The append is keyed by the child, so a repeat allocates nothing.
+async fn queue_detached_at_durable_seat(
+    manifest: &FrozenRoomManifest,
+    uow: &IngressUnitOfWork,
+    sm: &std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    context: &SmIngressAppendContext,
+    target: &FullJid,
+    stanza: &Stanza,
+    sealed: Option<OccupancySessionGeneration>,
+) -> Result<FullJidDeliveryOutcome, IngressUowError> {
+    use crate::ingress_uow::RoomOccupantLookup;
+    let RoomOccupantLookup::Seated(seat) = durable_seat(uow, manifest, target).await? else {
+        return Ok(FullJidDeliveryOutcome::Unavailable);
+    };
+    if !frozen_seat_stands(sealed, &seat) {
+        return Ok(FullJidDeliveryOutcome::Unavailable);
+    }
+    let current = crate::occupancy_authority::is_current(uow.database(), target, seat.generation)
+        .await
+        .map_err(|_| IngressUowError::RoomGenerationStale)?;
+    if !current {
+        return Ok(FullJidDeliveryOutcome::Unavailable);
+    }
+    let received_at = context.received_at.unwrap_or_else(chrono::Utc::now);
+    match sm
+        .record_keyed_stanza_for_detached_bound_resource(
+            target,
+            stanza,
+            received_at,
+            detached_append_key(context, target),
+        )
+        .await
+    {
+        Ok(outcome)
+            if outcome.is_allocated()
+                || matches!(
+                    outcome,
+                    waddle_xmpp::stream_management::SmKeyedAppendOutcome::Suppressed
+                ) =>
+        {
+            Ok(FullJidDeliveryOutcome::QueuedDetached)
+        }
+        Ok(_) => Ok(FullJidDeliveryOutcome::Unavailable),
+        Err(_) => Err(IngressUowError::EffectIntentConflict),
+    }
+}
+
 /// Keep a new detached allocation in the same serialized occupancy turn as its
 /// proof. The existing SM key remains the only durable acceptance ledger.
 pub(super) async fn queue_detached(
@@ -563,21 +836,32 @@ pub(super) async fn queue_detached(
     let Some(sm) = deps.sm_session_registry.cloned() else {
         return Ok(FullJidDeliveryOutcome::Unavailable);
     };
-    let watermark = manifest
+    let child = manifest
         .child(&context.receipt, Some(target))
-        .and_then(|child| child.occupancy)
         .ok_or(IngressUowError::EffectIntentConflict)?;
-    let (actor, fence) = current_actor(manifest, deps.room_registry, target).await?;
+    let watermark = child
+        .occupancy
+        .ok_or(IngressUowError::EffectIntentConflict)?;
+    let sealed_seat = child.seat;
+    let key = detached_append_key(context, target);
+    let (actor, fence) = match current_actor(manifest, deps.room_registry, target).await {
+        Ok(current) => current,
+        Err(IngressUowError::RoomGenerationStale) if durable_occupancy_applies(uow, manifest) => {
+            return queue_detached_at_durable_seat(
+                manifest,
+                uow,
+                &sm,
+                context,
+                target,
+                stanza,
+                sealed_seat,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
     let uow = uow.clone();
     let room = manifest.room.clone();
-    let key = waddle_xmpp::stream_management::SmIngressAppendKey {
-        message_key: context.message_key,
-        kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
-            context.receipt.kind.to_storage(),
-        ),
-        semantic_identity_hash: context.receipt.semantic_identity_hash,
-        resource: target.clone(),
-    };
     let target_owned = target.clone();
     let stanza = stanza.clone();
     let received_at = context.received_at.unwrap_or_else(chrono::Utc::now);
@@ -702,7 +986,7 @@ mod tests {
             ..
         } = &mut submission.plan.room_execution
         {
-            *manifest_snapshot = Some(RoomManifestSnapshot::from(&snapshot));
+            *manifest_snapshot = Some(Box::new(RoomManifestSnapshot::from(&snapshot)));
             *snapshot_generation = snapshot.admission_revision;
         }
         let route = submission
@@ -883,6 +1167,7 @@ mod tests {
             room.clone(),
             waddle_xmpp_core::xep0359::StanzaId::new("sealed", room.into()),
             &super::super::RoomManifestSnapshot {
+                seats: Vec::new(),
                 host_no_transport: Vec::new(),
                 coordinates: Some(coordinates),
                 occupancy_incarnation: incarnation,
@@ -1176,6 +1461,7 @@ mod tests {
             room,
             stamp,
             &super::super::RoomManifestSnapshot {
+                seats: Vec::new(),
                 host_no_transport: Vec::new(),
                 coordinates: None,
                 occupancy_incarnation: AdminMutationId::generate(),
@@ -1214,3 +1500,7 @@ mod tests {
 #[cfg(test)]
 #[path = "room_manifest_replay_transient_tests.rs"]
 mod transient_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+#[path = "room_manifest_replay_seat_tests.rs"]
+mod seat_tests;

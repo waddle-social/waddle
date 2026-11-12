@@ -91,33 +91,6 @@ pub(super) async fn execute(
     for resource in resources.iter().filter(|resource| {
         progress.fanout.contains(resource) && !progress.completed.contains(resource)
     }) {
-        match super::relay_copy::attempt_before_readiness(
-            uow, decision, index, effect, resource, &immediate,
-        )
-        .await
-        {
-            Ok(Some(super::relay_copy::LegacyRemoteAttempt::Wire(outcome))) => {
-                destinations.push((resource.clone(), outcome));
-                completion = SettledCompletion::Uncertain;
-                continue;
-            }
-            Ok(Some(super::relay_copy::LegacyRemoteAttempt::Superseded(settled))) => {
-                handed_off.push(resource.clone());
-                if !settled.is_empty() {
-                    persisted = settled;
-                    completion = SettledCompletion::Complete;
-                    break;
-                }
-                continue;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(%error, %resource, "live legacy remote child authority unavailable");
-                completion = SettledCompletion::Uncertain;
-                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
-                continue;
-            }
-        }
         let dispatch_stream = deps.connection_registry.local_sm_stream(resource);
         match crate::ingress::archive_dispatch::resource_ready(
             uow,
@@ -410,7 +383,10 @@ async fn append_resource(
                     context,
                     resource,
                     effect_stanza(effect),
-                    deps.room_registry,
+                    crate::ingress::live_delivery::RoomChildProof {
+                        registry: deps.room_registry,
+                        endpoint: None,
+                    },
                     move || consumer.consume(&target, &stanza),
                 )
                 .await;
@@ -424,8 +400,9 @@ async fn append_resource(
                 };
             }
         }
-        // The ordered relay's legacy ACK has no frozen-child completion proof.
-        // A sealed child stays pending until its actual local sink can prove it.
+        // A sealed child completes where its target is connected: a detached
+        // session or a socket of this node, or the hosting node's keyed
+        // acceptance of the copy this node sends it.
         let outcome = match deps.ingress_append_context.as_ref() {
             Some(context) => match crate::ingress::room_manifest_replay::queue_detached(
                 manifest,
@@ -438,7 +415,23 @@ async fn append_resource(
             .await
             {
                 Ok(FullJidDeliveryOutcome::Unavailable) => {
-                    deliver_direct_to_full_locally(deps, resource, effect_stanza(effect)).await
+                    let local =
+                        deliver_direct_to_full_locally(deps, resource, effect_stanza(effect)).await;
+                    let hosted_here = deps
+                        .connection_registry
+                        .entry(resource)
+                        .is_some_and(|entry| entry.is_locally_hosted());
+                    if local == FullJidDeliveryOutcome::Unavailable && !hosted_here {
+                        super::relay_copy::append_sealed_remote(
+                            deps,
+                            effect,
+                            resource,
+                            &manifest.room,
+                        )
+                        .await
+                    } else {
+                        local
+                    }
                 }
                 Ok(outcome) => outcome,
                 Err(_) => FullJidDeliveryOutcome::MaybeCommitted,

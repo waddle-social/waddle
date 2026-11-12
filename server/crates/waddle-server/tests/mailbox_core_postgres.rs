@@ -20,7 +20,7 @@ use waddle_server::ingress_uow::{
     MailboxTargetFence,
 };
 use waddle_xmpp::ingress::mailbox::{
-    MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxDispositionChange,
+    DirectRequestKey, MailboxAdmissionLimits, MailboxAdmissionRefusal, MailboxDispositionChange,
     MailboxDispositionError, MailboxEntryDisposition, MailboxLaneFence, MailboxLaneIdentity,
     MailboxLaneOrigin, MailboxLaneRecipient, MailboxLaneSequence, MailboxOperationKey,
     MailboxOwnerDecision, MailboxRoomLane,
@@ -851,6 +851,88 @@ impl Fixture {
         tx.commit().await.expect("commit proven insert");
         MailboxOperationKey::RoomAcceptance(key)
     }
+}
+
+/// A direct request that carries a copy of a canonical message refers to
+/// it, and its mailbox entry has the request as parent, not the message.
+/// The collector keeps the message while that entry is not consumed and
+/// takes the request and the entry with the message afterwards.
+#[tokio::test]
+async fn unconsumed_direct_request_retains_the_message_it_copies() {
+    let Some(fixture) = Fixture::open("retain_direct").await else {
+        return;
+    };
+    let message = fixture.message().await;
+    let request = DirectRequestKey::mint();
+    sqlx::query(&format!(
+        "INSERT INTO {}.ingress_direct_requests \
+         (request_key, recipient_jid, sender_entity, payload, message_key) \
+         VALUES ($1::uuid, 'bob@example.com/phone', 'sender', $2, $3::uuid)",
+        fixture.schema
+    ))
+    .bind(request.to_storage().to_string())
+    .bind(vec![0x7b_u8, 0x7d])
+    .bind(
+        message
+            .message_key()
+            .expect("room acceptance")
+            .to_storage()
+            .to_string(),
+    )
+    .execute(&fixture.admin)
+    .await
+    .expect("direct request that copies the message");
+    let identity = lane("stream-a");
+    let presented = fence(3, 5, "node-a");
+    let operation = MailboxOperationKey::Direct(request);
+    let appended = append(&fixture.uow, &identity, &presented, operation)
+        .await
+        .expect("append the request's entry");
+    let lane_id = appended.entry().lane;
+    fixture.expire(message).await;
+
+    // Pending, then decided but not consumed: the message stays.
+    assert_eq!(fixture.collect().await, 0);
+    assert!(fixture.message_exists(message).await);
+    let mut owner = fixture.uow.begin().await.expect("begin owner");
+    let mut locked =
+        MailboxRepository::lock_lane_for_target(&mut owner, lane_id, &target(5, "node-a"))
+            .await
+            .expect("owner locks lane");
+    MailboxRepository::decide(
+        &mut owner,
+        &mut locked,
+        operation,
+        MailboxOwnerDecision::Accepted,
+    )
+    .await
+    .expect("owner accepts");
+    owner.commit().await.expect("owner commits");
+    assert_eq!(fixture.collect().await, 0);
+    assert!(fixture.message_exists(message).await);
+
+    // Consumed: the message is collected and the request and its entry
+    // leave with it through the cascade.
+    let mut origin = fixture.uow.begin().await.expect("begin origin");
+    let locked = MailboxRepository::lock_lane_for_origin(&mut origin, lane_id, ClaimEpoch(3))
+        .await
+        .expect("origin locks lane");
+    MailboxRepository::consume(&mut origin, &locked, operation)
+        .await
+        .expect("origin consumes");
+    origin.commit().await.expect("origin commits");
+    assert_eq!(fixture.collect().await, 1);
+    assert!(!fixture.message_exists(message).await);
+    assert_eq!(
+        fixture
+            .scalar(
+                "SELECT (SELECT count(*) FROM {schema}.ingress_direct_requests) \
+                 + (SELECT count(*) FROM {schema}.ingress_mailbox_entries)"
+            )
+            .await,
+        0
+    );
+    fixture.close().await;
 }
 
 #[tokio::test]

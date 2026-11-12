@@ -1170,8 +1170,9 @@ mod clustered {
         keypair_pool, mam_query, muc_presence, send_element, KeypairPool, Roles, SocketEndpoint,
     };
     use super::super::{
-        execute, exercise_roster, iq_request, iq_result, relation_exists, Provisioned, DOMAIN,
-        NS_ROSTER, RELEASE_GIT_SHA, SCHEMA, SESSION_KEY,
+        disconnect_admin, end_admin_sessions, execute, exercise_roster, iq_request, iq_result,
+        relation_exists, Provisioned, SessionWatch, DOMAIN, NS_ROSTER, RELEASE_GIT_SHA, SCHEMA,
+        SESSION_KEY,
     };
     use super::{
         assert_exit, assert_serves, login_url, provision, provisioning_snapshot, runtime_url,
@@ -1257,7 +1258,7 @@ mod clustered {
         );
         assert!(!relation_exists(&provisioned.admin, "_lineage").await);
 
-        provisioned.admin.close().await;
+        disconnect_admin(&mut provisioned).await;
         let pending = operator.owner_phase(&plan, &enroll).await;
         assert_exit(&pending, PENDING, "owner-phase inside the activation delay");
         assert!(
@@ -1324,7 +1325,7 @@ mod clustered {
             deployment,
             &keypairs,
         );
-        provisioned.admin.close().await;
+        disconnect_admin(&mut provisioned).await;
         let legacy = operator
             .owner_phase(
                 &[
@@ -1611,7 +1612,7 @@ mod clustered {
             "clustering_muc_rooms",
         ];
         let before = row_digests(&admin_pool, &CARRIED).await;
-        admin_pool.close().await;
+        end_admin_sessions(admin_pool, &cluster, &database).await;
 
         // The documented provisioning procedure, exactly as written. A
         // second run leaves every role, membership, owner and ACL as the
@@ -1651,7 +1652,7 @@ mod clustered {
             (0, false, roles.schema_owner.as_str()),
             "the old login must own nothing and the NOLOGIN owner must own `public`"
         );
-        admin_pool.close().await;
+        end_admin_sessions(admin_pool, &cluster, &database).await;
 
         // Step 5: the owner phase, with the unenrolled lease table retired
         // under the lease lifetime the old server ran with.
@@ -1684,7 +1685,12 @@ mod clustered {
             identity_path.to_str().expect("identity path"),
         ];
         tokio::time::sleep(LEASE_TTL + Duration::from_millis(300)).await;
+        let watch = SessionWatch::start(cluster.clone(), database.clone());
         let pending = operator.owner_phase(&plan, &[]).await;
+        let sessions = watch.finish().await;
+        if pending.code != PENDING {
+            eprintln!("sessions seen while the owner phase ran: {sessions:#?}");
+        }
         assert_exit(&pending, PENDING, "owner-phase retiring the lease table");
         tokio::time::sleep(LEASE_TTL + Duration::from_millis(500)).await;
         let prepared = operator.owner_phase(&plan, &[]).await;

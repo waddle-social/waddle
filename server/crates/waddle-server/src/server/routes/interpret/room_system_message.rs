@@ -167,7 +167,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
                     client_origin: None,
                     fence: requirement,
                     snapshot_generation: snapshot.admission_revision,
-                    manifest_snapshot: Some(RoomManifestSnapshot::from(&snapshot)),
+                    manifest_snapshot: Some(Box::new(RoomManifestSnapshot::from(&snapshot))),
                 });
         }
 

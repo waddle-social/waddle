@@ -3,8 +3,10 @@
 //! The poller is the authority for finding work: it scans the lanes that owe
 //! this node a decision, on an interval and whenever a peer's hint arrives. A
 //! hint only shortens the wait; a lost one costs at most one interval. Each
-//! pass examines a bounded number of lanes and works a bounded number at a
-//! time, so a backlog cannot occupy more than that many ingress connections.
+//! pass examines a bounded number of lanes and hands them to a bounded
+//! number of workers, so a backlog cannot occupy more than that many ingress
+//! connections, and a lane whose head is slow delays no other lane while a
+//! worker is free.
 //!
 //! Working a lane depends on what its head entry carries. A room acceptance
 //! runs the owner's ordinary relayed-groupchat commit, rebuilt from canonical
@@ -98,6 +100,7 @@ pub fn spawn_mailbox_poller(bridge: Arc<OrderedRelayDeliveryBridge>) {
         let mut adoption_after = None;
         let mut sweep_after = None;
         let mut pass: u32 = 0;
+        let workers = LaneWorkers::new();
         loop {
             tokio::select! {
                 biased;
@@ -112,7 +115,7 @@ pub fn spawn_mailbox_poller(bridge: Arc<OrderedRelayDeliveryBridge>) {
             if pass.is_multiple_of(MAILBOX_ADOPTION_PASSES) {
                 adoption_after = adopt_once(&services, adoption_after).await;
             }
-            resume_after = poll_once(&services, resume_after).await;
+            resume_after = poll_once(&services, &workers, resume_after).await;
             if pass.is_multiple_of(MAILBOX_SWEEP_PASSES) {
                 sweep_after = sweep_once(&services, sweep_after).await;
                 report_unconsumed_requests(&services).await;
@@ -254,11 +257,88 @@ impl OrderedRelayDeliveryBridge {
     }
 }
 
-/// One pass: scan this node's backlog after `resume_after` and work its
-/// lanes, at most [`MAILBOX_CLAIM_LIMIT`] at a time. Returns where the next
-/// pass resumes.
+/// The poller's lane workers: at most [`MAILBOX_CLAIM_LIMIT`] lanes are
+/// worked at a time, each by its own task, and a lane is worked by one task
+/// at a time.
+///
+/// A worker holds its lane until the lane's head is idle, deferred or dead
+/// lettered, which for a head whose owner attempt runs to its receiver
+/// budget is several seconds. The poller does not wait for a worker: a
+/// pass hands each lane to the next free worker and ends, so a lane that
+/// is held occupies one worker while the others keep draining the lanes
+/// this pass and later passes find.
+struct LaneWorkers {
+    permits: Arc<tokio::sync::Semaphore>,
+    busy: Arc<std::sync::Mutex<std::collections::HashSet<MailboxLaneId>>>,
+}
+
+impl LaneWorkers {
+    fn new() -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(MAILBOX_CLAIM_LIMIT)),
+            busy: Arc::default(),
+        }
+    }
+
+    /// Whether a worker holds `lane`.
+    fn is_busy(&self, lane: MailboxLaneId) -> bool {
+        self.busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&lane)
+    }
+
+    /// Hand `lane` to the next free worker, waiting for one. `false` when
+    /// no worker can be had, which ends the pass.
+    async fn work(
+        &self,
+        services: &Arc<OrderedRelayDeliveryServices>,
+        authority: &Arc<crate::ingress::IngressAuthority>,
+        lane: MailboxLaneId,
+        target: &NodeIdentity,
+    ) -> bool {
+        let Ok(permit) = Arc::clone(&self.permits).acquire_owned().await else {
+            return false;
+        };
+        self.busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(lane);
+        let busy = Arc::clone(&self.busy);
+        let services = Arc::clone(services);
+        let authority = Arc::clone(authority);
+        let target = target.clone();
+        tokio::spawn(async move {
+            // Both are released when the worker ends, however it ends.
+            let _permit = permit;
+            let _released = LaneRelease { busy, lane };
+            work_lane(&services, &authority, lane, &target).await;
+        });
+        true
+    }
+}
+
+/// Marks a worker's lane free again when the worker's task ends.
+struct LaneRelease {
+    busy: Arc<std::sync::Mutex<std::collections::HashSet<MailboxLaneId>>>,
+    lane: MailboxLaneId,
+}
+
+impl Drop for LaneRelease {
+    fn drop(&mut self) {
+        self.busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.lane);
+    }
+}
+
+/// One pass: scan this node's backlog after `resume_after` and hand its
+/// lanes to the workers, skipping a lane a worker still holds. Returns
+/// where the next pass resumes.
 async fn poll_once(
     services: &Arc<OrderedRelayDeliveryServices>,
+    workers: &LaneWorkers,
     resume_after: Option<MailboxLaneId>,
 ) -> Option<MailboxLaneId> {
     let state = services.web_socket_state.upgrade()?;
@@ -274,13 +354,13 @@ async fn poll_once(
             return None;
         }
     };
-    for claimed in lanes.chunks(MAILBOX_CLAIM_LIMIT) {
-        futures::future::join_all(
-            claimed
-                .iter()
-                .map(|lane| work_lane(services, &authority, *lane, &target)),
-        )
-        .await;
+    for lane in &lanes {
+        if workers.is_busy(*lane) {
+            continue;
+        }
+        if !workers.work(services, &authority, *lane, &target).await {
+            return None;
+        }
     }
     let full_page = lanes.len() >= crate::ingress::mailbox_worker::MAILBOX_SCAN_LIMIT as usize;
     lanes.last().copied().filter(|_| full_page)
@@ -387,6 +467,47 @@ async fn seat_room_occupancy(
     room: &BareJid,
     target: &NodeIdentity,
 ) -> bool {
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return false;
+    };
+    seat_room_occupancy_in(&state, authority, room, target).await
+}
+
+/// Seat `room`'s durable occupancy before this node serves a stanza of one
+/// of its own connections from the room's actor under claim `epoch`.
+///
+/// The mailbox poller seats a room when it works an entry for it. A node
+/// that took the room's claim another way (its orphan reaper, a steal, a
+/// restart) has an actor that holds none of the recorded occupants until
+/// then, and would refuse a groupchat stanza of an occupant connected to
+/// it. Every path that reads the roster to decide a stanza therefore calls
+/// this first; it costs one map lookup once the room is seated under the
+/// claim. `true` when the room is seated, or when this deployment keeps no
+/// durable occupancy.
+pub(crate) async fn ensure_room_occupancy_seated(
+    state: &crate::server::routes::websocket::WebSocketState,
+    room: &BareJid,
+    epoch: waddle_xmpp::ownership::ClaimEpoch,
+) -> bool {
+    let authority = &state.deps.protocol.ingress;
+    if !authority.mailbox_acceptance_enabled() || authority.room_occupancy_seated(room, epoch) {
+        return true;
+    }
+    if !authority.room_requests_carried_now().await {
+        return true;
+    }
+    let Some(target) = authority.node_identity() else {
+        return true;
+    };
+    seat_room_occupancy_in(state, authority, room, &target).await
+}
+
+async fn seat_room_occupancy_in(
+    state: &crate::server::routes::websocket::WebSocketState,
+    authority: &Arc<crate::ingress::IngressAuthority>,
+    room: &BareJid,
+    target: &NodeIdentity,
+) -> bool {
     let (load, claim) = match authority.load_room_occupancy(room).await {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -410,9 +531,6 @@ async fn seat_room_occupancy(
             "durable occupancy rows that cannot be parsed were not seated"
         );
     }
-    let Some(state) = services.web_socket_state.upgrade() else {
-        return false;
-    };
     let restored = state
         .deps
         .protocol

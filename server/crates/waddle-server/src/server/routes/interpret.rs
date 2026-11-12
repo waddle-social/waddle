@@ -247,6 +247,10 @@ pub(crate) use route_to_connection::{
     deliver_registered_remote_resource, queue_processed_for_detached, route_to_connection,
     undeliverable_iq_reply, DetachedQueueOutcome,
 };
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use route_to_connection::{
+    ControlledRemoteObligations, CONTROLLED_REGISTERED_REMOTE_OBLIGATIONS,
+};
 #[cfg(feature = "clustering")]
 pub(crate) use routing::deliver_peer_to_full_at;
 pub(crate) use routing::existing_ingress_delivery;

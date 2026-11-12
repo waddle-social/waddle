@@ -70,24 +70,58 @@ an owner transfer does, and what must hold before the relay path is deleted.
   obligations as soon as its commit has executed
   (`deliver_owner_obligations`), and the ingress maintenance pass repeats
   that for anything still owed after a minute.
-- **Copies after an owner attempt that did not execute.** A copy for a
-  resource hosted by another node, the sender's reflection included, is
-  delivered only by the owner's live execution of its commit, over the
-  relay's full-JID path. Recovery of a sealed manifest hands a copy only to
-  a resource hosted by the recovering node, and only where that node also
-  runs the room's actor under the occupancy incarnation the manifest was
-  sealed with (`room_manifest_replay`). So when the owner's attempt ends
-  between its commit and its execution (the process is killed, or the
-  attempt outlasts the six-second receiver budget), the origin still reads
-  the acceptance and counts the stanza, the occupants hosted by the owner
-  receive their copies from recovery, and the sender and every other
-  occupant on another node receive no live copy: the message reaches them
-  from the archive only. `owner_sigkill_after_commit_delivers_the_frozen_reflection_once`
-  and `membership_change_between_acceptance_and_ack` in
-  `tests/xep0045_xep0198_remote_acceptance.rs` fail for this reason.
+- **Copies.** Every copy is a child of the sealed manifest and has one
+  durable send attempt (`ingress_send_attempts`, keyed by message, receipt
+  and recipient). The node that hosts the target claims that attempt before
+  it writes to the socket, so a copy is written once whichever node offers
+  it and however often. The owner's live execution and its recovery
+  (`deliver_owner_obligations`) send a copy for a resource on another node
+  over the room's ordered channel with the copy's canonical obligation
+  (`append_sealed_remote` in `S/ingress/execute_relay_copy.rs`); the hosting
+  node's answer is the child's outcome and the owner records it. When the
+  owner ends between its commit and its execution, each node's ingress
+  maintenance pass delivers the children whose targets it hosts and records
+  them, without the owner.
+- **Proof of the frozen occupancy.** On the node that runs the actor the
+  manifest was sealed by, that actor checks the child's occupancy watermark
+  in the turn that writes the copy. The incarnation and the watermarks exist
+  only in that actor, so any other node proves the child against the room's
+  durable occupancy (`room_manifest_replay`). Each child records the
+  generation of the connection that held its target's seat when the
+  manifest was sealed (`seat`). The copy is written to a connection while
+  `ingress_room_occupants` seats the target under that generation and the
+  connection is of that generation. A seat held by another generation, or
+  no seat, leaves the copy undelivered as for a target that is not
+  connected: the full JID was bound again and joined again, and the copy
+  was not frozen for that occupancy. Once the room's claim has left the
+  incarnation that sealed the manifest, a child is settled as departed
+  (`OccupancyDeparted`) when its target has no seat or a seat of another
+  generation; while that claim stands the owner's actor decides.
+- **A child without a recorded seat.** The stored manifest versions its
+  child records in place (`children_version`): version 1 has no `seat`,
+  version 2 has it. A manifest stored without the field is version 1 and
+  is still read. Its children name no occupant the durable rows could be
+  compared with, so a node without the sealing actor never delivers them
+  and settles them as departed once the claim has left the sealing
+  incarnation. The sealing actor delivers them by their watermark as
+  before.
+- **What the seat does not tell apart.** `ingress_room_occupants`
+  identifies a seat by its connection, so a resource that leaves and joins
+  again on the same connection has the same row as before. The sealing
+  actor settles the old child by its watermark the next time it executes
+  it; when that actor ends first, a node that proves the child from durable
+  rows delivers it to the rejoined occupancy. Excluding that needs a
+  per-seat identity in the table.
+- **Detached sessions.** A target whose session is detached is appended
+  to through the stream-management registry under the child's key. Without
+  the sealing actor the append requires that the recorded seat is held by
+  the generation the child was sealed with and that the occupancy
+  authority (`xmpp_occupancy_authority`) holds that generation as current
+  for the full JID.
 - **Lost hint.** The owner's poller scans its backlog every second. A pass
-  works its lanes two at a time and waits for both, so one lane held for
-  its receiver budget delays every other lane of the node by that long.
+  hands each lane to one of two workers and does not wait for them, so a
+  lane held for its receiver budget occupies one worker while the other
+  keeps draining the node's other lanes.
 - **Owner transfer.** The successor adopts the lane once it holds the claim
   and has seated the room's durable occupancy in its room actor, then
   decides the head entry from canonical rows. An occupant without a row in
@@ -132,13 +166,16 @@ an owner transfer does, and what must hold before the relay path is deleted.
   any entry of the room; lanes are adopted only after that load. Voice
   requests, pending mediated invitations, call and Muji session state and
   rate-limit state are not stored and are not recovered.
-- **Seating only from the poller.** Durable occupancy is seated by the
-  mailbox poller, when it adopts a lane with a backlog or works an entry.
-  A node that takes a room's claim another way (its orphan reaper hydrates
-  the room) serves stanzas of its own connections from an unseated actor
-  until an entry for the room arrives: an occupant connected to that node
-  is refused with `not-acceptable` and must join again. The two-node suite
-  pins the claim to the replacement owner and does not cover this.
+- **Seating on any takeover.** A node seats a room's durable occupancy
+  once per claim epoch (`seat_room_occupancy_in` in
+  `S/clustering/route_bridge/mailbox.rs`) before it decides a mailbox entry
+  of the room and before it reads the roster for a groupchat stanza of one
+  of its own connections (`ensure_room_occupancy_seated`, called by
+  `dispatch_to_room` in `S/server/routes/interpret/room_dispatch.rs`). A
+  node that took the claim through its orphan reaper, a steal or a restart
+  therefore serves an occupant connected to it without a new join. When the
+  occupancy cannot be loaded and the sender is not in the actor's roster,
+  the stanza is answered with `internal-server-error`, not `not-acceptable`.
 - **Occupancy writer.** The room actor records every seat it grants or
   removes in `ingress_room_occupants` under the room claim, including a
   resource connected to the owner itself and removals by kick, ban,

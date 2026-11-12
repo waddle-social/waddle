@@ -166,7 +166,7 @@ pub(super) async fn plan_bot_groupchat_message(
             .map(super::effects::room::RoomFenceRequirement::Guarded)
             .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
         snapshot_generation: bot_ctx.snapshot_generation,
-        manifest_snapshot: bot_ctx.manifest_snapshot.clone(),
+        manifest_snapshot: bot_ctx.manifest_snapshot.clone().map(Box::new),
     });
     let mut planned =
         build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));

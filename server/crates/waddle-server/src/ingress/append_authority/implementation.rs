@@ -66,8 +66,9 @@ pub(crate) enum AppendAuthority {
     /// Minted by this node's own ingress commit, or already verified against the
     /// canonical row.
     Verified,
-    /// Local sealed-room authority retained for local owner-refresh fallback.
-    /// Legacy remote wire delivery must not export its canonical append key.
+    /// Authority for settling a sealed room child on this node, as the
+    /// recovery pass does when it retires a child whose occupant has left.
+    /// It is never exported to another node as a copy's obligation.
     LocalOnly,
     /// A relayed claim that passed the synchronous checks only (sender claim and
     /// stanza binding). The canonical read runs on the first
