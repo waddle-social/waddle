@@ -41,6 +41,7 @@ use super::cleanup::ConnectionShutdownOutcome;
 use super::connection::{BindingPublisher, BindingRetirement, CoordinatorResume};
 use super::registration::recovery_owned_retirement;
 use super::state::WsConnState;
+use super::stream_management::sm_show_from_name;
 use super::WebSocketState;
 use crate::account_coordinator::{
     AccountBindingAuthority, AccountCoordinators, BindingReply, CoordinatorBindingPublisher,
@@ -98,13 +99,53 @@ fn committed(reply: &BindingReply) -> bool {
 }
 
 /// The resource snapshot the connection currently projects.
-fn projected_snapshot(conn: &WsConnState) -> AccountResourceSnapshot {
+///
+/// A registered connection's presence lives on its connection-registry
+/// entry, where the presence handlers write it; the connection's own
+/// presence fields hold only what a resume restored, for the turns before
+/// its entry exists. The entry is read owner-gated, so a connection whose
+/// full JID was taken by a replacement does not project the replacement's
+/// presence.
+fn projected_snapshot(
+    state: &WebSocketState,
+    conn: &WsConnState,
+    jid: &FullJid,
+) -> AccountResourceSnapshot {
+    let registry = &state.deps.protocol.connection_registry;
+    let entry = conn
+        .registry_owner
+        .as_ref()
+        .and_then(|owner| registry.entry_if_owner(jid, owner));
+    let (presence_available, presence_show, presence_status, presence_priority, presence_payloads) =
+        match entry {
+            Some(entry) => {
+                let available = entry.is_presence_available();
+                let advertised = registry.presence_state(jid).filter(|_| available);
+                match advertised {
+                    Some(advertised) => (
+                        true,
+                        advertised.show.as_deref().and_then(sm_show_from_name),
+                        advertised.status,
+                        advertised.priority,
+                        advertised.payloads,
+                    ),
+                    None => (available, None, None, entry.presence_priority(), Vec::new()),
+                }
+            }
+            None => (
+                conn.presence_available,
+                conn.presence_show.clone(),
+                conn.presence_status.clone(),
+                conn.presence_priority,
+                conn.presence_payloads.clone(),
+            ),
+        };
     AccountResourceSnapshot {
-        presence_available: conn.presence_available,
-        presence_show: conn.presence_show.clone(),
-        presence_status: conn.presence_status.clone(),
-        presence_priority: conn.presence_priority,
-        presence_payloads: conn.presence_payloads.clone(),
+        presence_available,
+        presence_show,
+        presence_status,
+        presence_priority,
+        presence_payloads,
         carbons_enabled: conn.carbons_enabled,
         roster_interested: conn.roster_interested,
         blocklist_interested: conn.blocklist_interested,
@@ -122,7 +163,14 @@ pub(super) async fn sync_snapshot(state: &WebSocketState, conn: &mut WsConnState
     let Some(coordinators) = selected_coordinators(state) else {
         return;
     };
-    let snapshot = projected_snapshot(conn);
+    let Some(jid) = conn
+        .account_binding
+        .as_ref()
+        .map(|link| link.full_jid.clone())
+    else {
+        return;
+    };
+    let snapshot = projected_snapshot(state, conn, &jid);
     let Some(link) = conn.account_binding.as_mut() else {
         return;
     };
