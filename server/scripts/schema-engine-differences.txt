@@ -1,0 +1,41 @@
+# Tables that exist on one database engine only, read by
+# `schema_baseline.py lockstep`. One `postgres-only TABLE` or
+# `sqlite-only TABLE` per line; `#` starts a comment.
+#
+# Every other table must exist on both engines with the same column names
+# and the same explicitly created index names.
+
+# Clustering runs on PostgreSQL only.
+postgres-only clustering_claims
+postgres-only clustering_keypair_slots
+postgres-only clustering_keypool
+postgres-only clustering_keypool_slots
+postgres-only clustering_muc_admin_receipts
+postgres-only clustering_muc_room_affiliations
+postgres-only clustering_muc_room_lifecycles
+postgres-only clustering_muc_rooms
+postgres-only clustering_nodes
+postgres-only clustering_orphan_reaper_cursors
+postgres-only clustering_peer_allowlist
+postgres-only clustering_steal_intents
+
+# Records of the restricted-runtime owner phase, which SQLite does not have:
+# it starts under one role that owns the schema.
+postgres-only _waddle_space_store_owner
+postgres-only extension_room_observation_owner_state
+postgres-only notification_activity_owner_state
+postgres-only notification_outbox_owner_state
+postgres-only pubsub_schema_marker
+postgres-only push_service_schema_marker
+postgres-only push_service_vapid_schema_marker
+
+# The manifest of the PostgreSQL epoch-guard triggers.
+postgres-only ingress_epoch_guard_manifest
+
+# Created by the owner phase on PostgreSQL. A server that owns its schema
+# (SQLite, and PostgreSQL without an attestation) creates it when the first
+# provider webhook arrives, so a freshly started database does not hold it.
+postgres-only webhook_deliveries
+
+# PostgreSQL orders notification recovery with an identity column.
+sqlite-only pending_notification_recovery_counter
