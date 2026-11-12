@@ -54,9 +54,9 @@ use waddle_xmpp::stream_management::SM_NS;
 use super::support::{collect_until, keypair_pool, provision_clustered, send_element, KeypairPool};
 use super::{
     assert_catalog_unchanged, assert_runtime_owns_nothing, attach_serving_pool,
-    attach_single_node_stores, catalog_entries, execute, exercise_muc, owner_phase_stable_entries,
-    relation_exists, role, run_owner_phase, startup_identity, Prepared, Provisioned, DOMAIN,
-    POOL_LIMITS, SCHEMA,
+    attach_single_node_stores, catalog_entries, disconnect_admin, execute, exercise_muc,
+    owner_phase_stable_entries, relation_exists, role, run_owner_phase, startup_identity, Prepared,
+    Provisioned, SessionWatch, DOMAIN, POOL_LIMITS, SCHEMA,
 };
 
 /// The attested serving pool with the separate control-plane pool a
@@ -114,8 +114,19 @@ async fn run_exclusive_owner_phase(
 ) -> Result<AttestedLineage, RestrictedRuntimeOwnerError> {
     let tag = format!("waddle-owner-{}", Uuid::new_v4().simple());
     let plan = exclusive_plan(&provisioned.plan, &tag);
-    provisioned.admin.close().await;
+    let watch = SessionWatch::start(provisioned.cluster.clone(), provisioned.database.clone());
+    disconnect_admin(provisioned).await;
     let result = run_owner_phase(&tagged_owner_url(&provisioned.owner_url, &tag), &plan).await;
+    let sessions = watch.finish().await;
+    if matches!(
+        result,
+        Err(RestrictedRuntimeOwnerError::DatabaseNotExclusive { .. })
+    ) {
+        eprintln!(
+            "owner phase {tag} refused a database that is not exclusive; sessions seen while it \
+             ran: {sessions:#?}"
+        );
+    }
     provisioned.admin =
         PgPool::connect_with(provisioned.base.clone().database(&provisioned.database))
             .await

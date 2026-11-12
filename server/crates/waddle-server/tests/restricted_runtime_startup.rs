@@ -140,6 +140,163 @@ impl Prepared {
     }
 }
 
+/// A record of the client sessions connected to one database while a step
+/// runs, sampled through a session on another database of the cluster so
+/// that the watch is not one of the sessions it records.
+///
+/// An owner phase that requires the database to itself refuses when it sees
+/// another session. The record names that session: its backend, login,
+/// `application_name`, when it started and when it was last seen.
+#[cfg(feature = "clustering")]
+struct SessionWatch {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    samples: tokio::task::JoinHandle<Vec<String>>,
+}
+
+#[cfg(feature = "clustering")]
+impl SessionWatch {
+    /// Start recording the sessions of `database` through `cluster`, a pool
+    /// on another database.
+    fn start(cluster: PgPool, database: String) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let samples = tokio::spawn(async move {
+            struct Seen {
+                pid: i32,
+                login: String,
+                application_name: String,
+                backend_start: String,
+                state: String,
+                query: String,
+                first: Duration,
+                last: Duration,
+            }
+            let started = std::time::Instant::now();
+            let mut seen: Vec<Seen> = Vec::new();
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                type Row = (
+                    i32,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                );
+                let rows: Vec<Row> = sqlx::query_as(
+                    "SELECT pid, usename::text, application_name, backend_start::text, state, \
+                            pg_catalog.left(query, 120) \
+                       FROM pg_catalog.pg_stat_activity \
+                      WHERE datname = $1 AND backend_type = 'client backend'",
+                )
+                .bind(&database)
+                .fetch_all(&cluster)
+                .await
+                .unwrap_or_default();
+                let at = started.elapsed();
+                for (pid, login, application_name, backend_start, state, query) in rows {
+                    let backend_start = backend_start.unwrap_or_default();
+                    let state = state.unwrap_or_default();
+                    let query = query.unwrap_or_default();
+                    match seen
+                        .iter_mut()
+                        .find(|known| known.pid == pid && known.backend_start == backend_start)
+                    {
+                        Some(known) => {
+                            known.last = at;
+                            known.state = state;
+                            known.query = query;
+                        }
+                        None => seen.push(Seen {
+                            pid,
+                            login: login.unwrap_or_default(),
+                            application_name: application_name.unwrap_or_default(),
+                            backend_start,
+                            state,
+                            query,
+                            first: at,
+                            last: at,
+                        }),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            let ended = started.elapsed();
+            seen.into_iter()
+                .map(|session| {
+                    format!(
+                        "pid {} login {} application_name {:?} backend_start {} seen +{:?}..+{:?} \
+                         of {:?}; last state {:?}, last query {:?}",
+                        session.pid,
+                        session.login,
+                        session.application_name,
+                        session.backend_start,
+                        session.first,
+                        session.last,
+                        ended,
+                        session.state,
+                        session.query
+                    )
+                })
+                .collect()
+        });
+        Self { stop, samples }
+    }
+
+    /// Stop recording and return one line per session that was seen.
+    async fn finish(self) -> Vec<String> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.samples.await.unwrap_or_default()
+    }
+}
+
+/// End every session the database administrator has on `database`: close
+/// `admin`, drop it, and wait until none of the administrator's backends is
+/// left there.
+///
+/// `PgPool::close` leaves a connection open when that connection was being
+/// returned to the pool while `close` ran: it is put back as idle after
+/// `close` has emptied the idle queue, and stays connected for as long as a
+/// handle to the pool exists. Dropping the pool closes its socket, and the
+/// backend exits some time after that, so the sessions are awaited where
+/// the server reports them. `cluster` is a pool of the same login on
+/// another database; its sessions are not counted.
+#[cfg(feature = "clustering")]
+async fn end_admin_sessions(admin: PgPool, cluster: &PgPool, database: &str) {
+    admin.close().await;
+    drop(admin);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let remaining: Vec<(i32, Option<String>)> = sqlx::query_as(
+            "SELECT pid, pg_catalog.left(query, 120) FROM pg_catalog.pg_stat_activity \
+              WHERE datname = $1 AND usename = session_user \
+                AND backend_type = 'client backend'",
+        )
+        .bind(database)
+        .fetch_all(cluster)
+        .await
+        .expect("read the administrator's sessions");
+        if remaining.is_empty() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the administrator's sessions on {database} did not end: {remaining:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Disconnect the fixture's administrator from its database before a step
+/// that needs the database to itself. The fixture keeps a pool that
+/// connects on its next use.
+#[cfg(feature = "clustering")]
+async fn disconnect_admin(provisioned: &mut Provisioned) {
+    let reconnecting = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy_with(provisioned.base.clone().database(&provisioned.database));
+    let admin = std::mem::replace(&mut provisioned.admin, reconnecting);
+    end_admin_sessions(admin, &provisioned.cluster, &provisioned.database).await;
+}
+
 async fn runtime_connection(prepared: &Prepared) -> PgConnection {
     PgConnection::connect_with(
         &PgConnectOptions::from_str(&prepared.runtime_url).expect("runtime URL"),
