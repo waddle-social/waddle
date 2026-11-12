@@ -7,6 +7,11 @@ alert rows also note their intervening changes. Other product/schema cells and
 their line references retain the original snapshot and need rechecking before
 implementation. This partial refresh is not a new whole-system audit.
 
+For the capabilities in #2046's own scope (restricted runtime, owner
+entrypoint, typed ingress entry, pumps, connection actor, mailbox types,
+SASL2, ordered relay, durable SM, metrics and alerts) the current record is
+[`2046-capability-matrix.md`](2046-capability-matrix.md).
+
 No build, runtime test, workload or deployment was performed for this refresh.
 Source wiring, earlier reported local checks, hosted CI execution and live
 deployment are separate evidence below. No production access was used.
