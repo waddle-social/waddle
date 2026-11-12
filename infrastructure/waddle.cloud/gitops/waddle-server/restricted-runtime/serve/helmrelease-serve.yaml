@@ -1,0 +1,9 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: waddle-server
+  namespace: waddle
+spec:
+  values:
+    restrictedRuntime:
+      enabled: true

@@ -17,6 +17,8 @@
 #[cfg(feature = "clustering")]
 #[path = "restricted_runtime_startup/clustered.rs"]
 mod clustered;
+#[path = "restricted_runtime_startup/owner_entrypoint.rs"]
+mod owner_entrypoint;
 #[path = "restricted_runtime_support/mod.rs"]
 mod support;
 
@@ -924,6 +926,113 @@ async fn owner_phase_stable_entries(admin: &PgPool) -> Vec<String> {
         .collect();
     entries.sort();
     entries
+}
+
+/// The handoff the fixtures start the server with is composed by
+/// `compose_handoff`. This reads every database-derived value of it
+/// separately, as the administrator, with its own catalog query, and
+/// requires the composed document to carry exactly those values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn composed_handoff_carries_the_pins_an_administrator_reads() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    let composed: serde_json::Value =
+        serde_json::from_str(&prepared.handoff).expect("handoff is JSON");
+
+    let pins: Vec<i64> = sqlx::query_scalar(
+        "SELECT pin FROM pg_catalog.unnest(ARRAY[ \
+           (SELECT datdba::bigint FROM pg_catalog.pg_database \
+             WHERE datname = pg_catalog.current_database()), \
+           (SELECT nspowner::bigint FROM pg_catalog.pg_namespace WHERE nspname = $1), \
+           (SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname = $3), \
+           (SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname = $4), \
+           (SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname = $5), \
+           (SELECT oid::bigint FROM pg_catalog.pg_namespace WHERE nspname = $2), \
+           pg_catalog.to_regclass($1 || '._lineage')::oid::bigint, \
+           (SELECT indexrelid::bigint FROM pg_catalog.pg_index \
+             WHERE indisprimary AND indrelid = pg_catalog.to_regclass($1 || '._lineage')), \
+           pg_catalog.to_regprocedure($2 || '.read_physical_identity()')::oid::bigint, \
+           pg_catalog.to_regclass($1 || '._migrations')::oid::bigint, \
+           (SELECT indexrelid::bigint FROM pg_catalog.pg_index \
+             WHERE indisprimary AND indrelid = pg_catalog.to_regclass($1 || '._migrations')), \
+           pg_catalog.to_regclass($1 || '.ingress_protocol_epoch')::oid::bigint, \
+           (SELECT indexrelid::bigint FROM pg_catalog.pg_index \
+             WHERE indisprimary \
+               AND indrelid = pg_catalog.to_regclass($1 || '.ingress_protocol_epoch')), \
+           pg_catalog.to_regclass($1 || '.ingress_epoch_guard_manifest')::oid::bigint \
+         ]) WITH ORDINALITY AS pins(pin, position) ORDER BY position",
+    )
+    .bind(SCHEMA)
+    .bind(support::TRUSTED_SCHEMA)
+    .bind(&prepared.roles.runtime)
+    .bind(&prepared.roles.installer)
+    .bind(&prepared.roles.definer)
+    .fetch_all(&prepared.admin)
+    .await
+    .expect("administrator reads the pins");
+    assert_eq!(
+        composed["pins"],
+        serde_json::json!({
+            "database_owner_role_oid": pins[0],
+            "schema_owner_role_oid": pins[1],
+            "runtime_role_oid": pins[2],
+            "installer_role_oid": pins[3],
+            "definer_role_oid": pins[4],
+            "trusted_schema_oid": pins[5],
+            "lineage_relation_oid": pins[6],
+            "lineage_primary_index_oid": pins[7],
+            "attestor_function_oid": pins[8],
+            "installation_operation_id": prepared.operation_id.to_string(),
+            "ledger_relation_oid": pins[9],
+            "ledger_primary_index_oid": pins[10],
+            "epoch_relation_oid": pins[11],
+            "epoch_primary_index_oid": pins[12],
+            "guard_manifest_relation_oid": pins[13],
+        }),
+        "the composed pins must be the catalog's"
+    );
+
+    let (lineage_uuid, deployment_uuid, system_identifier, database_oid, schema_oid): (
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    ) = sqlx::query_as(&format!(
+        "SELECT l.lineage_uuid, l.deployment_uuid, \
+                (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+                (SELECT oid::bigint FROM pg_catalog.pg_database \
+                  WHERE datname = pg_catalog.current_database()), \
+                (SELECT oid::bigint FROM pg_catalog.pg_namespace WHERE nspname = $1) \
+           FROM {SCHEMA}._lineage l"
+    ))
+    .bind(SCHEMA)
+    .fetch_one(&prepared.admin)
+    .await
+    .expect("administrator reads the lineage and physical identity");
+    for (field, expected) in [
+        ("version", serde_json::json!(3)),
+        ("release_git_sha", serde_json::json!(RELEASE_GIT_SHA)),
+        ("lineage_uuid", serde_json::json!(lineage_uuid)),
+        ("deployment_uuid", serde_json::json!(deployment_uuid)),
+        ("system_identifier", serde_json::json!(system_identifier)),
+        ("database_oid", serde_json::json!(database_oid)),
+        ("database_name", serde_json::json!(prepared.database)),
+        ("schema_oid", serde_json::json!(schema_oid)),
+        ("schema_name", serde_json::json!(SCHEMA)),
+        (
+            "installer_login",
+            serde_json::json!(prepared.roles.installer),
+        ),
+        ("runtime_login", serde_json::json!(prepared.roles.runtime)),
+        ("definer_role", serde_json::json!(prepared.roles.definer)),
+        ("trusted_schema", serde_json::json!(support::TRUSTED_SCHEMA)),
+    ] {
+        assert_eq!(composed[field], expected, "{field}");
+    }
+    prepared.cleanup().await;
 }
 
 /// The owner phase can run again on a prepared database, classifies every

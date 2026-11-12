@@ -264,3 +264,66 @@ Deployment.
 {{- if eq (include "waddle-server.runtimeSecretName" .) "" -}}
 {{- fail "waddle-server requires secret.sessionKey plus secret.occupantIdSecret, secret.existingSecret, or secret.runtimeSecretName providing WADDLE_SESSION_KEY and WADDLE_OCCUPANT_ID_SECRET" -}}
 {{- end -}}
+
+
+{{- /*
+Restricted PostgreSQL runtime. Both switches need the same connection and
+role settings; refuse to render a Job or a Deployment that could only fail.
+*/ -}}
+{{- $restricted := .Values.restrictedRuntime -}}
+{{- if or $restricted.enabled $restricted.ownerJob.enabled -}}
+{{- if ne .Values.database.driver "postgres" -}}
+{{- fail "restrictedRuntime requires database.driver=postgres" -}}
+{{- end -}}
+{{- $identifier := "^[a-z_][a-z0-9_]{0,62}$" -}}
+{{- range $name, $value := dict "restrictedRuntime.schema" $restricted.schema "restrictedRuntime.roles.migratorLogin" $restricted.roles.migratorLogin "restrictedRuntime.roles.schemaOwner" $restricted.roles.schemaOwner "restrictedRuntime.roles.runtimeLogin" $restricted.roles.runtimeLogin "restrictedRuntime.roles.attestorInstallerLogin" $restricted.roles.attestorInstallerLogin "restrictedRuntime.roles.attestorDefinerRole" $restricted.roles.attestorDefinerRole "restrictedRuntime.roles.attestorSchema" $restricted.roles.attestorSchema "restrictedRuntime.database.name" $restricted.database.name -}}
+{{- if not (regexMatch $identifier (toString $value)) -}}
+{{- fail (printf "%s must be a lowercase PostgreSQL identifier" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $value := dict "restrictedRuntime.database.host" $restricted.database.host "restrictedRuntime.database.caSecret.name" $restricted.database.caSecret.name "restrictedRuntime.credentials.runtime.secretName" $restricted.credentials.runtime.secretName "deployment.uuid" $deploymentUuid -}}
+{{- if not $value -}}
+{{- fail (printf "%s is required for the restricted runtime" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-f]{40}$" (toString $restricted.releaseGitSha)) -}}
+{{- fail "restrictedRuntime.releaseGitSha must be the release's 40-character lowercase Git SHA" -}}
+{{- end -}}
+{{- range .Values.containerExtraEnv -}}
+{{- if and (eq .name "WADDLE_GIT_SHA") (ne (toString .value) (toString $restricted.releaseGitSha)) -}}
+{{- fail "restrictedRuntime.releaseGitSha must equal the WADDLE_GIT_SHA in containerExtraEnv" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- if $restricted.enabled -}}
+{{- range .Values.containerExtraEnv -}}
+{{- if has .name (list "WADDLE_DATABASE_URL" "WADDLE_DB_RUNTIME_ATTESTATION" "WADDLE_DB_MIGRATOR_LOGIN" "WADDLE_XMPP_MAM_SCHEMA_OWNER" "WADDLE_XMPP_MAM_CLAIM_SCHEMA") -}}
+{{- fail (printf "restrictedRuntime.enabled sets %s itself; remove it from containerExtraEnv" .name) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.deployment.lineageAction -}}
+{{- fail "restrictedRuntime.enabled cannot run a lineage action; unset deployment.lineageAction" -}}
+{{- end -}}
+{{- end -}}
+
+{{- if $restricted.ownerJob.enabled -}}
+{{- $uuid := "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" -}}
+{{- $nil := "00000000-0000-0000-0000-000000000000" -}}
+{{- $operationId := toString $restricted.ownerJob.installationOperationId -}}
+{{- if or (not (regexMatch $uuid $operationId)) (eq $operationId $nil) -}}
+{{- fail "restrictedRuntime.ownerJob.installationOperationId must be a generated UUID" -}}
+{{- end -}}
+{{- $generation := toString $restricted.ownerJob.keypoolGeneration -}}
+{{- if and .Values.clustering.enabled (or (not (regexMatch $uuid $generation)) (eq $generation $nil)) -}}
+{{- fail "restrictedRuntime.ownerJob.keypoolGeneration must be a generated UUID when clustering is enabled" -}}
+{{- end -}}
+{{- if not $restricted.ownerJob.cutover -}}
+{{- fail "restrictedRuntime.ownerJob.cutover must hold the handoff's cutover record" -}}
+{{- end -}}
+{{- range $name, $value := dict "restrictedRuntime.credentials.migrator.secretName" $restricted.credentials.migrator.secretName "restrictedRuntime.credentials.attestorInstaller.secretName" $restricted.credentials.attestorInstaller.secretName -}}
+{{- if not $value -}}
+{{- fail (printf "%s is required for the owner Job" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

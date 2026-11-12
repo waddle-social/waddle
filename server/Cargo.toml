@@ -84,7 +84,7 @@ proptest = "1.5"
 reqwest = { version = "0.13", features = ["json", "rustls", "http2"], default-features = false }
 
 # CLI Arguments & Config
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 config = "0.15"
 dirs = "6.0"
 

@@ -1,0 +1,59 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgresql
+  namespace: waddle
+spec:
+  # The owner phase's keypair-slot retirement check is written against
+  # PostgreSQL 17 and fails closed on 18. Before enabling this component,
+  # confirm the running major version is 17 (`SELECT version()`) and replace
+  # this tag with the exact minor that is running: a different image restarts
+  # the instances.
+  imageName: ghcr.io/cloudnative-pg/postgresql:17
+  managed:
+    roles:
+      # The operator reconciles attributes, passwords and memberships of the
+      # roles listed here. `inherit: false` is required on every one: the
+      # server's attachment verifiers and the provisioning procedure refuse a
+      # role that inherits. Memberships are declared here because the
+      # operator revokes any it does not find in `inRoles`.
+      - name: waddle_database_owner
+        ensure: present
+        comment: Owns the waddle database; no login can act as it
+        login: false
+        inherit: false
+      - name: waddle_owner
+        ensure: present
+        comment: Owns the application schema and every relation in it
+        login: false
+        inherit: false
+      - name: waddle_attestor
+        ensure: present
+        comment: Owns the attestor schema and function
+        login: false
+        inherit: false
+      - name: waddle_migrator
+        ensure: present
+        comment: Runs waddle-server owner-phase and emit-handoff
+        login: true
+        inherit: false
+        inRoles:
+          - waddle_owner
+        passwordSecret:
+          name: postgresql-waddle-migrator
+      - name: waddle_attestor_installer
+        ensure: present
+        comment: Runs waddle-server install-attestor
+        login: true
+        inherit: false
+        inRoles:
+          - waddle_attestor
+        passwordSecret:
+          name: postgresql-waddle-attestor-installer
+      - name: waddle_runtime
+        ensure: present
+        comment: The login waddle-server serves under
+        login: true
+        inherit: false
+        passwordSecret:
+          name: postgresql-waddle-runtime

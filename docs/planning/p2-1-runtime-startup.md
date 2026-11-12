@@ -67,7 +67,8 @@ The following shape uses illustrative values:
 These OIDs and record IDs are illustrative, not an installation recipe. A
 trusted operator must record actual pins independently of the runtime
 connection, after positive attestor installation or same-operation
-reconciliation on the original primary. Version 1, version 2, and incomplete
+reconciliation on the original primary. `waddle-server emit-handoff` reads
+them on the owner connection; see [Owner entrypoint](#owner-entrypoint). Version 1, version 2, and incomplete
 handoffs are refused. The record IDs describe an operator procedure; the
 runtime has no trusted signing key or anti-replay store and does not verify
 that old credentials, backends, listeners, prepared transactions, or privileged
@@ -216,8 +217,10 @@ exact shape and refuses any deviation:
   the `SELECT`-only stage.
 
 The target schema must not grant anything to PUBLIC. The owner phase refuses
-such a schema, which includes the default `public` schema, before it runs any
-DDL.
+such a schema before it runs any DDL. The `public` schema carries PUBLIC
+grants by default and is refused in that state; once they are revoked and
+the schema belongs to the NOLOGIN schema owner it is accepted like any other
+(see [Provisioning a database one login owns](#provisioning-a-database-one-login-owns)).
 
 ### Clustered owner phase
 
@@ -335,7 +338,8 @@ The cutover runbook must therefore state:
    login's credential, terminate its backends, verify none remain and no
    prepared transaction is pending) are complete before the owner phase.
 2. The owner handle is opened with an `application_name` unique to the run,
-   and the plan names it.
+   and the plan names it. `waddle-server owner-phase` generates the name and
+   does both.
 3. `legacy_ttl` is the `WADDLE_CLUSTERING_LEASE_TTL_MS` the old server ran
    with. The phase only enforces the lifetime the plan says the servers are
    configured with; if the old deployment had raised it, the operator
@@ -411,6 +415,587 @@ tombstoned, not deleted. The revisioned stream management tables and the inter-s
 resume tables stay without privileges: no serving path selects the first,
 and the registered migrations drop the second. The stream management,
 occupancy and outbox rows are the same with and without clustering.
+
+## Owner entrypoint
+
+The owner phase, the attestor installation and the handoff are subcommands of
+the `waddle-server` binary, so the release image that serves is the image
+that prepares its database. `S/main.rs` dispatches on the presence of any
+argument before it adopts listeners; without arguments the server starts. A
+subcommand builds its own runtime, installs no telemetry exporter, binds
+nothing and reads no serving configuration. Results go to standard output,
+diagnostics to standard error.
+
+| Subcommand | Login in `WADDLE_DATABASE_URL` | Does |
+|---|---|---|
+| `owner-phase` | migrator | `prepare_restricted_runtime_owner`: migrations, every store's owner preparation, the runtime grants. Prints the database identity (lineage and physical identity) as JSON |
+| `install-attestor` | attestor installer | `physical_attestation::install` for the identity `owner-phase` printed, under an operator-chosen operation ID |
+| `emit-handoff` | migrator | Composes the `WADDLE_DB_RUNTIME_ATTESTATION` document, or with `--verify` checks a stored one |
+
+`owner-phase` and `emit-handoff` connect as the migrator and set
+`role=<schema owner>`, `search_path=<schema>` and an `application_name`
+generated for the run on their own sessions; `install-attestor` sets its
+`search_path`. Nothing else may set them: every subcommand refuses, before
+it connects, a URL that carries `options`, `options[...]` or
+`application_name`, an environment in which `PGOPTIONS` or `PGAPPNAME` is
+set, and a URL whose login is not the one it expects.
+
+Connection URLs are taken from the environment only, never as arguments.
+`--identity-output` and `--output` write a temporary file in the target's
+directory and rename it over the target, so a rerun replaces the file
+atomically; a target that is a symbolic link is refused.
+
+### Inputs
+
+Secrets have no flag and are never printed: `WADDLE_DATABASE_URL`,
+`WADDLE_SESSION_KEY` (the VAPID root key), `WADDLE_CLUSTERING_KEYPAIR_POOL`
+and the optional `WADDLE_RUNTIME_DATABASE_URL`. Role, schema and plan inputs
+are flags with an environment fallback. Where the restricted server already
+takes the same value, the subcommand reads the same variable, so one
+environment block configures the job and the deployment:
+
+| Flag | Environment | Used by |
+|---|---|---|
+| `--schema` | `WADDLE_XMPP_MAM_CLAIM_SCHEMA` | `owner-phase`, `emit-handoff` |
+| `--migrator-login` | `WADDLE_DB_MIGRATOR_LOGIN` | `owner-phase`, `emit-handoff` |
+| `--schema-owner` | `WADDLE_XMPP_MAM_SCHEMA_OWNER` | `owner-phase`, `emit-handoff` |
+| `--runtime-login` | `WADDLE_DB_RUNTIME_LOGIN` | all three |
+| `--attestor-definer-role` | `WADDLE_DB_ATTESTOR_DEFINER_ROLE` | all three |
+| `--attestor-installer-login` | `WADDLE_DB_ATTESTOR_INSTALLER_LOGIN` | `install-attestor`, `emit-handoff` |
+| `--attestor-schema` | `WADDLE_DB_ATTESTOR_SCHEMA` | `install-attestor`, `emit-handoff` |
+| `--release-git-sha` | `WADDLE_GIT_SHA` | `emit-handoff` |
+| `--keypool-generation` | `WADDLE_CLUSTERING_KEYPOOL_GENERATION` | `owner-phase` |
+
+The first three and `WADDLE_GIT_SHA` are the variables the restricted server
+reads. `owner-phase` also reads `WADDLE_DEPLOYMENT_UUID` and
+`WADDLE_DB_LINEAGE_ACTION` through the server's lineage configuration, and
+`WADDLE_CLUSTERING_ENABLED`, `WADDLE_CLUSTERING_KEYPAIR_POOL` and
+`WADDLE_CLUSTERING_LEASE_TTL_MS` through its clustering configuration. With
+clustering enabled the plan's PeerIds are derived from the keypair pool by
+the function the runtime's lease attachment uses, so the enrollment cannot
+name a pool the servers do not hold. A binary built without the `clustering`
+feature refuses `WADDLE_CLUSTERING_ENABLED=true`.
+
+The remaining clustering plan inputs are flags only:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--keypool-activation-delay <n>(ms\|s\|m\|h)` | `--legacy-ttl` when retiring, otherwise `0s` | How long a newly enrolled generation stays pending |
+| `--legacy-keypair-slots refuse\|retire` | `refuse` | Treatment of a keypair-slot table an unattested server created |
+| `--legacy-ttl <duration>` | none; required with `retire` | Lease lifetime the retired servers ran with |
+| `--allowlist refuse\|reconcile` | `refuse` | Treatment of enrolled PeerIds outside the keypair pool |
+| `--exclusive-database required\|not-checked` | `required` | Whether another session or a prepared transaction fails the phase |
+
+The exclusivity check exists only with a clustering plan. A non-clustered
+`owner-phase` does not check that it has the database to itself, so the
+operator must have stopped every server first. `not-checked` disables the
+only check that no server or operator session is still connected: a
+connected old server can then write while the phase adopts or retires what
+it holds. It is never used during a cutover.
+
+`install-attestor` takes `--identity <file>` (the JSON `owner-phase` printed,
+also written by `owner-phase --identity-output <file>`) and
+`--operation-id <uuid>`. The expected identity is therefore the one attested
+on the owner connection; the installer compares the live database with it
+and does not read it back through its own login. The installation can be
+repeated with the same operation ID.
+
+### Exit codes
+
+| Code | Meaning | Action |
+|---|---|---|
+| 0 | Completed | Next step |
+| 1 | The connection or a statement failed, a lock stayed contended or timed out, or an outcome is unknown. Nothing says a rerun would fail | Read the diagnostic and run again; for `install-attestor`, with the same operation ID |
+| 2 | Invalid arguments, environment or input file; nothing was sent to the database | Fix the invocation |
+| 3 | `owner-phase` only: every schema is prepared and granted, and the keypair-pool generation is pending | Run `owner-phase` again after the printed activation time; the server refuses to start until that run exits 0 |
+| 4 | A verifier refused the database, the plan or the document | A rerun refuses again until one of them changes |
+
+How errors map (`S/owner_cli/error.rs`), searched along the whole chain of
+causes:
+
+| Error | Code |
+|---|---|
+| Missing or invalid environment, wrong login in the URL, smuggled session options, unreadable input file, output path that is a symbolic link | 2 |
+| Connection could not be opened; output file could not be written | 1 |
+| `sqlx::Error`; `DatabaseError::ConnectionFailed`, `QueryFailed`, `Internal` | 1 |
+| `DatabaseError::MigrationCatalogFenceContended`, `MigrationLedgerLockContended`, `MigrationLockTimeout`, `CatalogMutationFenceContended`, `CatalogMutationGateContended`, `CatalogMutationLockTimeout` | 1 |
+| `DatabaseError::MigrationLockRollbackUnconfirmed`, `CatalogMutationRollbackUnconfirmed` (reconcile the backend, then rerun) | 1 |
+| Any other `DatabaseError` except `MigrationLedger` and `Lineage`, including a pool that cannot be built as configured | 1 |
+| `KeypoolOwnerError::LockTimeout`, `AllowlistOwnerPreparationError::LockTimeout` | 1 |
+| `PhysicalAttestationError::Database`, `CommitUnknown`, `PostCommitUnverified`, `InstallationIndeterminate` | 1 |
+| `RuntimeStartupError::PreflightPoolCloseIndeterminate` | 1 |
+| `KeypoolActivationPending` | 3 |
+| `DatabaseError::MigrationLedger`, `DatabaseError::Lineage` | 4 |
+| Every other owner-phase, attestor, handoff or preflight error: `PublicSchemaPrivilege`, `UnclassifiedRelation`, `ExcessRuntimePrivilege`, `UnsafeRuntimeRole`, `DatabaseNotExclusive`, `OwnerSessionUntagged`, `KeypoolEnrolledWithoutClusteringPlan`, `LegacyKeypairSlots`, `LegacyShapeMismatch`, `LegacyLeaseLive`, `EnrollmentMismatch`, `UnexpectedPeers`, attestor `Mismatch`, `InstallationConflict`, `NotPrimary`, handoff `Drift`, `MissingObject`, `AttestorInstallationMismatch`, `Refused` | 4 |
+
+Two refusals clear without a change to the plan: `LegacyLeaseLive` once the
+lease of a stopped server has run out, and `DatabaseNotExclusive` once the
+other sessions are gone. Both still exit 4, because a server that is still
+running keeps them true and that is for an operator to establish. A store
+error that carries a database failure in an opaque variant, without
+exposing it as a cause, also exits 4; its text names the failure.
+
+A refusal prints the typed error and each of its causes: the leased slot
+with its holder and heartbeat age, the PeerIds the plan does not name, the
+unclassified relation, the excess privilege with its relation. When the
+database is not exclusive, each other session visible to the migrator is
+listed with its pid, login, `application_name`, client address and state,
+and each prepared transaction with its identifier. A pending generation
+prints its activation time on the database clock.
+
+### The handoff per release
+
+The handoff document has three kinds of field:
+
+- **Database pins**, read by `emit-handoff` on the owner connection:
+  `lineage_uuid`, `system_identifier`, the database and schema OID and name,
+  and every entry under `pins` except `installation_operation_id`. They
+  change only when a pinned object is recreated.
+- **Deployment inputs** that are the same for every release:
+  `deployment_uuid`, the role and schema names, `installation_operation_id`
+  (`--installation-operation-id`) and the `cutover` record
+  (`--cutover <file>`, a JSON file holding exactly the handoff's `cutover`
+  object: the transition, the primary endpoint the runtime connects to, the
+  retired login and the cutoff references).
+- **The release input**: `release_git_sha`, which must equal the
+  `WADDLE_GIT_SHA` the image is started with.
+
+A deployment therefore runs `emit-handoff` once per prepared database and,
+for each new image, replaces `release_git_sha` in the stored document. The
+owner phase is not involved. `emit-handoff --verify <file> --release-git-sha
+<sha>` recomposes the document from the database, the role flags and the
+given release, taking the cutover record and the installation operation ID
+from the file, and exits 4 naming every field that differs (for example
+`release_git_sha` or `pins.ledger_primary_index_oid`). It emits nothing.
+
+`emit-handoff` refuses, with exit 4:
+
+- a session whose login is the runtime login: the handoff is never composed
+  on the connection it will be checked against;
+- a pinned object that does not exist yet, naming it;
+- an attestor function whose catalog marker was not written by the given
+  operation ID for this identity and these roles;
+- a document that `RuntimeStartupIdentity::from_json` rejects for the same
+  release and deployment;
+- when `WADDLE_RUNTIME_DATABASE_URL` is set, a document that fails the
+  server's pinned read-only preflight on that runtime connection (endpoint,
+  login, transport and the pinned catalog).
+
+### Provisioning a database one login owns
+
+The owner phase expects a NOLOGIN schema owner that a separate migrator
+login acts as, a runtime login without membership or ownership, an attestor
+definer and installer, an application schema PUBLIC holds nothing on, and
+`pg_catalog.pg_control_system()` executable by the schema owner and the
+definer only. A database the owner-as-runtime server built has none of this:
+one login owns the database and every relation in `public`, and PUBLIC holds
+`CONNECT` and `TEMPORARY` on the database, `USAGE` on `public` and `EXECUTE`
+on `pg_control_system()`.
+
+The following procedure is the one-time step that precedes `owner-phase` on
+such a database. It needs a superuser: only one can create roles, reassign
+another role's objects, change the database owner and change the ACL of a
+`pg_catalog` function. It is one transaction, every check runs before the
+first change, and a second run changes nothing. The tested copy is
+`server/crates/waddle-server/sql/restricted_runtime_provisioning.sql`.
+
+Roles. A role that does not exist is created without a password. A role
+that already exists is never altered:
+
+- it is refused if it is a superuser, has `REPLICATION` or `BYPASSRLS`, is
+  the session's own role, or is named `pg_*`, `postgres`,
+  `streaming_replica` or `cnpg_pooler_pgbouncer`;
+- otherwise it must already have the shape the procedure creates (`LOGIN`
+  or `NOLOGIN` as its parameter requires, `NOINHERIT`, no `CREATEDB` or
+  `CREATEROLE`, no `ALTER ROLE … SET` setting, no membership other than the
+  two the procedure grants, and for a NOLOGIN role no password), or the
+  procedure stops and names each difference;
+- a pre-existing login may have a password. The three logins can therefore
+  be created with their credentials beforehand, which is how an operator
+  that manages roles declaratively supplies them.
+
+With CloudNativePG, logins declared under `managed.roles` default to
+`inherit: true`. The manifest must set `inherit: false` for all three, or
+the procedure refuses them; the attachment verifiers require `NOINHERIT`.
+
+The seven role parameters must name seven different roles and the two
+schemas must differ. The procedure also stops, having changed nothing, when
+the old login still has a backend or a prepared transaction in the database,
+when the attestor schema exists under another owner, and when a default
+privilege exists for all schemas, for the application or attestor schema,
+or for the old login. `REASSIGN OWNED` does not move default privileges, so
+the old login's must be removed by an operator first.
+
+Run it connected to the application database, after steps 1–4 of the
+coordinated cutover, with the parameters set on the same session:
+
+```sql
+SET waddle.schema                   = 'public';
+SET waddle.old_login                = 'waddle';
+SET waddle.database_owner           = 'waddle_database_owner';
+SET waddle.schema_owner             = 'waddle_owner';
+SET waddle.migrator_login           = 'waddle_migrator';
+SET waddle.runtime_login            = 'waddle_runtime';
+SET waddle.attestor_installer_login = 'waddle_attestor_installer';
+SET waddle.attestor_definer_role    = 'waddle_attestor';
+SET waddle.attestor_schema          = 'waddle_attestation';
+```
+
+```sql
+BEGIN;
+
+DO $provision$
+DECLARE
+    app_schema      text := pg_catalog.current_setting('waddle.schema');
+    old_login       text := pg_catalog.current_setting('waddle.old_login');
+    database_owner  text := pg_catalog.current_setting('waddle.database_owner');
+    schema_owner    text := pg_catalog.current_setting('waddle.schema_owner');
+    migrator        text := pg_catalog.current_setting('waddle.migrator_login');
+    runtime         text := pg_catalog.current_setting('waddle.runtime_login');
+    installer       text := pg_catalog.current_setting('waddle.attestor_installer_login');
+    definer         text := pg_catalog.current_setting('waddle.attestor_definer_role');
+    attestor_schema text := pg_catalog.current_setting('waddle.attestor_schema');
+    this_database   text := pg_catalog.current_database();
+    owner_roles     text[] := ARRAY[database_owner, schema_owner, definer];
+    login_roles     text[] := ARRAY[migrator, runtime, installer];
+    role_name       text;
+    existing        record;
+    detail          text;
+BEGIN
+    ---------------------------------------------------------------------
+    -- Checks. Nothing above the "Changes" line below alters anything.
+    ---------------------------------------------------------------------
+    IF NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) THEN
+        RAISE EXCEPTION 'restricted runtime provisioning must run as a superuser';
+    END IF;
+    IF (SELECT pg_catalog.count(DISTINCT name)
+          FROM pg_catalog.unnest(ARRAY[old_login] || owner_roles || login_roles) AS name) <> 7 THEN
+        RAISE EXCEPTION 'the seven role parameters must name seven different roles; nothing was changed';
+    END IF;
+    IF app_schema = attestor_schema THEN
+        RAISE EXCEPTION 'the application schema and the attestor schema must differ; nothing was changed';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = app_schema) THEN
+        RAISE EXCEPTION 'application schema % does not exist in database %', app_schema, this_database;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = old_login) THEN
+        RAISE EXCEPTION 'old login % does not exist', old_login;
+    END IF;
+
+    -- The old login must be gone from this database: a live backend or a
+    -- prepared transaction of it could still write as the owner it was.
+    SELECT pg_catalog.string_agg(activity.pid::text, ', ') INTO detail
+      FROM pg_catalog.pg_stat_activity activity
+     WHERE activity.datname = this_database AND activity.usename = old_login
+       AND activity.pid <> pg_catalog.pg_backend_pid();
+    IF detail IS NOT NULL THEN
+        RAISE EXCEPTION 'the old login % still has backends in this database (pid %); nothing was changed',
+            old_login, detail;
+    END IF;
+    SELECT pg_catalog.string_agg(prepared.gid, ', ') INTO detail
+      FROM pg_catalog.pg_prepared_xacts prepared
+     WHERE prepared.database = this_database AND prepared.owner = old_login;
+    IF detail IS NOT NULL THEN
+        RAISE EXCEPTION 'the old login % still has prepared transactions in this database (%); nothing was changed',
+            old_login, detail;
+    END IF;
+
+    -- Default privileges would hand future objects to other roles, and
+    -- REASSIGN OWNED leaves the old login's default privileges in place.
+    -- None is removed here: each needs a decision.
+    SELECT pg_catalog.string_agg(
+               pg_catalog.format('role %s schema %s type %s: %s',
+                   pg_catalog.pg_get_userbyid(da.defaclrole),
+                   COALESCE(n.nspname, '(all)'), da.defaclobjtype, da.defaclacl), '; ')
+      INTO detail
+      FROM pg_catalog.pg_default_acl da
+      LEFT JOIN pg_catalog.pg_namespace n ON n.oid = da.defaclnamespace
+     WHERE da.defaclnamespace = 0
+        OR n.nspname IN (app_schema, attestor_schema)
+        OR pg_catalog.pg_get_userbyid(da.defaclrole) = old_login;
+    IF detail IS NOT NULL THEN
+        RAISE EXCEPTION 'default privileges must be removed first (%); nothing was changed', detail;
+    END IF;
+
+    -- An attestor schema that already exists must already be the definer's.
+    SELECT pg_catalog.pg_get_userbyid(nspowner) INTO detail
+      FROM pg_catalog.pg_namespace WHERE nspname = attestor_schema;
+    IF detail IS NOT NULL AND detail <> definer THEN
+        RAISE EXCEPTION 'attestor schema % already exists and belongs to %, not to %; nothing was changed',
+            attestor_schema, detail, definer;
+    END IF;
+
+    -- Roles this procedure would create. An existing one is never altered.
+    FOREACH role_name IN ARRAY owner_roles || login_roles LOOP
+        IF role_name LIKE 'pg\_%'
+           OR role_name IN (current_user, session_user,
+                            'postgres', 'streaming_replica', 'cnpg_pooler_pgbouncer') THEN
+            RAISE EXCEPTION 'role % is a system role or this session''s own role and cannot be a restricted-runtime role; nothing was changed',
+                role_name;
+        END IF;
+        SELECT * INTO existing FROM pg_catalog.pg_authid WHERE rolname = role_name;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+        IF existing.rolsuper OR existing.rolreplication OR existing.rolbypassrls THEN
+            RAISE EXCEPTION 'role % already exists with SUPERUSER, REPLICATION or BYPASSRLS and will not be altered; nothing was changed',
+                role_name;
+        END IF;
+        detail := pg_catalog.concat_ws(', ',
+            CASE WHEN role_name = ANY (login_roles) AND NOT existing.rolcanlogin THEN 'it is NOLOGIN' END,
+            CASE WHEN role_name = ANY (owner_roles) AND existing.rolcanlogin THEN 'it is LOGIN' END,
+            CASE WHEN role_name = ANY (owner_roles) AND existing.rolpassword IS NOT NULL
+                 THEN 'it has a password' END,
+            CASE WHEN existing.rolinherit THEN 'it is INHERIT' END,
+            CASE WHEN existing.rolcreatedb THEN 'it is CREATEDB' END,
+            CASE WHEN existing.rolcreaterole THEN 'it is CREATEROLE' END,
+            CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s
+                               WHERE s.setrole = existing.oid)
+                 THEN 'it has ALTER ROLE ... SET settings' END,
+            (SELECT pg_catalog.string_agg(
+                        pg_catalog.format('%s is a member of %s',
+                            pg_catalog.pg_get_userbyid(m.member),
+                            pg_catalog.pg_get_userbyid(m.roleid)), ', ')
+               FROM pg_catalog.pg_auth_members m
+              WHERE existing.oid IN (m.roleid, m.member)
+                AND NOT (m.set_option AND NOT m.inherit_option AND NOT m.admin_option
+                         AND (pg_catalog.pg_get_userbyid(m.roleid),
+                              pg_catalog.pg_get_userbyid(m.member))
+                             IN ((schema_owner, migrator), (definer, installer)))));
+        IF detail <> '' THEN
+            RAISE EXCEPTION 'role % already exists and does not have the shape this procedure creates: %; nothing was changed',
+                role_name, detail;
+        END IF;
+    END LOOP;
+
+    ---------------------------------------------------------------------
+    -- Changes.
+    ---------------------------------------------------------------------
+
+    -- 1. Roles. The three owners cannot log in and nothing inherits from
+    --    them; the three logins hold no cluster-wide attribute.
+    FOREACH role_name IN ARRAY owner_roles LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+            EXECUTE pg_catalog.format(
+                'CREATE ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE '
+                'NOREPLICATION NOBYPASSRLS', role_name);
+        END IF;
+    END LOOP;
+    FOREACH role_name IN ARRAY login_roles LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+            EXECUTE pg_catalog.format(
+                'CREATE ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE '
+                'NOREPLICATION NOBYPASSRLS', role_name);
+        END IF;
+    END LOOP;
+
+    -- 2. The only memberships: the migrator can act as the schema owner and
+    --    the installer as the attestor definer, by SET ROLE alone. The
+    --    runtime login is a member of nothing.
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m
+                    WHERE pg_catalog.pg_get_userbyid(m.roleid) = schema_owner
+                      AND pg_catalog.pg_get_userbyid(m.member) = migrator) THEN
+        EXECUTE pg_catalog.format(
+            'GRANT %I TO %I WITH INHERIT FALSE, SET TRUE, ADMIN FALSE', schema_owner, migrator);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m
+                    WHERE pg_catalog.pg_get_userbyid(m.roleid) = definer
+                      AND pg_catalog.pg_get_userbyid(m.member) = installer) THEN
+        EXECUTE pg_catalog.format(
+            'GRANT %I TO %I WITH INHERIT FALSE, SET TRUE, ADMIN FALSE', definer, installer);
+    END IF;
+
+    -- 3. Ownership. Every object of the old login moves to the NOLOGIN
+    --    schema owner. The database gets an owner no login can act as, and
+    --    the application schema (`public` belongs to pg_database_owner, not
+    --    to the old login) is given to the schema owner explicitly.
+    EXECUTE pg_catalog.format('REASSIGN OWNED BY %I TO %I', old_login, schema_owner);
+    EXECUTE pg_catalog.format('ALTER DATABASE %I OWNER TO %I', this_database, database_owner);
+    EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', app_schema, schema_owner);
+
+    -- 4. Database access. PUBLIC loses CONNECT and TEMPORARY on this
+    --    database, so the old login can no longer connect to it; the three
+    --    logins connect and nothing else.
+    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', this_database);
+    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM %I', this_database, old_login);
+    EXECUTE pg_catalog.format(
+        'GRANT CONNECT ON DATABASE %I TO %I, %I, %I', this_database, migrator, runtime, installer);
+
+    -- 5. Schema access. The owner phase refuses an application schema on
+    --    which PUBLIC holds anything, which the default `public` schema
+    --    does. No other schema is touched.
+    EXECUTE pg_catalog.format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', app_schema);
+    EXECUTE pg_catalog.format('REVOKE ALL ON SCHEMA %I FROM %I', app_schema, old_login);
+
+    -- 6. The attestor's own schema, owned by the definer role.
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = attestor_schema) THEN
+        EXECUTE pg_catalog.format('CREATE SCHEMA %I AUTHORIZATION %I', attestor_schema, definer);
+    END IF;
+
+    -- 7. The physical identity is read through pg_control_system(). Only the
+    --    schema owner (lineage) and the attestor definer may call it; the
+    --    runtime and installer logins must not, so PUBLIC loses it. Function
+    --    ACLs are per database: no other database is affected.
+    REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC;
+    EXECUTE pg_catalog.format(
+        'GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO %I, %I',
+        schema_owner, definer);
+END
+$provision$;
+
+COMMIT;
+```
+
+What it changes, and why the verifiers need it:
+
+| Step | Statement | Required by |
+|---|---|---|
+| 1 | Creates each missing role: three NOLOGIN owners and three logins, all `NOINHERIT` and without cluster-wide attributes | The runtime role check (`UnsafeRuntimeRole`) and the attestor's role prerequisites |
+| 2 | `GRANT <owner> TO <migrator>` and `GRANT <definer> TO <installer>`, `SET` only, where not already granted | Room observation's migrator check and the attestor's exact role graph; the runtime is a member of nothing |
+| 3 | `REASSIGN OWNED BY <old login> TO <schema owner>`, `ALTER DATABASE … OWNER`, `ALTER SCHEMA … OWNER` | Every store verifies schema-owner ownership; the database owner must be none of the runtime, installer or definer |
+| 4 | `REVOKE ALL ON DATABASE … FROM PUBLIC`, `GRANT CONNECT` to the three logins | The runtime must hold neither `TEMP` nor `CREATE` on the database |
+| 5 | `REVOKE ALL ON SCHEMA <application schema> FROM PUBLIC` | `PublicSchemaPrivilege`; MAM and the durable room store admit only the owner, the runtime, the definer and `pg_monitor` in the schema ACL |
+| 6 | Creates the attestor schema, owned by the definer, if it is missing | The attestor's trusted-schema prerequisites |
+| 7 | `REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC`, `GRANT` to the schema owner and the definer | Lineage verification under the schema owner; the attestor refuses a runtime or installer that can call it |
+
+Scope and consequences the runbook must state:
+
+- `REASSIGN OWNED` moves every object the old login owns in this database,
+  in any schema, and every database it owns.
+- Only the application schema's ACL is changed. With a dedicated
+  application schema, `public` keeps its default PUBLIC `USAGE`; the
+  restricted-runtime suites pass with it in place.
+- Database and function ACLs are per database. The revokes apply to this
+  database only: the three logins, like every role, keep PUBLIC's `CONNECT`
+  and `TEMPORARY` on other databases such as `postgres` and `template1`,
+  and `pg_control_system()` stays callable by PUBLIC there. An operator who
+  wants the runtime login confined to the application database revokes
+  `CONNECT` from PUBLIC on the others, or restricts the login in
+  `pg_hba.conf`; neither is required by a verifier.
+- Afterwards the old login owns nothing in this database and cannot connect
+  to it, and it can no longer call `pg_control_system()` here, which lineage
+  verification reads. The old login is the `old_runtime` of the handoff's
+  cutover record. It keeps its role; rotating or dropping its credential is
+  step 2 of the cutover.
+- The provisioning does not touch relation or function ACLs. A relation that
+  grants something to another role is reported by the owner phase or by the
+  attachment that verifies it.
+- Rollback. Provisioning is the rollback boundary of the cutover: from it
+  on, the owner-as-runtime image cannot start on this database. There is no
+  reverse script. Rolling back means restoring the PostgreSQL cluster from
+  the physical backup taken after the pods stopped and before provisioning
+  (a logical dump of the database does not carry roles, memberships or the
+  database ACL), restoring the old login's credential, and deploying the
+  old image. Writes accepted after the cutover are lost by that restore.
+  Once `owner-phase` has retired the keypair-slot table, the old image
+  could not lease a slot even with ownership returned.
+
+`owner_entrypoint::provisioning_refuses_what_it_would_rewrite_and_repeats_without_change`
+(`tests/restricted_runtime_startup/owner_entrypoint.rs`) applies the
+procedure to a database one login owns and compares, around every run, a
+superuser's reading of the named roles' attributes, password presence,
+memberships and settings, the database and schema owners and ACLs, every
+relation and routine with owner and ACL, the ACL of `pg_control_system()`
+and all default privileges. A superuser or replication role, a system role
+name, repeated parameters, an existing login with `INHERIT`, a setting and
+a membership, a default privilege of the old login, and a connected old
+login each stop it with that reading unchanged. Logins created beforehand
+with passwords and the target shape are accepted and keep their attributes
+and passwords, and a second run leaves the reading identical.
+
+`owner_entrypoint::clustered::production_shaped_public_schema_is_provisioned_and_served`
+builds the production shape: a login that owns its database, the clustered
+owner-as-runtime server started against `public` with its default grants,
+and a roster item, an archived direct message and a room with an archived
+message written through it. It then applies the procedure twice, with the
+same before-and-after comparison, runs `owner-phase` with
+`--legacy-keypair-slots retire` (exit 3, then exit 0 after the delay),
+`install-attestor` and `emit-handoff` with the pinned preflight, and starts
+the clustered server under the runtime login on `public`. The user, roster,
+archive and room rows are unchanged by provisioning and the owner phase, the
+server returns the roster item and both archived messages, and PostgreSQL
+returns no `insufficient_privilege` error to the runtime login.
+
+`owner_entrypoint::subcommands_prepare_a_database_the_restricted_server_serves`
+runs the three subcommands on a fresh database with separate roles and a
+dedicated schema, starts the server on the emitted handoff, and covers the
+repeated owner phase, the handoff for another release that the server
+refuses at startup, and `--verify` on a drifted database.
+`owner_entrypoint::clustered::clustered_owner_phase_reports_pending_activation_and_refusals`
+covers exit 3 with its activation time, the listed foreign session and the
+refused unenrolled lease table. Each test checks every subcommand's output
+for the database passwords, the connection URLs, the session key and the
+keypair seeds.
+`owner_entrypoint::subcommands_do_not_echo_credentials_under_password_authentication`
+repeats that check where a password is actually verified: it starts a
+PostgreSQL server of its own with `scram-sha-256` authentication and runs
+the subcommands against a wrong password, an unreachable server and a
+runtime URL whose password fails the preflight. It needs `initdb` and
+`postgres` on `PATH` and is skipped without them, so it is not in the
+required-test list.
+`composed_handoff_carries_the_pins_an_administrator_reads` reads every
+database-derived field of the handoff with its own administrator query and
+requires the composed document to carry exactly those values.
+
+What the entrypoint does not do: create the database, set or rotate a
+credential, fence the old writers, or decide the cutover record. It has no
+read-only status subcommand; a repeated `owner-phase` on a prepared database
+changes nothing and reports the same result.
+
+### Deployment
+
+The chart and the GitOps directory carry the cutover, switched off. With
+both chart switches off and neither component listed, the rendered objects
+contain nothing of it.
+
+- **Chart** (`server/charts/waddle-server`). `restrictedRuntime.ownerJob.enabled`
+  renders a ServiceAccount, a Role limited to the handoff ConfigMap, the
+  Job's inputs and a CronJob that is suspended and scheduled for a date
+  that does not occur. An operator creates a Job from it. Its pod runs
+  `owner-phase`, `install-attestor` and `emit-handoff` from the release
+  image as init containers, each with its own login's URL
+  (`sslmode=verify-full`, the CA mounted from a Secret) and, for
+  `emit-handoff`, the runtime URL so the pinned preflight runs; a last
+  container publishes the emitted document as the ConfigMap
+  `<release>-runtime-handoff-pins` with `kubectl apply -k`. The Job's
+  `podFailurePolicy` fails it at once on exit codes 2 and 4 and counts 1
+  and 3 against `backoffLimit`, so a pending keypair-pool generation is
+  retried by the Job controller's backoff. It is not a Helm hook: the
+  clustered owner phase needs the server at zero replicas.
+- `restrictedRuntime.enabled` gives the server `WADDLE_DATABASE_URL` for the
+  runtime login (verified TLS, `options=-c search_path=<schema>`, the
+  read-write Service), `WADDLE_DB_MIGRATOR_LOGIN`,
+  `WADDLE_XMPP_MAM_SCHEMA_OWNER`, `WADDLE_XMPP_MAM_CLAIM_SCHEMA` and
+  `WADDLE_DB_RUNTIME_ATTESTATION` from the ConfigMap
+  `<release>-runtime-handoff`. The chart renders that ConfigMap from the
+  published pins, or from `restrictedRuntime.handoff.document` when the
+  document is kept in values, replacing `release_git_sha` with
+  `restrictedRuntime.releaseGitSha`. Reading the published ConfigMap uses
+  Helm's `lookup`, so an offline render needs the document in values. The
+  chart refuses to render when the SHA differs from the `WADDLE_GIT_SHA` in
+  `containerExtraEnv`, when a variable it sets is also set there, or when a
+  lineage action is configured.
+- **Release automation** (`server/env.cue`, `server/deployment.cue`) writes
+  `restrictedRuntime.releaseGitSha` in the same step as `WADDLE_GIT_SHA` and
+  the published-values schema requires it, so the handoff is composed for
+  every release.
+- **GitOps**
+  (`infrastructure/waddle.cloud/gitops/waddle-server/restricted-runtime/`).
+  Two kustomize components that `kustomization.yaml` does not list.
+  `prepare` adds the six roles to the CloudNativePG cluster's
+  `managed.roles` with `inherit: false`, the two memberships and a
+  PostgreSQL 17 image, and sets the chart's connection, role, credential
+  and owner Job values. `serve` sets `restrictedRuntime.enabled` and removes
+  the old `WADDLE_DATABASE_URL`. The three password Secrets are referenced
+  by name and are not in the repository.
+
+The procedure, with its rollback boundary, is
+[the cutover runbook](../runbooks/restricted-runtime-cutover.md).
+
+Not established: none of this has been applied to a cluster. The
+operator's handling of `inRoles` and `inherit: false` is taken from its
+documentation, not observed. A release that changes owner preparation needs
+the owner Job again at zero replicas, which is a manual step.
 
 ## Typed ingress transaction entry
 

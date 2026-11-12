@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use minidom::Element;
 use sqlx::postgres::{PgConnectOptions, PgPool};
-use sqlx::Row;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::lineage::{AttestedLineage, DeploymentUuid, LineageAction, PgSchemaName};
 use waddle_server::db::physical_attestation::{install, PgRoleName, PhysicalAttestationConfig};
+use waddle_server::db::runtime_startup::{compose_handoff, HandoffInputs, OperatorRecord};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::server::runtime_owner::{
     prepare_restricted_runtime_owner, RestrictedRuntimeOwnerError, RestrictedRuntimeOwnerPlan,
@@ -593,6 +593,7 @@ impl Prepared {
     pub async fn handoff_for(&self, runtime_url: &str) -> String {
         handoff(
             &self.admin,
+            &self.owner_url,
             &self.roles,
             &self.lineage,
             runtime_url,
@@ -661,16 +662,10 @@ pub fn url_with(base: &str, database: &str, user: &str, options: &str) -> String
     url.to_string()
 }
 
-/// The operator handoff. Every pin is read by the administrator, never from
-/// the runtime connection it will be checked against.
-pub async fn handoff(
-    admin: &PgPool,
-    roles: &Roles,
-    lineage: &AttestedLineage,
-    runtime_url: &str,
-    operation_id: Uuid,
-) -> String {
-    // Record the endpoint exactly as the runtime's connection options name it.
+/// The operator's cutover record for a runtime that connects through
+/// `runtime_url`: the endpoint exactly as the runtime's connection options
+/// name it, the retired login, and a fresh reference for every cutoff.
+pub async fn cutover_record(admin: &PgPool, old_runtime: &str, runtime_url: &str) -> String {
     let endpoint = PgConnectOptions::from_str(runtime_url).expect("runtime URL");
     let socket_directory = endpoint
         .get_socket()
@@ -681,108 +676,75 @@ pub async fn handoff(
                 .starts_with('/')
                 .then(|| endpoint.get_host().to_owned())
         });
-    let row = sqlx::query(
-        "SELECT db.datdba::bigint, n.nspowner::bigint, runtime.oid::bigint, \
-                installer.oid::bigint, definer.oid::bigint, trusted.oid::bigint, \
-                lineage.oid::bigint, lineage_idx.indexrelid::bigint, attestor.oid::bigint, \
-                ledger.oid::bigint, ledger_idx.indexrelid::bigint, epoch.oid::bigint, \
-                epoch_idx.indexrelid::bigint, manifest.oid::bigint, old_runtime.oid::bigint \
-         FROM pg_catalog.pg_database db \
-         JOIN pg_catalog.pg_namespace n ON n.nspname = $1 \
-         JOIN pg_catalog.pg_class lineage \
-           ON lineage.relnamespace = n.oid AND lineage.relname = '_lineage' \
-         JOIN pg_catalog.pg_index lineage_idx \
-           ON lineage_idx.indrelid = lineage.oid AND lineage_idx.indisprimary \
-         JOIN pg_catalog.pg_class ledger \
-           ON ledger.relnamespace = n.oid AND ledger.relname = '_migrations' \
-         JOIN pg_catalog.pg_index ledger_idx \
-           ON ledger_idx.indrelid = ledger.oid AND ledger_idx.indisprimary \
-         JOIN pg_catalog.pg_class epoch \
-           ON epoch.relnamespace = n.oid AND epoch.relname = 'ingress_protocol_epoch' \
-         JOIN pg_catalog.pg_index epoch_idx \
-           ON epoch_idx.indrelid = epoch.oid AND epoch_idx.indisprimary \
-         JOIN pg_catalog.pg_class manifest \
-           ON manifest.relnamespace = n.oid AND manifest.relname = 'ingress_epoch_guard_manifest' \
-         JOIN pg_catalog.pg_namespace trusted ON trusted.nspname = $2 \
-         JOIN pg_catalog.pg_proc attestor \
-           ON attestor.pronamespace = trusted.oid AND attestor.proname = 'read_physical_identity' \
-         JOIN pg_catalog.pg_roles runtime ON runtime.rolname = $3 \
-         JOIN pg_catalog.pg_roles installer ON installer.rolname = $4 \
-         JOIN pg_catalog.pg_roles definer ON definer.rolname = $5 \
-         JOIN pg_catalog.pg_roles old_runtime ON old_runtime.rolname = $6 \
-         WHERE db.datname = pg_catalog.current_database()",
-    )
-    .bind(SCHEMA)
-    .bind(TRUSTED_SCHEMA)
-    .bind(&roles.runtime)
-    .bind(&roles.installer)
-    .bind(&roles.definer)
-    .bind(&roles.old_runtime)
-    .fetch_one(admin)
-    .await
-    .expect("administrator records the startup pins");
-    let oid = |index| u32::try_from(row.get::<i64, _>(index)).expect("OID fits u32");
-    let physical = lineage
-        .postgres_identity
-        .as_ref()
-        .expect("PostgreSQL identity");
+    let old_runtime_oid: i64 =
+        sqlx::query_scalar("SELECT oid::bigint FROM pg_catalog.pg_roles WHERE rolname = $1")
+            .bind(old_runtime)
+            .fetch_one(admin)
+            .await
+            .expect("administrator records the retired login");
     serde_json::json!({
-        "version": 3,
-        "release_git_sha": RELEASE_GIT_SHA,
-        "deployment_uuid": lineage.deployment_uuid.to_string(),
-        "lineage_uuid": lineage.lineage_uuid.to_string(),
-        "system_identifier": physical.system_identifier.to_string(),
-        "database_oid": physical.database.oid,
-        "database_name": physical.database.name.0,
-        "schema_oid": physical.schema.oid,
-        "schema_name": physical.schema.name.0,
-        "installer_login": roles.installer,
-        "runtime_login": roles.runtime,
-        "definer_role": roles.definer,
-        "trusted_schema": TRUSTED_SCHEMA,
-        "cutover": {
-            "transition_id": Uuid::new_v4().to_string(),
-            "primary": {
-                "provider": "test-postgresql",
-                "cluster_id": "disposable-cluster",
-                "instance_id": "disposable-primary",
-                "endpoint_host": endpoint.get_host(),
-                "endpoint_port": endpoint.get_port(),
-                "endpoint_socket_dir": socket_directory,
-                "observation_record_id": Uuid::new_v4().to_string(),
-            },
-            "old_runtime": {
-                "login": roles.old_runtime,
-                "role_oid": oid(14),
-                "credential_cutoff_record_id": Uuid::new_v4().to_string(),
-            },
-            "listener_cutoff_record_id": Uuid::new_v4().to_string(),
-            "backend_cutoff_record_id": Uuid::new_v4().to_string(),
-            "prepared_transaction_cutoff_record_id": Uuid::new_v4().to_string(),
-            "mutator_policy": {
-                "mode": "quiesced_for_serving_interval",
-                "record_id": Uuid::new_v4().to_string(),
-            },
+        "transition_id": Uuid::new_v4().to_string(),
+        "primary": {
+            "provider": "test-postgresql",
+            "cluster_id": "disposable-cluster",
+            "instance_id": "disposable-primary",
+            "endpoint_host": endpoint.get_host(),
+            "endpoint_port": endpoint.get_port(),
+            "endpoint_socket_dir": socket_directory,
+            "observation_record_id": Uuid::new_v4().to_string(),
         },
-        "pins": {
-            "database_owner_role_oid": oid(0),
-            "schema_owner_role_oid": oid(1),
-            "runtime_role_oid": oid(2),
-            "installer_role_oid": oid(3),
-            "definer_role_oid": oid(4),
-            "trusted_schema_oid": oid(5),
-            "lineage_relation_oid": oid(6),
-            "lineage_primary_index_oid": oid(7),
-            "attestor_function_oid": oid(8),
-            "installation_operation_id": operation_id.to_string(),
-            "ledger_relation_oid": oid(9),
-            "ledger_primary_index_oid": oid(10),
-            "epoch_relation_oid": oid(11),
-            "epoch_primary_index_oid": oid(12),
-            "guard_manifest_relation_oid": oid(13),
-        }
+        "old_runtime": {
+            "login": old_runtime,
+            "role_oid": old_runtime_oid,
+            "credential_cutoff_record_id": Uuid::new_v4().to_string(),
+        },
+        "listener_cutoff_record_id": Uuid::new_v4().to_string(),
+        "backend_cutoff_record_id": Uuid::new_v4().to_string(),
+        "prepared_transaction_cutoff_record_id": Uuid::new_v4().to_string(),
+        "mutator_policy": {
+            "mode": "quiesced_for_serving_interval",
+            "record_id": Uuid::new_v4().to_string(),
+        },
     })
     .to_string()
+}
+
+/// The operator handoff, composed the way `emit-handoff` composes it: the
+/// pins are read on the owner connection, never on the runtime connection
+/// the handoff will be checked against.
+pub async fn handoff(
+    admin: &PgPool,
+    owner_url: &str,
+    roles: &Roles,
+    lineage: &AttestedLineage,
+    runtime_url: &str,
+    operation_id: Uuid,
+) -> String {
+    let cutover = cutover_record(admin, &roles.old_runtime, runtime_url).await;
+    let mut owner_config = DatabaseConfig::new(DatabaseDriver::Postgres, owner_url.to_owned());
+    owner_config.pool_size = 1;
+    let owner = Database::from_config("restricted runtime handoff", &owner_config)
+        .await
+        .expect("owner database");
+    compose_handoff(
+        &owner,
+        &HandoffInputs {
+            release_git_sha: RELEASE_GIT_SHA,
+            deployment_uuid: lineage.deployment_uuid,
+            installer_login: &role(&roles.installer),
+            runtime_login: &role(&roles.runtime),
+            definer_role: &role(&roles.definer),
+            trusted_schema: &PgSchemaName(TRUSTED_SCHEMA.to_owned()),
+        },
+        &OperatorRecord {
+            installation_operation_id: operation_id,
+            cutover: &cutover,
+        },
+    )
+    .await
+    .expect("compose the operator handoff")
+    .document()
+    .to_owned()
 }
 
 /// The catalog state a restricted runtime must leave alone: every relation,

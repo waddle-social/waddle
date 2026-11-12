@@ -134,6 +134,12 @@ package cuenv
 		modules: #PublishedExtensionModules
 		...
 	}
+	// Published with every release so the restricted runtime's handoff
+	// names the same Git SHA as the pod's WADDLE_GIT_SHA.
+	restrictedRuntime: {
+		releaseGitSha: #GitSha
+		...
+	}
 	...
 }
 

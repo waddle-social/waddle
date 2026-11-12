@@ -244,14 +244,22 @@ inventory remains the reference for call sites.
 
 In dependency order. Sizes are estimates from reading source.
 
-1. **Owner entrypoint and grant matrix (L).** One command that creates roles,
-   runs migrations and each store's owner preparation, installs the attestor
-   and applies the runtime grants. Today the only non-fixture grants are the
-   attestor installer, the owner-rejection grant and the lease tables
-   (`S/db/physical_attestation/installer.rs:643-644`,
-   `MIG/owner/owner_rejection_grants.rs:280`, `S/clustering/lease.rs:684`).
-   Auth, sessions, roster, blocking and uploads have no grants or verifier
-   (`S/db/physical_attestation/coverage_gap_gate.rs:117-131`).
+1. **Owner entrypoint and grant matrix (L).** The server binary has three
+   subcommands, dispatched before listener adoption (`S/main.rs`,
+   `S/owner_cli.rs`): `owner-phase` runs the migrations, each store's owner
+   preparation and the runtime grant matrix
+   (`S/server/runtime_owner.rs`) as the migrator login; `install-attestor`
+   installs the attestor as its installer login; `emit-handoff` composes or
+   verifies the startup handoff from pins read on the owner connection
+   (`S/db/runtime_startup/handoff.rs`). The handoff's only per-release field
+   is `release_git_sha`. Roles are not created by the subcommands: a
+   documented one-time provisioning procedure turns a database one login
+   owns, including one in `public`, into the shape the owner phase accepts
+   (`server/crates/waddle-server/sql/restricted_runtime_provisioning.sql`).
+   `owner_entrypoint::*` in `tests/restricted_runtime_startup` runs the real
+   binary's subcommands and then the real server, on a fresh database and
+   on a production-shaped one. See
+   [the owner entrypoint](p2-1-runtime-startup.md#owner-entrypoint).
 2. **Six owner constructors at startup (M).** Room effect outbox, push
    registrations, VAPID, push service, notification outbox and notification
    activity each have an attach path, but startup calls the owner constructor
@@ -304,9 +312,24 @@ In dependency order. Sizes are estimates from reading source.
 7. **Replace the refusal with the attach (S).** `S/main.rs` attaches the
    serving pool with a control-plane pool when clustering is enabled, and
    startup has no clustering refusal under the attested pool.
-8. **Deployment (M).** CNPG creates only the owner role
-   (`infrastructure/waddle.cloud/gitops/waddle-server/postgresql-cluster.yaml:9-12`)
-   and the chart has no owner job, runtime credential or attestation variable.
+8. **Deployment (M).** The chart (`server/charts/waddle-server`, 0.4.11) and
+   the GitOps directory carry everything the cutover needs, switched off:
+   `restrictedRuntime.ownerJob.enabled` renders a suspended owner CronJob
+   that runs the subcommands of gap 1 from the release image and publishes
+   the handoff as a ConfigMap; `restrictedRuntime.enabled` makes the server
+   connect as the runtime login over verified TLS and start from the handoff,
+   which the chart recomposes with each release's Git SHA. The CNPG roles,
+   the PostgreSQL 17 pin and the production values are kustomize components
+   under
+   `infrastructure/waddle.cloud/gitops/waddle-server/restricted-runtime/`
+   that `kustomization.yaml` does not reference. The release automation
+   publishes `restrictedRuntime.releaseGitSha` next to `WADDLE_GIT_SHA`
+   (`server/env.cue`). The procedure is
+   [the cutover runbook](../runbooks/restricted-runtime-cutover.md). None of
+   it has been applied to a cluster or rehearsed: production still serves as
+   the login that owns its database, the three password Secrets do not
+   exist, and a release whose owner preparation changed has no automated
+   sequencing of the owner Job.
 
 Exit test:
 `restricted_startup_runs_pinned_preflight_then_refuses_unprepared_stores`

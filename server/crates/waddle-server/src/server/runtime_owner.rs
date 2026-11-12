@@ -174,8 +174,9 @@ pub enum RestrictedRuntimeOwnerError {
     #[error("could not inspect the prepared schema for runtime grants")]
     GrantInventory(#[source] DatabaseError),
     #[error(
-        "PUBLIC holds privileges on schema {schema}; the restricted runtime needs a dedicated \
-         schema without PUBLIC access"
+        "PUBLIC holds privileges on schema {schema}; the restricted runtime needs a schema \
+         without PUBLIC access (REVOKE ALL ON SCHEMA {schema} FROM PUBLIC is part of the \
+         one-time provisioning)"
     )]
     PublicSchemaPrivilege { schema: String },
     #[error("relation {relation} has no runtime grant classification")]
@@ -1127,8 +1128,9 @@ async fn verify_runtime_role(
 }
 
 /// PUBLIC privileges on the target schema reach every role, and each store's
-/// attachment refuses them. The default `public` schema carries them, so a
-/// deployment must use a dedicated schema; refuse before any DDL runs.
+/// attachment refuses them. The `public` schema carries them until they are
+/// revoked, so it is refused in its default state; refuse before any DDL
+/// runs.
 async fn refuse_public_schema_privileges(
     owner: &Database,
 ) -> Result<(), RestrictedRuntimeOwnerError> {

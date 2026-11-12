@@ -45,6 +45,9 @@ spec:
         {{- if .Values.apnsSecretChecksum }}
         checksum/apns-secret-value: {{ .Values.apnsSecretChecksum | quote }}
         {{- end }}
+        {{- if .Values.restrictedRuntime.enabled }}
+        checksum/runtime-handoff: {{ include "waddle-server.restrictedHandoff" . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -143,6 +146,26 @@ spec:
             - name: WADDLE_XMPP_TLS_KEY
               value: {{ printf "%s/%s" .Values.xmpp.tls.mountPath .Values.xmpp.tls.keyKey | quote }}
             {{- end }}
+            {{- if .Values.restrictedRuntime.enabled }}
+            {{- /*
+              The restricted runtime: the server connects as the runtime
+              login, which holds no DDL privilege, and starts from the
+              handoff. The password variable precedes the URL that expands it.
+            */}}
+            - name: WADDLE_RUNTIME_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.restrictedRuntime.credentials.runtime.secretName | quote }}
+                  key: {{ .Values.restrictedRuntime.credentials.runtime.passwordKey | quote }}
+            - name: WADDLE_DATABASE_URL
+              value: {{ include "waddle-server.restrictedRuntimeDatabaseUrl" . | quote }}
+            - name: WADDLE_DB_RUNTIME_ATTESTATION
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "waddle-server.handoffConfigMapName" . }}
+                  key: handoff.json
+            {{- include "waddle-server.restrictedRoleEnv" . | nindent 12 }}
+            {{- end }}
             {{- with .Values.containerExtraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -172,6 +195,11 @@ spec:
               mountPath: {{ .Values.xmpp.tls.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.restrictedRuntime.enabled }}
+            - name: postgres-ca
+              mountPath: /etc/waddle/postgres-ca
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -187,6 +215,11 @@ spec:
         - name: xmpp-tls
           secret:
             secretName: {{ .Values.xmpp.tls.secretName }}
+        {{- end }}
+        {{- if .Values.restrictedRuntime.enabled }}
+        - name: postgres-ca
+          secret:
+            secretName: {{ .Values.restrictedRuntime.database.caSecret.name | quote }}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

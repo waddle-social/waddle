@@ -529,6 +529,22 @@ waddle-server clustering::lease::runtime_attach_tests::postgres_keypool_owner_re
 waddle-server::restricted_clustered_startup two_restricted_nodes_form_a_cluster_and_serve_without_ddl
 waddle-server::restricted_runtime_startup clustered::clustered_restricted_startup_refuses_an_unprepared_or_pending_database
 
+# #2116 owner entrypoint: the `owner-phase`, `install-attestor` and
+# `emit-handoff` subcommands of the server binary must prepare a database
+# the restricted server then serves on, including one shaped like
+# production (a single login owning `public`) after the documented
+# provisioning, without losing a row and without printing a secret. The
+# provisioning must never alter a role that already exists, and the composed
+# handoff must carry the pins an administrator reads independently. An image
+# whose subcommands cannot prepare a real database, report a pending
+# keypair-pool generation as success or emit a handoff the server refuses
+# must not ship.
+waddle-server::restricted_runtime_startup owner_entrypoint::subcommands_prepare_a_database_the_restricted_server_serves
+waddle-server::restricted_runtime_startup owner_entrypoint::clustered::clustered_owner_phase_reports_pending_activation_and_refusals
+waddle-server::restricted_runtime_startup owner_entrypoint::clustered::production_shaped_public_schema_is_provisioned_and_served
+waddle-server::restricted_runtime_startup owner_entrypoint::provisioning_refuses_what_it_would_rewrite_and_repeats_without_change
+waddle-server::restricted_runtime_startup composed_handoff_carries_the_pins_an_administrator_reads
+
 # #2116 claim schema bootstrap on a serving cluster: a node that starts
 # under the schema owner while other nodes serve must not take a table lock
 # on a current claim schema. An image whose bootstrap can deadlock with a

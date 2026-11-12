@@ -1,0 +1,10 @@
+{{- if .Values.restrictedRuntime.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "waddle-server.handoffConfigMapName" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+data:
+  handoff.json: {{ include "waddle-server.restrictedHandoff" . | quote }}
+{{- end }}

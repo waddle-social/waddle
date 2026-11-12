@@ -1414,6 +1414,12 @@ fn parse_occupant_id_secret(raw: Option<&str>) -> Result<OccupantIdSecret, Strin
 
 const SESSION_KEY_MIN_BYTES: usize = 32;
 
+/// The session key from `WADDLE_SESSION_KEY`, under the rules the server
+/// applies to it. The owner phase seals the VAPID signing key under it.
+pub(crate) fn session_key_from_env() -> Result<String, String> {
+    parse_session_key(std::env::var("WADDLE_SESSION_KEY").ok().as_deref())
+}
+
 fn parse_session_key(raw: Option<&str>) -> Result<String, String> {
     let value = raw.filter(|value| !value.is_empty()).ok_or_else(|| {
         "WADDLE_SESSION_KEY is required (generate with: openssl rand -base64 48)".to_string()

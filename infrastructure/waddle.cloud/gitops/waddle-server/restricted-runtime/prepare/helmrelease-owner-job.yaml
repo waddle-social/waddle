@@ -1,0 +1,67 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: waddle-server
+  namespace: waddle
+spec:
+  values:
+    restrictedRuntime:
+      schema: public
+      database:
+        host: postgresql-rw
+        port: 5432
+        name: waddle
+        caSecret:
+          name: postgresql-ca
+          key: ca.crt
+      roles:
+        migratorLogin: waddle_migrator
+        schemaOwner: waddle_owner
+        runtimeLogin: waddle_runtime
+        attestorInstallerLogin: waddle_attestor_installer
+        attestorDefinerRole: waddle_attestor
+        attestorSchema: waddle_attestation
+      # kubernetes.io/basic-auth Secrets the operator supplies; the same
+      # Secrets set the role passwords through the Cluster's managed roles.
+      credentials:
+        runtime:
+          secretName: postgresql-waddle-runtime
+        migrator:
+          secretName: postgresql-waddle-migrator
+        attestorInstaller:
+          secretName: postgresql-waddle-attestor-installer
+      ownerJob:
+        enabled: true
+        # Replace each all-zero UUID with one generated for this cutover
+        # (`uuidgen`), and `role_oid` with the old login's OID. The chart
+        # refuses to render the all-zero operation ID and generation, and
+        # `emit-handoff` refuses an all-zero or repeated record ID.
+        keypoolGeneration: 00000000-0000-0000-0000-000000000000
+        installationOperationId: 00000000-0000-0000-0000-000000000000
+        # First cutover only: the old servers' keypair-slot table is retired
+        # under the lease lifetime they ran with (30 s unless
+        # WADDLE_CLUSTERING_LEASE_TTL_MS was raised). Remove afterwards.
+        ownerPhaseExtraArgs:
+          - --legacy-keypair-slots
+          - retire
+          - --legacy-ttl
+          - 30s
+        cutover:
+          transition_id: 00000000-0000-0000-0000-000000000000
+          primary:
+            provider: cloudnative-pg
+            cluster_id: waddle/postgresql
+            instance_id: postgresql-rw
+            endpoint_host: postgresql-rw
+            endpoint_port: 5432
+            observation_record_id: 00000000-0000-0000-0000-000000000000
+          old_runtime:
+            login: waddle
+            role_oid: 0
+            credential_cutoff_record_id: 00000000-0000-0000-0000-000000000000
+          listener_cutoff_record_id: 00000000-0000-0000-0000-000000000000
+          backend_cutoff_record_id: 00000000-0000-0000-0000-000000000000
+          prepared_transaction_cutoff_record_id: 00000000-0000-0000-0000-000000000000
+          mutator_policy:
+            mode: quiesced_for_serving_interval
+            record_id: 00000000-0000-0000-0000-000000000000

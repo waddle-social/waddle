@@ -168,6 +168,84 @@ database:
   # small default since this pool never carries bulk writes.
   controlPlanePoolSize: 4
 
+# Restricted PostgreSQL runtime (#2116). Everything here is inert until a
+# switch below is turned on.
+#
+# `ownerJob.enabled` renders the owner CronJob and its inputs. The CronJob is
+# suspended and never scheduled: a cutover runbook creates a Job from it
+# while the server is scaled to zero. It runs the release image's
+# `owner-phase`, `install-attestor` and `emit-handoff` subcommands and
+# publishes the handoff as a ConfigMap.
+#
+# `enabled` makes the server serve under the runtime login: it connects with
+# the runtime credential over verified TLS and starts from the handoff. Turn
+# it on only after the owner Job has succeeded.
+restrictedRuntime:
+  enabled: false
+  # The release's full Git SHA, equal to the pod's WADDLE_GIT_SHA. Release
+  # automation sets both together; the handoff is composed with it on every
+  # release.
+  releaseGitSha: ""
+  # Application schema that holds the server's relations.
+  schema: public
+  database:
+    # The primary's read-write Service. The handoff's cutover record names
+    # this host and port, and the server certificate must name the host.
+    host: ""
+    port: 5432
+    name: ""
+    # Secret holding the CA certificate that signed the server certificate.
+    caSecret:
+      name: ""
+      key: ca.crt
+  roles:
+    migratorLogin: ""
+    schemaOwner: ""
+    runtimeLogin: ""
+    attestorInstallerLogin: ""
+    attestorDefinerRole: ""
+    attestorSchema: ""
+  # Secrets holding each login's password. The password is placed in a
+  # connection URL unescaped, so it must consist of URL-safe characters
+  # (letters, digits, `-`, `.`, `_`, `~`).
+  credentials:
+    runtime:
+      secretName: ""
+      passwordKey: password
+    migrator:
+      secretName: ""
+      passwordKey: password
+    attestorInstaller:
+      secretName: ""
+      passwordKey: password
+  handoff:
+    # The handoff document, as the owner Job emitted it, kept in values.
+    # When empty the chart reads it from the ConfigMap the owner Job
+    # published, which needs cluster access at render time.
+    document: {}
+  ownerJob:
+    enabled: false
+    # Generation the keypair-pool enrollment is recorded under. Generate one
+    # UUID per keypair pool and keep it.
+    keypoolGeneration: ""
+    # Operation ID of the attestor installation. Generate one UUID and keep
+    # it; a rerun with the same ID is safe.
+    installationOperationId: ""
+    # The handoff's `cutover` object: the operator's record of the
+    # transition, the primary endpoint, the retired login and the cutoff
+    # references.
+    cutover: {}
+    # Extra `owner-phase` arguments, for example
+    # ["--legacy-keypair-slots", "retire", "--legacy-ttl", "30s"] on the
+    # first cutover of a clustered deployment.
+    ownerPhaseExtraArgs: []
+    # Pod failures tolerated before the Job fails. Exit codes 1 and 3 are
+    # retried with the Job controller's backoff; 2 and 4 fail the Job at once.
+    backoffLimit: 6
+    # Image whose entrypoint is kubectl, used to publish the handoff
+    # ConfigMap.
+    publishImage: registry.k8s.io/kubectl:v1.33.4
+
 xmpp:
   enabled: true
   domain: waddle.local
