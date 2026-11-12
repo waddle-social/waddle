@@ -73,6 +73,8 @@ pub enum RoomRequestError {
     DecisionNotLatchedHere,
     #[error("frozen response has more stanzas than a request can hold")]
     TooManyResponses,
+    #[error("groupchat sender has no durable occupancy in the room")]
+    SenderNotSeated,
 }
 
 /// The authenticated origin of a room request: the principal reference and,
@@ -782,34 +784,37 @@ fn decode_occupant(row: &crate::db::Row) -> Result<Option<RoomOccupantRecord>, I
 }
 
 /// Typed, transaction-taking access to durable room occupancy. Only the room
-/// owner writes it, in the transaction that decides the request.
+/// owner writes it: its room actor records every seat it grants or removes
+/// under the room claim, and the transaction that decides a room request
+/// completes the requester's row.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RoomOccupantRepository;
 
 impl RoomOccupantRepository {
-    /// Seat an occupant for an accepted join, replacing whatever row the
-    /// full JID had.
-    pub async fn seat(
+    /// Record a seat the room actor granted, replacing whatever row the full
+    /// JID had. A row of the same connection generation keeps its presence
+    /// and its join request; a row of another generation loses both, because
+    /// they belong to the connection it replaces.
+    pub async fn record_seat(
         transaction: &mut IngressUowTransaction<'_>,
         occupant: &RoomOccupantRecord,
     ) -> Result<(), IngressUowError> {
-        let presence = occupant
-            .presence
-            .as_ref()
-            .and_then(encode_occupant_presence);
         let (tx, prepared) = transaction.prepared_parts();
         let relations = relations(tx, prepared)?;
         tx.execute(
             &format!(
-                "INSERT INTO {} (room_jid, occupant_jid, nick, role, affiliation, \
-                 occupancy_generation, join_request, presence, room_epoch) \
-                 VALUES (?, ?, ?, ?::smallint, ?::smallint, ?, ?::uuid, ?, ?) \
+                "INSERT INTO {occupants} AS seat (room_jid, occupant_jid, nick, role, \
+                 affiliation, occupancy_generation, room_epoch) \
+                 VALUES (?, ?, ?, ?::smallint, ?::smallint, ?, ?) \
                  ON CONFLICT (room_jid, occupant_jid) DO UPDATE SET nick = EXCLUDED.nick, \
                  role = EXCLUDED.role, affiliation = EXCLUDED.affiliation, \
+                 join_request = CASE WHEN seat.occupancy_generation = \
+                   EXCLUDED.occupancy_generation THEN seat.join_request END, \
+                 presence = CASE WHEN seat.occupancy_generation = \
+                   EXCLUDED.occupancy_generation THEN seat.presence END, \
                  occupancy_generation = EXCLUDED.occupancy_generation, \
-                 join_request = EXCLUDED.join_request, presence = EXCLUDED.presence, \
                  room_epoch = EXCLUDED.room_epoch",
-                relations.occupants
+                occupants = relations.occupants
             ),
             crate::db_params![
                 occupant.room.to_string(),
@@ -818,15 +823,53 @@ impl RoomOccupantRepository {
                 role_to_storage(occupant.role),
                 affiliation_to_storage(occupant.affiliation),
                 occupant.generation.to_string(),
-                occupant
-                    .join_request
-                    .map(|key| key.to_storage().to_string()),
-                presence,
                 occupant.room_epoch.0,
             ],
         )
         .await?;
         Ok(())
+    }
+
+    /// Complete the row of an accepted join with the request that created
+    /// it and the presence the room broadcast for it. The room actor
+    /// recorded the seat before the join's projection committed; this
+    /// writes nothing when that row is gone or belongs to another
+    /// connection generation, so an occupant removed since is not seated
+    /// again. `true` when the row was completed.
+    pub async fn confirm_join(
+        transaction: &mut IngressUowTransaction<'_>,
+        occupant: &RoomOccupantRecord,
+    ) -> Result<bool, IngressUowError> {
+        let presence = occupant
+            .presence
+            .as_ref()
+            .and_then(encode_occupant_presence);
+        let (tx, prepared) = transaction.prepared_parts();
+        let relations = relations(tx, prepared)?;
+        let updated = tx
+            .execute(
+                &format!(
+                    "UPDATE {} SET nick = ?, role = ?::smallint, affiliation = ?::smallint, \
+                     join_request = ?::uuid, presence = ?, room_epoch = ? \
+                     WHERE room_jid = ? AND occupant_jid = ? AND occupancy_generation = ?",
+                    relations.occupants
+                ),
+                crate::db_params![
+                    occupant.nick.clone(),
+                    role_to_storage(occupant.role),
+                    affiliation_to_storage(occupant.affiliation),
+                    occupant
+                        .join_request
+                        .map(|key| key.to_storage().to_string()),
+                    presence,
+                    occupant.room_epoch.0,
+                    occupant.room.to_string(),
+                    occupant.occupant.to_string(),
+                    occupant.generation.to_string(),
+                ],
+            )
+            .await?;
+        Ok(updated == 1)
     }
 
     /// Rewrite the presence, nick, role and affiliation of the row a

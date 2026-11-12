@@ -176,6 +176,17 @@ pub struct IngressUnitOfWork {
     standalone_receipt_writer: StandaloneReceiptWriter,
     lineage: LineageConfig,
     remote_room_acceptance: RemoteRoomAcceptance,
+    /// Rooms whose durable occupancy this node has seated in its room actor,
+    /// with the room claim epoch it did so under. Shared by every clone.
+    seated_rooms: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<jid::BareJid, waddle_xmpp::ownership::ClaimEpoch>,
+        >,
+    >,
+    /// Milliseconds since the Unix epoch at which a transaction last proved
+    /// the mailbox epoch; zero before any did. See
+    /// [`Self::mailbox_acceptance_active_now`].
+    mailbox_epoch_proven_at_ms: Arc<std::sync::atomic::AtomicI64>,
     /// Optional full-identity writer capability retained by the exact
     /// physically attested pool.
     attested_pg_writer: Option<AttestedPostgresWriterCapability>,
@@ -249,6 +260,8 @@ impl IngressUnitOfWork {
             lineage,
             attested_pg_writer,
             remote_room_acceptance: RemoteRoomAcceptance::default(),
+            seated_rooms: Default::default(),
+            mailbox_epoch_proven_at_ms: Default::default(),
             fencing: IngressFencing::SingleNode,
         })
     }
@@ -270,6 +283,68 @@ impl IngressUnitOfWork {
         self.remote_room_acceptance == RemoteRoomAcceptance::DurableMailbox
             && self.db.driver() == DatabaseDriver::Postgres
             && !matches!(self.fencing, IngressFencing::SingleNode)
+    }
+
+    /// Whether a transaction opened now would carry remote room acceptance
+    /// through the durable mailbox, for a caller that holds no transaction.
+    ///
+    /// The answer comes from a transaction's proven protocol epoch. A proof
+    /// of the mailbox epoch is reused for five seconds, so a caller on a hot
+    /// path opens a transaction at most that often once the epoch is
+    /// reached; below it every call opens one.
+    pub async fn mailbox_acceptance_active_now(&self) -> Result<bool, IngressUowError> {
+        const PROOF_REUSE_MS: i64 = 5_000;
+        if !self.mailbox_acceptance_enabled() {
+            return Ok(false);
+        }
+        let now = crate::time::now_ms();
+        let proven = self
+            .mailbox_epoch_proven_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if proven != 0 && now.saturating_sub(proven) < PROOF_REUSE_MS {
+            return Ok(true);
+        }
+        let transaction = self
+            .begin_with_timeouts(
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_millis(500),
+            )
+            .await?;
+        let active = self.mailbox_acceptance_active(&transaction);
+        transaction.commit().await?;
+        if active {
+            self.mailbox_epoch_proven_at_ms
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(active)
+    }
+
+    /// Whether this node has seated `room`'s durable occupancy in its room
+    /// actor under the claim `epoch`. From then on the actor records every
+    /// seat it grants before it holds the occupant, so the occupancy table
+    /// names every occupant the actor has.
+    pub fn room_occupancy_seated(
+        &self,
+        room: &jid::BareJid,
+        epoch: waddle_xmpp::ownership::ClaimEpoch,
+    ) -> bool {
+        self.seated_rooms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(room)
+            .is_some_and(|seated| *seated == epoch)
+    }
+
+    /// Record that `room`'s durable occupancy was seated under `epoch`.
+    pub fn mark_room_occupancy_seated(
+        &self,
+        room: jid::BareJid,
+        epoch: waddle_xmpp::ownership::ClaimEpoch,
+    ) {
+        self.seated_rooms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(room, epoch);
     }
 
     /// Whether `transaction` carries remote room acceptance through the

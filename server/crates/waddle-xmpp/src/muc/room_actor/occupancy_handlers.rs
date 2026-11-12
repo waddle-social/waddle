@@ -66,263 +66,281 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _handler_timer = MucOccupancyHandlerTimer::start("join");
-        // #1108: a caller holding a stale ActorRef must retry through the
-        // registry. For an inactivity seal this also re-checks ownership so
-        // the seal can strengthen to OwnershipLost before the reaper runs.
-        self.reject_sealed_join().await?;
-        // ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): refuse to
-        // admit a join while this incarnation's durable restore is
-        // unresolved (a genuine backend failure, not a legitimate brand
-        // -new room) — see `RoomActor::ensure_restored_before_join`.
-        self.ensure_restored_before_join().await?;
-        self.gate_join_ownership().await?;
-        if self.invite_rollback_pending(&msg.sender_jid.to_bare()) {
-            return Err(RoomActorError::InviteRollbackPending);
-        }
-        let joining_bare_jid = msg.sender_jid.to_bare();
-        if !self.admission_revision_is_current(&joining_bare_jid, msg.admission_revision) {
-            return Err(RoomActorError::StaleAdmissionRevision);
-        }
+        let reply: Self::Reply = async {
+            let _handler_timer = MucOccupancyHandlerTimer::start("join");
+            // #1108: a caller holding a stale ActorRef must retry through the
+            // registry. For an inactivity seal this also re-checks ownership so
+            // the seal can strengthen to OwnershipLost before the reaper runs.
+            self.reject_sealed_join().await?;
+            // ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): refuse to
+            // admit a join while this incarnation's durable restore is
+            // unresolved (a genuine backend failure, not a legitimate brand
+            // -new room) — see `RoomActor::ensure_restored_before_join`.
+            self.ensure_restored_before_join().await?;
+            self.gate_join_ownership().await?;
+            if self.invite_rollback_pending(&msg.sender_jid.to_bare()) {
+                return Err(RoomActorError::InviteRollbackPending);
+            }
+            let joining_bare_jid = msg.sender_jid.to_bare();
+            if !self.admission_revision_is_current(&joining_bare_jid, msg.admission_revision) {
+                return Err(RoomActorError::StaleAdmissionRevision);
+            }
 
-        let mut resolver_join_advanced_admission_revision = false;
-        match msg.affiliation_grant {
-            JoinAffiliationGrant::Unaffiliated => {}
-            JoinAffiliationGrant::Resolver(affiliation) => {
-                // Resolver-derived affiliations are reconstructible from the
-                // channel/space graph, so they intentionally remain memory-only.
-                // Applied unconditionally, including `Affiliation::None`:
-                // a resolver revocation must clear any stale
-                // resolver-derived Member/Admin entry so the revoked
-                // user no longer passes members-only admission below.
-                // `set_with_provenance` keeps this safe — it refuses
-                // resolver writes over explicit grants (bans survive)
-                // and removes the map entry on a None write.
-                //
-                // An applied change bumps the admission revision immediately
-                // (like `ChangeAffiliation`). If the resolver value is already
-                // identical, a successful admission bumps it below: a delayed
-                // `SyncResolverAffiliation` from an earlier rejected
-                // join of this user carries the pre-change revision and
-                // must be refused, or it would clear the affiliation
-                // this join just re-derived.
-                if self
-                    .room
-                    .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation)
-                    .is_some()
-                {
-                    self.invalidate_invite_grant(&msg.sender_jid.to_bare());
-                    self.advance_member_admission_revision(&joining_bare_jid);
-                    resolver_join_advanced_admission_revision = true;
-                }
-            }
-            JoinAffiliationGrant::CreatorOwner => {
-                // #1134 defense-in-depth on top of the registry's
-                // created-bit: XEP-0045 §10.1.1 gives Owner to the
-                // creator only, so the grant applies only while no
-                // owner exists. If two racing first-joins both claim
-                // creatorship, the actor's serialized mailbox makes
-                // exactly one of them the owner.
-                if !self.room.has_owner() {
-                    self.commit_durable(
-                        RoomDurableMutation::Affiliation(AffiliationEntry::new(
-                            msg.sender_jid.to_bare(),
-                            Some(Affiliation::Owner),
-                        )),
-                        RoomMutationEffects::none(),
-                    )
-                    .await
-                    .map_err(|error| match error {
-                        super::DurablePersistError::NotOwner
-                        | super::DurablePersistError::CommitOutcomeUnknown => {
-                            RoomActorError::RoomSealed
-                        }
-                        super::DurablePersistError::OwnershipUnavailable
-                        | super::DurablePersistError::PersistFailed => {
-                            RoomActorError::OwnershipUnavailable
-                        }
-                    })?;
-                    self.room
-                        .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
-                    self.invalidate_invite_grant(&msg.sender_jid.to_bare());
-                }
-            }
-            JoinAffiliationGrant::HostOwned => {}
-        }
-
-        let admitted = match msg.affiliation_grant {
-            JoinAffiliationGrant::HostOwned => {
-                !self.room.config.group_dm
-                    && self.room.affiliation(&joining_bare_jid) != Affiliation::Outcast
-            }
-            _ => self.room.can_user_join(&joining_bare_jid),
-        };
-        if !admitted {
-            // XEP-0045 §7.2.8: a ban (outcast) is <forbidden/> even in a
-            // members-only room — never <registration-required/>, which
-            // would invite the banned user to apply for membership
-            // (#1265 item 1).
-            let reason = if self.room.affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast
-            {
-                JoinDenialReason::Banned
-            } else {
-                JoinDenialReason::MembersOnly
-            };
-            return Err(RoomActorError::JoinForbidden { reason });
-        }
-        // #1107: the same FULL JID must never hold two occupancies.
-        // Sibling sessions of the same BARE jid legitimately share one
-        // nick (multi-session join below), but this exact session
-        // joining under a second nick would create a ghost occupancy
-        // that leave-cleanup misses. Nicknames are locked to identity,
-        // so refuse per XEP-0045 §7.6 (`<not-acceptable/>`).
-        if let Some(current_nick) = self.room.find_nick_by_real_jid(&msg.sender_jid) {
-            if current_nick != msg.nick {
-                return Err(RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
-                    current_nick: current_nick.to_owned(),
-                    requested_nick: msg.nick,
-                });
-            }
-        }
-        let mut is_same_bare_multi_session_join = false;
-        let is_existing_session_rejoin = self
-            .room
-            .occupant_sessions(&msg.nick)
-            .iter()
-            .any(|session| session == &msg.sender_jid);
-        if let Some(existing) = self.room.occupant(&msg.nick) {
-            if existing.real_jid != msg.sender_jid {
-                if existing.real_jid.to_bare() == msg.sender_jid.to_bare() {
-                    is_same_bare_multi_session_join = true;
-                } else {
-                    return Err(RoomActorError::NickAlreadyInUse(msg.nick));
-                }
-            }
-        }
-        let joining_affiliation = self.room.affiliation(&msg.sender_jid.to_bare());
-        if self.room.is_full()
-            && !is_existing_session_rejoin
-            && !is_same_bare_multi_session_join
-            && !affiliation_overflows_full_room(joining_affiliation)
-        {
-            return Err(RoomActorError::RoomFull);
-        }
-
-        // Filter displaced call state from the reply without changing live
-        // state until the occupancy projection has committed.
-        let displaces_session = self
-            .room
-            .session_generation(&msg.sender_jid)
-            .is_some_and(|previous| previous != msg.session);
-        let existing_occupants: Vec<JoinExistingOccupant> = self
-            .room
-            .occupants
-            .values()
-            .flat_map(|o| {
-                self.room.occupant_sessions(&o.nick).into_iter().map(|jid| {
-                    let displaced = displaces_session && jid == msg.sender_jid;
-                    let muji = (!displaced)
-                        .then(|| self.room.muji_for_session(&o.nick, &jid))
-                        .flatten();
-                    let in_call = if displaced {
-                        Default::default()
-                    } else {
-                        self.room.in_call_state_for_session(&o.nick, &jid)
-                    };
-                    JoinExistingOccupant {
-                        jid,
-                        nick: o.nick.clone(),
-                        affiliation: o.affiliation,
-                        role: o.role,
-                        muji,
-                        in_call,
+            let mut resolver_join_advanced_admission_revision = false;
+            match msg.affiliation_grant {
+                JoinAffiliationGrant::Unaffiliated => {}
+                JoinAffiliationGrant::Resolver(affiliation) => {
+                    // Resolver-derived affiliations are reconstructible from the
+                    // channel/space graph, so they intentionally remain memory-only.
+                    // Applied unconditionally, including `Affiliation::None`:
+                    // a resolver revocation must clear any stale
+                    // resolver-derived Member/Admin entry so the revoked
+                    // user no longer passes members-only admission below.
+                    // `set_with_provenance` keeps this safe — it refuses
+                    // resolver writes over explicit grants (bans survive)
+                    // and removes the map entry on a None write.
+                    //
+                    // An applied change bumps the admission revision immediately
+                    // (like `ChangeAffiliation`). If the resolver value is already
+                    // identical, a successful admission bumps it below: a delayed
+                    // `SyncResolverAffiliation` from an earlier rejected
+                    // join of this user carries the pre-change revision and
+                    // must be refused, or it would clear the affiliation
+                    // this join just re-derived.
+                    if self
+                        .room
+                        .update_affiliation_from_resolver(msg.sender_jid.to_bare(), affiliation)
+                        .is_some()
+                    {
+                        self.invalidate_invite_grant(&msg.sender_jid.to_bare());
+                        self.advance_member_admission_revision(&joining_bare_jid);
+                        resolver_join_advanced_admission_revision = true;
                     }
-                })
-            })
-            .collect();
+                }
+                JoinAffiliationGrant::CreatorOwner => {
+                    // #1134 defense-in-depth on top of the registry's
+                    // created-bit: XEP-0045 §10.1.1 gives Owner to the
+                    // creator only, so the grant applies only while no
+                    // owner exists. If two racing first-joins both claim
+                    // creatorship, the actor's serialized mailbox makes
+                    // exactly one of them the owner.
+                    if !self.room.has_owner() {
+                        self.commit_durable(
+                            RoomDurableMutation::Affiliation(AffiliationEntry::new(
+                                msg.sender_jid.to_bare(),
+                                Some(Affiliation::Owner),
+                            )),
+                            RoomMutationEffects::none(),
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            super::DurablePersistError::NotOwner
+                            | super::DurablePersistError::CommitOutcomeUnknown => {
+                                RoomActorError::RoomSealed
+                            }
+                            super::DurablePersistError::OwnershipUnavailable
+                            | super::DurablePersistError::PersistFailed => {
+                                RoomActorError::OwnershipUnavailable
+                            }
+                        })?;
+                        self.room
+                            .set_affiliation(msg.sender_jid.to_bare(), Affiliation::Owner);
+                        self.invalidate_invite_grant(&msg.sender_jid.to_bare());
+                    }
+                }
+                JoinAffiliationGrant::HostOwned => {}
+            }
 
-        // Resolver cache updates deliberately precede this commit so a
-        // revocation is visible to the admission checks even during outage.
-        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::try_new(msg.nick.clone())
-        else {
-            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
-        };
-        // The session's occupancy order is minted BEFORE the durable commit
-        // awaits: a disconnect cleanup racing a blocked projection (the WS
-        // backstop cancelled the waiter, the actor kept running) mints its
-        // leave attempt during this await, and that attempt must post-date
-        // the join it targets — not be `Superseded` by an order assigned
-        // when the projection finally applied (#1647, codex round 27).
-        let join_order = next_occupancy_order();
-        let gate = self
-            .commit_projection(RoomProjection::OccupancyJoin {
-                occupant: msg.sender_jid.clone(),
-                nick: durable_nick,
-                session: msg.session,
-            })
-            .await
-            .map_err(Self::map_projection_commit_error)?;
-        self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
-            let occupant_count_before = actor.room.occupant_count();
-            if displaces_session {
-                actor
-                    .room
-                    .clear_session_call_state(&msg.nick, &msg.sender_jid);
-            }
-            // Refreshing a resumed seated session does not create a new
-            // occupancy. Frozen delivery guards only change on replacement.
-            let joined_at = (actor.room.session_generation(&msg.sender_jid) == Some(msg.session)
-                && actor.room.find_nick_by_real_jid(&msg.sender_jid) == Some(msg.nick.as_str()))
-            .then(|| actor.room.session_watermark(&msg.sender_jid))
-            .flatten()
-            .unwrap_or_else(|| {
-                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1))
-            });
-            let joined_jid = msg.sender_jid.clone();
-            let new_occupant = actor.room.add_occupant_with_affiliation(
-                msg.sender_jid,
-                msg.nick.clone(),
-                Some(msg.local_domain.as_str()),
-                joined_at,
-                msg.session,
-            );
-            // A host-owned sender is unaffiliated by design; in a moderated
-            // room that alone would make it a voiceless Visitor.
-            let new_occupant_role = match (msg.affiliation_grant, new_occupant.role) {
-                (JoinAffiliationGrant::HostOwned, Role::Visitor) => Role::Participant,
-                (_, role) => role,
+            let admitted = match msg.affiliation_grant {
+                JoinAffiliationGrant::HostOwned => {
+                    !self.room.config.group_dm
+                        && self.room.affiliation(&joining_bare_jid) != Affiliation::Outcast
+                }
+                _ => self.room.can_user_join(&joining_bare_jid),
             };
-            let new_occupant_affiliation = new_occupant.affiliation;
-            if let Some(occupant) = actor.room.occupants.get_mut(&msg.nick) {
-                occupant.role = new_occupant_role;
+            if !admitted {
+                // XEP-0045 §7.2.8: a ban (outcast) is <forbidden/> even in a
+                // members-only room — never <registration-required/>, which
+                // would invite the banned user to apply for membership
+                // (#1265 item 1).
+                let reason =
+                    if self.room.affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast {
+                        JoinDenialReason::Banned
+                    } else {
+                        JoinDenialReason::MembersOnly
+                    };
+                return Err(RoomActorError::JoinForbidden { reason });
             }
-            actor.room.set_session_order(&joined_jid, join_order);
-            actor.room.set_session_generation(&joined_jid, msg.session);
-            actor.note_session_joined(&joined_jid);
-            let occupant_count = actor.room.occupant_count();
-            crate::metrics::record_muc_presence("join");
-            crate::metrics::adjust_muc_occupant_total(
-                occupant_count as i64 - occupant_count_before as i64,
-            );
-            let room_jid = actor.room.room_jid.clone();
-            if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
-                && !resolver_join_advanced_admission_revision
+            // #1107: the same FULL JID must never hold two occupancies.
+            // Sibling sessions of the same BARE jid legitimately share one
+            // nick (multi-session join below), but this exact session
+            // joining under a second nick would create a ghost occupancy
+            // that leave-cleanup misses. Nicknames are locked to identity,
+            // so refuse per XEP-0045 §7.6 (`<not-acceptable/>`).
+            if let Some(current_nick) = self.room.find_nick_by_real_jid(&msg.sender_jid) {
+                if current_nick != msg.nick {
+                    return Err(RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
+                        current_nick: current_nick.to_owned(),
+                        requested_nick: msg.nick,
+                    });
+                }
+            }
+            let mut is_same_bare_multi_session_join = false;
+            let is_existing_session_rejoin = self
+                .room
+                .occupant_sessions(&msg.nick)
+                .iter()
+                .any(|session| session == &msg.sender_jid);
+            if let Some(existing) = self.room.occupant(&msg.nick) {
+                if existing.real_jid != msg.sender_jid {
+                    if existing.real_jid.to_bare() == msg.sender_jid.to_bare() {
+                        is_same_bare_multi_session_join = true;
+                    } else {
+                        return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+                    }
+                }
+            }
+            let joining_affiliation = self.room.affiliation(&msg.sender_jid.to_bare());
+            if self.room.is_full()
+                && !is_existing_session_rejoin
+                && !is_same_bare_multi_session_join
+                && !affiliation_overflows_full_room(joining_affiliation)
             {
-                actor.advance_member_admission_revision(&joining_bare_jid);
+                return Err(RoomActorError::RoomFull);
             }
-            actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
-            JoinOutcome {
-                existing_occupants,
-                new_occupant_affiliation,
-                new_occupant_role,
-                occupant_count,
-                room_jid,
-                is_same_bare_multi_session_join,
-                is_existing_session_rejoin,
-                subject_state: actor.room.subject.clone(),
-            }
-        })
-        .map_err(Self::map_projection_refusal)
+
+            // Filter displaced call state from the reply without changing live
+            // state until the occupancy projection has committed.
+            let displaces_session = self
+                .room
+                .session_generation(&msg.sender_jid)
+                .is_some_and(|previous| previous != msg.session);
+            let existing_occupants: Vec<JoinExistingOccupant> = self
+                .room
+                .occupants
+                .values()
+                .flat_map(|o| {
+                    self.room.occupant_sessions(&o.nick).into_iter().map(|jid| {
+                        let displaced = displaces_session && jid == msg.sender_jid;
+                        let muji = (!displaced)
+                            .then(|| self.room.muji_for_session(&o.nick, &jid))
+                            .flatten();
+                        let in_call = if displaced {
+                            Default::default()
+                        } else {
+                            self.room.in_call_state_for_session(&o.nick, &jid)
+                        };
+                        JoinExistingOccupant {
+                            jid,
+                            nick: o.nick.clone(),
+                            affiliation: o.affiliation,
+                            role: o.role,
+                            muji,
+                            in_call,
+                        }
+                    })
+                })
+                .collect();
+
+            // Resolver cache updates deliberately precede this commit so a
+            // revocation is visible to the admission checks even during outage.
+            let Some(durable_nick) =
+                crate::muc::durable::MucOccupantNick::try_new(msg.nick.clone())
+            else {
+                return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+            };
+            // The session's occupancy order is minted BEFORE the durable commit
+            // awaits: a disconnect cleanup racing a blocked projection (the WS
+            // backstop cancelled the waiter, the actor kept running) mints its
+            // leave attempt during this await, and that attempt must post-date
+            // the join it targets — not be `Superseded` by an order assigned
+            // when the projection finally applied (#1647, codex round 27).
+            let join_order = next_occupancy_order();
+            // The role is corrected by the report that follows the projection;
+            // what must precede the commit is the seat itself.
+            self.record_seat_before_join(
+                &msg.sender_jid,
+                &msg.nick,
+                joining_affiliation,
+                self.room.derive_role_from_affiliation(joining_affiliation),
+                msg.session,
+            )
+            .await?;
+            let gate = self
+                .commit_projection(RoomProjection::OccupancyJoin {
+                    occupant: msg.sender_jid.clone(),
+                    nick: durable_nick,
+                    session: msg.session,
+                })
+                .await
+                .map_err(Self::map_projection_commit_error)?;
+            self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+                let occupant_count_before = actor.room.occupant_count();
+                if displaces_session {
+                    actor
+                        .room
+                        .clear_session_call_state(&msg.nick, &msg.sender_jid);
+                }
+                // Refreshing a resumed seated session does not create a new
+                // occupancy. Frozen delivery guards only change on replacement.
+                let joined_at = (actor.room.session_generation(&msg.sender_jid)
+                    == Some(msg.session)
+                    && actor.room.find_nick_by_real_jid(&msg.sender_jid)
+                        == Some(msg.nick.as_str()))
+                .then(|| actor.room.session_watermark(&msg.sender_jid))
+                .flatten()
+                .unwrap_or_else(|| {
+                    OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1))
+                });
+                let joined_jid = msg.sender_jid.clone();
+                let new_occupant = actor.room.add_occupant_with_affiliation(
+                    msg.sender_jid,
+                    msg.nick.clone(),
+                    Some(msg.local_domain.as_str()),
+                    joined_at,
+                    msg.session,
+                );
+                // A host-owned sender is unaffiliated by design; in a moderated
+                // room that alone would make it a voiceless Visitor.
+                let new_occupant_role = match (msg.affiliation_grant, new_occupant.role) {
+                    (JoinAffiliationGrant::HostOwned, Role::Visitor) => Role::Participant,
+                    (_, role) => role,
+                };
+                let new_occupant_affiliation = new_occupant.affiliation;
+                if let Some(occupant) = actor.room.occupants.get_mut(&msg.nick) {
+                    occupant.role = new_occupant_role;
+                }
+                actor.room.set_session_order(&joined_jid, join_order);
+                actor.room.set_session_generation(&joined_jid, msg.session);
+                actor.note_session_joined(&joined_jid);
+                let occupant_count = actor.room.occupant_count();
+                crate::metrics::record_muc_presence("join");
+                crate::metrics::adjust_muc_occupant_total(
+                    occupant_count as i64 - occupant_count_before as i64,
+                );
+                let room_jid = actor.room.room_jid.clone();
+                if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
+                    && !resolver_join_advanced_admission_revision
+                {
+                    actor.advance_member_admission_revision(&joining_bare_jid);
+                }
+                actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
+                JoinOutcome {
+                    existing_occupants,
+                    new_occupant_affiliation,
+                    new_occupant_role,
+                    occupant_count,
+                    room_jid,
+                    is_same_bare_multi_session_join,
+                    is_existing_session_rejoin,
+                    subject_state: actor.room.subject.clone(),
+                }
+            })
+            .map_err(Self::map_projection_refusal)
+        }
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -433,6 +451,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let reply: Self::Reply = async {
         let _handler_timer = MucOccupancyHandlerTimer::start("leave");
         // A tombstoned attempt never processes a fresh leave (it must not
         // evict a session that displaced it), but a RETAINED RETRY still
@@ -741,6 +760,10 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             other => other,
         })
         .map_err(Self::map_projection_refusal)
+        }
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -756,31 +779,36 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
         msg: PresenceUpdateData,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if !self.effectful_work_is_permitted().await {
-            return Ok(None);
+        let reply: Self::Reply = async {
+            if !self.effectful_work_is_permitted().await {
+                return Ok(None);
+            }
+            let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
+                return Ok(None);
+            };
+            let sender_nick = sender_occupant.nick.clone();
+            let sender_real_jid = sender_occupant.real_jid.clone();
+            let sender_role = sender_occupant.role;
+            let sender_affiliation = sender_occupant.affiliation;
+            let room_jid = self.room.room_jid.clone();
+            let recipients = self
+                .room
+                .occupants
+                .values()
+                .flat_map(|o| self.room.occupant_sessions(&o.nick))
+                .collect();
+            Ok(Some(PresenceUpdateOutcome {
+                sender_nick,
+                sender_real_jid,
+                sender_role,
+                sender_affiliation,
+                room_jid,
+                recipients,
+            }))
         }
-        let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
-            return Ok(None);
-        };
-        let sender_nick = sender_occupant.nick.clone();
-        let sender_real_jid = sender_occupant.real_jid.clone();
-        let sender_role = sender_occupant.role;
-        let sender_affiliation = sender_occupant.affiliation;
-        let room_jid = self.room.room_jid.clone();
-        let recipients = self
-            .room
-            .occupants
-            .values()
-            .flat_map(|o| self.room.occupant_sessions(&o.nick))
-            .collect();
-        Ok(Some(PresenceUpdateOutcome {
-            sender_nick,
-            sender_real_jid,
-            sender_role,
-            sender_affiliation,
-            room_jid,
-            recipients,
-        }))
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -1080,38 +1108,43 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         msg: ReconcileChannelBackedRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let ReconcileChannelBackedRoom {
-            room_jid,
-            waddle_id,
-            channel_id,
-            desired_config,
-        } = msg;
-        // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
-        self.gate_mutation().await?;
-        let instant_name = room_jid.node().map(|node| node.to_string());
-        let mut desired_config = desired_config;
-        desired_config.description = self.room.config.description.clone();
-        if !self.room.config.name.is_empty()
-            && instant_name.as_deref() != Some(self.room.config.name.as_str())
-        {
-            desired_config.name = self.room.config.name.clone();
+        let reply: Self::Reply = async {
+            let ReconcileChannelBackedRoom {
+                room_jid,
+                waddle_id,
+                channel_id,
+                desired_config,
+            } = msg;
+            // ADR-0017 Phase 3 Slice 7 FIX 2: verify ownership BEFORE mutating.
+            self.gate_mutation().await?;
+            let instant_name = room_jid.node().map(|node| node.to_string());
+            let mut desired_config = desired_config;
+            desired_config.description = self.room.config.description.clone();
+            if !self.room.config.name.is_empty()
+                && instant_name.as_deref() != Some(self.room.config.name.as_str())
+            {
+                desired_config.name = self.room.config.name.clone();
+            }
+            let desired_config = desired_config.normalized();
+            self.commit_durable(
+                RoomDurableMutation::Config {
+                    config: desired_config.clone(),
+                    waddle_id: waddle_id.clone(),
+                    channel_id: channel_id.clone(),
+                },
+                RoomMutationEffects::none(),
+            )
+            .await?;
+            self.room.waddle_id = waddle_id.into_string();
+            self.room.channel_id = channel_id.into_string();
+            self.replace_config(desired_config);
+            self.config_revision = self.config_revision.saturating_add(1);
+            self.advance_room_admission_revision();
+            Ok(())
         }
-        let desired_config = desired_config.normalized();
-        self.commit_durable(
-            RoomDurableMutation::Config {
-                config: desired_config.clone(),
-                waddle_id: waddle_id.clone(),
-                channel_id: channel_id.clone(),
-            },
-            RoomMutationEffects::none(),
-        )
-        .await?;
-        self.room.waddle_id = waddle_id.into_string();
-        self.room.channel_id = channel_id.into_string();
-        self.replace_config(desired_config);
-        self.config_revision = self.config_revision.saturating_add(1);
-        self.advance_room_admission_revision();
-        Ok(())
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -1169,36 +1202,41 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         msg: SyncResolverAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.reject_sealed_join().await.is_err() {
-            return ResolverAffiliationSyncOutcome::RoomSealed;
-        }
-        match self.gate_join_ownership().await {
-            Ok(()) => {}
-            Err(RoomActorError::RoomSealed) => {
+        let reply: Self::Reply = async {
+            if self.reject_sealed_join().await.is_err() {
                 return ResolverAffiliationSyncOutcome::RoomSealed;
             }
-            Err(_) => return ResolverAffiliationSyncOutcome::OwnershipUnavailable,
+            match self.gate_join_ownership().await {
+                Ok(()) => {}
+                Err(RoomActorError::RoomSealed) => {
+                    return ResolverAffiliationSyncOutcome::RoomSealed;
+                }
+                Err(_) => return ResolverAffiliationSyncOutcome::OwnershipUnavailable,
+            }
+            if self.invite_rollback_pending(&msg.jid) {
+                return ResolverAffiliationSyncOutcome::InviteRollbackPending;
+            }
+            if !self.admission_revision_is_current(&msg.jid, msg.expected_admission_revision) {
+                return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
+            }
+            // An applied change is itself an admission-relevant affiliation
+            // change, so it bumps the revision like `ChangeAffiliation` —
+            // any join admitted against the pre-sync snapshot retries.
+            if self
+                .room
+                .update_affiliation_from_resolver(msg.jid.clone(), msg.affiliation)
+                .is_some()
+            {
+                self.invalidate_invite_grant(&msg.jid);
+                self.advance_member_admission_revision(&msg.jid);
+            }
+            ResolverAffiliationSyncOutcome::Applied {
+                admission_revision: self.admission_revision,
+            }
         }
-        if self.invite_rollback_pending(&msg.jid) {
-            return ResolverAffiliationSyncOutcome::InviteRollbackPending;
-        }
-        if !self.admission_revision_is_current(&msg.jid, msg.expected_admission_revision) {
-            return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
-        }
-        // An applied change is itself an admission-relevant affiliation
-        // change, so it bumps the revision like `ChangeAffiliation` —
-        // any join admitted against the pre-sync snapshot retries.
-        if self
-            .room
-            .update_affiliation_from_resolver(msg.jid.clone(), msg.affiliation)
-            .is_some()
-        {
-            self.invalidate_invite_grant(&msg.jid);
-            self.advance_member_admission_revision(&msg.jid);
-        }
-        ResolverAffiliationSyncOutcome::Applied {
-            admission_revision: self.admission_revision,
-        }
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 

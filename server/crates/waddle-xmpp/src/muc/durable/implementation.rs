@@ -39,6 +39,51 @@ pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppErr
 pub type RoomCommitFuture<'a> =
     Pin<Box<dyn Future<Output = Result<RoomCommitOutcome, RoomCommitError>> + Send + 'a>>;
 
+/// One occupying session as the room actor reports it to the room's durable
+/// occupancy record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomOccupancySeat {
+    pub occupant: FullJid,
+    pub nick: String,
+    pub role: crate::types::Role,
+    pub affiliation: Affiliation,
+    /// Generation of the connection that holds the seat.
+    pub session: waddle_xmpp_core::OccupancySessionGeneration,
+}
+
+/// A change the room actor makes to the room's durable occupancy record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomOccupancyChange {
+    /// The session occupies the room; replaces whatever the record holds
+    /// for the full JID.
+    Seat(RoomOccupancySeat),
+    /// The full JID no longer occupies the room, whatever generation the
+    /// record holds for it.
+    Unseat { occupant: FullJid },
+}
+
+/// Whether a durable occupancy record exists for the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomOccupancyRecord {
+    /// The changes are committed.
+    Written,
+    /// The deployment keeps no durable occupancy record; nothing was
+    /// written and the actor's memory is the only occupancy.
+    Inactive,
+}
+
+/// Writes room occupancy changes under the room's exact claim. Bound to a
+/// [`MucDurableStore`] by the deployment that keeps the record.
+pub trait RoomOccupancyLedger: Send + Sync {
+    /// Apply `changes` in order, in one transaction that asserts `fence`.
+    fn record<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        changes: Vec<RoomOccupancyChange>,
+    ) -> MucDurableFuture<'a, RoomOccupancyRecord>;
+}
+
 /// Durable coordinates plus the reservation for effects staged by this commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomCommitOutcome {
@@ -388,6 +433,26 @@ pub trait MucDurableStore: Send + Sync {
         intent: RoomDurableMutation,
         effects: RoomMutationEffects,
     ) -> RoomCommitFuture<'a>;
+
+    /// Record occupancy changes of `room_jid` under `fence`, in the order
+    /// given. The room actor calls this for every seat it grants or removes
+    /// so that a successor owner can recover the room's occupants. A store
+    /// without a bound [`RoomOccupancyLedger`] keeps no record.
+    fn record_room_occupancy<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        changes: Vec<RoomOccupancyChange>,
+    ) -> MucDurableFuture<'a, RoomOccupancyRecord> {
+        let _ = (room_jid, fence, changes);
+        Box::pin(async { Ok(RoomOccupancyRecord::Inactive) })
+    }
+
+    /// Bind the writer of the durable occupancy record. Bound once, when
+    /// the deployment wires its ingress authority.
+    fn bind_occupancy_ledger(&self, ledger: std::sync::Arc<dyn RoomOccupancyLedger>) {
+        let _ = ledger;
+    }
 
     /// Read the exact admin attempt's receipt, retained independently of
     /// later mutations and drained effect rows. Missing means this attempt

@@ -578,6 +578,7 @@ mod tests {
             stop_token: CancellationToken::new(),
             exact_claim_fences: DashMap::new(),
             published_claim_fences: DashMap::new(),
+            occupancy_ledger: std::sync::OnceLock::new(),
         };
         let jid = room_jid("identity-rotation");
         let entity = Entity::new(EntityType::RoomActor, jid.to_string());

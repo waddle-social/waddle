@@ -335,6 +335,59 @@ pub(super) async fn begin_owner(
     Ok(Some(OwnerAcceptance { lane, operation }))
 }
 
+/// Refuse to accept a relayed groupchat message whose sender has no row in
+/// the room's durable occupancy.
+///
+/// The check applies once this node has seated the room's occupancy under
+/// the claim the commit asserts. From then on the room actor records a seat
+/// before it holds the occupant, so a sender the actor accepts has a row; a
+/// sender without one was accepted from actor state the table does not
+/// back, and a successor owner could not have reached the same decision.
+/// The commit fails without a decision and the worker retries the entry
+/// after the actor has reported its roster again.
+#[cfg(feature = "clustering")]
+pub(super) async fn assert_sender_seated(
+    uow: &IngressUnitOfWork,
+    tx: &mut IngressUowTransaction<'_>,
+    acceptance: &OwnerAcceptance,
+    submission: &IngressSubmission,
+) -> Result<(), IngressUowError> {
+    use crate::ingress_uow::{RoomOccupantRepository, RoomRequestError};
+    let IngressStreamIdentity::Relayed {
+        canonical,
+        room_fence,
+        ..
+    } = &submission.identity
+    else {
+        return Ok(());
+    };
+    let Ok(MailboxLaneIdentity {
+        recipient: MailboxLaneRecipient::Room { room, .. },
+        ..
+    }) = acceptance.lane.key().encoding().decode()
+    else {
+        return Err(MailboxError::InvalidStored.into());
+    };
+    if !uow.room_occupancy_seated(&room, room_fence.epoch) {
+        return Ok(());
+    }
+    if RoomOccupantRepository::bare_jid_occupies(tx, &room, &canonical.sender_bare).await? {
+        Ok(())
+    } else {
+        Err(RoomRequestError::SenderNotSeated.into())
+    }
+}
+
+#[cfg(not(feature = "clustering"))]
+pub(super) async fn assert_sender_seated(
+    _uow: &IngressUnitOfWork,
+    _tx: &mut IngressUowTransaction<'_>,
+    _acceptance: &OwnerAcceptance,
+    _submission: &IngressSubmission,
+) -> Result<(), IngressUowError> {
+    Ok(())
+}
+
 #[cfg(not(feature = "clustering"))]
 pub(super) async fn begin_owner(
     _uow: &IngressUnitOfWork,

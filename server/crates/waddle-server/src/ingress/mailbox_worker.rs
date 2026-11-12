@@ -492,6 +492,40 @@ impl IngressAuthority {
         Ok(sweep)
     }
 
+    /// Whether a room request sent now is carried by the mailbox: the
+    /// deployment selects it and the protocol epoch has reached the mailbox
+    /// epoch. A storage failure reads as `false`.
+    pub async fn room_requests_carried_now(&self) -> bool {
+        self.uow
+            .mailbox_acceptance_active_now()
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Count the room requests whose owner decided at least `older_than`
+    /// ago and whose origin has not consumed the decision.
+    ///
+    /// A room request's response belongs to the connection that sent it, so
+    /// nothing consumes it on that connection's behalf: unlike a decided
+    /// room acceptance, such a request is only reported. It stays until its
+    /// requester resumes and consumes it or an operator removes it.
+    #[cfg(feature = "clustering")]
+    pub async fn count_unconsumed_request_decisions(
+        &self,
+        older_than: Duration,
+    ) -> Result<u64, IngressUowError> {
+        let mut tx = self
+            .uow
+            .begin_with_timeouts(Duration::from_millis(250), Duration::from_secs(1))
+            .await?;
+        let count = crate::ingress_uow::RoomRequestRepository::count_unsettled_decisions(
+            &mut tx, older_than,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(count)
+    }
+
     /// Operator repair: return a dead-lettered entry to pending work with a
     /// fresh retry budget. Nothing else moves a lane past a dead letter.
     pub async fn repair_mailbox_dead_letter(

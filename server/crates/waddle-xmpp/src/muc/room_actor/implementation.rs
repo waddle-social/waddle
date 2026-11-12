@@ -397,8 +397,10 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         msg: RestoreLiveRoster,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let (pending_admin_projection, admin_mutation_resolution) =
-            match msg.pending_admin_projection {
+        let reply: Self::Reply = async {
+            let (pending_admin_projection, admin_mutation_resolution) = match msg
+                .pending_admin_projection
+            {
                 Some(projection) => {
                     let store = self
                         .durable_store
@@ -431,116 +433,120 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
                 }
                 None => (None, None),
             };
-        // Only a batch proven committed may prune by final affiliation, and
-        // only the JIDs it touched: its outbox rows own their removal
-        // presences. An unproven projection proves nothing about anyone.
-        let admin_pruned_jids: Vec<BareJid> = pending_admin_projection
-            .as_ref()
-            .map(|projection| {
-                projection
-                    .expected_affiliations
-                    .iter()
-                    .map(|(jid, _)| jid.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let occupant_count_before = self.room.occupant_count();
-        let config = self.room.config.clone();
-        let subject = self.room.subject.clone();
-        let affiliations = self.room.affiliation_list.clone();
-        let mut restored = msg.room;
-        let moderation_changed = restored.config.moderated != config.moderated;
-        let previous_affiliations = restored.affiliation_list.clone();
-        // The transplant restores THIS room's live roster; its identity is
-        // never the restored value's (durable commits key their claim fence
-        // by the actor's room JID).
-        restored.room_jid = self.room.room_jid.clone();
-        restored.config = config;
-        restored.subject = subject;
-        restored.affiliation_list = affiliations;
-        let restored_occupants = restored
-            .occupants
-            .iter()
-            .map(|(nick, occupant)| (nick.clone(), occupant.real_jid.to_bare()))
-            .collect::<Vec<_>>();
-        let already_removed = pending_admin_projection
-            .as_ref()
-            .map(|projection| projection.removed_sessions.as_slice())
-            .unwrap_or_default();
-        let mut removed_sessions = Vec::new();
-        for (nick, jid) in &restored_occupants {
-            let banned = restored.affiliation(jid) == Affiliation::Outcast;
-            let pruned_by_proven_admin_batch =
-                admin_pruned_jids.contains(jid) && !restored.can_user_join(jid);
-            // Only fenced restored state proves a foreign revocation. Local
-            // ambiguous leave and config enforcement retain their custody.
-            let revoked_by_another_mutation = self.restore_state
-                == DurableRestoreState::Ready(DurableRoomOrigin::Restored)
-                && previous_affiliations.get(jid) >= Affiliation::Member
-                && !restored.can_user_join(jid)
-                && !msg.pending_affiliation_departures.contains(jid);
-            if banned || pruned_by_proven_admin_batch || revoked_by_another_mutation {
-                removed_sessions.extend(
-                    restored
-                        .occupant_sessions(nick)
-                        .into_iter()
-                        .filter(|session| !already_removed.contains(session)),
-                );
-            }
-        }
-        // The foreign owner's durable affiliation is authoritative, but its
-        // actor may never have known these live sessions. Own their removal
-        // presence and SFU cleanup before changing the roster or publishing.
-        let proven_removals = self
-            .persist_live_roster_removals(
-                msg.live_roster_restore_attempt,
-                &restored,
-                removed_sessions,
-                already_removed,
-            )
-            .await?;
-        for (nick, jid) in restored_occupants {
-            for session in restored.occupant_sessions(&nick) {
-                if proven_removals.contains(&session) {
-                    restored.remove_occupant_session(&nick, &session);
+            // Only a batch proven committed may prune by final affiliation, and
+            // only the JIDs it touched: its outbox rows own their removal
+            // presences. An unproven projection proves nothing about anyone.
+            let admin_pruned_jids: Vec<BareJid> = pending_admin_projection
+                .as_ref()
+                .map(|projection| {
+                    projection
+                        .expected_affiliations
+                        .iter()
+                        .map(|(jid, _)| jid.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let occupant_count_before = self.room.occupant_count();
+            let config = self.room.config.clone();
+            let subject = self.room.subject.clone();
+            let affiliations = self.room.affiliation_list.clone();
+            let mut restored = msg.room;
+            let moderation_changed = restored.config.moderated != config.moderated;
+            let previous_affiliations = restored.affiliation_list.clone();
+            // The transplant restores THIS room's live roster; its identity is
+            // never the restored value's (durable commits key their claim fence
+            // by the actor's room JID).
+            restored.room_jid = self.room.room_jid.clone();
+            restored.config = config;
+            restored.subject = subject;
+            restored.affiliation_list = affiliations;
+            let restored_occupants = restored
+                .occupants
+                .iter()
+                .map(|(nick, occupant)| (nick.clone(), occupant.real_jid.to_bare()))
+                .collect::<Vec<_>>();
+            let already_removed = pending_admin_projection
+                .as_ref()
+                .map(|projection| projection.removed_sessions.as_slice())
+                .unwrap_or_default();
+            let mut removed_sessions = Vec::new();
+            for (nick, jid) in &restored_occupants {
+                let banned = restored.affiliation(jid) == Affiliation::Outcast;
+                let pruned_by_proven_admin_batch =
+                    admin_pruned_jids.contains(jid) && !restored.can_user_join(jid);
+                // Only fenced restored state proves a foreign revocation. Local
+                // ambiguous leave and config enforcement retain their custody.
+                let revoked_by_another_mutation = self.restore_state
+                    == DurableRestoreState::Ready(DurableRoomOrigin::Restored)
+                    && previous_affiliations.get(jid) >= Affiliation::Member
+                    && !restored.can_user_join(jid)
+                    && !msg.pending_affiliation_departures.contains(jid);
+                if banned || pruned_by_proven_admin_batch || revoked_by_another_mutation {
+                    removed_sessions.extend(
+                        restored
+                            .occupant_sessions(nick)
+                            .into_iter()
+                            .filter(|session| !already_removed.contains(session)),
+                    );
                 }
             }
-            let affiliation = restored.affiliation(&jid);
-            let role = restored.derive_role_from_affiliation(affiliation);
-            if let Some(occupant) = restored.occupants.get_mut(&nick) {
-                if moderation_changed || occupant.affiliation != affiliation {
-                    occupant.role = role;
+            // The foreign owner's durable affiliation is authoritative, but its
+            // actor may never have known these live sessions. Own their removal
+            // presence and SFU cleanup before changing the roster or publishing.
+            let proven_removals = self
+                .persist_live_roster_removals(
+                    msg.live_roster_restore_attempt,
+                    &restored,
+                    removed_sessions,
+                    already_removed,
+                )
+                .await?;
+            for (nick, jid) in restored_occupants {
+                for session in restored.occupant_sessions(&nick) {
+                    if proven_removals.contains(&session) {
+                        restored.remove_occupant_session(&nick, &session);
+                    }
                 }
-                occupant.affiliation = affiliation;
+                let affiliation = restored.affiliation(&jid);
+                let role = restored.derive_role_from_affiliation(affiliation);
+                if let Some(occupant) = restored.occupants.get_mut(&nick) {
+                    if moderation_changed || occupant.affiliation != affiliation {
+                        occupant.role = role;
+                    }
+                    occupant.affiliation = affiliation;
+                }
             }
+            if let Some(projection) = pending_admin_projection {
+                // The durable outbox owns the removal presences and SFU effects.
+                // Only finish the exact in-memory delta before publication; a
+                // config transition still retains its separately owed removals.
+                projection.apply_to_roster(&mut restored);
+                self.admin_receipt_after_publication = Some(projection.attempt);
+            }
+            self.room = restored;
+            self.occupancy_incarnation = msg.occupancy_incarnation;
+            // The predecessor's `Drop` releases its occupants from the pod-wide
+            // gauge; the transplanted roster is this actor's to account for now.
+            crate::metrics::adjust_muc_occupant_total(
+                self.room.occupant_count() as i64 - occupant_count_before as i64,
+            );
+            self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
+            self.absorb_departure_ledger(msg.departures);
+            // The durable affiliation is now projected. Retained local leavers
+            // are already unaffiliated, so later handoffs preserve their custody
+            // without exempting a future membership grant/revocation from pruning.
+            self.pending_affiliation_departures.clear();
+            for resolution in msg.admin_mutation_resolutions {
+                self.record_admin_mutation_resolution(resolution);
+            }
+            if let Some(resolution) = admin_mutation_resolution {
+                self.record_admin_mutation_resolution(resolution);
+            }
+            Ok(())
         }
-        if let Some(projection) = pending_admin_projection {
-            // The durable outbox owns the removal presences and SFU effects.
-            // Only finish the exact in-memory delta before publication; a
-            // config transition still retains its separately owed removals.
-            projection.apply_to_roster(&mut restored);
-            self.admin_receipt_after_publication = Some(projection.attempt);
-        }
-        self.room = restored;
-        self.occupancy_incarnation = msg.occupancy_incarnation;
-        // The predecessor's `Drop` releases its occupants from the pod-wide
-        // gauge; the transplanted roster is this actor's to account for now.
-        crate::metrics::adjust_muc_occupant_total(
-            self.room.occupant_count() as i64 - occupant_count_before as i64,
-        );
-        self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
-        self.absorb_departure_ledger(msg.departures);
-        // The durable affiliation is now projected. Retained local leavers
-        // are already unaffiliated, so later handoffs preserve their custody
-        // without exempting a future membership grant/revocation from pruning.
-        self.pending_affiliation_departures.clear();
-        for resolution in msg.admin_mutation_resolutions {
-            self.record_admin_mutation_resolution(resolution);
-        }
-        if let Some(resolution) = admin_mutation_resolution {
-            self.record_admin_mutation_resolution(resolution);
-        }
-        Ok(())
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -932,6 +938,10 @@ pub struct RoomActor {
     /// whether its in-memory mutation has already applied.
     pub(in crate::muc::room_actor) durable_store:
         Option<std::sync::Arc<dyn super::super::durable::MucDurableStore>>,
+    /// What this actor last wrote to the room's durable occupancy record,
+    /// by occupying full JID. Empty while the deployment keeps no record.
+    pub(in crate::muc::room_actor) recorded_occupancy:
+        HashMap<FullJid, super::super::durable::RoomOccupancySeat>,
     /// Exact ownership tuple retained by this actor incarnation. Durable
     /// operations must never borrow a replacement actor's cached claim.
     pub(in crate::muc::room_actor) durable_claim_fence:
@@ -1128,6 +1138,7 @@ impl RoomActor {
             durable_member_recipients: Vec::new(),
             membership_source: None,
             durable_store: None,
+            recorded_occupancy: HashMap::new(),
             durable_claim_fence: None,
             restore_state: DurableRestoreState::Ready(DurableRoomOrigin::New),
             #[cfg(test)]
@@ -2392,55 +2403,69 @@ impl kameo::message::Message<Join> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.reject_sealed_join().await?;
-        // `Join` predates the resolver-aware admission message, but it is
-        // still reachable by internal callers holding an ActorRef. Apply the
-        // same fail-closed restore and ownership gates as
-        // `JoinWithAffiliation`; otherwise a stale reference could admit an
-        // occupant after this actor's durable fence became non-serving.
-        self.ensure_restored_before_join().await?;
-        self.gate_join_ownership().await?;
-        if self.invite_rollback_pending(&msg.real_jid.to_bare()) {
-            return Err(RoomActorError::InviteRollbackPending);
-        }
-        if self.room.is_full() && !affiliation_overflows_full_room(msg.affiliation) {
-            return Err(RoomActorError::RoomFull);
-        }
-        if self.room.occupant(&msg.nick).is_some() {
-            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
-        }
-        let Some(durable_nick) = super::super::durable::MucOccupantNick::try_new(msg.nick.clone())
-        else {
-            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
-        };
-        let session = msg.session;
-        let gate = self
-            .commit_projection(RoomProjection::OccupancyJoin {
-                occupant: msg.real_jid.clone(),
-                nick: durable_nick,
+        let reply: Self::Reply = async {
+            self.reject_sealed_join().await?;
+            // `Join` predates the resolver-aware admission message, but it is
+            // still reachable by internal callers holding an ActorRef. Apply the
+            // same fail-closed restore and ownership gates as
+            // `JoinWithAffiliation`; otherwise a stale reference could admit an
+            // occupant after this actor's durable fence became non-serving.
+            self.ensure_restored_before_join().await?;
+            self.gate_join_ownership().await?;
+            if self.invite_rollback_pending(&msg.real_jid.to_bare()) {
+                return Err(RoomActorError::InviteRollbackPending);
+            }
+            if self.room.is_full() && !affiliation_overflows_full_room(msg.affiliation) {
+                return Err(RoomActorError::RoomFull);
+            }
+            if self.room.occupant(&msg.nick).is_some() {
+                return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+            }
+            let Some(durable_nick) =
+                super::super::durable::MucOccupantNick::try_new(msg.nick.clone())
+            else {
+                return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+            };
+            let session = msg.session;
+            self.record_seat_before_join(
+                &msg.real_jid,
+                &msg.nick,
+                msg.affiliation,
+                msg.role,
                 session,
+            )
+            .await?;
+            let gate = self
+                .commit_projection(RoomProjection::OccupancyJoin {
+                    occupant: msg.real_jid.clone(),
+                    nick: durable_nick,
+                    session,
+                })
+                .await
+                .map_err(Self::map_projection_commit_error)?;
+            self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+                actor.room.add_occupant(super::super::Occupant {
+                    real_jid: msg.real_jid.clone(),
+                    nick: msg.nick.clone(),
+                    role: msg.role,
+                    affiliation: msg.affiliation,
+                    is_remote: false,
+                    home_server: None,
+                });
+                let joined_at =
+                    OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
+                actor
+                    .room
+                    .set_session_watermark(msg.real_jid.clone(), joined_at);
+                actor.room.set_session_generation(&msg.real_jid, session);
+                actor.note_session_joined(&msg.real_jid);
+                actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
             })
-            .await
-            .map_err(Self::map_projection_commit_error)?;
-        self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
-            actor.room.add_occupant(super::super::Occupant {
-                real_jid: msg.real_jid.clone(),
-                nick: msg.nick.clone(),
-                role: msg.role,
-                affiliation: msg.affiliation,
-                is_remote: false,
-                home_server: None,
-            });
-            let joined_at =
-                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
-            actor
-                .room
-                .set_session_watermark(msg.real_jid.clone(), joined_at);
-            actor.room.set_session_generation(&msg.real_jid, session);
-            actor.note_session_joined(&msg.real_jid);
-            actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
-        })
-        .map_err(Self::map_projection_refusal)
+            .map_err(Self::map_projection_refusal)
+        }
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -2628,27 +2653,32 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         msg: UpdateConfig,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let config = msg.config.normalized();
-        let (effects, notification) = self.config_effects_for_update(&config, msg.effect_plan);
-        let (_, reservation) = self
-            .commit_durable(
-                RoomDurableMutation::Config {
-                    config: config.clone(),
-                    waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-                    channel_id: ChannelId::new(self.room.channel_id.clone()),
-                },
-                effects,
-            )
-            .await?;
-        self.config_durable_coordinates = self.durable_coordinates;
-        self.replace_config(config);
-        self.config_revision = self.config_revision.saturating_add(1);
-        self.advance_room_admission_revision();
-        Ok(ConfigMutationApplied {
-            revision: self.config_revision,
-            notification,
-            reservation,
-        })
+        let reply: Self::Reply = async {
+            let config = msg.config.normalized();
+            let (effects, notification) = self.config_effects_for_update(&config, msg.effect_plan);
+            let (_, reservation) = self
+                .commit_durable(
+                    RoomDurableMutation::Config {
+                        config: config.clone(),
+                        waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                        channel_id: ChannelId::new(self.room.channel_id.clone()),
+                    },
+                    effects,
+                )
+                .await?;
+            self.config_durable_coordinates = self.durable_coordinates;
+            self.replace_config(config);
+            self.config_revision = self.config_revision.saturating_add(1);
+            self.advance_room_admission_revision();
+            Ok(ConfigMutationApplied {
+                revision: self.config_revision,
+                notification,
+                reservation,
+            })
+        }
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -2972,47 +3002,55 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         msg: ChangeAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.invite_rollback_pending(&msg.jid) {
-            return Err(AffiliationMutationError::InviteRollbackPending);
-        }
-        let changed = self.room.affiliation(&msg.jid) != msg.affiliation;
-        if changed {
-            if let Err(error) = self
-                .commit_durable(
-                    RoomDurableMutation::Affiliation(super::super::durable::AffiliationEntry::new(
-                        msg.jid.clone(),
-                        (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
-                    )),
-                    super::super::RoomMutationEffects::none(),
-                )
-                .await
-            {
-                if matches!(error, DurablePersistError::CommitOutcomeUnknown)
-                    && msg.affiliation == Affiliation::None
-                {
-                    self.pending_affiliation_departures.insert(msg.jid.clone());
-                }
-                return Err(error.into());
+        let reply: Self::Reply = async {
+            if self.invite_rollback_pending(&msg.jid) {
+                return Err(AffiliationMutationError::InviteRollbackPending);
             }
-        } else {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(RoomMutationError::from)?;
+            let changed = self.room.affiliation(&msg.jid) != msg.affiliation;
+            if changed {
+                if let Err(error) = self
+                    .commit_durable(
+                        RoomDurableMutation::Affiliation(
+                            super::super::durable::AffiliationEntry::new(
+                                msg.jid.clone(),
+                                (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
+                            ),
+                        ),
+                        super::super::RoomMutationEffects::none(),
+                    )
+                    .await
+                {
+                    if matches!(error, DurablePersistError::CommitOutcomeUnknown)
+                        && msg.affiliation == Affiliation::None
+                    {
+                        self.pending_affiliation_departures.insert(msg.jid.clone());
+                    }
+                    return Err(error.into());
+                }
+            } else {
+                self.gate_pre_mutation_ownership()
+                    .await
+                    .map_err(RoomMutationError::from)?;
+            }
+            self.pending_affiliation_departures.remove(&msg.jid);
+            self.invalidate_invite_grant(&msg.jid);
+            let needs_rehydration =
+                self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
+            if self
+                .room
+                .set_affiliation(msg.jid.clone(), msg.affiliation)
+                .is_some()
+            {
+                self.advance_member_admission_revision(&msg.jid);
+            }
+            if needs_rehydration {
+                self.refresh_durable_recipients_from_source().await;
+            }
+            Ok(())
         }
-        self.pending_affiliation_departures.remove(&msg.jid);
-        self.invalidate_invite_grant(&msg.jid);
-        let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
-        if self
-            .room
-            .set_affiliation(msg.jid.clone(), msg.affiliation)
-            .is_some()
-        {
-            self.advance_member_admission_revision(&msg.jid);
-        }
-        if needs_rehydration {
-            self.refresh_durable_recipients_from_source().await;
-        }
-        Ok(())
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 
@@ -3251,6 +3289,11 @@ impl kameo::message::Message<SealForDestroy> for RoomActor {
                 self.seal_state = RoomSealState::Destroying {
                     attempt: msg.attempt,
                 };
+                // The room's claim is still held here and is released with
+                // the tombstone, so this is the last point at which the
+                // occupancy record can be emptied under the claim. A destroy
+                // that is undone reports the roster again.
+                self.unseat_recorded_occupancy().await;
                 self.seal_state
             }
             // An inactivity seal already excludes every admission. Upgrade it
@@ -3309,6 +3352,7 @@ impl kameo::message::Message<UnsealDestroy> for RoomActor {
             })
         {
             self.seal_state = RoomSealState::Open;
+            self.report_occupancy().await;
             true
         } else {
             false
@@ -3383,7 +3427,12 @@ impl kameo::message::Message<Destroy> for RoomActor {
         _msg: Destroy,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room.occupants.clear();
+        let reply: Self::Reply = async {
+            self.room.occupants.clear();
+        }
+        .await;
+        self.report_occupancy().await;
+        reply
     }
 }
 

@@ -288,9 +288,17 @@ async fn decide_request(
         .await
         .expect("freeze responses");
     if decision == MailboxOwnerDecision::Accepted && request.kind == RoomRequestKind::Join {
-        RoomOccupantRepository::seat(&mut tx, &record(request.generation, Some(request.key)))
+        // The room actor records the seat before the join's projection
+        // commits; the decision completes that row.
+        RoomOccupantRepository::record_seat(&mut tx, &record(request.generation, None))
             .await
-            .expect("seat occupant");
+            .expect("record seat");
+        assert!(RoomOccupantRepository::confirm_join(
+            &mut tx,
+            &record(request.generation, Some(request.key))
+        )
+        .await
+        .expect("confirm join"));
     }
     MailboxRepository::decide(&mut tx, &mut locked, operation, decision)
         .await
@@ -617,7 +625,13 @@ async fn occupancy_is_written_by_generation_and_recovered_by_a_successor() {
             .await
             .expect("occupancy probe")
     );
-    RoomOccupantRepository::seat(&mut tx, &record(first, None))
+    // A join's decision completes only a row the actor recorded.
+    assert!(
+        !RoomOccupantRepository::confirm_join(&mut tx, &record(first, None))
+            .await
+            .expect("confirm without a seat")
+    );
+    RoomOccupantRepository::record_seat(&mut tx, &record(first, None))
         .await
         .expect("seat");
     assert!(
@@ -652,9 +666,25 @@ async fn occupancy_is_written_by_generation_and_recovered_by_a_successor() {
         .await
         .expect("current update"));
     // A join from a later connection replaces the row.
-    RoomOccupantRepository::seat(&mut tx, &record(second, None))
+    RoomOccupantRepository::record_seat(&mut tx, &record(second, None))
         .await
         .expect("rejoin");
+    // The earlier connection's presence does not survive the replacement,
+    // and a decision for the earlier connection no longer finds its row.
+    assert!(matches!(
+        RoomOccupantRepository::lookup(&mut tx, &room(), &occupant()).await.expect("lookup"),
+        RoomOccupantLookup::Seated(row) if row.presence.is_none() && row.generation == second
+    ));
+    assert!(
+        !RoomOccupantRepository::confirm_join(&mut tx, &record(first, None))
+            .await
+            .expect("stale confirm")
+    );
+    assert!(
+        RoomOccupantRepository::confirm_join(&mut tx, &record(second, None))
+            .await
+            .expect("confirm rejoin")
+    );
     tx.commit().await.expect("owner commits");
 
     // A second resource whose row cannot be parsed is counted, not seated.

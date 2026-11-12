@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use jid::BareJid;
 use waddle_xmpp::ingress::mailbox::{MailboxOperationKey, MailboxOwnerDecision, RoomRequestKind};
-use waddle_xmpp::muc::room_actor::{RecoveredOccupant, SeedRecoveredOccupants};
+use waddle_xmpp::muc::room_actor::{RecoveredOccupant, ReportOccupancy, SeedRecoveredOccupants};
 use waddle_xmpp::muc::room_registry_actor::GetOrRestoreDurableRoom;
 use waddle_xmpp::ownership::NodeIdentity;
 use waddle_xmpp::telemetry::attributes::MailboxDeliveryOutcome;
@@ -115,6 +115,7 @@ pub fn spawn_mailbox_poller(bridge: Arc<OrderedRelayDeliveryBridge>) {
             resume_after = poll_once(&services, resume_after).await;
             if pass.is_multiple_of(MAILBOX_SWEEP_PASSES) {
                 sweep_after = sweep_once(&services, sweep_after).await;
+                report_unconsumed_requests(&services).await;
             }
         }
     });
@@ -190,6 +191,69 @@ async fn sweep_once(
     }
 }
 
+/// Report decided room requests no origin consumed. The count is published
+/// on every successful read; the log line is written only when it is not
+/// zero, once per sweep.
+async fn report_unconsumed_requests(services: &Arc<OrderedRelayDeliveryServices>) {
+    let Some(authority) = mailbox_authority(services) else {
+        return;
+    };
+    match authority
+        .count_unconsumed_request_decisions(MAILBOX_UNCONSUMED_GRACE)
+        .await
+    {
+        Ok(count) => {
+            waddle_xmpp::telemetry::reliability::record_room_request_unconsumed_decisions(count);
+            if count > 0 {
+                tracing::warn!(
+                    count,
+                    "decided room requests were not consumed by their origin"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "mailbox poller could not count unconsumed room requests");
+        }
+    }
+}
+
+impl OrderedRelayDeliveryBridge {
+    /// Whether `envelope` carries a room kind this node no longer accepts
+    /// on the relay: a join, an occupant presence or a Muji IQ, while room
+    /// requests travel through the mailbox. Such an envelope is answered
+    /// with the unsupported-envelope refusal before its sequence is
+    /// reserved, so the sender rolls the sequence back and nothing ran.
+    pub(in crate::clustering) async fn refuses_relayed_room_kind(
+        &self,
+        envelope: &super::RemoteStanzaEnvelope,
+    ) -> bool {
+        let super::OrderedRelayPayload::MucProxy { kind, .. } = &envelope.payload else {
+            return false;
+        };
+        if !matches!(
+            kind,
+            OrderedRelayMucProxyKind::JoinPresence
+                | OrderedRelayMucProxyKind::OccupantPresence
+                | OrderedRelayMucProxyKind::MujiJingleIq
+        ) {
+            return false;
+        }
+        let Some(state) = self
+            .services
+            .get()
+            .and_then(|services| services.web_socket_state.upgrade())
+        else {
+            return false;
+        };
+        state
+            .deps
+            .protocol
+            .ingress
+            .room_requests_carried_now()
+            .await
+    }
+}
+
 /// One pass: scan this node's backlog after `resume_after` and work its
 /// lanes, at most [`MAILBOX_CLAIM_LIMIT`] at a time. Returns where the next
 /// pass resumes.
@@ -242,6 +306,12 @@ async fn work_lane(
             Ok(MailboxLaneHead::Ready(claimed)) => {
                 let decided = seat_room_occupancy(services, authority, &claimed.room, target).await
                     && accept(services, &claimed).await;
+                if !decided {
+                    // A commit refused for a sender without durable
+                    // occupancy is retried once the actor has written its
+                    // roster to the table again.
+                    report_room_occupancy(services, &claimed.room).await;
+                }
                 record_attempt(authority, claimed.lane, claimed.operation, target, decided).await
             }
             Ok(MailboxLaneHead::ReadyRequest(claimed)) => {
@@ -321,7 +391,7 @@ async fn seat_room_occupancy(
     if owner != *target {
         return false;
     }
-    if authority.open_room_requests().room_seeded(room, epoch) {
+    if authority.room_occupancy_seated(room, epoch) {
         return true;
     }
     if load.unparseable > 0 {
@@ -331,29 +401,34 @@ async fn seat_room_occupancy(
             "durable occupancy rows that cannot be parsed were not seated"
         );
     }
-    if !load.seated.is_empty() {
-        let Some(state) = services.web_socket_state.upgrade() else {
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return false;
+    };
+    let restored = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetOrRestoreDurableRoom {
+            room_jid: room.clone(),
+        })
+        .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+        .await;
+    let actor = match restored {
+        Ok(Some(actor)) => actor,
+        // The room has no durable lifecycle: there is no actor to seat. With
+        // rows that is a room nothing can be decided against yet; without
+        // rows there is nothing to seat and nothing the actor could hold.
+        Ok(None) if load.seated.is_empty() => {
+            authority.mark_room_occupancy_seated(room.clone(), epoch);
+            return true;
+        }
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(%error, room = %room, "room not restored for occupancy seating");
             return false;
-        };
-        let restored = state
-            .deps
-            .protocol
-            .room_registry
-            .ask(GetOrRestoreDurableRoom {
-                room_jid: room.clone(),
-            })
-            .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
-            .await;
-        let actor = match restored {
-            Ok(Some(actor)) => actor,
-            // The room has no durable lifecycle: there is no actor to seat
-            // and nothing an entry could be decided against.
-            Ok(None) => return false,
-            Err(error) => {
-                tracing::warn!(%error, room = %room, "room not restored for occupancy seating");
-                return false;
-            }
-        };
+        }
+    };
+    if !load.seated.is_empty() {
         let occupants = load
             .seated
             .into_iter()
@@ -379,10 +454,48 @@ async fn seat_room_occupancy(
             }
         }
     }
-    authority
-        .open_room_requests()
-        .mark_room_seeded(room.clone(), epoch);
+    // The room counts as seated only once the table names every occupant
+    // the actor holds, including those that joined before this deployment
+    // kept durable occupancy. The owner's groupchat commit relies on that.
+    match actor
+        .ask(ReportOccupancy)
+        .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(error) => {
+            tracing::warn!(%error, room = %room, "room occupancy not reported");
+            return false;
+        }
+    }
+    authority.mark_room_occupancy_seated(room.clone(), epoch);
     true
+}
+
+/// Ask `room`'s actor to write its roster to the durable occupancy record.
+async fn report_room_occupancy(services: &Arc<OrderedRelayDeliveryServices>, room: &BareJid) {
+    let Some(state) = services.web_socket_state.upgrade() else {
+        return;
+    };
+    let restored = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetOrRestoreDurableRoom {
+            room_jid: room.clone(),
+        })
+        .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+        .await;
+    if let Ok(Some(actor)) = restored {
+        if let Err(error) = actor
+            .ask(ReportOccupancy)
+            .reply_timeout(OCCUPANCY_SEAT_TIMEOUT)
+            .await
+        {
+            tracing::warn!(%error, room = %room, "room occupancy not reported");
+        }
+    }
 }
 
 /// The role and affiliation the room gave the requester, read from the

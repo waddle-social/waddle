@@ -325,6 +325,10 @@ pub struct PostgresMucRoomStore {
     /// publication observability and legacy pre-fanout groupchat dispatch/MAM
     /// consumers; actor-derived durable work carries its immutable fence.
     pub(in crate::muc_durable) published_claim_fences: DashMap<BareJid, RoomClaimFenceContext>,
+    /// Writer of the rooms' durable occupancy record, bound once the
+    /// ingress authority exists. Unbound, the store keeps no record.
+    pub(in crate::muc_durable) occupancy_ledger:
+        std::sync::OnceLock<std::sync::Arc<dyn waddle_xmpp::muc::durable::RoomOccupancyLedger>>,
 }
 
 pub(in crate::muc_durable) fn remove_room_claim_fence_if(
@@ -459,6 +463,7 @@ impl PostgresMucRoomStore {
             stop_token,
             exact_claim_fences: DashMap::new(),
             published_claim_fences: DashMap::new(),
+            occupancy_ledger: std::sync::OnceLock::new(),
         })
     }
 
@@ -498,6 +503,7 @@ impl PostgresMucRoomStore {
             stop_token,
             exact_claim_fences: DashMap::new(),
             published_claim_fences: DashMap::new(),
+            occupancy_ledger: std::sync::OnceLock::new(),
         };
         Ok(store)
     }
@@ -2409,6 +2415,30 @@ impl PostgresMucRoomStore {
 }
 
 impl MucDurableStore for PostgresMucRoomStore {
+    fn record_room_occupancy<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+        changes: Vec<waddle_xmpp::muc::durable::RoomOccupancyChange>,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, waddle_xmpp::muc::durable::RoomOccupancyRecord>
+    {
+        match self.occupancy_ledger.get() {
+            Some(ledger) => ledger.record(room_jid, fence, changes),
+            None => {
+                Box::pin(async { Ok(waddle_xmpp::muc::durable::RoomOccupancyRecord::Inactive) })
+            }
+        }
+    }
+
+    fn bind_occupancy_ledger(
+        &self,
+        ledger: std::sync::Arc<dyn waddle_xmpp::muc::durable::RoomOccupancyLedger>,
+    ) {
+        if self.occupancy_ledger.set(ledger).is_err() {
+            tracing::error!("room occupancy ledger bound more than once; keeping the first");
+        }
+    }
+
     fn load_admin_mutation_receipt<'a>(
         &'a self,
         room_jid: &'a BareJid,
