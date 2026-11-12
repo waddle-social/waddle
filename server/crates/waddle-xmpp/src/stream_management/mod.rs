@@ -23,7 +23,10 @@
 //! - `StreamManagementState` - Per-connection SM state (counters, queue)
 //! - `SmSessionRegistry` - Server-wide registry for detached resumable sessions
 //! - `UnackedQueue` - Queue of unacknowledged outbound stanzas
+//! - `durable` - Pure model of the durable session: lifecycle, outbound
+//!   window, owner fence and resume authorization
 
+pub mod durable;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod frontier_model;
 pub mod ingress_append;

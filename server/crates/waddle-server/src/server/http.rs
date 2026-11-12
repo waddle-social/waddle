@@ -2056,6 +2056,31 @@ async fn create_sm_session_registry(
     )
     .await?;
     state.register_lineage_alias(DurableStore::Sm, DurableStore::Global);
+    // The durable session authority shares the ingress database with the
+    // portable relations it writes. The legacy mode opens no store.
+    let durable_sm = crate::sm_authority::DurableSmSelection::open(
+        crate::sm_authority::DurableSmMode::from_env()?,
+        global_db,
+        server_config.clustering.enabled,
+    )
+    .await?;
+    if let Some(store) = durable_sm.store().filter(|store| !store.is_clustered()) {
+        // No binding of a previous process of this single node exists any
+        // more, so the sessions it left owned are detached and resumable. A
+        // clustered node proves owner loss per session by its claim instead.
+        let detached = store
+            .detach_owners_of_previous_process(chrono::Utc::now())
+            .await?;
+        if detached > 0 {
+            info!(
+                detached,
+                "detached durable SM sessions owned by a previous process"
+            );
+        }
+    }
+    if !state.publish_durable_sm(durable_sm) {
+        warn!("a stream-management authority was already selected; keeping the first selection");
+    }
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),

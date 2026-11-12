@@ -14,6 +14,7 @@ use crate::db::DatabasePool;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
 use crate::server::liveness::RuntimeProgress;
+use crate::sm_authority::DurableSmSelection;
 #[cfg(any(test, feature = "test-support"))]
 use crate::spaces_metadata::InMemorySpacesMetadataStore;
 use crate::spaces_metadata::SpacesMetadataStore;
@@ -121,6 +122,10 @@ pub struct AppState {
     /// Runtime-progress heartbeat read by the `/health` liveness probe. The
     /// router starts its heartbeat task; liveness never touches a database.
     pub(crate) runtime_progress: Arc<RuntimeProgress>,
+    /// The stream-management authority selected at startup, published once
+    /// the ingress database's SM stores exist. Read it through
+    /// [`Self::durable_sm`].
+    durable_sm: OnceLock<DurableSmSelection>,
 }
 
 impl AppState {
@@ -229,6 +234,7 @@ impl AppState {
             lineage_latched: OnceLock::new(),
             lineage_adopt_matched: Mutex::new(HashSet::new()),
             runtime_progress: Arc::new(RuntimeProgress::new()),
+            durable_sm: OnceLock::new(),
         }
     }
 }
@@ -280,6 +286,19 @@ impl AppState {
             state: self,
             prepared,
         })
+    }
+
+    /// The selected stream-management authority. Before startup publishes a
+    /// selection this is the legacy authority, which is also the default.
+    pub fn durable_sm(&self) -> &DurableSmSelection {
+        static LEGACY: DurableSmSelection = DurableSmSelection::Legacy;
+        self.durable_sm.get().unwrap_or(&LEGACY)
+    }
+
+    /// Publish the startup selection. Returns false if one was already
+    /// published; the first selection stays in force.
+    pub(crate) fn publish_durable_sm(&self, selection: DurableSmSelection) -> bool {
+        self.durable_sm.set(selection).is_ok()
     }
 
     pub fn register_lineage_database(&self, store: DurableStore, database: Database) {

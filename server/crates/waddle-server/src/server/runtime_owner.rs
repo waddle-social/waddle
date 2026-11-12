@@ -52,6 +52,7 @@ use crate::pending_delivery::bootstrap_pending_delivery_owner_schema;
 use crate::pubsub::DatabasePubSubStorage;
 use crate::push_registrations::{DatabasePushRegistrationStore, PushRegistrationOwnerError};
 use crate::room_effect_outbox::{RoomEffectOutboxError, RoomEffectOutboxStore};
+use crate::sm_authority::bootstrap_durable_sm_owner_schema;
 use crate::sm_persistence::bootstrap_portable_sm_owner_schema;
 use crate::spaces_metadata::{prepare_space_stores_owner, SpaceStoreAttachError};
 
@@ -197,6 +198,8 @@ pub enum RestrictedRuntimeOwnerError {
     Inbox(#[source] InboxStorageError),
     #[error("stream management owner preparation failed")]
     StreamManagement(#[source] SmPersistenceError),
+    #[error("durable stream management owner preparation failed")]
+    DurableStreamManagement(#[source] DatabaseError),
     #[error("PubSub owner preparation failed")]
     PubSub(#[source] XmppError),
     #[error("space store owner preparation failed")]
@@ -356,6 +359,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     ("sm_unacked", READ_INSERT_DELETE),
     ("sm_acknowledged_windows", READ_INSERT_DELETE),
     ("sm_ingress_appends", READ_WRITE),
+    // Durable session authority: session rows are inserted, row-locked,
+    // updated and purged; operation outcomes are inserted and pruned.
+    ("sm_durable_sessions", READ_WRITE),
+    ("sm_durable_operations", READ_INSERT_DELETE),
     ("pending_delivery", READ_WRITE),
     ("pending_delivery_sm_promotions", READ_INSERT_DELETE),
     // PubSub and its projections.
@@ -665,6 +672,9 @@ pub async fn prepare_restricted_runtime_owner(
     bootstrap_portable_sm_owner_schema(owner)
         .await
         .map_err(RestrictedRuntimeOwnerError::StreamManagement)?;
+    bootstrap_durable_sm_owner_schema(owner)
+        .await
+        .map_err(RestrictedRuntimeOwnerError::DurableStreamManagement)?;
     DatabasePubSubStorage::initialize_owner(owner.clone(), &identity)
         .await
         .map_err(RestrictedRuntimeOwnerError::PubSub)?;

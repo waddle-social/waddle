@@ -236,34 +236,12 @@ pub(super) enum SnapshotApplyError {
     },
 }
 
-/// Apply the existing portable snapshot SQL in the caller's transaction.
-/// The caller must authorize any new delivery before entering this function;
-/// this body never acquires a canonical-source lock after the session gate.
-pub(super) async fn apply_snapshot_in_transaction(
+/// Insert or refresh one `sm_sessions` row in the caller's transaction.
+pub(super) async fn upsert_session_row(
     tx: &mut crate::db::Transaction<'_>,
     prepared: &PreparedSnapshot<'_>,
-    ledger: &Ledger,
-) -> Result<StoreOutcome, SnapshotApplyError> {
+) -> Result<(), SmPersistenceError> {
     let session = prepared.session;
-    // Drop any pre-existing unacked rows for this stream_id
-    // BEFORE the inserts so a previous `persist_delete_session`
-    // failure (eviction path logs-and-swallows) doesn't trip the
-    // `(stream_id, sequence)` PRIMARY KEY constraint on the new
-    // inserts and roll the whole transaction back — including
-    // the session row update we WANT to commit. (Greptile P1
-    // review on PR #405.) The session row's `ON CONFLICT DO
-    // UPDATE` already handles its own duplicate; the unacked
-    // table has no upsert path because it normally only sees
-    // appends. The DELETE here makes the atomic-store call
-    // idempotent against partial-prior-state on the same
-    // stream_id.
-    tx.execute(
-        "DELETE FROM sm_unacked WHERE stream_id = ?",
-        crate::db_params![session.stream_id.as_str().to_string()],
-    )
-    .await
-    .map_err(|e| SnapshotApplyError::Storage(SmPersistenceError::Other(e.to_string())))?;
-
     // Refreshes preserve the first durable detach timestamp: traffic cannot
     // renew the existing session's resume window. A later detach after source
     // deletion inserts its own timestamp.
@@ -335,7 +313,41 @@ pub(super) async fn apply_snapshot_in_transaction(
         ],
     )
     .await
+    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    Ok(())
+}
+
+/// Apply the existing portable snapshot SQL in the caller's transaction.
+/// The caller must authorize any new delivery before entering this function;
+/// this body never acquires a canonical-source lock after the session gate.
+pub(super) async fn apply_snapshot_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    prepared: &PreparedSnapshot<'_>,
+    ledger: &Ledger,
+) -> Result<StoreOutcome, SnapshotApplyError> {
+    let session = prepared.session;
+    // Drop any pre-existing unacked rows for this stream_id
+    // BEFORE the inserts so a previous `persist_delete_session`
+    // failure (eviction path logs-and-swallows) doesn't trip the
+    // `(stream_id, sequence)` PRIMARY KEY constraint on the new
+    // inserts and roll the whole transaction back — including
+    // the session row update we WANT to commit. (Greptile P1
+    // review on PR #405.) The session row's `ON CONFLICT DO
+    // UPDATE` already handles its own duplicate; the unacked
+    // table has no upsert path because it normally only sees
+    // appends. The DELETE here makes the atomic-store call
+    // idempotent against partial-prior-state on the same
+    // stream_id.
+    tx.execute(
+        "DELETE FROM sm_unacked WHERE stream_id = ?",
+        crate::db_params![session.stream_id.as_str().to_string()],
+    )
+    .await
     .map_err(|e| SnapshotApplyError::Storage(SmPersistenceError::Other(e.to_string())))?;
+
+    upsert_session_row(tx, prepared)
+        .await
+        .map_err(SnapshotApplyError::Storage)?;
 
     for stanza in prepared.unacked {
         let xml = stanza.stanza.wire();

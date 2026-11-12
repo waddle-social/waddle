@@ -38,6 +38,9 @@ mod atomic_store;
 /// `sm_sessions`/`sm_unacked` schema, instead of forking a second copy
 /// that could silently drift from this one.
 pub(crate) mod codec;
+/// Row access for the durable session authority (`crate::sm_authority`),
+/// which commits these relations in its own transactions.
+pub(crate) mod durable_rows;
 mod incremental;
 pub(crate) mod ingress_append;
 mod joined_sessions;
@@ -64,6 +67,13 @@ pub(crate) async fn verify_runtime_postgres_schema(
     db: &crate::db::Database,
 ) -> Result<(), SmRuntimeAttachError> {
     runtime_attach::verify(db, true).await
+}
+/// Verify the durable session authority's owner-prepared relations, the
+/// portable relations it also writes, and the runtime's privileges on both.
+pub(crate) async fn verify_durable_runtime_postgres_schema(
+    db: &crate::db::Database,
+) -> Result<(), SmRuntimeAttachError> {
+    runtime_attach::verify_durable(db).await
 }
 pub use schema::bootstrap_schema_owner as bootstrap_portable_sm_owner_schema;
 
