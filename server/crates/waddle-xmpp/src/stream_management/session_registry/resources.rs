@@ -209,35 +209,42 @@ impl InMemorySmSessionRegistry {
         &self,
         bare_jid: &BareJid,
     ) -> Result<Vec<FullJid>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut resources = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut resources: Vec<FullJid> = sessions
-            .values()
-            .filter(|session| {
-                !session.is_expired()
-                    && session.roster_interested
-                    && session.jid.to_bare() == *bare_jid
-            })
-            .map(|session| session.jid.clone())
-            .collect();
-        drop(sessions);
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        resources.extend(
-            claimed
+            let mut resources: Vec<FullJid> = sessions
                 .values()
                 .filter(|session| {
                     !session.is_expired()
                         && session.roster_interested
                         && session.jid.to_bare() == *bare_jid
                 })
-                .map(|session| session.jid.clone()),
-        );
+                .map(|session| session.jid.clone())
+                .collect();
+            drop(sessions);
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            resources.extend(
+                claimed
+                    .values()
+                    .filter(|session| {
+                        !session.is_expired()
+                            && session.roster_interested
+                            && session.jid.to_bare() == *bare_jid
+                    })
+                    .map(|session| session.jid.clone()),
+            );
+            resources
+        };
+        self.extend_with_durable_detached(bare_jid, &mut resources, |resource| {
+            resource.roster_interested
+        })
+        .await?;
         Ok(resources)
     }
 
@@ -246,35 +253,42 @@ impl InMemorySmSessionRegistry {
         &self,
         bare_jid: &BareJid,
     ) -> Result<Vec<FullJid>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut resources = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut resources: Vec<FullJid> = sessions
-            .values()
-            .filter(|session| {
-                !session.is_expired()
-                    && session.blocklist_interested
-                    && session.jid.to_bare() == *bare_jid
-            })
-            .map(|session| session.jid.clone())
-            .collect();
-        drop(sessions);
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        resources.extend(
-            claimed
+            let mut resources: Vec<FullJid> = sessions
                 .values()
                 .filter(|session| {
                     !session.is_expired()
                         && session.blocklist_interested
                         && session.jid.to_bare() == *bare_jid
                 })
-                .map(|session| session.jid.clone()),
-        );
+                .map(|session| session.jid.clone())
+                .collect();
+            drop(sessions);
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            resources.extend(
+                claimed
+                    .values()
+                    .filter(|session| {
+                        !session.is_expired()
+                            && session.blocklist_interested
+                            && session.jid.to_bare() == *bare_jid
+                    })
+                    .map(|session| session.jid.clone()),
+            );
+            resources
+        };
+        self.extend_with_durable_detached(bare_jid, &mut resources, |resource| {
+            resource.blocklist_interested
+        })
+        .await?;
         Ok(resources)
     }
 
@@ -289,7 +303,12 @@ impl InMemorySmSessionRegistry {
             !session.is_expired() && session.roster_interested && session.jid == *jid
         })?
         else {
-            return Ok(false);
+            return Ok(self
+                .admit_to_durable_detached(jid, stanza, original_receipt_at, None, |resource| {
+                    resource.roster_interested
+                })
+                .await?
+                .is_some());
         };
         self.append_detached_stanza(
             &stream_id,
@@ -311,7 +330,12 @@ impl InMemorySmSessionRegistry {
             !session.is_expired() && session.blocklist_interested && session.jid == *jid
         })?
         else {
-            return Ok(false);
+            return Ok(self
+                .admit_to_durable_detached(jid, stanza, original_receipt_at, None, |resource| {
+                    resource.blocklist_interested
+                })
+                .await?
+                .is_some());
         };
         self.append_detached_stanza(
             &stream_id,
@@ -332,7 +356,10 @@ impl InMemorySmSessionRegistry {
         let Some(stream_id) =
             self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
         else {
-            return Ok(false);
+            return Ok(self
+                .admit_to_durable_detached(jid, stanza, original_receipt_at, None, |_| true)
+                .await?
+                .is_some());
         };
         self.append_detached_stanza(
             &stream_id,
@@ -391,7 +418,9 @@ impl InMemorySmSessionRegistry {
         let Some(stream_id) =
             self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
         else {
-            return Ok(None);
+            return self
+                .admit_to_durable_detached(jid, stanza, original_receipt_at, None, |_| true)
+                .await;
         };
         let recorded = self
             .append_detached_stanza(
@@ -439,7 +468,17 @@ impl InMemorySmSessionRegistry {
         let Some(stream_id) =
             self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
         else {
-            return Ok(SmKeyedAppendOutcome::NoSession);
+            return Ok(
+                match self
+                    .admit_to_durable_detached(jid, stanza, original_receipt_at, Some(&key), |_| {
+                        true
+                    })
+                    .await?
+                {
+                    Some(accepting_stream) => SmKeyedAppendOutcome::Appended { accepting_stream },
+                    None => SmKeyedAppendOutcome::NoSession,
+                },
+            );
         };
         let provenance = super::super::SmFrameProvenance::ingress([key.clone()]);
         self.commit_keyed_detached_entry(
@@ -831,28 +870,33 @@ impl InMemorySmSessionRegistry {
         &self,
         bare_jid: &BareJid,
     ) -> Result<Vec<FullJid>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut resources = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut resources: Vec<FullJid> = sessions
-            .values()
-            .filter(|session| !session.is_expired() && session.jid.to_bare() == *bare_jid)
-            .map(|session| session.jid.clone())
-            .collect();
-        drop(sessions);
-
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        resources.extend(
-            claimed
+            let mut resources: Vec<FullJid> = sessions
                 .values()
                 .filter(|session| !session.is_expired() && session.jid.to_bare() == *bare_jid)
-                .map(|session| session.jid.clone()),
-        );
+                .map(|session| session.jid.clone())
+                .collect();
+            drop(sessions);
+
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            resources.extend(
+                claimed
+                    .values()
+                    .filter(|session| !session.is_expired() && session.jid.to_bare() == *bare_jid)
+                    .map(|session| session.jid.clone()),
+            );
+            resources
+        };
+        self.extend_with_durable_detached(bare_jid, &mut resources, |_| true)
+            .await?;
         Ok(resources)
     }
 
@@ -867,29 +911,13 @@ impl InMemorySmSessionRegistry {
         bare_jid: &BareJid,
         except: &[FullJid],
     ) -> Result<Vec<FullJid>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut resources = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut resources: Vec<FullJid> = sessions
-            .values()
-            .filter(|session| {
-                session.carbons_enabled
-                    && !session.is_expired()
-                    && session.jid.to_bare() == *bare_jid
-                    && !except.contains(&session.jid)
-            })
-            .map(|session| session.jid.clone())
-            .collect();
-        drop(sessions);
-
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        resources.extend(
-            claimed
+            let mut resources: Vec<FullJid> = sessions
                 .values()
                 .filter(|session| {
                     session.carbons_enabled
@@ -897,8 +925,31 @@ impl InMemorySmSessionRegistry {
                         && session.jid.to_bare() == *bare_jid
                         && !except.contains(&session.jid)
                 })
-                .map(|session| session.jid.clone()),
-        );
+                .map(|session| session.jid.clone())
+                .collect();
+            drop(sessions);
+
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            resources.extend(
+                claimed
+                    .values()
+                    .filter(|session| {
+                        session.carbons_enabled
+                            && !session.is_expired()
+                            && session.jid.to_bare() == *bare_jid
+                            && !except.contains(&session.jid)
+                    })
+                    .map(|session| session.jid.clone()),
+            );
+            resources
+        };
+        self.extend_with_durable_detached(bare_jid, &mut resources, |resource| {
+            resource.carbons_enabled && !except.contains(&resource.jid)
+        })
+        .await?;
         Ok(resources)
     }
 
@@ -907,35 +958,42 @@ impl InMemorySmSessionRegistry {
         &self,
         bare_jid: &BareJid,
     ) -> Result<Vec<FullJid>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut resources = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut resources: Vec<FullJid> = sessions
-            .values()
-            .filter(|session| {
-                !session.is_expired()
-                    && session.presence_available
-                    && session.jid.to_bare() == *bare_jid
-            })
-            .map(|session| session.jid.clone())
-            .collect();
-        drop(sessions);
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        resources.extend(
-            claimed
+            let mut resources: Vec<FullJid> = sessions
                 .values()
                 .filter(|session| {
                     !session.is_expired()
                         && session.presence_available
                         && session.jid.to_bare() == *bare_jid
                 })
-                .map(|session| session.jid.clone()),
-        );
+                .map(|session| session.jid.clone())
+                .collect();
+            drop(sessions);
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            resources.extend(
+                claimed
+                    .values()
+                    .filter(|session| {
+                        !session.is_expired()
+                            && session.presence_available
+                            && session.jid.to_bare() == *bare_jid
+                    })
+                    .map(|session| session.jid.clone()),
+            );
+            resources
+        };
+        self.extend_with_durable_detached(bare_jid, &mut resources, |resource| {
+            resource.presence_available
+        })
+        .await?;
         Ok(resources)
     }
 
@@ -950,7 +1008,12 @@ impl InMemorySmSessionRegistry {
             !session.is_expired() && session.presence_available && session.jid == *jid
         })?
         else {
-            return Ok(false);
+            return Ok(self
+                .admit_to_durable_detached(jid, stanza, original_receipt_at, None, |resource| {
+                    resource.presence_available
+                })
+                .await?
+                .is_some());
         };
         self.append_detached_stanza(
             &stream_id,
@@ -978,26 +1041,35 @@ impl InMemorySmSessionRegistry {
         &self,
         jid: &FullJid,
     ) -> Result<Option<DetachedPresenceState>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if let Some(session) = sessions.values().find(|session| {
-            !session.is_expired() && session.presence_available && session.jid == *jid
-        }) {
-            return Ok(Some(DetachedPresenceState::from_session(session)));
-        }
-        drop(sessions);
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        Ok(claimed
-            .values()
-            .find(|session| {
+        {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if let Some(session) = sessions.values().find(|session| {
                 !session.is_expired() && session.presence_available && session.jid == *jid
+            }) {
+                return Ok(Some(DetachedPresenceState::from_session(session)));
+            }
+            drop(sessions);
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if let Some(session) = claimed.values().find(|session| {
+                !session.is_expired() && session.presence_available && session.jid == *jid
+            }) {
+                return Ok(Some(DetachedPresenceState::from_session(session)));
+            }
+        }
+        Ok(self
+            .durable_detached_matching(&jid.to_bare(), |resource| {
+                resource.presence_available && resource.jid == *jid
             })
-            .map(DetachedPresenceState::from_session))
+            .await?
+            .into_iter()
+            .next()
+            .map(|resource| resource.presence))
     }
 
     /// Return last known rich presence state for every detached available
@@ -1006,36 +1078,47 @@ impl InMemorySmSessionRegistry {
         &self,
         bare_jid: &BareJid,
     ) -> Result<Vec<DetachedPresenceState>, SmRegistryError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut states = {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let mut states: Vec<DetachedPresenceState> = sessions
-            .values()
-            .filter(|session| {
-                !session.is_expired()
-                    && session.presence_available
-                    && session.jid.to_bare() == *bare_jid
-            })
-            .map(DetachedPresenceState::from_session)
-            .collect();
-        drop(sessions);
-
-        let claimed = self
-            .claimed_sessions
-            .read()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        states.extend(
-            claimed
+            let mut states: Vec<DetachedPresenceState> = sessions
                 .values()
                 .filter(|session| {
                     !session.is_expired()
                         && session.presence_available
                         && session.jid.to_bare() == *bare_jid
                 })
-                .map(DetachedPresenceState::from_session),
-        );
+                .map(DetachedPresenceState::from_session)
+                .collect();
+            drop(sessions);
+
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            states.extend(
+                claimed
+                    .values()
+                    .filter(|session| {
+                        !session.is_expired()
+                            && session.presence_available
+                            && session.jid.to_bare() == *bare_jid
+                    })
+                    .map(DetachedPresenceState::from_session),
+            );
+            states
+        };
+        for resource in self
+            .durable_detached_matching(bare_jid, |resource| resource.presence_available)
+            .await?
+        {
+            if !states.iter().any(|state| state.resource == resource.jid) {
+                states.push(resource.presence);
+            }
+        }
         Ok(states)
     }
 }

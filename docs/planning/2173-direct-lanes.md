@@ -120,15 +120,17 @@ admission authority lives; the worker itself admits nothing:
   next sequence, so a second admitter on the same fence would
   desynchronise it.
 - A **detached** session is appended to through the stream-management
-  session registry. That registry holds no durable session: admission with
-  `AdmissionAuthority::Detached` from outside a connection has no caller in
-  the tree, and the store exposes no lookup of a session by full JID
-  (`DurableSmStore::session` takes a session key). A recipient whose only
-  session is a detached durable one is therefore "not present" to the
-  worker, the request is rejected, and the origin runs its offline
-  fallback. This is the outcome the relay has in the same configuration.
-  When the registry's detached append admits on the `Detached` authority,
-  the worker gains it without change.
+  session registry. Under the durable selector the registry's detached
+  readers and appenders also consult the durable authority
+  (`S/sm_authority/detached.rs`, attached with
+  `InMemorySmSessionRegistry::attach_durable_detached`): a `Detached`
+  session inside its resume window is listed with the presence, carbons and
+  interest flags of its stored resource snapshot, and a stanza for it is
+  admitted on `AdmissionAuthority::Detached` under the session's claim,
+  retained unexposed and replayed on resume. The claim is taken on the
+  admitting node first when another node holds it, by the swap a resume of
+  a detached session uses. The worker reaches these sessions through the
+  same registry calls, without change.
 
 The order of hand-over and decision depends on what makes a repeated
 attempt safe:
@@ -238,9 +240,6 @@ adoption of account lanes (`S/ingress/mailbox_worker.rs`) and retention
 
 Not built:
 
-- Admission to a detached durable session (see [Acceptance](#acceptance)),
-  and with it the read that resolves a full JID to a session and
-  generation.
 - A writer of the "hosted elsewhere" refusal.
 - A sweep that reports decided direct requests no origin consumed. The
   monitoring query `waddle_ingress_direct_requests` reports them.

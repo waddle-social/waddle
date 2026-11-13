@@ -253,6 +253,56 @@ so the binding reads the session: one that continues is left to the node
 holding its claim, as a superseded generation is; one that is terminal is
 treated as ended. Only an unreadable store keeps the binding waiting.
 
+## Delivery to a detached session
+
+A `Detached` session inside its resume window is a recipient, with the
+rules a detached legacy session has (`S/sm_authority/detached.rs`):
+
+- **Selection.** The stream-management session registry's detached
+  readers (`detached_resources_for_user`, the carbon, presence, roster and
+  block-list variants, `detached_presence_state`) list the account's
+  `Detached` rows whose window has not elapsed, with the flags and presence
+  of the stored resource snapshot. A session whose owner was lost before
+  it detached has no snapshot and is listed as unavailable, without
+  carbons or interest. Every routing path that reads those registry calls,
+  including the RFC 6121 recipient inventory, the relay receiver and the
+  direct-lane worker, sees these sessions as it sees a legacy detached
+  session: a full JID that names one selects it, and a bare-JID message
+  selects the live resources of the highest non-negative priority and
+  every detached session.
+- **Admission.** The registry's detached appenders admit the stanza on
+  `AdmissionAuthority::Detached` at the generation read with the row. The
+  frame is retained without raising the exposure ceiling, so a resume
+  replays it in ordinal order ahead of anything admitted later. A copy an
+  ingress transaction owns is admitted under an operation id derived from
+  the session and the copy's ingress key, so a repeated offer while the
+  frame is retained returns the same ordinal; the frame carries the copy's
+  ingress receipt and provenance.
+- **Claim.** On a clustered store the admission asserts the session claim.
+  The admitting node is the account's owner, which need not hold it: it
+  uses the claim it holds, takes a free one, or moves one another node holds
+  by the swap a resume uses for a `Detached` row (`OwnerReleased`, or
+  `OwnerLeaseExpired` for a holder whose lease lapsed). The holder is not
+  asked; the row has no connection. A resume on any node later moves the
+  claim back by the same rule, and the expiry sweep runs on whichever node
+  holds it.
+- **Refusal.** A known refusal (the session resumed, ended, is full, or its
+  claim could not be held) retains nothing and is reported as no session,
+  so the caller takes its offline path. An admission whose commit outcome
+  stays unknown after three offers is reported as a storage failure, and
+  the caller does not deliver the stanza another way.
+- **Expiry.** An expired session's retained frames, these included, are
+  transferred to offline delivery by the janitor once and its custody is
+  released (`settle_terminal_session`).
+
+Limits: a frame that arrives while the session is `TransferHydrating` is
+refused and takes the offline path; it is not replayed by that resume. A
+claim moved here right after the holder detached refuses the holder's
+admission of the frames its endpoint accepted after the detach
+(`admit_detached_tail`); those frames are in no custody and only the
+ingress-owned ones are redelivered from their canonical rows. Each detached
+read is a database read per routed stanza.
+
 ## Replacement on a clustered store
 
 Binding a resource again ends its durable sessions with `Replaced`

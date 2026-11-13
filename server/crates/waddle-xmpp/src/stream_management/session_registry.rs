@@ -14,6 +14,7 @@ mod claims;
 mod core;
 mod cross_node_resume;
 mod custody;
+mod durable_detached;
 mod inventory;
 mod persistence_codec;
 mod promotion_receipt_gc;
@@ -33,13 +34,17 @@ pub use cross_node_resume::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,
     StealTicket,
 };
+pub use durable_detached::{
+    DurableDetachedAdmission, DurableDetachedFrame, DurableDetachedResource,
+    DurableDetachedSessions,
+};
 pub use resources::{DetachedPresenceState, ResumableSessionProbe};
 pub use session::{DetachedSession, DetachedUnackedStanza, PromotionCaptureCustody};
 pub use tombstones::{RecentTombstoneRecord, TOMBSTONE_CLOCK_SKEW_SLACK};
 pub use trait_impl::StoredDetachedSession;
 pub use traits::{
-    SmClaimCompletion, SmRegistryError, SmSessionRegistry, TombstoneScrubbedSmEntries,
-    TombstoneScrubbedSmEntry,
+    SmClaimCompletion, SmRegistryError, SmSessionRegistry, StorageOutageCause,
+    TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry,
 };
 
 /// Exclusive authority for one SM stream operation.

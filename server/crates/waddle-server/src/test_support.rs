@@ -295,10 +295,21 @@ pub async fn websocket_state_with_sasl2_and_durable_sm() -> Arc<WebSocketState> 
     )
     .await
     .expect("open the durable SM store on the fixture database");
+    let store = selection
+        .store()
+        .expect("the durable selection carries a store")
+        .clone();
     assert!(
         state.deps.app_state.publish_durable_sm(selection),
         "the fixture selects its stream-management authority once"
     );
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .attach_durable_detached(Arc::new(
+            crate::sm_authority::DurableDetachedRecipients::new(store),
+        ));
     state
 }
 
