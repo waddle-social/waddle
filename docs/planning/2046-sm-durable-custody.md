@@ -1,5 +1,10 @@
 # Dark durable SM custody for one local direct frame
 
+> Status: the `sm_custody` candidate this record describes is deleted. The
+> durable session authority (`2139-durable-sm-session-model.md`) is the
+> stream-management custody; this record is kept for its reasoning.
+
+
 Status: unselected repository candidate for #2046, behind `test-support` and
 `clustering`. No production selector, registered migration, WebSocket switch,
 GC activation, or resume activation is included.

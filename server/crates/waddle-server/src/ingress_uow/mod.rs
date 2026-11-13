@@ -214,26 +214,6 @@ enum EpochPreparation<'g> {
 }
 
 impl IngressUnitOfWork {
-    /// Bind a dark custody candidate to this exact attested pool and full
-    /// configuration, never to a caller-selected schema name alone.
-    #[cfg(all(feature = "test-support", feature = "clustering"))]
-    pub(crate) fn custody_candidate_schema(
-        &self,
-        config: &crate::db::physical_attestation::PhysicalAttestationConfig,
-    ) -> Result<String, IngressUowError> {
-        let capability = self
-            .attested_pg_writer
-            .as_ref()
-            .ok_or(IngressUowError::AttestedPoolRequired)?;
-        self.db
-            .verify_attested_pg_writer_capability(capability)
-            .map_err(crate::db::DatabaseError::from)?;
-        if !capability.matches_config(config) {
-            return Err(IngressUowError::AttestedPoolRequired);
-        }
-        Ok(capability.identity().schema.name.0.clone())
-    }
-
     pub(crate) fn database(&self) -> &Database {
         &self.db
     }

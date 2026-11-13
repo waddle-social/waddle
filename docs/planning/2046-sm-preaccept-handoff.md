@@ -1,5 +1,10 @@
 # Dark source-to-SM pre-accept handoff for #2046
 
+> Status: the `sm_custody` candidate this record describes is deleted. The
+> durable session authority (`2139-durable-sm-session-model.md`) is the
+> stream-management custody; this record is kept for its reasoning.
+
+
 ## Scope
 
 Build an unselected, typed handoff for prepared local direct frames. Carry each known committed full-payload custody operation and exact immutable SM slot from source delivery into a candidate memory admission. Source completion must wait for durable payload custody; count or queue admission must wait for the committed slot. Keep the original operation, source receipt time, resource, session generation and binding identity through cancellation or authority loss. Reject unsupported source classes and a replacement generation before effects.
