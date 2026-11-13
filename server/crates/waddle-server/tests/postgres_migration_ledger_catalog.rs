@@ -133,13 +133,19 @@ async fn postgres_clean_legacy_and_foreign_ledger_rows() {
     .expect("inspect backfilled checksums");
     assert_eq!(missing, 0);
 
-    // A runner with no owned namespaces must ignore existing foreign rows.
+    // A runner owns every version in the ledger, so one whose catalog lacks
+    // the baseline refuses the baseline row rather than ignoring it.
     let foreign = MigrationRunner::new(Vec::new());
-    assert!(foreign
-        .run(&fixture.db)
-        .await
-        .expect("foreign rows")
-        .is_empty());
+    let refused = foreign.run(&fixture.db).await;
+    assert!(
+        matches!(
+            refused,
+            Err(DatabaseError::MigrationLedger(
+                MigrationLedgerError::UnknownVersion { version: 2000, .. }
+            ))
+        ),
+        "unexpected runner result: {refused:?}"
+    );
     fixture.close().await;
 }
 

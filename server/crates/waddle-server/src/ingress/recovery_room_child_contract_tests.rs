@@ -444,9 +444,9 @@ async fn postgres_sealed_manifest_preserves_children_after_durable_revision_adva
         panic!("snapshot")
     };
     snapshot.coordinates = Some(coordinates);
-    f.execute("CREATE TABLE clustering_muc_rooms (room_jid TEXT PRIMARY KEY, lifecycle_id TEXT, revision BIGINT)", ()).await;
+    f.execute("CREATE TABLE IF NOT EXISTS clustering_muc_rooms (room_jid TEXT PRIMARY KEY, waddle_id TEXT NOT NULL, channel_id TEXT NOT NULL, config_json TEXT NOT NULL, lifecycle_id TEXT, revision BIGINT)", ()).await;
     f.execute(
-        "INSERT INTO clustering_muc_rooms (room_jid, lifecycle_id, revision) VALUES (?, ?, ?)",
+        "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, 'waddle', 'channel', '{}', ?, ?)",
         crate::db_params![
             "room@muc.example.com",
             coordinates.lifecycle.to_string(),

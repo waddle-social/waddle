@@ -57,11 +57,6 @@ async fn sqlite_assert_retained(db: &Database, retention: &RetentionLab, pin: &A
 #[tokio::test]
 async fn sqlite_observes_exact_ledger_and_never_reverts_terminal() {
     let (db, retention) = sqlite_fixture().await;
-    sqlite_exec(
-        &db,
-        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
-    )
-    .await;
     let (mut pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
     pin.received_at += ChronoDuration::microseconds(123);
     seed_sqlite_direct(&db, &pin, envelope, intent).await;

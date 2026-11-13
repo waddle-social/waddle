@@ -1223,8 +1223,7 @@ mod tests {
         let db = crate::db::Database::from_config("registration-authority-race", &config)
             .await
             .expect("open postgres");
-        crate::db::MigrationRunner::single()
-            .run(&db)
+        crate::test_support::migrate_shared_test_postgres(&db)
             .await
             .expect("migrate shared registration fixture database");
         Some(db)

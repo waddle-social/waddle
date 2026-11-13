@@ -155,10 +155,7 @@ async fn register_test_swarm_node(
 }
 
 async fn reset_fixed_pair_roster(db: &Database) {
-    waddle_server::db::MigrationRunner::single()
-        .run(db)
-        .await
-        .expect("global schema migrations for fixed-pair roster reset");
+    cluster_support::migrate_shared_postgres(db).await;
     let conn = db.guard().await.expect("guard");
     conn.execute(
         "DELETE FROM roster_items \

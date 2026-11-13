@@ -62,6 +62,69 @@ use crate::ingress_uow::{
 #[cfg(feature = "test-support")]
 use sqlx::postgres::PgPool;
 
+/// Build the current schema of the shared PostgreSQL test database (the one
+/// `WADDLE_TEST_POSTGRES_URL` names) from the deployment catalog.
+///
+/// The schema baseline builds every table from an empty schema. Tests that
+/// share this database also open stores whose constructors create some of
+/// those tables themselves, so a test that ran first may have left them
+/// behind without the baseline's ledger row. Such a schema is dropped and
+/// recreated before the catalog runs: the shared test database may be reset
+/// freely, and the tests that use it run one at a time (nextest's `postgres`
+/// group). A schema whose ledger already holds the baseline is migrated in
+/// place.
+pub async fn migrate_shared_test_postgres(
+    db: &crate::db::Database,
+) -> Result<(), crate::db::DatabaseError> {
+    if db.driver() != crate::db::DatabaseDriver::Postgres {
+        return Err(crate::db::DatabaseError::ConnectionFailed(
+            "the shared test database is PostgreSQL".to_owned(),
+        ));
+    }
+    let conn = db.guard().await?;
+    let mut rows = conn
+        .query(
+            "SELECT pg_catalog.quote_ident(pg_catalog.current_schema()::text), \
+                    pg_catalog.to_regclass('_migrations') IS NOT NULL, \
+                    EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                            WHERE n.nspname = pg_catalog.current_schema() \
+                              AND c.relname NOT IN ('_lineage', '_migrations'))",
+            (),
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| crate::db::DatabaseError::ConnectionFailed("no current schema".into()))?;
+    let (schema, has_ledger, has_relations): (String, bool, bool) =
+        (row.get(0)?, row.get(1)?, row.get(2)?);
+    drop(rows);
+    let on_baseline = if has_ledger {
+        let mut rows = conn
+            .query(
+                "SELECT EXISTS (SELECT 1 FROM _migrations WHERE version = ?)",
+                crate::db_params![crate::db::BASELINE_VERSION],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => row.get::<bool>(0)?,
+            None => false,
+        }
+    } else {
+        false
+    };
+    if has_relations && !on_baseline {
+        conn.execute_batch(&format!(
+            "DROP SCHEMA {schema} CASCADE; CREATE SCHEMA {schema}"
+        ))
+        .await?;
+    }
+    drop(conn);
+    crate::db::MigrationRunner::single().run(db).await?;
+    Ok(())
+}
+
 /// Prepare the legacy observation schema before applying registered migrations.
 #[cfg(feature = "test-support")]
 pub async fn initialize_room_observations_for_test(

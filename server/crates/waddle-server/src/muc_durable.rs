@@ -660,8 +660,7 @@ mod tests {
         // This shared database is also used by server-startup scenarios.
         // Install authority through its migration so later startup observes
         // both the table and its committed ledger entry.
-        crate::db::MigrationRunner::single()
-            .run(&db)
+        crate::test_support::migrate_shared_test_postgres(&db)
             .await
             .expect("migrate shared MUC fixture database");
         let claim_store = Arc::new(PostgresClaimStore::new(db.clone()));

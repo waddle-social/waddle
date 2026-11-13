@@ -2144,14 +2144,16 @@ async fn inbox_projection_a_b_retry_a_applies_once_postgres() {
 
 #[tokio::test]
 async fn inbox_projection_a_b_retry_a_applies_once_sqlite() {
-    let storage = crate::inbox::DatabaseInboxStorage::open(Some("sqlite::memory:"))
+    let db = Database::in_memory("inbox_projection_once")
         .await
-        .expect("sqlite inbox");
-    let db = storage.database();
+        .expect("open SQLite database");
     MigrationRunner::single()
         .run(&db)
         .await
         .expect("sqlite migrations");
+    crate::inbox::DatabaseInboxStorage::from_database(db.clone())
+        .await
+        .expect("sqlite inbox");
     let uow = sqlite_uow(&db).await;
     let mut transaction = uow.begin().await.expect("begin sqlite UoW");
     // This exercises the existing delivery repository API, including the
@@ -2170,16 +2172,16 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
     };
     use waddle_xmpp_core::xep0359::StanzaId;
 
-    let storage = SqlxMamStorage::open_in_memory().await.expect("sqlite MAM");
-    let db = Database::from_sqlite_pool(
-        "mam_repository",
-        storage.sqlite_pool().expect("sqlite pool").clone(),
-        crate::db::SqlitePoolStorage::InMemory,
-    );
+    let db = Database::in_memory("mam_repository")
+        .await
+        .expect("open SQLite database");
     MigrationRunner::single()
         .run(&db)
         .await
         .expect("sqlite migrations");
+    let storage = SqlxMamStorage::from_sqlite_pool(db.sqlite_pool().expect("sqlite pool").clone())
+        .await
+        .expect("sqlite MAM");
     let archive: jid::BareJid = "archive@example.com".parse().expect("archive");
     let mut message = ArchivedMessage::for_test(
         "sender@example.com/device".parse().expect("sender"),

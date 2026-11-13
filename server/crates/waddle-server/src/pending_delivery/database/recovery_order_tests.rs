@@ -65,7 +65,19 @@ async fn ordinal(db: &Database, id: &PendingRowId) -> PendingNotificationRecover
     .expect("valid ordinal")
 }
 
+/// A pending store a release before insertion ordinals left behind. The
+/// schema baseline builds the current store, so its relations are dropped
+/// first and the store's own initialization performs the upgrade.
 async fn legacy_schema(fixture: &IngressFixture) -> [PendingRow; 2] {
+    fixture.execute("DROP TABLE pending_delivery", ()).await;
+    // SQLite keeps the ordinal counter in a table; PostgreSQL uses the
+    // column's identity sequence.
+    fixture
+        .execute(
+            "DROP TABLE IF EXISTS pending_notification_recovery_counter",
+            (),
+        )
+        .await;
     fixture.execute("CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY, recipient_jid TEXT NOT NULL, original_receipt_at BIGINT NOT NULL, payload_kind TEXT NOT NULL, archive_stanza_by TEXT, archive_stanza_id TEXT, transient_xml TEXT, flushed_in_session TEXT, legacy_note TEXT NOT NULL DEFAULT 'preserve')", ()).await;
     let rows = [
         archived(PendingRowId::new(hex::encode([255_u8; 32])), "legacy-high"),

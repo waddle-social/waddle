@@ -317,7 +317,24 @@ async fn prepare_v1009_application_fixture(fixture: &Fixture) -> PhysicalAttesta
 
 #[cfg(feature = "test-support")]
 async fn prepare_candidate_application_fixture(fixture: &Fixture) -> PhysicalAttestationConfig {
-    prepare_application_fixture(fixture, true).await
+    let config = prepare_application_fixture(fixture, true).await;
+    remove_unprepared_pubsub_definer(fixture).await;
+    config
+}
+
+/// The schema baseline creates the PubSub owner's definer helper, which the
+/// strict restricted ingress profile refuses as an alternate authority over
+/// guarded tables. Labs that observe that profile model a schema whose PubSub
+/// owner preparation has not run, so the helper is removed.
+#[cfg(feature = "test-support")]
+async fn remove_unprepared_pubsub_definer(fixture: &Fixture) {
+    sqlx::query(&format!(
+        "DROP FUNCTION {}.pubsub_runtime_attach_lock()",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove the PubSub owner definer");
 }
 
 #[cfg(feature = "test-support")]

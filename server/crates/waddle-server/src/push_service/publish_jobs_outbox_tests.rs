@@ -574,6 +574,14 @@ async fn postgres_claim_fenced_owner_completion_atomically_acks_local_provider()
 }
 
 async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture, missing: &[&str]) {
+    // The schema baseline builds the outbox, so its absence is staged by
+    // moving the table aside for the probe.
+    fixture
+        .execute(
+            "ALTER TABLE notification_outbox RENAME TO hidden_notification_outbox",
+            (),
+        )
+        .await;
     let mut empty = fixture
         .db
         .begin_immediate()
@@ -583,6 +591,12 @@ async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture, missing
         .await
         .expect("missing table is not readiness"));
     empty.rollback().await.expect("end absent-table probe");
+    fixture
+        .execute(
+            "ALTER TABLE hidden_notification_outbox RENAME TO notification_outbox",
+            (),
+        )
+        .await;
     let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("old outbox source");

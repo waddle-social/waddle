@@ -85,9 +85,10 @@ impl IngressWsFixture {
 
         // A clustered server refuses to boot unless its keypair-pool peer is
         // enrolled in the allowlist (the e2e harness does the same through
-        // `reset_and_enroll`). Provision the control-plane tables through the
-        // production ensure_schema paths inside this fixture's schema, then
-        // enroll the pool peer, all before the server process starts.
+        // `reset_and_enroll`). Build this fixture's schema from the deployment
+        // catalog, provision the control-plane tables through the production
+        // ensure_schema paths, then enroll the pool peer, all before the
+        // server process starts.
         {
             use waddle_server::clustering::allowlist::AllowlistStore as _;
             use waddle_server::clustering::lease::KeypairSlotLease as _;
@@ -98,6 +99,13 @@ impl IngressWsFixture {
             )
             .await
             .expect("open fixture control db");
+            // The schema baseline, which the server also applies at startup,
+            // builds every table from an empty schema; it runs before the
+            // store constructors below, which then find their tables.
+            waddle_server::db::MigrationRunner::single()
+                .run(&control_db)
+                .await
+                .expect("migrate fixture schema");
             waddle_server::clustering::allowlist::PostgresAllowlistStore::new(control_db.clone())
                 .ensure_schema()
                 .await

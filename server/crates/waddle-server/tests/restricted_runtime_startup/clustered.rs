@@ -1136,8 +1136,15 @@ async fn clustered_owner_phase_adopts_a_database_an_owner_capable_runtime_built(
         clustering.lease_ttl = lease_lifetime;
     }
 
-    // The deployment pipeline enrolls the allowlist before the first node.
+    // The first clustered start on an empty database builds the schema from
+    // the baseline and stops with an empty allowlist; the deployment pipeline
+    // then enrolls the allowlist before the node serves. The migration here
+    // stands for that first start.
     let owner = owner_database(&provisioned.owner_url).await;
+    waddle_server::db::MigrationRunner::single()
+        .run(&owner)
+        .await
+        .expect("build the schema as the first start does");
     PostgresAllowlistStore::new(owner.clone())
         .ensure_schema()
         .await
