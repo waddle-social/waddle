@@ -393,7 +393,7 @@ const ACTOR_DELIVER_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// (SM review on PR #1277). The MUC presence fan-out does NOT use this
 /// schedule — its join/leave broadcast loops are non-blocking by
 /// contract and retry once without sleeping.
-const DROPPED_FULL_RETRY_DELAYS: [std::time::Duration; 2] = [
+pub(super) const DROPPED_FULL_RETRY_DELAYS: [std::time::Duration; 2] = [
     std::time::Duration::from_millis(5),
     std::time::Duration::from_millis(20),
 ];
@@ -536,7 +536,9 @@ impl From<DetachedDeliveryOutcome> for FullJidDeliveryOutcome {
     }
 }
 
-fn detached_after_routing_failure(outcome: DetachedDeliveryOutcome) -> FullJidDeliveryOutcome {
+pub(super) fn detached_after_routing_failure(
+    outcome: DetachedDeliveryOutcome,
+) -> FullJidDeliveryOutcome {
     match outcome {
         DetachedDeliveryOutcome::Queued => FullJidDeliveryOutcome::QueuedDetached,
         DetachedDeliveryOutcome::Unavailable | DetachedDeliveryOutcome::Failed => {

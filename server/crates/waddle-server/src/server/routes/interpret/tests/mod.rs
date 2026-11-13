@@ -43,6 +43,7 @@ mod plan;
 mod projection_outcomes;
 pub(crate) mod room_dispatch;
 mod room_subject;
+mod routing_bound_binding;
 mod routing_detached_delivery;
 mod routing_fanout_pass;
 mod routing_full_jid_fallback;

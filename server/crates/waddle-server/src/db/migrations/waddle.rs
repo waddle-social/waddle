@@ -1807,6 +1807,18 @@ pub const V1036_SESSION_OCCUPANCY_GENERATION_POSTGRES: &str = r#"
 ALTER TABLE sm_durable_sessions ADD COLUMN IF NOT EXISTS occupancy_session TEXT NULL;
 "#;
 
+/// The node a direct request is addressed to when it is not the account
+/// owner: the node that hosts the binding the account coordinator named for
+/// the recipient's resource, and that binding itself. A request without a
+/// target is decided by the node that holds the account's claim. The
+/// relation exists only on PostgreSQL, so SQLite records the version alone.
+/// The statement is repeatable.
+pub const V1037_DIRECT_REQUEST_TARGETS: &str = r#"
+SELECT 1;
+"#;
+pub const V1037_DIRECT_REQUEST_TARGETS_POSTGRES: &str =
+    include_str!("direct_request_targets_postgres.sql");
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -2029,6 +2041,12 @@ pub fn all() -> Vec<Migration> {
             description: "Record the occupancy generation of each durable session".to_string(),
             sql_sqlite: V1036_SESSION_OCCUPANCY_GENERATION,
             sql_postgres: V1036_SESSION_OCCUPANCY_GENERATION_POSTGRES,
+        },
+        Migration {
+            version: 1037,
+            description: "Address a direct request to the node that hosts its binding".to_string(),
+            sql_sqlite: V1037_DIRECT_REQUEST_TARGETS,
+            sql_postgres: V1037_DIRECT_REQUEST_TARGETS_POSTGRES,
         },
     ]
 }

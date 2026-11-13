@@ -2245,8 +2245,17 @@ async fn run_group_dm_leave(
         });
     }
 
-    let live_resources =
-        waddle_xmpp::registry::get_resources_for_user(user_registry, &caller_bare).await;
+    // With the account coordinator selected its active resources are the
+    // caller's live resources; the registry's `UserActor` is not read.
+    let live_resources = match state.account_authority().resources(&caller_bare).await {
+        Some(Ok(resources)) => resources,
+        Some(Err(error)) => {
+            return Err(internal_err(format!(
+                "failed to list live group-DM leave resources: {error}"
+            )));
+        }
+        None => waddle_xmpp::registry::get_resources_for_user(user_registry, &caller_bare).await,
+    };
     let live_resource_set = live_resources.iter().cloned().collect::<BTreeSet<_>>();
     let mut resources = live_resources;
     match sm_sessions.detached_resources_for_user(&caller_bare).await {

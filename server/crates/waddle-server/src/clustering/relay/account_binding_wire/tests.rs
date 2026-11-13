@@ -311,7 +311,7 @@ fn the_owners_answers_reach_the_requester_unchanged() {
         AccountAuthorityAnswer::BindSuccess(Some(Box::new(bind_success_receipt(&binding)))),
         AccountAuthorityAnswer::BindSuccess(None),
         AccountAuthorityAnswer::Presented(true),
-        AccountAuthorityAnswer::ExpiredBindings(vec![(full_jid(), binding)]),
+        AccountAuthorityAnswer::ExpiredBindings(vec![(full_jid(), binding.clone())]),
         AccountAuthorityAnswer::View(AccountView {
             resources: vec![full_jid(), laptop.clone()],
             available: vec![(laptop.clone(), 5)],
@@ -329,8 +329,9 @@ fn the_owners_answers_reach_the_requester_unchanged() {
                 priority: 5,
                 payloads: vec![payload()],
             }],
-            roster_interested: vec![laptop],
+            roster_interested: vec![laptop.clone()],
             blocklist_interested: Vec::new(),
+            bindings: vec![(laptop, binding)],
         }),
     ];
     for answer in answers {

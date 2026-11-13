@@ -407,6 +407,7 @@ fn decode_lane(
 }
 
 /// How a presented fence relates to the one on file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FenceOrder {
     Current,
     Supersedes,
@@ -455,6 +456,31 @@ impl MailboxRepository {
         identity: &MailboxLaneIdentity,
         presented: &MailboxLaneFence,
     ) -> Result<LockedMailboxLane, IngressUowError> {
+        Self::lock_lane_with(transaction, identity, presented, false).await
+    }
+
+    /// [`Self::lock_lane`] for a lane whose target is the node that hosts a
+    /// binding rather than the holder of a claim. Such a target can change
+    /// while the claim epoch stays the same, when the resource binds again
+    /// on another node. A drained lane, one whose every entry carries a
+    /// disposition, owes its recorded target nothing, so it moves to the
+    /// presented target as long as neither presented epoch is older than
+    /// the recorded one. A lane with undecided entries keeps its target and
+    /// refuses the caller as stale until they are decided.
+    pub async fn lock_lane_retargeting_drained(
+        transaction: &mut IngressUowTransaction<'_>,
+        identity: &MailboxLaneIdentity,
+        presented: &MailboxLaneFence,
+    ) -> Result<LockedMailboxLane, IngressUowError> {
+        Self::lock_lane_with(transaction, identity, presented, true).await
+    }
+
+    async fn lock_lane_with(
+        transaction: &mut IngressUowTransaction<'_>,
+        identity: &MailboxLaneIdentity,
+        presented: &MailboxLaneFence,
+        retarget_drained: bool,
+    ) -> Result<LockedMailboxLane, IngressUowError> {
         let transaction_identity = transaction.identity();
         let (tx, prepared) = transaction.prepared_parts();
         let relations = relations(tx, prepared)?;
@@ -500,12 +526,21 @@ impl MailboxRepository {
         if !key.resolves_to(&lane.key).map_err(MailboxError::from)? {
             return Err(MailboxError::InvalidStored.into());
         }
-        match fence_order(&lane.fence, presented).map_err(MailboxError::from)? {
-            FenceOrder::Current => {}
-            FenceOrder::Supersedes => {
-                Self::write_fence(tx, &relations, lane.id, presented).await?;
-                lane.fence = presented.clone();
+        let order = match fence_order(&lane.fence, presented) {
+            Ok(order) => order,
+            Err(_)
+                if retarget_drained
+                    && lane.pending() == 0
+                    && presented.origin_epoch >= lane.fence.origin_epoch
+                    && presented.target_epoch >= lane.fence.target_epoch =>
+            {
+                FenceOrder::Supersedes
             }
+            Err(stale) => return Err(MailboxError::from(stale).into()),
+        };
+        if order == FenceOrder::Supersedes {
+            Self::write_fence(tx, &relations, lane.id, presented).await?;
+            lane.fence = presented.clone();
         }
         Ok(lane)
     }

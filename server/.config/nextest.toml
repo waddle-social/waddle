@@ -98,6 +98,7 @@ package(waddle-server) & (
     | binary(ingress_uow_reentrant_claim)
     | binary(mailbox_core_postgres)
     | binary(room_requests_postgres)
+    | binary(direct_requests_postgres)
     | binary(migration_owner_lab)
     | binary(pubsub_runtime_attach)
     | binary(room_effect_runtime_attach)

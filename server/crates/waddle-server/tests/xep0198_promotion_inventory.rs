@@ -351,7 +351,7 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
         .unwrap();
     assert_eq!(
         MigrationRunner::single().run(&fixture.db).await.unwrap(),
-        vec![1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036]
+        vec![1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037]
     );
     assert!(MigrationRunner::single()
         .run(&fixture.db)

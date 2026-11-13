@@ -31,6 +31,20 @@ pub(super) async fn deliver_peer_to_live(
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
     if !deps.effects.is_planning() {
+        // The caller offered the stanza to a binding another node hosts
+        // before this live attempt on this node.
+        if let Some(outcome) = crate::server::routes::interpret::deliver_to_bound_resource(
+            deps,
+            target,
+            stanza,
+            waddle_xmpp::registry::DeliveryKind::PeerStanza,
+            None,
+            crate::server::routes::interpret::BoundReach::LOCAL_LIVE,
+        )
+        .await
+        {
+            return outcome;
+        }
         return deliver_peer_to_live_only(deps.user_registry, target, stanza).await;
     }
     let resources = crate::server::routes::interpret::recipient_selection::live_resources(

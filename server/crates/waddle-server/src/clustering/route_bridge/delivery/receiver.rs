@@ -7,7 +7,7 @@ use super::{
     ORDERED_RECEIVER_DELIVERY_TIMEOUT,
 };
 use crate::ingress::identity::IngressRelayAdmission;
-use crate::server::routes::interpret::SmIngressAppendContext;
+use crate::server::routes::interpret::{BoundReach, SmIngressAppendContext};
 use std::collections::HashSet;
 
 impl OrderedRelayDeliveryBridge {
@@ -34,16 +34,29 @@ impl OrderedRelayDeliveryBridge {
             .await
         {
             Some(outcome) => outcome,
-            None => {
-                crate::server::routes::interpret::deliver_direct_to_full(
-                    Some(&services.user_registry),
-                    Some(&services.sm_session_registry),
-                    target,
-                    stanza,
-                    context,
-                )
-                .await
-            }
+            None => match deliver_bound_on_this_node(
+                services,
+                target,
+                stanza,
+                DeliveryKind::DirectFrame,
+                context,
+                None,
+                BoundReach::LOCAL,
+            )
+            .await
+            {
+                Some(outcome) => outcome,
+                None => {
+                    crate::server::routes::interpret::deliver_direct_to_full(
+                        Some(&services.user_registry),
+                        Some(&services.sm_session_registry),
+                        target,
+                        stanza,
+                        context,
+                    )
+                    .await
+                }
+            },
         };
         match outcome {
             FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
@@ -95,7 +108,25 @@ impl OrderedRelayDeliveryBridge {
                 }
             };
         }
-        if matches!(stanza, Stanza::Iq(_)) {
+        let is_iq = matches!(stanza, Stanza::Iq(_));
+        if let Some(outcome) = deliver_bound_on_this_node(
+            services,
+            target,
+            stanza,
+            DeliveryKind::PeerStanza,
+            ingress_append_context,
+            received_at,
+            if is_iq {
+                BoundReach::LOCAL_LIVE
+            } else {
+                BoundReach::LOCAL
+            },
+        )
+        .await
+        {
+            return nack_for(outcome);
+        }
+        if is_iq {
             return deliver_reserved_full_jid_peer_live_only(services, target, stanza).await;
         }
         match crate::server::routes::interpret::deliver_peer_to_full_at(
@@ -143,11 +174,63 @@ async fn deliver_ordered_local_copy(
     })
 }
 
+/// The outcome of a full-JID delivery as the relay receiver reports it.
+fn nack_for(outcome: FullJidDeliveryOutcome) -> Result<(), OrderedRelayNackReason> {
+    match outcome {
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => Ok(()),
+        FullJidDeliveryOutcome::Dropped => Err(OrderedRelayNackReason::Backpressure),
+        FullJidDeliveryOutcome::MaybeCommitted => Err(OrderedRelayNackReason::MaybeCommitted),
+        FullJidDeliveryOutcome::Unavailable => Err(OrderedRelayNackReason::TargetUnavailable),
+    }
+}
+
+/// Deliver one full-JID stanza through the binding the account coordinator
+/// names, as [`crate::server::routes::interpret::deliver_to_bound_resource`]
+/// does for an interpreter. `None` when the registry is selected.
+pub(in super::super) async fn deliver_bound_on_this_node(
+    services: &OrderedRelayDeliveryServices,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: DeliveryKind,
+    context: Option<&SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+    reach: BoundReach,
+) -> Option<FullJidDeliveryOutcome> {
+    let state = services.web_socket_state.upgrade()?;
+    let mut deps = build_interpret_deps(&state, None);
+    deps.connection_registry = &services.connection_registry;
+    deps.user_registry = Some(&services.user_registry);
+    deps.sm_session_registry = Some(&services.sm_session_registry);
+    deps.ingress_append_context = context.cloned();
+    crate::server::routes::interpret::deliver_to_bound_resource(
+        &deps,
+        target,
+        stanza,
+        kind,
+        received_at,
+        reach,
+    )
+    .await
+}
+
 pub(in super::super) async fn deliver_reserved_full_jid_peer_live_only(
     services: &OrderedRelayDeliveryServices,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> Result<(), OrderedRelayNackReason> {
+    if let Some(outcome) = deliver_bound_on_this_node(
+        services,
+        target,
+        stanza,
+        DeliveryKind::PeerStanza,
+        None,
+        None,
+        BoundReach::LIVE,
+    )
+    .await
+    {
+        return nack_for(outcome);
+    }
     let user_actor = services
         .user_registry
         .ask(waddle_xmpp::registry::GetUser {
@@ -239,8 +322,32 @@ pub(in super::super) async fn deliver_reserved_bare_presence_direct(
         return Ok(());
     }
 
-    let live_targets =
-        waddle_xmpp::registry::available_resources_for_user(&services.user_registry, target).await;
+    let coordinator = match services.web_socket_state.upgrade() {
+        Some(state) => {
+            state
+                .deps
+                .app_state
+                .account_authority()
+                .available_resources(target)
+                .await
+        }
+        None => None,
+    };
+    let live_targets = match coordinator {
+        Some(Ok(available)) => available,
+        Some(Err(error)) => {
+            tracing::warn!(
+                bare_jid = %target,
+                %error,
+                "ordered relay: account coordinator did not list available resources for bare-JID presence"
+            );
+            Vec::new()
+        }
+        None => {
+            waddle_xmpp::registry::available_resources_for_user(&services.user_registry, target)
+                .await
+        }
+    };
     let live_set: HashSet<jid::FullJid> = live_targets.iter().map(|(jid, _)| jid.clone()).collect();
     let mut landed = false;
     for resource in live_targets.into_iter().map(|(jid, _)| jid) {
@@ -325,6 +432,19 @@ pub(in super::super) async fn deliver_direct_or_registered_remote_resource(
                 return outcome;
             }
         }
+    }
+    if let Some(outcome) = deliver_bound_on_this_node(
+        services,
+        target,
+        stanza,
+        DeliveryKind::DirectFrame,
+        None,
+        None,
+        BoundReach::LOCAL,
+    )
+    .await
+    {
+        return outcome;
     }
     crate::server::routes::interpret::deliver_direct_to_full(
         Some(&services.user_registry),

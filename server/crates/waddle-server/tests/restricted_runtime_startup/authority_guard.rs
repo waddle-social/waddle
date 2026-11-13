@@ -408,7 +408,7 @@ async fn owner_phase_guards_authority_relations_created_before_the_guard_migrati
         &prepared.admin,
         // The ledger refuses an applied version above a missing one, so the
         // later migration is undone with it; its statement is repeatable.
-        &format!("DELETE FROM {SCHEMA}._migrations WHERE version IN (1034, 1035, 1036)"),
+        &format!("DELETE FROM {SCHEMA}._migrations WHERE version IN (1034, 1035, 1036, 1037)"),
     )
     .await;
     // A row the unguarded binary committed.

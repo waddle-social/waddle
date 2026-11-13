@@ -60,6 +60,19 @@ pub struct AccountView {
     pub roster_interested: Vec<FullJid>,
     /// Active resources that want block-list pushes.
     pub blocklist_interested: Vec<FullJid>,
+    /// The exact binding of every active resource. Delivery sends a stanza
+    /// for a resource only to the endpoint that carries this binding.
+    pub bindings: Vec<(FullJid, BindingRef)>,
+}
+
+impl AccountView {
+    /// The active binding of `resource`, if it has one.
+    pub fn binding(&self, resource: &FullJid) -> Option<&BindingRef> {
+        self.bindings
+            .iter()
+            .find(|(jid, _)| jid == resource)
+            .map(|(_, binding)| binding)
+    }
 }
 
 /// A request to start retiring one exact binding.

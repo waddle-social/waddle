@@ -10,7 +10,7 @@
 //! - the thread-level row `(owner, room, thread_id=<message thread>)`
 //!   when the displayed message belongs to a thread.
 //!
-//! Both rows are pushed through [`push_inbox_update`] so the user's
+//! Both rows are pushed through [`push_inbox_update_with`] so the user's
 //! other resources fan out the read-state flip without waiting for a
 //! fresh `urn:waddle:inbox:0` / `urn:waddle:threads:0` query (XEP-0430
 //! §"Mark as read" cross-device sync semantic).
@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp_core::mam::ThreadId;
 
-use super::groupchat_archive::push_inbox_update;
+use super::groupchat_archive::push_inbox_update_with;
 use super::Deps;
 
 /// Drive [`OutboundEvent::MarkInboxReadFromDisplayed`] effects against
@@ -118,9 +118,7 @@ async fn apply_mark_read(
         .await
     {
         Ok(Some(entry)) => {
-            let push_recipients =
-                push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry)
-                    .await;
+            let push_recipients = push_inbox_update_with(deps, owner, &entry).await;
             capture_displayed_marker_pushes(deps, owner, push_recipients);
             let mutation = match thread_id {
                 Some(thread_id) => {

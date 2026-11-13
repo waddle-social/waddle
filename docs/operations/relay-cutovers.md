@@ -322,6 +322,8 @@ every binding request and account read for an account another node owns to
 that node as the new message
 `waddle.clustering.relay.account_binding.v1`. The same id carries the
 request that closes a connection replaced by a fresh bind on another node.
+An account view answered through it carries the exact binding of each
+active resource, which delivery reads to reach a resource on another node.
 There is no earlier version of this message and no compatible receiver on
 an older binary: an older peer answers `UnknownMessage`, which leaves the
 request undecided, and the bind or resume fails. A node that runs the

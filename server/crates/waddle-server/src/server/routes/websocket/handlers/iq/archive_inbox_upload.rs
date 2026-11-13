@@ -872,13 +872,9 @@ async fn handle_inbox_mark_read_iq(
     };
 
     if let Some(entry) = updated {
-        crate::server::routes::interpret::push_inbox_update(
-            state.deps.protocol.connection_registry.as_ref(),
-            Some(&state.deps.protocol.user_registry),
-            &user_jid,
-            &entry,
-        )
-        .await;
+        let deps =
+            crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+        crate::server::routes::interpret::push_inbox_update_with(&deps, &user_jid, &entry).await;
     }
 
     vec![iq_to_xml(build_mark_read_result(iq))]

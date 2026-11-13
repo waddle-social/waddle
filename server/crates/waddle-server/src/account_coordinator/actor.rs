@@ -1000,6 +1000,7 @@ impl AccountCoordinatorActor {
             presence: resources.presence_states(),
             roster_interested: resources.roster_interested_resources(),
             blocklist_interested: resources.blocklist_interested_resources(),
+            bindings: resources.active_bindings(),
         })
     }
 

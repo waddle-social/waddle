@@ -1021,7 +1021,7 @@ async fn push_projected_inbox(
         );
         resources
     } else if let super::effects::EffectOutcome::Inbox(Ok(entry)) = outcome {
-        push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry).await
+        push_inbox_update_with(deps, owner, &entry).await
     } else {
         Vec::new()
     }
@@ -1063,6 +1063,58 @@ pub(crate) async fn push_inbox_update(
         None => Vec::new(),
     };
     push_inbox_update_to(connection_registry, &resources, entry).await
+}
+
+/// [`push_inbox_update`] for a caller with interpreter dependencies.
+///
+/// With the account coordinator selected the pushed resources are the
+/// coordinator's active resources, and each push goes to the binding the
+/// coordinator names for it, on this node or on the node that hosts it.
+/// The push is a server-generated frame, never a copy an ingress
+/// transaction owns, so it travels without the caller's append context.
+pub(crate) async fn push_inbox_update_with(
+    deps: &Deps<'_>,
+    user: &BareJid,
+    entry: &InboxEntry,
+) -> Vec<FullJid> {
+    let coordinator = match deps.web_socket_state {
+        Some(state) => {
+            state
+                .deps
+                .app_state
+                .account_authority()
+                .resources(user)
+                .await
+        }
+        None => None,
+    };
+    let Some(read) = coordinator else {
+        return push_inbox_update(deps.connection_registry, deps.user_registry, user, entry).await;
+    };
+    let resources = read.unwrap_or_else(|error| {
+        warn!(%error, %user, "account coordinator did not list resources for an inbox push");
+        Vec::new()
+    });
+    let mut frame_deps = deps.clone();
+    frame_deps.ingress_append_context = None;
+    let mut delivered = Vec::new();
+    for resource in resources {
+        let stanza = Stanza::Message(build_inbox_push(Jid::from(resource.clone()), entry));
+        if super::deliver_to_bound_resource(
+            &frame_deps,
+            &resource,
+            &stanza,
+            waddle_xmpp::registry::DeliveryKind::DirectFrame,
+            None,
+            super::BoundReach::LIVE,
+        )
+        .await
+            == Some(super::FullJidDeliveryOutcome::Delivered)
+        {
+            delivered.push(resource);
+        }
+    }
+    delivered
 }
 
 /// A captured inbox refresh uses only its original account resources.

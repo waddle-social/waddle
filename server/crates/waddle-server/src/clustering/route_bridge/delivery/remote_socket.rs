@@ -84,6 +84,46 @@ impl OrderedRelayDeliveryBridge {
         .await
     }
 
+    /// The coordinator's binding of `target` when the account coordinator
+    /// is selected: `Some(Some(..))` names the binding and the other node
+    /// that hosts it, `Some(None)` means no other node hosts an active
+    /// binding of the resource. `None` when the registry is selected.
+    async fn coordinator_remote_binding(
+        &self,
+        target: &jid::FullJid,
+    ) -> Option<
+        Option<(
+            waddle_xmpp::ownership::BindingRef,
+            waddle_xmpp::ownership::NodeIdentity,
+        )>,
+    > {
+        let services = self.services.get()?.clone();
+        let state = services.web_socket_state.upgrade()?;
+        let read = state
+            .deps
+            .app_state
+            .account_authority()
+            .bound_resource(target)
+            .await?;
+        let Ok(Some(binding)) = read else {
+            return Some(None);
+        };
+        if services.connection_registry.hosts_binding(target, &binding) {
+            return Some(None);
+        }
+        let node = binding.connection_ref().node_lease().clustered_node();
+        Some(
+            node.filter(|node| *node != services.node_identity.current())
+                .map(|node| (binding, node)),
+        )
+    }
+
+    /// Deliver to a resource another node hosts. With the registry selected
+    /// that is a resource registered here through a remote channel mirror.
+    /// With the account coordinator selected it is a resource whose active
+    /// binding another node hosts, reached by a bound request; the mirror
+    /// is not read. `None` means no other node hosts the resource and the
+    /// caller keeps its local path.
     pub(crate) async fn try_deliver_registered_remote_resource_at(
         &self,
         target: &jid::FullJid,
@@ -92,6 +132,21 @@ impl OrderedRelayDeliveryBridge {
         ingress_append_context: Option<&SmIngressAppendContext>,
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<FullJidDeliveryOutcome> {
+        if let Some(remote) = self.coordinator_remote_binding(target).await {
+            let (binding, node) = remote?;
+            return Some(
+                self.deliver_bound(super::BoundDelivery {
+                    target,
+                    binding,
+                    node,
+                    stanza,
+                    kind,
+                    ingress_append_context,
+                    received_at,
+                })
+                .await,
+            );
+        }
         let registration = {
             let registrations = self.remote_owner_resources.lock().await;
             registrations.get(target).cloned()
@@ -388,11 +443,42 @@ impl OrderedRelayDeliveryBridge {
         }
     }
 
+    /// Deliver a frame to a resource another node hosts and report whether
+    /// it was accepted. With the account coordinator selected the frame is
+    /// a bound request to the node that hosts the resource's binding, and
+    /// its acceptance is that node's decision.
     pub(crate) async fn try_deliver_registered_remote_resource_write_accepted(
         self: &Arc<Self>,
         target: &jid::FullJid,
         stanza: &Stanza,
     ) -> RegisteredRemoteWriteAcceptedDelivery {
+        if let Some(remote) = self.coordinator_remote_binding(target).await {
+            let Some((binding, node)) = remote else {
+                return RegisteredRemoteWriteAcceptedDelivery::Absent;
+            };
+            return match self
+                .deliver_bound(super::BoundDelivery {
+                    target,
+                    binding,
+                    node,
+                    stanza,
+                    kind: DeliveryKind::DirectFrame,
+                    ingress_append_context: None,
+                    received_at: None,
+                })
+                .await
+            {
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    RegisteredRemoteWriteAcceptedDelivery::Delivered
+                }
+                FullJidDeliveryOutcome::Unavailable => {
+                    RegisteredRemoteWriteAcceptedDelivery::Absent
+                }
+                FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted => {
+                    RegisteredRemoteWriteAcceptedDelivery::Retryable
+                }
+            };
+        }
         let Some(registration) = ({
             let registrations = self.remote_owner_resources.lock().await;
             registrations.get(target).cloned()

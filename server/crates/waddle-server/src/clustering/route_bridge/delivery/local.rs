@@ -237,6 +237,19 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh_at(
             Err(_) => FullJidDeliveryOutcome::Dropped,
         };
     }
+    if let Some(outcome) = super::receiver::deliver_bound_on_this_node(
+        services,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::PeerStanza,
+        ingress_append_context,
+        received_at,
+        crate::server::routes::interpret::BoundReach::ANY,
+    )
+    .await
+    {
+        return outcome;
+    }
     crate::server::routes::interpret::deliver_peer_to_full_at(
         Some(&services.user_registry),
         Some(&services.sm_session_registry),

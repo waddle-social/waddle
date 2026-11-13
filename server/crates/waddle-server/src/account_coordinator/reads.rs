@@ -9,6 +9,7 @@
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ownership::account_coordinator::AccountResourcePresence;
+use waddle_xmpp::ownership::BindingRef;
 use waddle_xmpp::registry::user_actor::ResourceRoutingState;
 
 use super::authority::AccountBindingAuthority;
@@ -64,6 +65,20 @@ impl AccountAuthoritySelection {
                 .map(|resource| resource.jid)
                 .collect()
         }))
+    }
+
+    /// The active binding of one resource: the only binding delivery may
+    /// hand a stanza for it to. `Ok(None)` means the resource has no active
+    /// binding.
+    pub(crate) async fn bound_resource(
+        &self,
+        resource: &FullJid,
+    ) -> Option<Result<Option<BindingRef>, AccountCoordinatorError>> {
+        Some(
+            self.coordinator_view(&resource.to_bare())
+                .await?
+                .map(|view| view.binding(resource).cloned()),
+        )
     }
 
     /// Every active resource, with no presence filter.

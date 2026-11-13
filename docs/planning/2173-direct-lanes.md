@@ -145,9 +145,9 @@ A resource without stream management falls under the second row: the entry
 is decided before the write attempt, which is the non-SM
 attempted-uncertain outcome the relay has.
 
-The refusal "hosted elsewhere" is part of the stored vocabulary and has no
-writer: the worker cannot yet tell a session claimed by a third node from
-an absent one, and treats both as not delivered.
+The account owner's worker cannot tell a session claimed by a third node
+from an absent one, and refuses both as not delivered. The refusal "hosted
+elsewhere" is written for bound requests (see "Bound requests").
 
 ### Bare JID
 
@@ -207,6 +207,43 @@ decision is unknown.
   (`route_remote_resource_origin`).
 - A send for which the origin could not commit a request.
 
+## Bound requests
+
+With the account coordinator selected, a stanza for a full JID whose
+active binding another node hosts is not given to the account owner: it is
+a direct request addressed to the node that hosts the binding (migration
+V1037, `S/db/migrations/direct_request_targets_postgres.sql`).
+
+- **The request** records the target node incarnation
+  (`target_node_id`, `target_node_epoch`) and the exact binding
+  (`target_binding`), all three or none. A request without a target is
+  decided by the account owner as above. A key names one request, target
+  included.
+- **The lane** is (the account's `UserActor` entity, the full JID). Every
+  origin on every node shares it, so the hosting node decides a resource's
+  stanzas in commit order. Its fence takes both epochs from the account's
+  claim and names the hosting node as target; a claim that moves
+  supersedes it. When the resource binds again on another node under the
+  same claim, the lane moves to that node only once it is drained
+  (`MailboxRepository::lock_lane_retargeting_drained`); until then the
+  origin's commit is refused with no effect and the caller runs its
+  fallback.
+- **The decision** (`IngressAuthority::decide_bound_request`) is taken by
+  the node the lane names, under the lane lock. The target node hands the
+  stanza only to the connection that carries the named binding, or to the
+  resource's detached session when no connection holds the resource; a
+  connection that carries another binding refuses it as not delivered. A
+  copy an ingress transaction owns is handed over first and decided
+  afterwards; anything else is decided first and handed over once.
+- **Hosted elsewhere.** Any other node that works the lane, which happens
+  when a new account owner adopts it after the account's claim moved, may
+  only refuse the request with the "hosted elsewhere" refusal. The origin
+  reads every refusal as `Unavailable`.
+- **Gate.** A bound request is carried only when the mailbox carries
+  direct requests (D7). Otherwise the resource on the other node is
+  reported `Unavailable` and the caller runs its fallback; the remote
+  channel mirror is not used with the coordinator selected.
+
 ## Deletion precondition for the `BareJid` and `FullJid` relay lanes
 
 1. Every clustered deployment at protocol epoch 2 or later with the
@@ -237,9 +274,12 @@ origin seam and the worker (`delivery/direct.rs`), worker dispatch and
 adoption of account lanes (`S/ingress/mailbox_worker.rs`) and retention
 (`S/ingress/maintenance/implementation.rs`) are in the tree.
 
+Bound requests (V1037, the target node and binding, the "hosted
+elsewhere" refusal written by a node that is not the request's target)
+and the PostgreSQL repository suite (`tests/direct_requests_postgres.rs`)
+are in the tree, not yet verified by a test run.
+
 Not built:
 
-- A writer of the "hosted elsewhere" refusal.
 - A sweep that reports decided direct requests no origin consumed. The
   monitoring query `waddle_ingress_direct_requests` reports them.
-- A PostgreSQL repository suite for `ingress_direct_requests`.

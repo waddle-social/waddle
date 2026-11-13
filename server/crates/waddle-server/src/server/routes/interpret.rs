@@ -145,6 +145,8 @@ use crate::server::routes::websocket::WebSocketState;
 mod archive_groupchat_event;
 mod archive_lookup;
 mod bot;
+mod bound_delivery;
+pub(crate) use bound_delivery::{deliver_to_bound_resource, deliver_to_local_binding, BoundReach};
 pub(crate) mod carbons;
 mod deps;
 pub mod effects;
@@ -268,7 +270,9 @@ pub use deps::{
     Deps, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin, SmIngressAppendContext,
     TimerCommand,
 };
-pub(crate) use groupchat_archive::{project_groupchat_archive, push_inbox_update};
+#[cfg(test)]
+pub(crate) use groupchat_archive::push_inbox_update;
+pub(crate) use groupchat_archive::{project_groupchat_archive, push_inbox_update_with};
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
 };

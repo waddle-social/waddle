@@ -1301,6 +1301,18 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote_at(
     {
         return outcome;
     }
+    if let Some(outcome) = crate::server::routes::interpret::deliver_to_bound_resource(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::PeerStanza,
+        received_at,
+        crate::server::routes::interpret::BoundReach::ANY,
+    )
+    .await
+    {
+        return outcome;
+    }
     if let Some(outcome) = super::deliver_registered_remote_resource_at(
         deps,
         target,
@@ -1364,6 +1376,21 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
         deps.sm_session_registry,
         deps.ingress_append_context.as_ref(),
         target,
+    )
+    .await
+    {
+        return outcome;
+    }
+    // With the account coordinator selected the copy goes to the binding
+    // the coordinator names, on this node or as a bound request to the node
+    // that hosts it, instead of to the account's owner.
+    if let Some(outcome) = crate::server::routes::interpret::deliver_to_bound_resource(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::DirectFrame,
+        received_at,
+        crate::server::routes::interpret::BoundReach::ANY,
     )
     .await
     {
