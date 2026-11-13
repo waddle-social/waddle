@@ -125,7 +125,10 @@ async fn terminal_session_leaves_remote_room(end: SessionEnd) {
             let enabled: minidom::Element = enabled.parse().expect("typed SM enabled");
             assert_eq!(enabled.attr("max"), Some("10"));
             assert_eq!(enabled.attr("resume"), Some("true"));
-            let stream_id = enabled.attr("id").expect("resumable stream identifier");
+            let resume_id = enabled.attr("id").expect("resumable stream identifier");
+            // The `<enabled/>` id is a resume token; the durable session row
+            // is keyed by the session's storage key.
+            let session = super::sm_resume_token_support::session_stream(&db, resume_id).await;
             // Dropping the transport preserves occupancy until the negotiated
             // resume deadline, unlike a graceful XMPP close.
             drop(departing);
@@ -135,8 +138,8 @@ async fn terminal_session_leaves_remote_room(end: SessionEnd) {
                     let mut rows = conn
                         .query(
                             "SELECT detached_at_ms IS NOT NULL AND occupancy_session IS NOT NULL \
-                             FROM sm_sessions WHERE stream_id = ?",
-                            waddle_server::db_params![stream_id.to_owned()],
+                             FROM sm_durable_sessions WHERE session_id = ?",
+                            waddle_server::db_params![session.as_str().to_owned()],
                         )
                         .await
                         .expect("detached SM query");

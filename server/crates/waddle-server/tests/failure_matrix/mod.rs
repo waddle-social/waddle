@@ -8,9 +8,9 @@ use waddle_ws_test_support::WsXmppClient;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 use super::cluster_support::{
-    cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db, reset_and_enroll,
-    reset_node_lease_tables, spawn_cluster_server, wait_for_readiness, CLUSTER_PEER_PASSWORD,
-    CLUSTER_PEER_USERNAME,
+    activate_mailbox_epoch, cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db,
+    reset_and_enroll, reset_node_lease_tables, spawn_cluster_server, wait_for_readiness,
+    CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 
 const DOMAIN: &str = "localhost";
@@ -83,6 +83,12 @@ async fn same_full_jid_bound_concurrently_on_two_nodes_leaves_one_binding() {
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+    // The message from the node that lost the race reaches the remaining
+    // binding on the other node as a bound direct request, which the
+    // mailbox carries from protocol epoch 2
+    // (`docs/planning/2173-direct-lanes.md`, "Bound requests"). The nodes
+    // build the schema the epoch row lives in.
+    activate_mailbox_epoch(&db).await;
 
     // Both sockets authenticate first, so the two binds are the only work
     // left when they race.

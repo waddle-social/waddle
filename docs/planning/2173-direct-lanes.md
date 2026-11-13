@@ -242,7 +242,11 @@ V1037, now in `server/crates/waddle-server/sql/baseline/postgres.sql`).
 - **Gate.** A bound request is carried only when the mailbox carries
   direct requests (D7). Otherwise the resource on the other node is
   reported `Unavailable` and the caller runs its fallback; the remote
-  channel mirror is not used with the coordinator selected.
+  channel mirror is not used with the coordinator selected. A cluster
+  test that expects live delivery to a full JID bound on another node
+  therefore activates protocol epoch 2 first
+  (`cluster_support::activate_mailbox_epoch`): the harness nodes start
+  through the owner-as-runtime path, which never activates it.
 
 ## Deletion precondition for the `BareJid` and `FullJid` relay lanes
 
