@@ -33,7 +33,6 @@ use waddle_ws_test_support::{TestServer, WsXmppClient};
 const DOMAIN: &str = "localhost";
 const RECIPIENT: &str = "admin";
 const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
-const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
 const DURABLE_SM_ENV: &str = "WADDLE_XMPP_DURABLE_SM";
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 
@@ -170,7 +169,7 @@ impl Scenario {
             &pool.pool_env,
             port_a,
             &[port_b],
-            &[(ACCEPTANCE_ENV, "mailbox"), (DURABLE_SM_ENV, "durable")],
+            &[(DURABLE_SM_ENV, "durable")],
         )
         .await;
         let (server_b, _, _) = spawn_cluster_server_with_envs(
@@ -180,7 +179,6 @@ impl Scenario {
             &[port_a],
             &[
                 (SEAM_DIRECTORY_ENV, seam_directory.as_str()),
-                (ACCEPTANCE_ENV, "mailbox"),
                 (DURABLE_SM_ENV, "durable"),
             ],
         )

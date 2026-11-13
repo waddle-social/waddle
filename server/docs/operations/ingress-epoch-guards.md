@@ -89,7 +89,7 @@ epoch-proven.
 | --- | --- |
 | 0 | Guards are inert; every write is allowed. |
 | 1 | Guarded writes require the transaction-local proof. |
-| 2 | As 1. On clustered PostgreSQL, remote room acceptance uses the durable mailbox and clustered room manifests are sealed, unless `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=relay`. |
+| 2 | As 1. On clustered PostgreSQL, remote room acceptance uses the durable mailbox and clustered room manifests are sealed. |
 
 A server implements epochs 0 through 2 and refuses a higher live epoch
 inside each ingress transaction and each write transaction of the durable
@@ -108,8 +108,7 @@ stopped-pod cutover:
    remaining backends; verify none remain and `pg_prepared_xacts` is empty.
 3. Run the owner job. It prepares the schema, grants the runtime role and
    activates the epoch.
-4. Start the new version on every node with the same
-   `clustering.remoteRoomAcceptance`.
+4. Start the new version on every node.
 
 From step 3 on an older server cannot commit an ingress transaction. Rollback
 is **roll-forward only**: the epoch never moves down, a pre-V1008 catalog
@@ -122,14 +121,15 @@ has already been acknowledged to its sender; it gets no mailbox entry and no
 recorded owner decision, and its outstanding dispatch is finished by the
 ingress maintenance pass as before.
 
-A node that selects the mailbox refuses to start when the mailbox tables
+A clustered PostgreSQL node refuses to start when the mailbox tables
 hold rows the cutover cannot explain: an entry whose message has no source
 binding or owner decision, or an unfinished entry while the epoch is below 2.
 The startup error names the counts. Do not edit the rows to pass the check;
 find the writer that produced them.
 
 A PostgreSQL deployment that does not run the owner phase stays at epoch 0
-and keeps relay acceptance.
+and keeps relay acceptance. `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`, which
+once kept relay acceptance at epoch 2, is ignored with a startup warning.
 
 ## Owner limitation
 

@@ -17,7 +17,8 @@
 //! through the durable mailbox from protocol epoch 2 on, so the scenarios
 //! that test the handled count activate that epoch on the shared database.
 //! The scenarios that only test recovery of one acceptance after a lost
-//! reply or an origin restart select the ordered relay explicitly.
+//! reply or an origin restart stay below that epoch, where the origin hands
+//! the stanza to the owner through the ordered relay.
 //!
 //! The binary needs PostgreSQL and fails without `WADDLE_TEST_POSTGRES_URL`:
 //! every scenario is about durable state shared by two processes.
@@ -45,13 +46,12 @@ use waddle_xmpp::stream_management::SM_NS;
 
 const DOMAIN: &str = "localhost";
 const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
-/// Selects how both nodes carry remote room acceptance.
-const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
-
-/// How the nodes of a scenario carry remote room acceptance.
+/// How the nodes of a scenario carry remote room acceptance, decided by the
+/// protocol epoch of the shared database.
 #[derive(Clone, Copy)]
 enum Acceptance {
-    /// The origin counts the stanza when its own commit succeeds.
+    /// Below the mailbox epoch: the origin relays the stanza and counts it
+    /// when its own commit succeeds.
     Relay,
     /// The server's default at the mailbox epoch: the origin counts the
     /// stanza only after reading the owner's decision from the durable
@@ -77,14 +77,6 @@ async fn activate_mailbox_epoch(db: &Database) {
     }
 }
 
-impl Acceptance {
-    fn value(self) -> &'static str {
-        match self {
-            Self::Relay => "relay",
-            Self::Mailbox => "mailbox",
-        }
-    }
-}
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
 const DROP_REPLY: &str = "drop-reply";
@@ -372,7 +364,6 @@ struct Scenario {
     sender: SmClient,
     sender_occupant: jid::FullJid,
     witness: SmClient,
-    acceptance: Acceptance,
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -392,23 +383,15 @@ impl Scenario {
         let seams = OwnerSeams::new();
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
-        let (server_a, node_a, _) = spawn_cluster_server_with_envs(
-            &postgres_url,
-            &pool.pool_env,
-            port_a,
-            &[port_b],
-            &[(ACCEPTANCE_ENV, acceptance.value())],
-        )
-        .await;
+        let (server_a, node_a, _) =
+            spawn_cluster_server_with_envs(&postgres_url, &pool.pool_env, port_a, &[port_b], &[])
+                .await;
         let (server_b, node_b, _) = spawn_cluster_server_with_envs(
             &postgres_url,
             &pool.pool_env,
             port_b,
             &[port_a],
-            &[
-                (SEAM_DIRECTORY_ENV, &seams.directory()),
-                (ACCEPTANCE_ENV, acceptance.value()),
-            ],
+            &[(SEAM_DIRECTORY_ENV, &seams.directory())],
         )
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
@@ -474,7 +457,6 @@ impl Scenario {
             sender,
             sender_occupant,
             witness,
-            acceptance,
             _serial: serial,
         }
     }
@@ -807,7 +789,7 @@ async fn owner_sigkill_after_commit_delivers_the_frozen_reflection_once() {
         &scenario.pool.pool_env,
         port_b,
         &[scenario.port_a],
-        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
+        &[],
     )
     .await;
     wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
@@ -930,7 +912,7 @@ async fn origin_sigkill_after_owner_commit() {
         &scenario.pool.pool_env,
         port_a,
         &[scenario.port_b],
-        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
+        &[],
     )
     .await;
     wait_for_readiness(&server_a, true, Duration::from_secs(30)).await;
@@ -1044,10 +1026,7 @@ async fn observe_owner_killed_before_commit(scenario: &mut Scenario) -> OwnerKil
         &scenario.pool.pool_env,
         port_b,
         &[scenario.port_a],
-        &[
-            (SEAM_DIRECTORY_ENV, &scenario.seams.directory()),
-            (ACCEPTANCE_ENV, scenario.acceptance.value()),
-        ],
+        &[(SEAM_DIRECTORY_ENV, &scenario.seams.directory())],
     )
     .await;
     wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
@@ -1301,7 +1280,7 @@ async fn owner_transfer_before_commit_is_decided_once_by_the_successor() {
         &scenario.pool.pool_env,
         port_b,
         &[scenario.port_a],
-        &[(ACCEPTANCE_ENV, scenario.acceptance.value())],
+        &[],
     )
     .await;
     wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;

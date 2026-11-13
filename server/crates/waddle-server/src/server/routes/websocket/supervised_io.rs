@@ -343,17 +343,6 @@ impl<T> QueueItem<T> {
     pub fn into_inner(self) -> T {
         self.value
     }
-
-    /// Transform a retained item without releasing its count or byte permits.
-    #[cfg(feature = "test-support")]
-    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
-    pub(crate) fn map<U>(self, transform: impl FnOnce(T) -> U) -> QueueItem<U> {
-        QueueItem {
-            value: transform(self.value),
-            _count_permit: self._count_permit,
-            _byte_permit: self._byte_permit,
-        }
-    }
 }
 
 /// Bounded queue sender that signals the transport before returning overload.
@@ -635,9 +624,6 @@ pub(crate) trait WriteAuthority: Send + Sync {
         stop: &StopSignal,
         attempt: Box<dyn FnOnce() + '_>,
     ) -> bool;
-    fn completed(&self);
-    #[cfg(feature = "test-support")]
-    fn after_attempt(&self) -> futures::future::BoxFuture<'_, ()>;
 }
 
 impl<T> Drop for WriteRequest<T> {
@@ -1756,17 +1742,6 @@ impl IoCustodianHandle {
     /// Whether this custodian belongs to the supplied physical transport.
     pub fn is_for(&self, connection_ref: &ConnectionRef) -> bool {
         &self.client.connection_ref == connection_ref
-    }
-
-    /// Clone the exact physical connection's first-wins stop signal for
-    /// independently owned cleanup tasks.
-    #[cfg(feature = "test-support")]
-    #[expect(
-        dead_code,
-        reason = "connection retirement observes pump stops through the stop listener only"
-    )]
-    pub(crate) fn stop_signal(&self) -> StopSignal {
-        self.client.stop.clone()
     }
 
     pub(crate) fn watch_cancellation(
@@ -3883,10 +3858,6 @@ where
         return SendOutcome::IoFailure(error);
     }
     progress.attempted();
-    #[cfg(feature = "test-support")]
-    if let Some(authority) = authority.as_deref() {
-        authority.after_attempt().await;
-    }
 
     let flushed = tokio::select! {
         biased;
@@ -3900,9 +3871,6 @@ where
     match flushed {
         Ok(()) => {
             progress.completed();
-            if let Some(authority) = authority.as_deref() {
-                authority.completed();
-            }
             SendOutcome::Sent
         }
         Err(error) if is_send_after_close(&error) => {

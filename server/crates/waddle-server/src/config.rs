@@ -1184,10 +1184,27 @@ pub struct ServerConfig {
 pub struct IngressConfig {
     pub pool_size: u32,
     pub retry_attempts: usize,
-    /// How a groupchat message for a room owned by another node reaches the
-    /// owner's acceptance. Only a clustered PostgreSQL deployment acts on
-    /// the mailbox value.
-    pub remote_room_acceptance: crate::ingress_uow::RemoteRoomAcceptance,
+}
+
+/// Environment variable that once chose whether a groupchat message for a
+/// room owned by another node reached the owner's acceptance through the
+/// ordered relay or the durable mailbox. A clustered PostgreSQL deployment
+/// always carries that acceptance through the mailbox once the owner phase
+/// has activated ingress protocol epoch 2, so the variable selects nothing;
+/// startup logs a warning when it is set so a deployment still carrying it
+/// can drop it.
+pub const REMOVED_REMOTE_ROOM_ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
+
+/// Warn when the removed remote room acceptance selector is still set. Any
+/// value is ignored.
+pub fn warn_if_removed_remote_room_acceptance_set() {
+    if let Ok(value) = std::env::var(REMOVED_REMOTE_ROOM_ACCEPTANCE_ENV) {
+        tracing::warn!(
+            variable = REMOVED_REMOTE_ROOM_ACCEPTANCE_ENV,
+            value = %value,
+            "the remote room acceptance selector was removed and is ignored; a clustered PostgreSQL deployment carries remote room acceptance through the durable mailbox from ingress protocol epoch 2"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -1196,8 +1213,6 @@ pub enum IngressConfigError {
     PoolSize,
     #[error("WADDLE_INGRESS_RETRY_ATTEMPTS must be an integer between 1 and 32")]
     RetryAttempts,
-    #[error("WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE must be `relay` or `mailbox`")]
-    RemoteRoomAcceptance,
 }
 
 impl Default for IngressConfig {
@@ -1205,7 +1220,6 @@ impl Default for IngressConfig {
         Self {
             pool_size: 4,
             retry_attempts: 5,
-            remote_room_acceptance: Default::default(),
         }
     }
 }
@@ -1235,11 +1249,6 @@ impl IngressConfig {
                         .as_ref()
                         .parse()
                         .map_err(|_| IngressConfigError::RetryAttempts)?;
-                }
-                "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE" => {
-                    config.remote_room_acceptance =
-                        crate::ingress_uow::RemoteRoomAcceptance::from_config_value(value.as_ref())
-                            .ok_or(IngressConfigError::RemoteRoomAcceptance)?;
                 }
                 _ => {}
             }
@@ -3170,7 +3179,6 @@ mod ingress_authority_config_tests {
             IngressConfig {
                 pool_size: 4,
                 retry_attempts: 5,
-                remote_room_acceptance: Default::default(),
             }
         );
         assert_eq!(
@@ -3182,33 +3190,18 @@ mod ingress_authority_config_tests {
             IngressConfig {
                 pool_size: 16,
                 retry_attempts: 7,
-                remote_room_acceptance: Default::default(),
             }
         );
     }
 
     #[test]
-    fn ingress_authority_config_selects_remote_room_acceptance() {
-        use crate::ingress_uow::RemoteRoomAcceptance;
-        assert_eq!(
-            IngressConfig::default().remote_room_acceptance,
-            RemoteRoomAcceptance::DurableMailbox
-        );
-        for (value, expected) in [
-            ("relay", RemoteRoomAcceptance::OrderedRelay),
-            ("mailbox", RemoteRoomAcceptance::DurableMailbox),
-        ] {
+    fn ingress_authority_config_ignores_the_removed_remote_room_acceptance_selector() {
+        for value in ["relay", "mailbox", "both"] {
             assert_eq!(
-                IngressConfig::from_vars([("WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE", value)])
-                    .expect("selector")
-                    .remote_room_acceptance,
-                expected
+                IngressConfig::from_vars([("WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE", value)]),
+                Ok(IngressConfig::default())
             );
         }
-        assert_eq!(
-            IngressConfig::from_vars([("WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE", "both")]),
-            Err(IngressConfigError::RemoteRoomAcceptance)
-        );
     }
 
     #[test]

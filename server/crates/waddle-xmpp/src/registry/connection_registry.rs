@@ -20,14 +20,6 @@ mod archive_dispatch;
 mod binding;
 mod binding_permit;
 mod connections;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "unwired custody primitive for a later integration"
-    )
-)]
-mod dark_envelope_custody;
 pub(super) mod endpoint;
 mod live_resume;
 mod local_io;
@@ -39,25 +31,18 @@ mod state;
 mod subscriptions;
 mod write_interruption;
 
-pub use actor_outbound::{
-    ActorOutboundCustody, ActorOutboundId, ActorOutboundLease, ActorOutboundReceiver,
-    ActorOutboundStage,
-};
+pub use actor_outbound::ActorOutboundStage;
 pub use archive_dispatch::{ArchiveDispatchRefusal, ArchiveDispatchRefusalReason};
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
 pub use binding_permit::LocalBindingPermit;
-pub use endpoint::{
-    ActorSocketOutboundEndpoint, BindingAdmissionState, SocketOutboundEndpoint,
-    SocketOutboundReceiver,
-};
+pub use endpoint::{BindingAdmissionState, SocketOutboundEndpoint, SocketOutboundReceiver};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};
 pub use outbound::{
-    ActorProvisionalConnectionEntry, BroadcastOutcome, ConnectionEntry,
-    DeferredPendingFlushWakeups, DeliveryKind, ForceDetachInterruption, ForceDetachOfferError,
-    ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest, LocalConnectionBindingId,
-    OutboundStanza, OutboundWriteAcceptance, ProvisionalConnectionEntry, SendResult,
-    TerminalOrderingRetryLease,
+    BroadcastOutcome, ConnectionEntry, DeferredPendingFlushWakeups, DeliveryKind,
+    ForceDetachInterruption, ForceDetachOfferError, ForceDetachOrigin, ForceDetachOutcome,
+    ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,
+    ProvisionalConnectionEntry, SendResult, TerminalOrderingRetryLease,
 };
 pub use sending::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,

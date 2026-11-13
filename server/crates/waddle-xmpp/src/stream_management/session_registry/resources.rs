@@ -405,35 +405,6 @@ impl InMemorySmSessionRegistry {
             .await
     }
 
-    /// Record a typed stanza for an exact detached resource and return the
-    /// actual stream whose replay buffer accepted it. Callers that persist an
-    /// effect identity must use this rather than inferring a stream from the
-    /// target JID, which can be rebound while routing is in flight.
-    pub async fn record_stanza_for_detached_bound_resource_with_stream(
-        &self,
-        jid: &FullJid,
-        stanza: &Stanza,
-        original_receipt_at: DateTime<Utc>,
-    ) -> Result<Option<SmSessionId>, SmRegistryError> {
-        let Some(stream_id) =
-            self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
-        else {
-            return self
-                .admit_to_durable_detached(jid, stanza, original_receipt_at, None, |_| true)
-                .await;
-        };
-        let recorded = self
-            .append_detached_stanza(
-                &stream_id,
-                |session| !session.is_expired() && session.jid == *jid,
-                None,
-                stanza,
-                original_receipt_at,
-            )
-            .await?;
-        Ok(recorded.then(|| SmSessionId::new(stream_id)))
-    }
-
     /// Allocate one ingress obligation exactly once, even after resume or rebind.
     /// The ledger is consulted before looking at any detached session.
     ///

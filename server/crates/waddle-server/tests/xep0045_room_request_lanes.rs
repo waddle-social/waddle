@@ -36,7 +36,6 @@ use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType};
 
 const DOMAIN: &str = "localhost";
 const SEAM_DIRECTORY_ENV: &str = "WADDLE_TEST_SEAM_REMOTE_ACCEPTANCE_DIRECTORY";
-const ACCEPTANCE_ENV: &str = "WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE";
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
@@ -219,13 +218,11 @@ struct Scenario {
 
 impl Scenario {
     async fn start() -> Self {
-        Self::start_with("mailbox", &[]).await
+        Self::start_with(&[]).await
     }
 
-    /// Start with the origin node's remote room acceptance selector and
-    /// extra environment for both nodes. The owner always selects the
-    /// mailbox.
-    async fn start_with(origin_acceptance: &str, extra: &[(&str, &str)]) -> Self {
+    /// Start with extra environment for both nodes.
+    async fn start_with(extra: &[(&str, &str)]) -> Self {
         let postgres_url = waddle_ws_test_support::require_test_postgres_url()
             .expect("the room request suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
         let serial = cluster_e2e_serial_lock().lock().await;
@@ -237,12 +234,8 @@ impl Scenario {
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
         let seam_directory = seams.directory();
-        let mut envs_a = vec![(ACCEPTANCE_ENV, origin_acceptance)];
-        envs_a.extend_from_slice(extra);
-        let mut envs_b = vec![
-            (SEAM_DIRECTORY_ENV, seam_directory.as_str()),
-            (ACCEPTANCE_ENV, "mailbox"),
-        ];
+        let envs_a = extra.to_vec();
+        let mut envs_b = vec![(SEAM_DIRECTORY_ENV, seam_directory.as_str())];
         envs_b.extend_from_slice(extra);
         let (server_a, _, _) = spawn_cluster_server_with_envs(
             &postgres_url,
@@ -363,10 +356,7 @@ impl Scenario {
             &self.pool.pool_env,
             port_b,
             &[self.port_a],
-            &[
-                (SEAM_DIRECTORY_ENV, &self.seams.directory()),
-                (ACCEPTANCE_ENV, "mailbox"),
-            ],
+            &[(SEAM_DIRECTORY_ENV, &self.seams.directory())],
         )
         .await;
         wait_for_readiness(&server_b, true, Duration::from_secs(30)).await;
@@ -1006,31 +996,6 @@ async fn kicked_occupant_is_not_seated_by_a_successor() {
     assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 0);
 }
 
-/// An owner that carries room requests through the mailbox refuses a join
-/// that still arrives on the ordered relay: nothing is seated and no
-/// request exists.
-#[tokio::test]
-async fn relayed_join_is_refused_by_an_owner_at_the_mailbox_epoch() {
-    let scenario = Scenario::start_with("relay", &[]).await;
-    let mut joiner = scenario.origin_client("relayed").await;
-    joiner
-        .send(&String::from(&join_presence(&scenario.room, "relayed")))
-        .await
-        .expect("send join");
-    let frames = drain(&mut joiner, Duration::from_secs(10)).await;
-    assert!(
-        !frames
-            .iter()
-            .any(|frame| is_self_presence(frame, &scenario.occupant("relayed"))),
-        "a relayed join is not accepted at the mailbox epoch: {frames:?}"
-    );
-    assert_eq!(scalar(&scenario.db, &scenario.room, OCCUPANTS).await, 0);
-    assert_eq!(scalar(&scenario.db, &scenario.room, REQUESTS).await, 0);
-}
-
-/// A presence update and a leave of a resource on the origin node reach the
-/// owner as room requests: the other occupants see each, the occupancy row
-/// follows, and the leaving resource receives its own unavailable presence.
 #[tokio::test]
 async fn presence_update_and_leave_cross_nodes_as_room_requests() {
     let mut scenario = Scenario::start().await;
@@ -1135,26 +1100,23 @@ async fn muji_exchange_crosses_nodes_on_the_muji_lane() {
         .mount(&livekit)
         .await;
     let livekit_ws_url = livekit.uri().replacen("http://", "ws://", 1);
-    let scenario = Scenario::start_with(
-        "mailbox",
-        &[
-            ("LIVEKIT_API_KEY", "APItestkeyrequests"),
-            (
-                "LIVEKIT_API_SECRET",
-                "test-secret-with-at-least-32-bytes-of-payload",
-            ),
-            ("LIVEKIT_WS_URL", &livekit_ws_url),
-            ("LIVEKIT_TURN_HOST", "turn.example.test"),
-            (
-                "LIVEKIT_TURN_SHARED_SECRET",
-                "turn-shared-secret-value-also-long-enough",
-            ),
-            (
-                "LIVEKIT_WEBHOOK_SECRET",
-                "test-webhook-secret-with-at-least-32-bytes",
-            ),
-        ],
-    )
+    let scenario = Scenario::start_with(&[
+        ("LIVEKIT_API_KEY", "APItestkeyrequests"),
+        (
+            "LIVEKIT_API_SECRET",
+            "test-secret-with-at-least-32-bytes-of-payload",
+        ),
+        ("LIVEKIT_WS_URL", &livekit_ws_url),
+        ("LIVEKIT_TURN_HOST", "turn.example.test"),
+        (
+            "LIVEKIT_TURN_SHARED_SECRET",
+            "turn-shared-secret-value-also-long-enough",
+        ),
+        (
+            "LIVEKIT_WEBHOOK_SECRET",
+            "test-webhook-secret-with-at-least-32-bytes",
+        ),
+    ])
     .await;
     let mut caller = scenario.origin_client("caller").await;
     join_fanout_room(&mut caller, &scenario.room, "caller").await;

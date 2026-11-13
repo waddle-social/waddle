@@ -90,11 +90,6 @@ impl InMemorySmSessionRegistry {
         self.durable_detached.set(sessions).is_ok()
     }
 
-    /// Whether the durable authority's detached sessions are attached.
-    pub fn has_durable_detached(&self) -> bool {
-        self.durable_detached.get().is_some()
-    }
-
     /// The attached durable detached sessions of `account` that satisfy
     /// `keep`. Empty when no durable authority is attached.
     pub(super) async fn durable_detached_matching(

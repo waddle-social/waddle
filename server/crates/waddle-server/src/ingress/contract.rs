@@ -364,7 +364,6 @@ impl IngressAuthority {
         };
         #[cfg(not(feature = "clustering"))]
         let uow = IngressUnitOfWork::open(database.clone(), lineage)?;
-        let uow = uow.with_remote_room_acceptance(config.remote_room_acceptance);
         // Probe the epoch and lineage before publishing a usable authority. A
         // lineage attestation failure is not fatal at boot: the readiness gate
         // holds the node unready and every ingress transaction keeps failing

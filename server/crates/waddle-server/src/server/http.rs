@@ -2111,6 +2111,7 @@ async fn create_sm_session_registry(
     // binding rows reference durable sessions, so it opens only together
     // with the durable session authority.
     crate::account_coordinator::warn_if_removed_selector_set();
+    crate::config::warn_if_removed_remote_room_acceptance_set();
     let account_authority = crate::account_coordinator::AccountAuthoritySelection::open(
         global_db,
         clustering,

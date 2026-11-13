@@ -48,7 +48,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{
     ConnectionRef, NodeIdentityStamp, NodeLeaseIdentity, SharedNodeIdentity,
 };
-use waddle_xmpp::registry::{ActorOutboundCustody, ActorOutboundId, ActorOutboundStage};
+use waddle_xmpp::registry::ActorOutboundStage;
 
 pub use crate::server::routes::websocket::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, CustodianSummary, InboundTerminal,
@@ -255,55 +255,6 @@ impl<E> WebSocketInput<E> {
             }
         })
         .await;
-    }
-}
-
-/// One raw transport item retained under its original pump budget. Terminal
-/// values are separate because the reader holds them in its ordered slot.
-#[cfg(feature = "test-support")]
-#[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
-pub(crate) enum RetainedWebSocketInput {
-    Frame(QueueItem<Message>),
-    Close(Message),
-}
-
-#[cfg(feature = "test-support")]
-impl<E> WebSocketInput<E> {
-    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
-    pub(crate) async fn recv_retained(
-        &mut self,
-    ) -> Option<Result<RetainedWebSocketInput, InputError<E>>> {
-        poll_fn(|cx| {
-            if self.finished {
-                return Poll::Ready(None);
-            }
-            match self.frames.poll_recv(cx) {
-                Poll::Ready(Some(frame)) => {
-                    return Poll::Ready(Some(Ok(RetainedWebSocketInput::Frame(frame))));
-                }
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => {}
-            }
-            match Pin::new(&mut self.terminal).poll(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(result) => {
-                    self.finished = true;
-                    Poll::Ready(match result {
-                        Ok(OrderedInboundTerminal::Close(frame)) => {
-                            Some(Ok(RetainedWebSocketInput::Close(frame)))
-                        }
-                        Ok(OrderedInboundTerminal::IoFailure(error)) => {
-                            Some(Err(InputError::Transport(error)))
-                        }
-                        Ok(OrderedInboundTerminal::Oversized { size, max_bytes }) => {
-                            Some(Err(InputError::FrameTooLarge { size, max_bytes }))
-                        }
-                        Err(_) => None,
-                    })
-                }
-            }
-        })
-        .await
     }
 }
 
@@ -553,8 +504,6 @@ where
     retirement_deadline: Duration,
     close_on_drop: bool,
     close_task: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(feature = "test-support")]
-    close_probe: Option<Arc<ActorWriteProbe>>,
 }
 
 impl<R, W> UnstartedSocketParts<R, W>
@@ -569,7 +518,6 @@ where
         writer: W,
         retirement_deadline: Duration,
         close_on_drop: bool,
-        #[cfg(feature = "test-support")] close_probe: Option<Arc<ActorWriteProbe>>,
     ) -> Self {
         Self {
             authority,
@@ -579,8 +527,6 @@ where
             retirement_deadline,
             close_on_drop,
             close_task: None,
-            #[cfg(feature = "test-support")]
-            close_probe,
         }
     }
 
@@ -603,15 +549,9 @@ where
         };
         self.reader.take();
         let deadline = self.retirement_deadline;
-        #[cfg(feature = "test-support")]
-        let close_probe = self.close_probe.take();
         self.close_task = Some(runtime.spawn(async move {
             let _reservation = reservation;
             let close = async {
-                #[cfg(feature = "test-support")]
-                if let Some(probe) = close_probe {
-                    probe.before_close().await;
-                }
                 let _ = writer.send(Message::Close(None)).await;
                 let _ = writer.close().await;
             };
@@ -706,8 +646,6 @@ impl SocketAdmission {
             terminal_started: CancellationToken::new(),
             phase: RwLock::new(TransportPhase::Open),
             #[cfg(feature = "test-support")]
-            actor_write_probe: Mutex::new(None),
-            #[cfg(feature = "test-support")]
             actor_reaper_exit: Mutex::new(None),
         });
         let reservation = inventory.reserve(authority.connection_ref.clone())?;
@@ -731,29 +669,6 @@ impl SocketAdmission {
 
     pub(crate) fn connection_ref(&self) -> &ConnectionRef {
         &self.authority.connection_ref
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(crate) fn install_actor_write_probe(&self, probe: Arc<ActorWriteProbe>) {
-        let mut saved = self
-            .authority
-            .actor_write_probe
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        *saved = Some(probe);
-    }
-
-    /// Keep the eventual pump inventory nonterminal until every dark actor-side
-    /// task has returned and its independent cleanup owner is joined.
-    #[cfg(feature = "test-support")]
-    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
-    pub(crate) fn retain_actor_cleanup(
-        &mut self,
-    ) -> Result<
-        crate::server::routes::websocket::supervised_io::AuxiliaryCleanupGuard,
-        CustodianInventoryError,
-    > {
-        self.reservation.retain_until_auxiliary_cleanup()
     }
 
     /// Consume the admission into the single-task WebSocket loop. The loop
@@ -848,17 +763,7 @@ impl SocketAdmission {
             Ok(halves) => halves,
             Err(error) => {
                 if let Some(mut socket) = socket {
-                    #[cfg(feature = "test-support")]
-                    let close_probe = authority
-                        .actor_write_probe
-                        .lock()
-                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-                        .clone();
                     let _ = tokio::time::timeout(retirement_deadline, async {
-                        #[cfg(feature = "test-support")]
-                        if let Some(probe) = close_probe {
-                            probe.before_close().await;
-                        }
                         let _ = socket.send(Message::Close(None)).await;
                         let _ = socket.close().await;
                     })
@@ -868,12 +773,6 @@ impl SocketAdmission {
                 return Err(error);
             }
         };
-        #[cfg(feature = "test-support")]
-        let close_probe = authority
-            .actor_write_probe
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-            .clone();
         let parts = UnstartedSocketParts::new(
             Arc::clone(&authority),
             reservation,
@@ -881,8 +780,6 @@ impl SocketAdmission {
             writer,
             retirement_deadline,
             true,
-            #[cfg(feature = "test-support")]
-            close_probe,
         );
         after_split().await;
         let (custodian, mut input, output) = Self::start_with_parts(
@@ -1271,11 +1168,6 @@ pub struct TestSocketAdmission(SocketAdmission);
 
 #[cfg(feature = "test-support")]
 impl TestSocketAdmission {
-    pub fn with_actor_write_probe(self, probe: Arc<ActorWriteProbe>) -> Self {
-        self.0.install_actor_write_probe(probe);
-        self
-    }
-
     pub fn clustered(
         lifecycle: &NodeLifecycle,
         source: &SharedNodeIdentity,
@@ -1350,208 +1242,6 @@ impl TestSocketAdmission {
     }
 }
 
-/// Test-only barrier immediately before the source/lifecycle-fenced sink
-/// attempt. It can model a noncooperative synchronous pump poll.
-#[cfg(feature = "test-support")]
-pub struct ActorWriteProbe {
-    state: Mutex<ActorWriteProbeState>,
-    release: std::sync::Condvar,
-    entered: tokio::sync::watch::Sender<u64>,
-    attempts: std::sync::atomic::AtomicU64,
-    close_armed: std::sync::atomic::AtomicBool,
-    close_entered: tokio::sync::watch::Sender<bool>,
-    close_release: tokio::sync::Semaphore,
-    after_attempt_armed: std::sync::atomic::AtomicBool,
-    after_attempt_entered: tokio::sync::watch::Sender<bool>,
-    after_attempt_release: tokio::sync::Semaphore,
-    after_start_state: Mutex<ActorWriteProbeState>,
-    after_start_release: std::sync::Condvar,
-    after_start_entered: tokio::sync::watch::Sender<u64>,
-}
-
-#[cfg(feature = "test-support")]
-#[derive(Default)]
-struct ActorWriteProbeState {
-    armed: bool,
-    released: bool,
-    entries: u64,
-}
-
-#[cfg(feature = "test-support")]
-impl Default for ActorWriteProbe {
-    fn default() -> Self {
-        let (entered, _) = tokio::sync::watch::channel(0);
-        let (close_entered, _) = tokio::sync::watch::channel(false);
-        let (after_attempt_entered, _) = tokio::sync::watch::channel(false);
-        let (after_start_entered, _) = tokio::sync::watch::channel(0);
-        Self {
-            state: Mutex::new(ActorWriteProbeState::default()),
-            release: std::sync::Condvar::new(),
-            entered,
-            attempts: std::sync::atomic::AtomicU64::new(0),
-            close_armed: std::sync::atomic::AtomicBool::new(false),
-            close_entered,
-            close_release: tokio::sync::Semaphore::new(0),
-            after_attempt_armed: std::sync::atomic::AtomicBool::new(false),
-            after_attempt_entered,
-            after_attempt_release: tokio::sync::Semaphore::new(0),
-            after_start_state: Mutex::new(ActorWriteProbeState::default()),
-            after_start_release: std::sync::Condvar::new(),
-            after_start_entered,
-        }
-    }
-}
-
-#[cfg(feature = "test-support")]
-impl ActorWriteProbe {
-    pub fn pause_next(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        state.armed = true;
-        state.released = false;
-    }
-
-    pub async fn wait_for_entry(&self) {
-        let mut entered = self.entered.subscribe();
-        let _ = entered.wait_for(|entries| *entries > 0).await;
-    }
-
-    pub fn release(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        state.released = true;
-        self.release.notify_all();
-    }
-
-    pub fn pause_close(&self) {
-        self.close_armed
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    pub async fn wait_for_close(&self) {
-        let mut entered = self.close_entered.subscribe();
-        let _ = entered.wait_for(|entered| *entered).await;
-    }
-
-    pub fn release_close(&self) {
-        self.close_release.add_permits(1);
-    }
-
-    async fn before_close(&self) {
-        if self
-            .close_armed
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            self.close_entered.send_replace(true);
-            if let Ok(permit) = self.close_release.acquire().await {
-                permit.forget();
-            }
-        }
-    }
-
-    pub fn attempts(&self) -> u64 {
-        self.attempts.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    pub fn pause_after_attempt(&self) {
-        self.after_attempt_armed
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    pub async fn wait_for_after_attempt(&self) {
-        let mut entered = self.after_attempt_entered.subscribe();
-        let _ = entered.wait_for(|entered| *entered).await;
-    }
-
-    pub fn release_after_attempt(&self) {
-        self.after_attempt_release.add_permits(1);
-    }
-
-    /// Pause after `start_send` returns but before its receipt is marked
-    /// attempted. This exposes the otherwise narrow fast-ACK race in tests.
-    pub fn pause_after_start_send(&self) {
-        let mut state = self
-            .after_start_state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        state.armed = true;
-        state.released = false;
-    }
-
-    pub async fn wait_for_after_start_send(&self) {
-        let mut entered = self.after_start_entered.subscribe();
-        let _ = entered.wait_for(|entries| *entries > 0).await;
-    }
-
-    pub fn release_after_start_send(&self) {
-        let mut state = self
-            .after_start_state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        state.released = true;
-        self.after_start_release.notify_all();
-    }
-
-    fn after_start_send(&self) {
-        let mut state = self
-            .after_start_state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if !state.armed {
-            return;
-        }
-        state.armed = false;
-        state.entries += 1;
-        self.after_start_entered.send_replace(state.entries);
-        while !state.released {
-            state = self
-                .after_start_release
-                .wait(state)
-                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        }
-    }
-
-    async fn after_attempt(&self) {
-        if self
-            .after_attempt_armed
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            self.after_attempt_entered.send_replace(true);
-            if let Ok(permit) = self.after_attempt_release.acquire().await {
-                permit.forget();
-            }
-        }
-    }
-
-    fn before_attempt(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if !state.armed {
-            return;
-        }
-        state.armed = false;
-        state.entries += 1;
-        self.entered.send_replace(state.entries);
-        while !state.released {
-            state = self
-                .release
-                .wait(state)
-                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        }
-    }
-
-    fn record_attempt(&self) {
-        self.attempts
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
 struct TransportAuthority {
     connection_ref: ConnectionRef,
     source: IdentitySource,
@@ -1560,8 +1250,6 @@ struct TransportAuthority {
     live_interrupt: CancellationToken,
     terminal_started: CancellationToken,
     phase: RwLock<TransportPhase>,
-    #[cfg(feature = "test-support")]
-    actor_write_probe: Mutex<Option<Arc<ActorWriteProbe>>>,
     #[cfg(feature = "test-support")]
     actor_reaper_exit:
         Mutex<Option<crate::server::routes::websocket::supervised_io::ReservedReaperExitPoint>>,
@@ -1617,7 +1305,6 @@ impl TransportAuthority {
 struct FrameAuthority {
     transport: Arc<TransportAuthority>,
     mode: FrameMode,
-    actor: Option<(Arc<ActorOutboundCustody>, ActorOutboundId)>,
 }
 
 impl WriteAuthority for FrameAuthority {
@@ -1656,17 +1343,6 @@ impl WriteAuthority for FrameAuthority {
         }
         match self.mode {
             FrameMode::Data | FrameMode::LiveDetach => {
-                #[cfg(feature = "test-support")]
-                let probe = self
-                    .transport
-                    .actor_write_probe
-                    .lock()
-                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-                    .clone();
-                #[cfg(feature = "test-support")]
-                if let Some(probe) = &probe {
-                    probe.before_attempt();
-                }
                 // The process and live-interruption tokens are independently
                 // cancellable, so those checks remain best effort. Source,
                 // node generation and the first pump stop fence the sink
@@ -1692,32 +1368,8 @@ impl WriteAuthority for FrameAuthority {
                             {
                                 return Err(());
                             }
-                            if let Some((custody, id)) = &self.actor {
-                                custody
-                                    .attempt_with(id, || {
-                                        #[cfg(feature = "test-support")]
-                                        if let Some(probe) = &probe {
-                                            probe.record_attempt();
-                                        }
-                                        attempt();
-                                        #[cfg(feature = "test-support")]
-                                        if let Some(probe) = &probe {
-                                            probe.after_start_send();
-                                        }
-                                    })
-                                    .map_or(Err(()), |_| Ok(()))
-                            } else {
-                                #[cfg(feature = "test-support")]
-                                if let Some(probe) = &probe {
-                                    probe.record_attempt();
-                                }
-                                attempt();
-                                #[cfg(feature = "test-support")]
-                                if let Some(probe) = &probe {
-                                    probe.after_start_send();
-                                }
-                                Ok(())
-                            }
+                            attempt();
+                            Ok(())
                         })
                         .unwrap_or(Err(()))
                     })
@@ -1745,27 +1397,6 @@ impl WriteAuthority for FrameAuthority {
             }
         }
     }
-
-    fn completed(&self) {
-        if let Some((custody, id)) = &self.actor {
-            custody.mark_flushed(id);
-        }
-    }
-
-    #[cfg(feature = "test-support")]
-    fn after_attempt(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            let probe = self
-                .transport
-                .actor_write_probe
-                .lock()
-                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-                .clone();
-            if let Some(probe) = probe {
-                probe.after_attempt().await;
-            }
-        })
-    }
 }
 
 /// An outbound frame bound to the exact transport that constructed it.
@@ -1782,24 +1413,6 @@ impl WebSocketOutboundFrame {
             authority: Arc::new(FrameAuthority {
                 transport: Arc::clone(transport),
                 mode,
-                actor: None,
-            }),
-        }
-    }
-
-    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
-    fn actor_data(
-        frame: Message,
-        transport: &Arc<TransportAuthority>,
-        custody: Arc<ActorOutboundCustody>,
-        id: ActorOutboundId,
-    ) -> Self {
-        Self {
-            frame,
-            authority: Arc::new(FrameAuthority {
-                transport: Arc::clone(transport),
-                mode: FrameMode::Data,
-                actor: Some((custody, id)),
             }),
         }
     }
@@ -1885,28 +1498,6 @@ where
             frame,
             &self.authority,
             FrameMode::Data,
-        ))
-    }
-
-    #[expect(dead_code, reason = "the actor-owned endpoint does not use this yet")]
-    pub(crate) fn actor_data_frame(
-        &self,
-        frame: Message,
-        custody: Arc<ActorOutboundCustody>,
-        id: ActorOutboundId,
-    ) -> Result<WebSocketOutboundFrame, OutputError<E>> {
-        if custody.connection() != self.connection_ref() || id.connection() != self.connection_ref()
-        {
-            return Err(OutputError::WrongConnection);
-        }
-        if self.authority.phase() != TransportPhase::Open || matches!(frame, Message::Close(_)) {
-            return Err(OutputError::InvalidFrame);
-        }
-        Ok(WebSocketOutboundFrame::actor_data(
-            frame,
-            &self.authority,
-            custody,
-            id,
         ))
     }
 
@@ -2471,8 +2062,6 @@ impl SocketAdmission {
             writer,
             retirement_deadline,
             false,
-            #[cfg(feature = "test-support")]
-            None,
         );
         Self::start_with_parts(
             parts,

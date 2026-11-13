@@ -10,7 +10,7 @@ use waddle_server::ingress::origin_gate::{
 use waddle_server::ingress::{
     IngressCanonicalRef, IngressStreamIdentity, IngressSubmission, RoomExecutionPath,
 };
-use waddle_server::ingress_uow::{MailboxRepository, RemoteRoomAcceptance};
+use waddle_server::ingress_uow::MailboxRepository;
 use waddle_xmpp::ingress::mailbox::{
     MailboxEntryDisposition, MailboxOperationKey, MailboxOwnerDecision,
 };
@@ -114,15 +114,11 @@ async fn activate_mailbox_epoch(fixture: &IngressFixture) {
     }
 }
 
-/// A clustered PostgreSQL fixture at the mailbox epoch with the mailbox
-/// selected, and the fence of the room claim it seeded.
+/// A clustered PostgreSQL fixture at the mailbox epoch, and the fence of
+/// the room claim it seeded.
 async fn mailbox_fixture(name: &str) -> Option<(IngressFixture, RoomClaimFenceContext)> {
     let mut fixture = IngressFixture::postgres(name).await?;
     let room_fence = fixture.room_fence(&room()).await;
-    fixture.uow = fixture
-        .uow
-        .clone()
-        .with_remote_room_acceptance(RemoteRoomAcceptance::DurableMailbox);
     assert!(fixture.uow.mailbox_acceptance_enabled());
     activate_mailbox_epoch(&fixture).await;
     Some((fixture, room_fence))
@@ -280,19 +276,18 @@ async fn owner_plan_with_only_an_error_reply_is_the_owners_refusal() {
 
 /// The cutover boundary is the protocol epoch each commit locks. Below the
 /// mailbox epoch a clustered commit dispatches through the relay and writes
-/// no lane, whatever the selector. After the activation the relay selector
-/// still writes none, and the message committed before the activation gets
-/// no entry when it is retransmitted: it carries no source binding, so no
+/// no lane. After the activation the message committed before it gets no
+/// entry when it is retransmitted: it carries no source binding, so no
 /// owner decision is opened for it.
 #[tokio::test]
-async fn commits_below_the_mailbox_epoch_or_under_the_relay_selector_write_no_entry() {
+async fn commits_below_the_mailbox_epoch_write_no_entry() {
     let Some(mut fixture) = IngressFixture::postgres("mailbox_off").await else {
         return;
     };
     fixture.room_fence(&room()).await;
     assert!(
         fixture.uow.mailbox_acceptance_enabled(),
-        "the mailbox is the default selector on clustered PostgreSQL"
+        "clustered PostgreSQL carries remote room acceptance through the mailbox"
     );
     let relay_era = origin_groupchat(&fixture, "mailbox-off", "relayed body");
     let relay_era_commit = commit_submission(&fixture.uow, &relay_era, 5)
@@ -304,19 +299,6 @@ async fn commits_below_the_mailbox_epoch_or_under_the_relay_selector_write_no_en
     assert_eq!(fixture.count("ingress_mailbox_lanes").await, 0);
 
     activate_mailbox_epoch(&fixture).await;
-    let relay_selected = fixture
-        .uow
-        .clone()
-        .with_remote_room_acceptance(RemoteRoomAcceptance::OrderedRelay);
-    assert!(!relay_selected.mailbox_acceptance_enabled());
-    let relayed = origin_groupchat(&fixture, "mailbox-relay", "relay selector body");
-    let relayed_key = commit_submission(&relay_selected, &relayed, 5)
-        .await
-        .expect("origin commit under the relay selector")
-        .message_key
-        .expect("canonical message");
-    assert_eq!(entry_state(&fixture, relayed_key).await, (None, None));
-    assert_eq!(fixture.count("ingress_mailbox_lanes").await, 0);
 
     let replay = commit_submission(&fixture.uow, &relay_era, 5)
         .await
@@ -454,10 +436,7 @@ async fn poller_works_the_lane_head_from_canonical_rows_and_parks_it_after_its_r
         .parse::<uuid::Uuid>()
         .expect("deployment UUID");
     let authority = waddle_server::ingress::IngressAuthority::try_new(
-        waddle_server::config::IngressConfig {
-            remote_room_acceptance: RemoteRoomAcceptance::DurableMailbox,
-            ..Default::default()
-        },
+        waddle_server::config::IngressConfig::default(),
         fixture.db.clone(),
         waddle_server::config::LineageConfig {
             deployment_uuid: Some(waddle_server::db::lineage::DeploymentUuid(deployment)),
@@ -607,10 +586,7 @@ async fn mailbox_authority(
         .parse::<uuid::Uuid>()
         .expect("deployment UUID");
     let authority = waddle_server::ingress::IngressAuthority::try_new(
-        waddle_server::config::IngressConfig {
-            remote_room_acceptance: RemoteRoomAcceptance::DurableMailbox,
-            ..Default::default()
-        },
+        waddle_server::config::IngressConfig::default(),
         fixture.db.clone(),
         waddle_server::config::LineageConfig {
             deployment_uuid: Some(waddle_server::db::lineage::DeploymentUuid(deployment)),

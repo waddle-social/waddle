@@ -47,8 +47,8 @@ an owner transfer does, and what must hold before the relay path is deleted.
 - **Status.** Cut over. In a transaction at protocol epoch 2 or later that
   appends or finds the mailbox entry, the origin sends no relay payload
   (`without_relayed_dispatch` in `S/ingress/commit_mailbox.rs`). Below that
-  epoch, under the `relay` selector, and for a message without a source
-  binding, the relay carries the stanza as before.
+  epoch and for a message without a source binding, the relay carries the
+  stanza as before.
 - **Identity.** `MailboxOperationKey::RoomAcceptance(MessageKey)`, unique
   across lanes. The canonical request is the `ingress_messages` row the origin
   committed, with its source binding.
@@ -172,8 +172,7 @@ an owner transfer does, and what must hold before the relay path is deleted.
 
 - **Status.** Cut over for every clustered PostgreSQL deployment at protocol
   epoch 2 or later under the `mailbox` selector: the join handler commits a
-  room request and sends no relay payload. Relay below epoch 2 and under the
-  `relay` selector. Decided in
+  room request and sends no relay payload. Relay below epoch 2. Decided in
   [`2174-room-request-lanes.md`](2174-room-request-lanes.md).
 - **Identity.** `RoomJoin(RoomRequestKey)`, minted by the origin's handler
   before its first owner attempt; a later join of the same occupant is a new
@@ -254,7 +253,7 @@ an owner transfer does, and what must hold before the relay path is deleted.
 ### Muji signalling
 
 - **Status.** Cut over for every clustered PostgreSQL deployment at protocol
-  epoch 2 or later under the `mailbox` selector; relay otherwise.
+  epoch 2 or later; relay otherwise.
 - **Identity.** `RoomIq(RoomRequestKey)` per relayed Jingle IQ, on the
   `MujiSignaling` room lane, which has its own sequence and cursor and
   neither blocks nor is blocked by the `MucStanza` lane.
@@ -307,16 +306,17 @@ Decided in [`2173-direct-lanes.md`](2173-direct-lanes.md).
   the message offline, as the relay does in the same configuration. A
   writer of the "hosted elsewhere" refusal. A sweep of unconsumed
   decisions.
-- **Deletion precondition.** Every clustered deployment at epoch 2 or later
-  with the `mailbox` selector, the `relay` selector removed, and remote
-  channel mirrors retired; then removal of the `BareJid` and `FullJid`
+- **Deletion precondition.** Every clustered deployment at epoch 2 or later,
+  and remote channel mirrors retired; then removal of the `BareJid` and `FullJid`
   recipients with a version bump.
 
 ### Reserved MUC kinds
 
 `PrivateMessage`, `BareRoomIq`, `OccupantIq` and `FanoutChunk` have no
 producer and no receiver. They are removed with the `MucStanza` lane and need
-no replacement.
+no replacement. Removing them alone would change the `v16` enum, which is an
+incompatible relay activation; it is bundled with the `v17` bump that removes
+the `BareJid` and `FullJid` recipients.
 
 ## Wire version
 
@@ -324,7 +324,7 @@ no replacement.
 update and leave handlers send no `JoinPresence` or `OccupantPresence`
 payload at the mailbox epoch; `v16` marks the same for `MujiJingleIq`.
 Neither the envelope nor the reply changed and no variant was removed: the
-kinds are still sent below epoch 2 and under the `relay` selector, and a
+kinds are still sent below epoch 2, and a
 node at the current id still accepts them. The id lives in
 `S/clustering/relay/implementation.rs`; a peer that still registers an
 older id answers an unknown-message error before it admits anything, and
@@ -338,12 +338,17 @@ mailbox-epoch receiver uses the existing `UnsupportedEnvelope` reason.
 
 | Configuration | Groupchat | Join, presence, Muji | Bare and full JID |
 | --- | --- | --- | --- |
-| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox` | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; the relay kinds are refused by the receiver, including the leave replayed at connection end | mailbox; relay for a remote-mirror origin, an account without a claim and a request that could not be committed |
-| Clustered PostgreSQL, epoch ≥ 2, selector `relay` | relay | relay | relay |
+| Clustered PostgreSQL, epoch ≥ 2 | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; the relay kinds are refused by the receiver, including the leave replayed at connection end | mailbox; relay for a remote-mirror origin, an account without a claim and a request that could not be committed |
 | Clustered PostgreSQL, epoch < 2 (no restricted owner phase) | relay | relay | relay |
 | Single node | none | none | none |
 
+`WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE`, which once kept every lane on the
+relay at epoch 2, is removed and ignored with a startup warning.
+
 No part of `ordered_relay.rs`, `route_bridge/delivery/ordered*.rs` or the
-receiver is unused in every configuration, so none is deleted. Final
-removal needs every clustered deployment at epoch 2 or later with the
-`relay` selector removed, and remote channel mirrors retired.
+receiver is unused in every configuration, so none is deleted. The rows
+below epoch 2 are what the PostgreSQL owner-as-runtime startup serves: it
+never runs the owner phase, so a clustered deployment started that way
+stays at epoch 0, and that startup path stays until the restricted runtime
+cutover. Final removal needs every clustered deployment at epoch 2 or later
+(the owner-as-runtime startup deleted), and remote channel mirrors retired.
