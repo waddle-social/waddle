@@ -13,7 +13,7 @@ use super::{
     DarkMigrationLedgerPins, MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
 };
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
-use crate::db::migrations::{migration_checksum, MigrationRunner};
+use crate::db::migrations::{migration_checksum, MigrationRunner, BASELINE_VERSION};
 use crate::db::{Database, DatabaseDriver, DatabaseError, MigrationLedgerError};
 
 const RESTORE_PATH: &str = "\"$user\", public";
@@ -98,7 +98,7 @@ async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_an
     tx.rollback().await.expect("rollback rejected boundary");
 
     sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version=1030",
+        "DELETE FROM {}._migrations WHERE version=2000",
         fixture.schema
     ))
     .execute(&fixture.admin)
@@ -121,7 +121,7 @@ async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_an
         .await,
         Err(DarkLedgerPreflightError::Database(
             DatabaseError::MigrationLedger(MigrationLedgerError::PendingMigration {
-                version: 1030
+                version: 2000
             })
         ))
     ));
@@ -361,7 +361,7 @@ impl Fixture {
         for migration in MigrationRunner::single()
             .migrations
             .into_iter()
-            .filter(|migration| migration.version <= 1023)
+            .filter(|migration| migration.version <= BASELINE_VERSION)
         {
             sqlx::query(&format!(
                 "INSERT INTO {}._migrations (version, description, checksum) VALUES ($1, $2, $3)",
@@ -418,11 +418,8 @@ impl Fixture {
         for migration in MigrationRunner::single()
             .migrations
             .into_iter()
-            .filter(|migration| (1023..=1030).contains(&migration.version))
+            .filter(|migration| migration.version > BASELINE_VERSION)
         {
-            if migration.version == 1023 {
-                continue;
-            }
             sqlx::query(&format!(
                 "INSERT INTO {}._migrations (version, description, checksum) VALUES ($1, $2, $3)",
                 self.schema
@@ -648,7 +645,7 @@ async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() 
     blocker.rollback().await.expect("release lineage blocker");
 
     sqlx::query(&format!(
-        "UPDATE {}._migrations SET checksum='bad' WHERE version=1030",
+        "UPDATE {}._migrations SET checksum='bad' WHERE version=2000",
         fixture.schema
     ))
     .execute(&fixture.admin)
@@ -1056,7 +1053,7 @@ async fn postgres17_ledger_preflight_bounds_rows_and_text_before_decode() {
     let fixture = Fixture::new(&url).await;
     for column in ["description", "checksum"] {
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET {column} = $1 WHERE version = 1023",
+            "UPDATE {}._migrations SET {column} = $1 WHERE version = 2000",
             fixture.schema
         ))
         .bind("x".repeat(1_000_000))
@@ -1154,7 +1151,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     assert!(exclusive, "rollback must release the shared lock");
     other.rollback().await.expect("end owner");
 
-    for (predicate, missing) in [("version = 1023", 1023), ("version < 1000", 1)] {
+    for (predicate, missing) in [("version = 2000", 2000)] {
         sqlx::query(&format!(
             "DELETE FROM {}._migrations WHERE {predicate}",
             fixture.schema
@@ -1183,7 +1180,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
 
     // A valid relation with a damaged prefix cannot be repaired by this path.
     sqlx::query(&format!(
-        "UPDATE {}._migrations SET checksum='bad' WHERE version=1023",
+        "UPDATE {}._migrations SET checksum='bad' WHERE version=2000",
         fixture.schema
     ))
     .execute(&fixture.admin)
@@ -1203,7 +1200,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     ));
     tx.rollback().await.expect("checksum rollback");
     let checksum: String = sqlx::query_scalar(&format!(
-        "SELECT checksum FROM {}._migrations WHERE version=1023",
+        "SELECT checksum FROM {}._migrations WHERE version=2000",
         fixture.schema
     ))
     .fetch_one(&fixture.admin)

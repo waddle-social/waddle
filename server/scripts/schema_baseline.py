@@ -16,6 +16,10 @@ For PostgreSQL:
   postgres.fingerprint.sql     the query the server and the tooling run to
                                fingerprint a schema's structure
   postgres.fingerprint.json    the source's fingerprint (`--fingerprint`)
+  postgres.one-login.fingerprint.json
+                               the fingerprint of the same history built by a
+                               server that owns its schema
+                               (`--one-login-fingerprint`)
   postgres.retired-ledger.json the source's applied migrations
                                (`--retired-ledger`)
 
@@ -23,8 +27,9 @@ For SQLite: `sqlite.sql`, `sqlite.bootstrap.sql`, `sqlite.fingerprint.json`
 and `sqlite.retired-ledger.json`.
 
 The server reads `postgres.sql`, `sqlite.sql`, the fingerprints and the
-retired ledgers, and only when `WADDLE_DB_BASELINE_ACTION` selects the
-baseline.
+retired ledgers: the baseline is the first entry of its migration catalog,
+and the fingerprints and retired ledgers recognise a database the retired
+migration history built, which the server stamps.
 
 `round-trip` applies the generated SQL to an empty database, dumps it and
 compares the dump, and the rows of the static tables, with the document the
@@ -81,6 +86,53 @@ STATIC_TABLES = {
         "pending_notification_recovery_counter",
     ),
 }
+
+# One operand of a deparsed range test: an identifier, a literal, or either
+# with one parenthesised cast, such as `(0)::numeric`.
+_RANGE_OPERAND = r"(?:[^()\s]+|\([^()]*\)[^()\s]*|'[^']*'[^()\s]*)"
+_RANGE_TEST = re.compile(
+    rf"\(\((\w+) >= ({_RANGE_OPERAND})\) AND \(\1 <= ({_RANGE_OPERAND})\)\)")
+
+
+def reparseable_check(definition: str) -> str:
+    """A CHECK definition that parses back to the expression it came from.
+
+    PostgreSQL turns `x BETWEEN a AND b` into a nested `AND` of two
+    comparisons, and prints it as `((x >= a) AND (x <= b))`. Parsed again,
+    that text joins a leading nested `AND` into the enclosing one, so a
+    database built from the printed text holds a different expression.
+    Writing each range test back as `BETWEEN` keeps the nesting; the round
+    trip compares the result with the source.
+    """
+    return _RANGE_TEST.sub(r"(\1 BETWEEN \2 AND \3)", definition)
+
+
+# Columns of static rows that the PostgreSQL owner phase rewrites after the
+# migrations, with the values the migrations inserted: the owner phase
+# activates the ingress protocol epoch, recording when and for which
+# lineage. The baseline carries the row as the migrations inserted it, and
+# the owner phase activates the epoch on the baseline as it does on the
+# history.
+STATIC_COLUMNS_AS_MIGRATED = {
+    "postgresql": {
+        "ingress_protocol_epoch": {"activated_at": None, "epoch": 0, "lineage_uuid": None},
+    },
+    "sqlite": {},
+}
+
+
+def static_rows_of(document: dict[str, Any]) -> dict[str, Any]:
+    """The static tables' rows as the baseline carries them."""
+    rows = dict(document.get("rows") or {})
+    for table, columns in STATIC_COLUMNS_AS_MIGRATED[document["engine"]].items():
+        if table in rows:
+            rows[table] = [
+                {name: columns[name] if name in columns else value
+                 for name, value in row.items()}
+                for row in rows[table]
+            ]
+    return rows
+
 
 # PostgreSQL tables an owner preparation creates together with the row that
 # marks them prepared, and refuses when it finds the table without that row.
@@ -480,7 +532,10 @@ class PostgresGenerator:
             if row["parent"] == name and row["type"] in order and row["validated"]
         ]
         for row in sorted(inline, key=lambda row: (order[row["type"]], row["name"])):
-            lines.append(f"CONSTRAINT {ident(row['name'])} {row['definition']}")
+            definition = row["definition"]
+            if row["type"] == "c":
+                definition = reparseable_check(definition)
+            lines.append(f"CONSTRAINT {ident(row['name'])} {definition}")
         body = ",\n".join("    " + line for line in lines)
         return f"CREATE TABLE {ident(name)} (\n{body}\n);\n"
 
@@ -561,7 +616,7 @@ class PostgresGenerator:
     def static_rows(self) -> list[str]:
         """One statement per static table that holds rows in the source."""
         out = []
-        rows = self.document.get("rows") or {}
+        rows = static_rows_of(self.document)
         for table in STATIC_TABLES["postgresql"]:
             if f"table {self.schema}.{table}" not in self.objects:
                 continue
@@ -869,8 +924,8 @@ def header(name: str, commit: str, source: str) -> str:
         f"-- Source catalog: {source}\n"
         "--\n"
         "-- Part of the schema baseline (docs/planning/2046-schema-baseline.md). The\n"
-        "-- server uses the baseline only when WADDLE_DB_BASELINE_ACTION selects it;\n"
-        "-- otherwise the migration history in src/db/migrations is the catalog.\n"
+        "-- baseline is migration 2000, the first entry of the server's migration\n"
+        "-- catalog; later schema changes are migrations numbered from 2001.\n"
         "--\n"
         f"-- {_HEADERS[name]}\n\n"
     )
@@ -999,7 +1054,7 @@ def round_trip(arguments: argparse.Namespace) -> int:
         raise CatalogError("the source document was dumped without --rows for the static tables")
     static = STATIC_TABLES[document["engine"]]
     expected = {**expected, "rows": {
-        name: rows for name, rows in document["rows"].items() if name in static}}
+        name: rows for name, rows in static_rows_of(document).items() if name in static}}
     lines = schema_catalog.compare(expected, candidate, include_rows=True)
     for line in lines:
         print(line)
@@ -1104,6 +1159,11 @@ def _parser() -> argparse.ArgumentParser:
         "--fingerprint", metavar="FILE",
         help="fingerprint of the source database, stored as <engine>.fingerprint.json")
     generate_command.add_argument(
+        "--one-login-fingerprint", metavar="FILE",
+        help="PostgreSQL only: fingerprint of the same history built by a server that owns "
+             "its schema (the harness's `legacy` path), stored as "
+             "postgres.one-login.fingerprint.json")
+    generate_command.add_argument(
         "--retired-ledger", metavar="FILE",
         help="applied migration rows of the source database, stored as "
              "<engine>.retired-ledger.json")
@@ -1150,7 +1210,10 @@ def main(argv: list[str] | None = None) -> int:
         out = Path(arguments.out)
         out.mkdir(parents=True, exist_ok=True)
         engine = "postgres" if document["engine"] == "postgresql" else "sqlite"
+        if arguments.one_login_fingerprint and engine != "postgres":
+            raise CatalogError("--one-login-fingerprint applies to PostgreSQL only")
         for option, suffix in ((arguments.fingerprint, "fingerprint"),
+                               (arguments.one_login_fingerprint, "one-login.fingerprint"),
                                (arguments.retired_ledger, "retired-ledger")):
             if option:
                 try:

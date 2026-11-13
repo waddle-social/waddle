@@ -62,7 +62,7 @@ mirrors").
 ## The request
 
 `ingress_direct_requests`, PostgreSQL only, under the epoch guard
-(migration V1033, `S/db/migrations/direct_requests_postgres.sql`):
+(migration V1033, `server/crates/waddle-server/sql/baseline/postgres.sql`, which carries it since the schema baseline):
 
 | Column | Meaning |
 | --- | --- |
@@ -212,7 +212,7 @@ decision is unknown.
 With the account coordinator selected, a stanza for a full JID whose
 active binding another node hosts is not given to the account owner: it is
 a direct request addressed to the node that hosts the binding (migration
-V1037, `S/db/migrations/direct_request_targets_postgres.sql`).
+V1037, now in `server/crates/waddle-server/sql/baseline/postgres.sql`).
 
 - **The request** records the target node incarnation
   (`target_node_id`, `target_node_epoch`) and the exact binding

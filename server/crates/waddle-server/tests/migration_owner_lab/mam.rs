@@ -43,37 +43,6 @@ async fn owner_bootstrap_refuses_missing_migration_ledger() {
 }
 
 #[tokio::test]
-async fn owner_bootstrap_refuses_pending_catalog_before_mam_ddl() {
-    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
-        return;
-    };
-    let fixture = Fixture::new(&url, true).await;
-    let outcome = std::panic::AssertUnwindSafe(async {
-        super::make_v1028_pending(&fixture).await;
-        fixture.enable_owner_handoff().await;
-        assert!(bootstrap_dark_postgres_mam_owner(
-            &fixture.migrator_options,
-            &fixture.config(),
-            &fixture.migrator_role(),
-        )
-        .await
-        .is_err());
-        let absent: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NULL")
-            .bind(format!("{}.mam_messages", fixture.schema))
-            .fetch_one(&fixture.admin)
-            .await
-            .expect("inspect MAM absence");
-        assert!(absent);
-    })
-    .catch_unwind()
-    .await;
-    fixture.cleanup().await;
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-#[tokio::test]
 async fn owner_bootstrap_requires_identity_and_roles_before_ddl() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;

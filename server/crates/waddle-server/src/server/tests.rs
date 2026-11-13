@@ -873,7 +873,7 @@ async fn test_database_in_app_state() {
 
     let db = state.db_pool.global();
 
-    let runner = MigrationRunner::waddle();
+    let runner = MigrationRunner::single();
     runner.run(db).await.unwrap();
 
     // Verify tables exist - use persistent connection for in-memory database

@@ -43,8 +43,9 @@ pub fn run_from_args() -> i32 {
             return error.exit_code();
         }
     };
-    // The schema baseline, when selected, replaces the migration catalog for
-    // every step of every subcommand, so it is chosen before any connects.
+    // What migrations do with a database the retired migration history
+    // built is chosen once, before any step connects, so every step of
+    // every subcommand agrees.
     match select_schema_baseline_from_env() {
         Ok(()) => {}
         Err(message) => {

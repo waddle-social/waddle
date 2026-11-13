@@ -6,7 +6,7 @@ use sqlx::{PgConnection, Row};
 
 use super::receipt_authority::ReceiptOperationPins;
 use super::{RestrictedIngressProfileError, Result};
-use crate::db::migrations::waddle::V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES;
+use crate::db::migrations::postgres_function_body;
 use crate::db::physical_attestation::quote_identifier;
 
 const LOOKUP_CANDIDATE: &str =
@@ -29,11 +29,11 @@ pub(super) async fn verify(
         .bind(schema)
         .fetch_one(&mut *connection)
         .await?;
-    let source = V1030_RECEIPT_OPERATION_JOURNAL_POSTGRES
-        .split_once("AS $p21_body$")
-        .and_then(|(_, tail)| tail.split_once("$p21_body$").map(|(body, _)| body))
+    // The schema baseline writes the function as a template whose
+    // `__SCHEMA__` placeholder is the schema's `quote_ident` spelling.
+    let source = postgres_function_body("waddle_p21_record_effect_receipt")
         .ok_or(RestrictedIngressProfileError::Mismatch("journal source"))?
-        .replace("%1$I", &quoted_schema);
+        .replace("__SCHEMA__", &quoted_schema);
 
     // `inspect_profile_with_receipt_journal` checked the helper body against
     // the manifest-rendered candidate in this same catalog-fenced transaction.

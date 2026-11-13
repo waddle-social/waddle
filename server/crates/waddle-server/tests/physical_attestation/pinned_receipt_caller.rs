@@ -299,7 +299,7 @@ async fn pinned_caller_keeps_one_transaction_and_positive_only_reconciliation() 
     );
 
     let old_checksum: String = sqlx::query_scalar(&format!(
-        "SELECT checksum FROM {}._migrations WHERE version=1030",
+        "SELECT checksum FROM {}._migrations WHERE version=2000",
         fixture.target
     ))
     .fetch_one(&fixture.admin)
@@ -308,7 +308,7 @@ async fn pinned_caller_keeps_one_transaction_and_positive_only_reconciliation() 
     execute(
         &fixture,
         &format!(
-            "UPDATE {}._migrations SET checksum='bad' WHERE version=1030",
+            "UPDATE {}._migrations SET checksum='bad' WHERE version=2000",
             fixture.target
         ),
     )
@@ -319,7 +319,7 @@ async fn pinned_caller_keeps_one_transaction_and_positive_only_reconciliation() 
     );
     assert_eq!(count(&fixture, &operations[4]).await, 0);
     sqlx::query(&format!(
-        "UPDATE {}._migrations SET checksum=$1 WHERE version=1030",
+        "UPDATE {}._migrations SET checksum=$1 WHERE version=2000",
         fixture.target
     ))
     .bind(old_checksum)

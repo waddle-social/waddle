@@ -4,9 +4,9 @@
 Requires an administrator URL in WADDLE_TEST_POSTGRES_URL and psql on PATH
 (or PSQL pointing to it). The database's default collation must be C, for
 example one created from template0 with LOCALE_PROVIDER builtin and
-BUILTIN_LOCALE 'C'. Uses the actual ordered migration catalog and
-canonical pending owner source DDL. No existing target objects are dropped.
-This is a developer artifact producer, never a startup installer.
+BUILTIN_LOCALE 'C'. Builds the schema from the PostgreSQL schema baseline
+and the unregistered owner candidates. No existing target objects are
+dropped. This is a developer artifact producer, never a startup installer.
 """
 
 import argparse
@@ -18,23 +18,25 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1] / "crates/waddle-server/src/db"
+BASELINE = ROOT.parents[1] / "sql/baseline/postgres.sql"
 SCHEMA = "restricted_manifest_build"
 API = "restricted_manifest_api"
 RUNTIME = "restricted_manifest_runtime"
 FILES = {
     "candidate": ROOT / "migrations/owner/ingress_definer_api_candidate.sql",
     "relation": ROOT / "migrations/owner/ingress_epoch_relation_guard_candidate.sql",
-    "waddle": ROOT / "migrations/waddle.rs",
-    "global": ROOT / "migrations/global.rs",
-    "pending_schema": ROOT.parent / "pending_delivery/database/schema.rs",
-    "pending_recovery": ROOT.parent / "pending_delivery/database/recovery_order.rs",
+    "baseline": BASELINE,
     "structure_query": ROOT / "physical_attestation/restricted_ingress/structure.sql",
 }
-OUTPUT = ROOT / "physical_attestation/restricted_ingress_manifest_v2.json"
+OUTPUT = ROOT / "physical_attestation/restricted_ingress_manifest_v3.json"
+VERSION = 3
 
 
 def render(source):
     for placeholder, value in [
+        # The baseline's template spellings of the schema's name.
+        ("__SCHEMA_QUOTED__", f'"{SCHEMA}"'),
+        ("__SCHEMA_LITERAL__", f"'{SCHEMA}'"),
         ("__SCHEMA_PATH__", f'"{SCHEMA}"'),
         ("__SCHEMA__", f'"{SCHEMA}"'),
         ("__API_OWNER_LITERAL__", API),
@@ -44,79 +46,6 @@ def render(source):
     ]:
         source = source.replace(placeholder, value)
     return source
-
-
-def migrations(source):
-    constants = dict(re.findall(r'pub const (V\w+): &str = r#"(.*?)"#;', source, re.S))
-    # Small migrations may use an ordinary, unescaped Rust string literal.
-    # Reject other forms rather than silently omitting registered SQL.
-    for name, value in re.findall(r'pub const (V\w+): &str\s*=\s*"([^"\\]*)";', source):
-        if name in constants:
-            raise ValueError(f"duplicate migration constant: {name}")
-        constants[name] = value
-    # Registered migrations can also keep their SQL in a literal include.
-    # Resolve only relative files beneath the migration directory.
-    migration_root = (ROOT / "migrations").resolve()
-    for name, relative in re.findall(
-        r'pub const (V\w+): &str\s*=\s*include_str!\("([^"\\]+)"\);', source
-    ):
-        if name in constants:
-            raise ValueError(f"duplicate migration constant: {name}")
-        if Path(relative).is_absolute() or ".." in Path(relative).parts:
-            raise ValueError(f"migration include must be a relative source path: {relative}")
-        path = (migration_root / relative).resolve()
-        if not path.is_relative_to(migration_root):
-            raise ValueError(f"migration include escapes source directory: {relative}")
-        constants[name] = path.read_text()
-    names = re.findall(r"sql_postgres:\s*(V\w+)", source)
-    if not names or len(names) != len(set(names)):
-        raise ValueError("migration catalog format changed")
-    missing = [name for name in names if name not in constants]
-    if missing:
-        raise ValueError(f"unresolved migration constants: {missing}")
-    return "\n".join(constants[name] for name in names)
-
-
-def pending_owner_schema(source, recovery):
-    # Extract only pending_delivery's canonical empty-owner DDL. The actual
-    # Rust owner bootstrap independently validates this derivation in PG tests.
-    initial = re.search(
-        r"CREATE TABLE IF NOT EXISTS pending_delivery \(.*?\n        \)", source, re.S
-    )[0].replace("{bigint}", "BIGINT")
-    statements = [initial]
-    statements += re.findall(
-        r'"(ALTER TABLE pending_delivery ADD COLUMN IF NOT EXISTS [^"]+)"', source
-    )
-    statements += [
-        re.sub(r"\\\n\s*", "", statement)
-        for statement in re.findall(
-            r'"(CREATE (?:UNIQUE )?INDEX IF NOT EXISTS idx_pending_delivery_[^"]+)"', source
-        )
-    ]
-    recovery = recovery.split("async fn initialize_sqlite")[0]
-    statements.append(
-        "ALTER TABLE pending_delivery ADD COLUMN notification_recovery_ordinal "
-        "BIGINT GENERATED ALWAYS AS IDENTITY (CACHE 1 NO CYCLE)"
-    )
-    body = re.search(r'POSTGRES_IMMUTABLE_BODY: &str = "([^"]+)"', recovery)[1]
-    statements.append(
-        "CREATE FUNCTION pending_notification_recovery_ordinal_immutable() "
-        f"RETURNS trigger LANGUAGE plpgsql AS $${body}$$"
-    )
-    # The owner stage uses a qualified {table}; its SQLite predecessor has
-    # the same index definitions. Render and deduplicate the exact statements.
-    indexes = re.findall(
-        r'"(CREATE (?:UNIQUE )?INDEX IF NOT EXISTS idx_pending_notification_[^"]+)"', recovery
-    )
-    statements += list(
-        dict.fromkeys(index.replace("{table}", "pending_delivery") for index in indexes)
-    )
-    statements.append(
-        "CREATE TRIGGER pending_notification_recovery_ordinal_immutable "
-        "BEFORE UPDATE OF notification_recovery_ordinal ON pending_delivery "
-        "FOR EACH ROW EXECUTE FUNCTION pending_notification_recovery_ordinal_immutable()"
-    )
-    return ";\n".join(statements) + ";\n"
 
 
 def produce(sources):
@@ -130,9 +59,7 @@ def produce(sources):
         f"CREATE ROLE {API}; CREATE ROLE {RUNTIME}; "
         f"CREATE SCHEMA {SCHEMA}; SET search_path={SCHEMA};\n"
     )
-    for key in ["global", "waddle"]:
-        sql += migrations(sources[key]) + "\n"
-    sql += pending_owner_schema(sources["pending_schema"], sources["pending_recovery"])
+    sql += render(sources["baseline"]) + "\n"
     sql += sources["relation"] + render(sources["candidate"])
     sql += f"""
 SELECT jsonb_agg(jsonb_build_object(
@@ -171,8 +98,8 @@ SET search_path=pg_catalog,pg_temp;
         found = False
         for key, source in sources.items():
             pattern = (
-                r'POSTGRES_IMMUTABLE_BODY: &str = "([^"]+)"'
-                if key == "pending_recovery" else r"AS \$\$(.*?)\$\$"
+                r"\nAS \$function\$(.*?)\$function\$;\n"
+                if key == "baseline" else r"AS \$\$(.*?)\$\$"
             )
             for match in re.finditer(pattern, source, re.S):
                 if render(match[1]) == body:
@@ -188,7 +115,7 @@ SET search_path=pg_catalog,pg_temp;
         if not found:
             raise ValueError(f"exact source body not found: {function['name']}")
     return {
-        "version": 2,
+        "version": VERSION,
         "postgres_major": 17,
         "source_sha256": {key: hashlib.sha256(value.encode()).hexdigest() for key, value in sources.items()},
         "functions": sorted(functions, key=lambda value: value["name"]),
@@ -208,7 +135,7 @@ def main():
             raise SystemExit("restricted ingress manifest differs")
     else:
         OUTPUT.write_text(encoded)
-    print(f"PG17 restricted ingress v2: {len(manifest['functions'])} functions, {len(manifest['structure'])} tables")
+    print(f"PG17 restricted ingress v{VERSION}: {len(manifest['functions'])} functions, {len(manifest['structure'])} tables")
 
 
 if __name__ == "__main__":

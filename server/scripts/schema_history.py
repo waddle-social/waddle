@@ -3,8 +3,9 @@
 
 Each path starts from an empty database and runs the real server binary.
 
-History paths, which build the schema from the migration history and every
-store's own bootstrap:
+History paths, which build the schema from the retired migration history
+and every store's own bootstrap. They run the final release that carries
+that history (`--history-server-bin`, `--history-keypool-bin`):
 
   legacy      PostgreSQL, clustered, one login that owns everything. The
               operator's `waddle-cluster-keypool` enrollment SQL is applied,
@@ -15,29 +16,32 @@ store's own bootstrap:
               `install-attestor`.
   tenant      As restricted, in a schema that is not `public`.
   upgraded    The legacy database carried through provisioning, the owner
-              phase and the attestor installation.
+              phase and the attestor installation. It runs `--server-bin`:
+              with the cut binary its owner phase stamps the legacy
+              database, which a production database cut over to the
+              restricted shape goes through, and must still give what
+              `restricted` gives.
   sqlite      A SQLite file the server starts on.
 
-Baseline paths, which set `WADDLE_DB_BASELINE_ACTION=apply` so the schema
-baseline is the migration catalog, and must give what the history gives:
+Baseline paths, which build the schema from the schema baseline with
+`WADDLE_DB_BASELINE_ACTION=apply`, and must give what the history gives:
 
   baseline         As restricted. The handoff is then emitted and the server
                    is started under the runtime login until it is ready.
   baseline-tenant  As tenant.
   baseline-sqlite  As sqlite; the server is started twice.
 
-Stamp paths, which set `WADDLE_DB_BASELINE_ACTION=stamp` on a database the
-history built:
+Stamp paths, which run the server's default (`WADDLE_DB_BASELINE_ACTION`
+unset or `stamp`) on a database the history built:
 
   stamp           The restricted database: the catalog must not change, the
                   ledger must equal the baseline database's, a second stamp
-                  must change nothing, the restricted server must start, and
-                  a run without the baseline must refuse the database.
+                  must change nothing, an owner phase without the variable
+                  must change nothing, and the restricted server must start.
   stamp-sqlite    The same on the SQLite file.
-  stamp-refusals  `apply` on a database that still holds the history, a stamp
-                  on a schema that has an extra table, and the baseline on a
-                  PostgreSQL server that owns its schema: each must refuse
-                  and leave the database as it was.
+  stamp-refusals  `apply` on a database that still holds the history, and a
+                  stamp on a schema that has an extra table: each must
+                  refuse and leave the database as it was.
 
 Every database is dumped with `schema_catalog.py` into the output directory,
 with row counts, the contents of the tables whose rows do not depend on the
@@ -45,8 +49,11 @@ deployment, its structural fingerprint and its applied migration rows. Each
 comparison prints `ok` or `FAIL`; the exit code is 1 when one failed.
 
 `--paths history` runs the history paths, which is what the baseline is
-generated from. The default runs everything, which needs a binary built
-with the generated baseline.
+generated from. The default runs everything: the history paths with the
+history binaries, every other path with `--server-bin` and `--keypool-bin`,
+which must embed the generated baseline. Without `--history-server-bin`
+every path uses `--server-bin`, which only a binary that still carries the
+history can serve.
 
 The harness creates databases and roles named `waddle_baseline_*` through
 the administrator URL and drops them again unless `--keep` is given. It
@@ -107,6 +114,25 @@ ROW_TABLES = [
     "pubsub_schema_version",
 ]
 
+# Columns of those tables that the owner phase sets per deployment: it
+# activates the ingress protocol epoch with the time and the lineage. Dumps
+# record only whether each is set.
+DEPLOYMENT_COLUMNS = {
+    "ingress_protocol_epoch": ("activated_at", "lineage_uuid"),
+}
+
+
+def mask_deployment_columns(document: dict) -> dict:
+    """Replace each deployment column's value by whether it is set."""
+    rows = document.get("rows") or {}
+    for table, columns in DEPLOYMENT_COLUMNS.items():
+        for row in rows.get(table, []):
+            for column in columns:
+                if column in row:
+                    row[column] = None if row[column] in (None, "NULL") else "<set>"
+    return document
+
+
 HISTORY_PATHS = ("legacy", "restricted", "sqlite", "tenant", "upgraded")
 PATHS = (
     "legacy", "restricted", "sqlite", "tenant",
@@ -162,10 +188,20 @@ class Harness:
                 raise HarnessError(f"{arguments.admin_url_env} is not set")
             self.admin_url = admin_url
             self.psql = schema_catalog.find_psql(arguments.psql)
-        self.server = self._executable(arguments.server_bin)
-        self.keypool = (
+        self.current_server = self._executable(arguments.server_bin)
+        self.current_keypool = (
             self._executable(arguments.keypool_bin) if arguments.keypool_bin else None
         )
+        self.history_server = (
+            self._executable(arguments.history_server_bin)
+            if arguments.history_server_bin else self.current_server
+        )
+        self.history_keypool = (
+            self._executable(arguments.history_keypool_bin)
+            if arguments.history_keypool_bin else self.current_keypool
+        )
+        self.server = self.history_server
+        self.keypool = self.history_keypool
         self.out = Path(arguments.out).resolve()
         self.out.mkdir(parents=True, exist_ok=True)
         self.keep = arguments.keep
@@ -179,6 +215,11 @@ class Harness:
         self.results: list[tuple[str, bool]] = []
         self.pool: str | None = None
         self.enrollment_sql: str | None = None
+
+    def use_history(self, history: bool) -> None:
+        """Run the following steps with the history binaries or the current ones."""
+        self.server = self.history_server if history else self.current_server
+        self.keypool = self.history_keypool if history else self.current_keypool
 
     @staticmethod
     def _executable(path: str) -> str:
@@ -570,8 +611,8 @@ class Harness:
 
     def dump_postgres(self, name: str, database: str, schema: str = SCHEMA) -> Path:
         url = self.url(database)
-        document = schema_catalog.dump_postgres(
-            url, self.psql, schema, ROLE_ALIASES, row_counts=True, rows=ROW_TABLES)
+        document = mask_deployment_columns(schema_catalog.dump_postgres(
+            url, self.psql, schema, ROLE_ALIASES, row_counts=True, rows=ROW_TABLES))
         path = self.out / f"postgres-{name}.json"
         path.write_text(schema_catalog.render(document), encoding="utf-8")
         (self.out / f"postgres-{name}.fingerprint.json").write_text(
@@ -731,6 +772,7 @@ def run(arguments: argparse.Namespace) -> int:
         if "legacy" in dumps and "restricted" in dumps:
             harness.report("legacy-vs-restricted.structure", dumps["legacy"],
                            dumps["restricted"], structure_only=True, expect_equal=False)
+        harness.use_history(False)
 
         # The baseline builds what the history builds.
         if "baseline" in selected:
@@ -780,10 +822,10 @@ def run(arguments: argparse.Namespace) -> int:
             harness.serve_restricted("stamp-serve", restricted_database,
                                      OLD_LOGINS["restricted"], action="apply")
             harness.verdict("stamp.postgres.restricted-server-starts", True, "ready")
-            refused = harness.owner_phase("stamp-unselected", restricted_database, expect=4)
-            harness.verdict("stamp.postgres.history-catalog-refuses-stamped-database",
-                            "migration ledger" in refused.stderr,
-                            refused.stderr.strip().splitlines()[-1][:160])
+            harness.owner_phase("stamp-default", restricted_database)
+            harness.dump_postgres("stamped-default", restricted_database)
+            harness.same_file("stamp.postgres.default-is-a-no-op", "postgres-stamped.ledger.json",
+                              "postgres-stamped-default.ledger.json")
         if "stamp-sqlite" in selected and sqlite_history is not None:
             harness.serve_sqlite("stamp-sqlite", sqlite_history, "stamp")
             dumps["stamp-sqlite"] = harness.dump_sqlite("stamped", sqlite_history)
@@ -801,7 +843,7 @@ def run(arguments: argparse.Namespace) -> int:
             refused = harness.owner_phase("apply-on-history", tenant, TENANT_SCHEMA,
                                           action="apply", expect=4)
             harness.verdict("apply.refuses-a-retired-ledger",
-                            "WADDLE_DB_BASELINE_ACTION=stamp" in refused.stderr,
+                            "never stamps" in refused.stderr,
                             refused.stderr.strip().splitlines()[-1][:150])
             # A schema that is not the one the history builds is not stamped,
             # and the refusal leaves the ledger as it was.
@@ -817,22 +859,16 @@ def run(arguments: argparse.Namespace) -> int:
                            allow=ATTESTOR_COMMENT)
             harness.same_file("stamp.refusal-keeps-the-ledger", "postgres-tenant.ledger.json",
                               "postgres-tenant-after-refusal.ledger.json")
-            # A PostgreSQL server that owns its schema does not take the
-            # baseline: its stores create some tables in another shape.
-            try:
-                harness.serve_legacy("stamp-legacy", legacy_database, OLD_LOGINS["legacy"],
-                                     "stamp")
-                harness.verdict("baseline.refused-by-one-login-postgres", False, "it started")
-            except HarnessError as error:
-                harness.verdict("baseline.refused-by-one-login-postgres",
-                                "owner-phase" in str(error),
-                                str(error).strip().splitlines()[-1][:150])
 
         if "upgraded" in selected and legacy_database is not None:
             harness.upgrade(legacy_database)
             dumps["upgraded"] = harness.dump_postgres("upgraded", legacy_database)
             harness.report("restricted-vs-upgraded", dumps["restricted"], dumps["upgraded"],
                            allow=ATTESTOR_COMMENT + SERVED_ROWS)
+            if "baseline" in selected:
+                harness.same_file("stamp.postgres.one-login-ledger-equals-baseline",
+                                  "postgres-upgraded.ledger.json",
+                                  "postgres-baseline.ledger.json")
     finally:
         harness.cleanup()
     failed = [title for title, passed in harness.results if not passed]
@@ -855,6 +891,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--server-bin", required=True,
                         help="waddle-server built with the clustering feature")
     parser.add_argument("--keypool-bin", help="waddle-cluster-keypool (PostgreSQL paths)")
+    parser.add_argument("--history-server-bin",
+                        help="waddle-server of the final release that carries the retired "
+                             "migration history, for the history paths "
+                             "(default: --server-bin)")
+    parser.add_argument("--history-keypool-bin",
+                        help="waddle-cluster-keypool of that release (default: --keypool-bin)")
     parser.add_argument("--psql", help="psql executable (default: WADDLE_PSQL, then PATH)")
     parser.add_argument("--out", required=True, help="directory for the dumps and diffs")
     parser.add_argument("--paths", default="all",

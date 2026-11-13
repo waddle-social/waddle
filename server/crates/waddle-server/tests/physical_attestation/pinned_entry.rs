@@ -434,16 +434,16 @@ async fn dark_pinned_entry_rejects_missing_registered_ledger_row() {
     let fixture = Fixture::new(url).await;
     let pool = pinned_pool(&fixture, None).await;
     let deleted = sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version = 1030",
+        "DELETE FROM {}._migrations WHERE version = 2000",
         fixture.target
     ))
     .execute(&fixture.admin)
     .await
-    .expect("introduce V1030 ledger drift");
+    .expect("introduce baseline ledger drift");
     assert_eq!(
         deleted.rows_affected(),
         1,
-        "V1030 row is present before drift"
+        "baseline row is present before drift"
     );
     assert!(matches!(
         pool.inspect_dark_pinned_read_only_entry().await,

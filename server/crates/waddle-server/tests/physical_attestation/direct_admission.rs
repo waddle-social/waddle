@@ -137,26 +137,23 @@ async fn pg_production_start(
     production_start(&uow, lease).await
 }
 
+/// Restore the epoch guard as the schema baseline installs it.
 async fn installed_v1009(fixture: &Fixture) {
-    let source = include_str!("../../src/db/migrations/waddle.rs");
-    let sql = source
-        .split("pub const V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES: &str = r#\"")
-        .nth(1)
-        .expect("V1009 source")
-        .split("CREATE FUNCTION waddle_ingress_truncate_guard")
-        .next()
-        .expect("epoch guard source");
-    let sql = sql.replace(
-        "CREATE FUNCTION waddle_ingress_epoch_guard",
-        &format!(
-            "CREATE OR REPLACE FUNCTION {}.waddle_ingress_epoch_guard",
-            fixture.target
-        ),
+    let source = include_str!("../../sql/baseline/postgres.sql");
+    let (_, guard) = source
+        .split_once("\nCREATE FUNCTION waddle_ingress_epoch_guard()")
+        .expect("baseline epoch guard");
+    let (guard, _) = guard
+        .split_once("$function$;\n")
+        .expect("baseline epoch guard body");
+    let sql = format!(
+        "CREATE OR REPLACE FUNCTION {}.waddle_ingress_epoch_guard(){guard}$function$;",
+        fixture.target
     );
     sqlx::raw_sql(&sql)
         .execute(&fixture.admin)
         .await
-        .expect("restore installed V1009 guard");
+        .expect("restore the installed epoch guard");
     sqlx::query(&format!(
         "GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}",
         fixture.target, fixture.runtime

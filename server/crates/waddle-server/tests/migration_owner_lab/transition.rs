@@ -215,8 +215,10 @@ async fn transition_commits_exact_candidate_marker_and_select_only_acl_at_epoch_
     let fixture = TransitionFixture::new(&url).await;
     let before = fixture.ledger().await;
     assert!(
-        before.iter().any(|(version, _)| *version == 1028),
-        "V1028 is part of the registered baseline catalog"
+        before
+            .iter()
+            .any(|(version, _)| *version == waddle_server::db::BASELINE_VERSION),
+        "the schema baseline is part of the registered catalog"
     );
     assert_eq!(fixture.state().await, (true, true, 0, 0));
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
@@ -1241,7 +1243,7 @@ async fn observation_refuses_mismatch_wrong_identity_and_changed_catalog() {
     restore.commit().await.expect("commit guard restore");
     fixture
         .admin(&format!(
-            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 1009",
+            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 2000",
             fixture.schema
         ))
         .await;
@@ -1251,9 +1253,9 @@ async fn observation_refuses_mismatch_wrong_identity_and_changed_catalog() {
     );
     fixture
         .admin(&format!(
-            "UPDATE {}._migrations SET checksum = '{}' WHERE version = 1009",
+            "UPDATE {}._migrations SET checksum = '{}' WHERE version = 2000",
             fixture.schema,
-            ledger.iter().find(|(v, _)| *v == 1009).expect("V1009").1
+            ledger.iter().find(|(v, _)| *v == 2000).expect("baseline").1
         ))
         .await;
     fixture

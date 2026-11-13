@@ -6,9 +6,7 @@ use tracing::{debug, info, instrument};
 use super::baseline::{self, BaselineAction};
 use super::postgres_ledger::{self, PreparedLedger};
 use super::sql::migrations_table_sql;
-use super::{
-    global, migration_checksum, waddle, Migration, MigrationLedgerError, MigrationNamespace,
-};
+use super::{after_baseline, migration_checksum, Migration, MigrationLedgerError};
 use crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 #[cfg(test)]
 use crate::db::ConnectionGuard;
@@ -24,60 +22,54 @@ const MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(15);
 const MIGRATION_LOCK_RETRY: Duration = Duration::from_millis(20);
 const MIGRATION_LOCK_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 
+/// Table the schema baseline creates first among those it shares with no
+/// bootstrap. Finding it without a ledger means a schema the runner did not
+/// record, which it refuses to build over.
+pub(super) const SENTINEL_TABLE: &str = "users";
+
 /// Migration runner for applying migrations to a database.
 pub struct MigrationRunner {
     pub(super) migrations: Vec<Migration>,
-    owned_namespaces: HashSet<MigrationNamespace>,
-    /// Set when the process selected the schema baseline as its catalog.
+    /// Set on the deployment catalog, whose first entry is the schema
+    /// baseline: what to do with a database the retired history built.
     baseline: Option<BaselineAction>,
 }
 
 impl MigrationRunner {
-    /// Create a new migration runner with the given migrations. A runner owns
-    /// every namespace represented by its catalog; ledger rows outside those
-    /// namespaces intentionally belong to another runner and are ignored.
+    /// Create a runner for exactly the given migrations. It owns every
+    /// version in the ledger.
     pub fn new(migrations: Vec<Migration>) -> Self {
         let mut sorted = migrations;
         sorted.sort_by_key(|migration| migration.version);
-        let owned_namespaces = sorted
-            .iter()
-            .map(|migration| MigrationNamespace::of(migration.version))
-            .collect();
         Self {
             migrations: sorted,
-            owned_namespaces,
             baseline: None,
         }
     }
 
-    /// Create a runner for global database migrations.
+    /// The deployment catalog, under the name tests have long used for it.
     #[cfg(test)]
     pub fn global() -> Self {
         Self::single()
     }
 
-    /// Create a runner for channel/message schema migrations.
-    #[cfg(test)]
-    pub fn waddle() -> Self {
-        Self::new(waddle::all())
+    /// The deployment catalog: the schema baseline (version 2000) followed by
+    /// every later migration. Every ledger reader in a process builds its
+    /// runner with this, so the runner that applies, the owner preparations
+    /// that verify and the runtime preflight that pins agree. A database the
+    /// retired history built is stamped or refused as the process's
+    /// [`BaselineAction`] says; see [`baseline`].
+    pub fn single() -> Self {
+        Self::deployment(baseline::selected())
     }
 
-    /// Create a runner for single-database mode.
-    ///
-    /// This composes global + channel/message schema migrations into one
-    /// ordered stream so they share one migration history without collisions.
-    ///
-    /// A process that selected the schema baseline gets the baseline as its
-    /// whole catalog instead; see [`baseline`].
-    pub fn single() -> Self {
-        if let Some(action) = baseline::selected() {
-            let mut runner = Self::new(vec![baseline::migration()]);
-            runner.baseline = Some(action);
-            return runner;
-        }
-        let mut migrations = global::all();
-        migrations.extend(waddle::all());
-        Self::new(migrations)
+    /// The deployment catalog under an explicit [`BaselineAction`].
+    pub(super) fn deployment(action: BaselineAction) -> Self {
+        let mut migrations = vec![baseline::migration()];
+        migrations.extend(after_baseline::all());
+        let mut runner = Self::new(migrations);
+        runner.baseline = Some(action);
+        runner
     }
 
     /// Run all pending migrations on one transaction. PostgreSQL acquires the
@@ -181,11 +173,7 @@ impl MigrationRunner {
             .await?;
         }
 
-        let applied: HashSet<i64> = applied_rows
-            .iter()
-            .filter(|row| self.owns_version(row.version))
-            .map(|row| row.version)
-            .collect();
+        let applied: HashSet<i64> = applied_rows.iter().map(|row| row.version).collect();
         debug!(?applied, "Already applied migrations");
 
         let mut newly_applied = Vec::new();
@@ -207,16 +195,12 @@ impl MigrationRunner {
                 // A previous migration body may have changed its local path.
                 ledger.set_search_path(tx).await?;
             }
-            let apply_result = if migration.version == 1029
-                && migration.sql_sqlite == waddle::V1029_SM_FRAME_PROVENANCE
-                && migration.sql_postgres == waddle::V1029_SM_FRAME_PROVENANCE_POSTGRES
-            {
-                apply_sm_frame_provenance(tx, driver, migration).await
-            } else if self.baseline.is_some() {
-                baseline::apply(tx, driver, migration).await
-            } else {
-                tx.execute_batch(migration.sql_for(driver)).await
-            };
+            let apply_result =
+                if self.baseline.is_some() && migration.version == baseline::BASELINE_VERSION {
+                    baseline::apply(tx, driver, migration).await
+                } else {
+                    tx.execute_batch(migration.sql_for(driver)).await
+                };
             apply_result.map_err(|source| DatabaseError::MigrationApply {
                 version: migration.version,
                 description: migration.description.clone(),
@@ -335,9 +319,9 @@ impl MigrationRunner {
         self.verify_complete_rows(&applied_rows, driver)
     }
 
-    /// Verify the same catalog on a dedicated PostgreSQL owner session.
-    /// A complete ledger necessarily contains both owned namespaces, so the
-    /// bootstrap-only sentinel check cannot authorize additional work here.
+    /// Verify the same catalog on a dedicated PostgreSQL owner session. A
+    /// complete ledger is not empty, so the bootstrap-only sentinel check
+    /// cannot authorize additional work here.
     pub(super) async fn verify_complete_on_postgres_connection(
         &self,
         connection: &mut sqlx::PgConnection,
@@ -367,7 +351,7 @@ impl MigrationRunner {
 
         let mut seen = HashSet::new();
         for row in applied_rows {
-            if self.owns_version(row.version) && !seen.insert(row.version) {
+            if !seen.insert(row.version) {
                 return Err(MigrationLedgerError::DuplicateVersion {
                     version: row.version,
                 }
@@ -488,8 +472,8 @@ impl MigrationRunner {
         )?;
 
         // The bootstrap sentinel query is deliberately unavailable here. A
-        // committed single-catalog prefix must instead contain both owned
-        // namespaces through the requested version.
+        // committed prefix must instead contain every catalog version
+        // through the requested one.
         for migration in self
             .migrations
             .iter()
@@ -515,7 +499,7 @@ impl MigrationRunner {
         required_version: i64,
     ) -> Result<(), DatabaseError> {
         // Callers name the retired version that created what they attach to.
-        // On the baseline that version is the baseline itself.
+        // The baseline stands for every retired version.
         let required_version = if self.baseline.is_some() {
             required_version.max(baseline::BASELINE_VERSION)
         } else {
@@ -524,7 +508,7 @@ impl MigrationRunner {
         self.validate_ledger(applied_rows, driver, false)?;
         let mut seen = HashSet::new();
         for row in applied_rows {
-            if self.owns_version(row.version) && !seen.insert(row.version) {
+            if !seen.insert(row.version) {
                 return Err(MigrationLedgerError::DuplicateVersion {
                     version: row.version,
                 }
@@ -540,63 +524,41 @@ impl MigrationRunner {
         Ok(())
     }
 
-    /// The table each namespace's first migration unconditionally drops and
-    /// recreates. The exhaustive match ties the data-loss guard to the
-    /// namespace enum: adding a namespace without a sentinel fails to
-    /// compile, and `sentinel_tables_match_first_migration_sql` pins each
-    /// name to the actual `CREATE TABLE` in that namespace's first migration.
-    pub(super) const fn sentinel_table(namespace: MigrationNamespace) -> &'static str {
-        match namespace {
-            MigrationNamespace::Global => "users",
-            MigrationNamespace::Waddle => "channels",
-        }
-    }
-
-    /// Refuse to run a destructive initial migration when its owned schema
-    /// already exists but its namespace has no ledger history. Global V0001
-    /// drops then creates `users`; Waddle V1001 drops then creates `channels`.
+    /// Refuse to build the baseline over a schema that exists without any
+    /// ledger row: the runner did not record it, and plain `CREATE` would
+    /// either fail part-way or build next to tables it does not know.
     async fn validate_schema_has_ledger(
         &self,
         tx: &mut Transaction<'_>,
         driver: DatabaseDriver,
         applied_rows: &[LedgerRow],
     ) -> Result<(), DatabaseError> {
-        for namespace in [MigrationNamespace::Global, MigrationNamespace::Waddle] {
-            let sentinel_table = Self::sentinel_table(namespace);
-            if !self.owned_namespaces.contains(&namespace)
-                || applied_rows
-                    .iter()
-                    .any(|row| MigrationNamespace::of(row.version) == namespace)
-            {
-                continue;
-            }
-
-            let mut rows = match driver {
-                DatabaseDriver::Sqlite => {
-                    tx.query(
-                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-                        crate::db_params![sentinel_table],
-                    )
-                    .await?
-                }
-                DatabaseDriver::Postgres => {
-                    tx.query(
-                        "SELECT table_name FROM information_schema.tables \
-                         WHERE table_schema = current_schema() AND table_name = ?",
-                        crate::db_params![sentinel_table],
-                    )
-                    .await?
-                }
-            };
-            if rows.next().await?.is_some() {
-                return Err(MigrationLedgerError::SchemaWithoutLedger {
-                    namespace,
-                    table: sentinel_table.to_string(),
-                }
-                .into());
-            }
+        if !applied_rows.is_empty() {
+            return Ok(());
         }
-
+        let mut rows = match driver {
+            DatabaseDriver::Sqlite => {
+                tx.query(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    crate::db_params![SENTINEL_TABLE],
+                )
+                .await?
+            }
+            DatabaseDriver::Postgres => {
+                tx.query(
+                    "SELECT table_name FROM information_schema.tables \
+                     WHERE table_schema = current_schema() AND table_name = ?",
+                    crate::db_params![SENTINEL_TABLE],
+                )
+                .await?
+            }
+        };
+        if rows.next().await?.is_some() {
+            return Err(MigrationLedgerError::SchemaWithoutLedger {
+                table: SENTINEL_TABLE.to_string(),
+            }
+            .into());
+        }
         Ok(())
     }
 
@@ -611,15 +573,10 @@ impl MigrationRunner {
             .iter()
             .map(|migration| (migration.version, migration))
             .collect();
-        let mut applied_by_namespace: HashMap<MigrationNamespace, Vec<i64>> = HashMap::new();
+        let mut applied_versions = Vec::new();
         let mut adoption_backfill = Vec::new();
 
         for row in applied_rows {
-            let namespace = MigrationNamespace::of(row.version);
-            if !self.owned_namespaces.contains(&namespace) {
-                continue;
-            }
-
             let Some(migration) = expected.get(&row.version) else {
                 return Err(MigrationLedgerError::UnknownVersion {
                     version: row.version,
@@ -657,17 +614,10 @@ impl MigrationRunner {
                     .into())
                 }
             }
-            applied_by_namespace
-                .entry(namespace)
-                .or_default()
-                .push(row.version);
+            applied_versions.push(row.version);
         }
 
         for migration in &self.migrations {
-            let namespace = MigrationNamespace::of(migration.version);
-            let Some(applied_versions) = applied_by_namespace.get(&namespace) else {
-                continue;
-            };
             if applied_versions.contains(&migration.version) {
                 continue;
             }
@@ -677,7 +627,6 @@ impl MigrationRunner {
                 .find(|version| *version > migration.version)
             {
                 return Err(MigrationLedgerError::VersionGap {
-                    namespace,
                     missing: migration.version,
                     applied_after,
                 }
@@ -686,11 +635,6 @@ impl MigrationRunner {
         }
 
         Ok(adoption_backfill)
-    }
-
-    fn owns_version(&self, version: i64) -> bool {
-        self.owned_namespaces
-            .contains(&MigrationNamespace::of(version))
     }
 
     /// Get the current schema version.
@@ -826,61 +770,6 @@ async fn rollback_migration_attempt(tx: Transaction<'_>) -> Result<(), DatabaseE
         return Err(DatabaseError::MigrationLockRollbackUnconfirmed);
     }
     Ok(())
-}
-
-/// The SM owner may have bootstrapped this column before the global migration.
-/// SQLite's caller holds BEGIN IMMEDIATE; on PostgreSQL, the idempotent ALTER
-/// takes the table lock even if the column already exists. Validate the shape
-/// while that lock is held before recording the deterministic catalog checksum.
-async fn apply_sm_frame_provenance(
-    tx: &mut Transaction<'_>,
-    driver: DatabaseDriver,
-    migration: &Migration,
-) -> Result<(), DatabaseError> {
-    if driver == DatabaseDriver::Postgres || sm_provenance_column_shape(tx, driver).await?.is_none()
-    {
-        tx.execute_batch(migration.sql_for(driver)).await?;
-    }
-
-    let expected_type = match driver {
-        DatabaseDriver::Sqlite => "blob",
-        DatabaseDriver::Postgres => "bytea",
-    };
-    match sm_provenance_column_shape(tx, driver).await? {
-        Some((column_type, 0, None, 0)) if column_type.eq_ignore_ascii_case(expected_type) => {
-            Ok(())
-        }
-        _ => Err(DatabaseError::QueryFailed(
-            "sm_unacked.provenance must be a nullable binary column without a default or generated value".to_owned(),
-        )),
-    }
-}
-
-async fn sm_provenance_column_shape(
-    tx: &mut Transaction<'_>,
-    driver: DatabaseDriver,
-) -> Result<Option<(String, i64, Option<String>, i64)>, DatabaseError> {
-    let query = match driver {
-        DatabaseDriver::Sqlite => {
-            "SELECT type, \"notnull\", dflt_value, hidden + pk FROM pragma_table_xinfo('sm_unacked') WHERE name = 'provenance'"
-        }
-        DatabaseDriver::Postgres => {
-            "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod), \
-             CASE WHEN a.attnotnull THEN 1 ELSE 0 END::bigint, \
-             pg_catalog.pg_get_expr(d.adbin, d.adrelid), \
-             CASE WHEN a.attgenerated <> '' OR a.attidentity <> '' THEN 1 ELSE 0 END::bigint \
-             FROM pg_catalog.pg_attribute a \
-             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-             WHERE a.attrelid = pg_catalog.to_regclass('sm_unacked') \
-             AND a.attname = 'provenance' AND NOT a.attisdropped"
-        }
-    };
-    let mut rows = tx.query(query, ()).await?;
-    if let Some(row) = rows.next().await? {
-        Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-    } else {
-        Ok(None)
-    }
 }
 
 struct LedgerRow {

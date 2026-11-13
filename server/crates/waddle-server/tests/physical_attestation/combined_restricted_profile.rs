@@ -530,7 +530,7 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         .fetch_one(&admin)
         .await?;
     let expected = RestrictedIngressProfileObservation {
-        manifest_version: 2,
+        manifest_version: 3,
         schema_oid: identity.schema.oid,
         epoch_relation_oid: epoch.0,
         runtime_role_oid: runtime_oid.0,
@@ -1063,7 +1063,7 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         .context("closed MAM profile after sequential extra owner phase")?;
 
     // A complete V1030 ledger is checked again for every pinned diagnostic.
-    sqlx::query("DELETE FROM guarded._migrations WHERE version = 1030")
+    sqlx::query("DELETE FROM guarded._migrations WHERE version = 2000")
         .execute(&admin)
         .await?;
     ensure!(

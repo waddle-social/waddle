@@ -11,7 +11,6 @@ use waddle_server::db::physical_attestation::{
     ReceiptOperation, ReceiptOperationAuthority, ReceiptOperationPins, ReceiptReadback,
     RestrictedIngressProfileError, CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_server::test_support::database_from_attested_postgres_pool;
 
 use super::super::{proxy_runtime_options, Fixture};
@@ -21,21 +20,8 @@ const LOOKUP_CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/p21_receipt_journal_lookup_candidate.sql");
 const INGRESS_API_CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/ingress_definer_api_candidate.sql");
-const RECEIPT_WRITER_CANDIDATE: &str =
-    include_str!("../../src/db/migrations/owner/p21_receipt_journal_postgres.sql");
-
-/// The guarded ingress tables of the migrations above V1030. The ledger
-/// refuses an applied version above a missing one, so reapplying V1030
-/// recreates them. V1034's authority tables stay in place: its statements
-/// are repeatable, and the definer profile does not cover those tables.
-const RECREATED_GUARDED_TABLES: [&str; 6] = [
-    "ingress_mailbox_lanes",
-    "ingress_mailbox_entries",
-    "ingress_room_requests",
-    "ingress_room_responses",
-    "ingress_room_occupants",
-    "ingress_direct_requests",
-];
+/// The schema baseline, which creates the receipt journal and its writer.
+const RECEIPT_WRITER_SOURCE: &str = include_str!("../../sql/baseline/postgres.sql");
 
 pub(super) async fn exercise(
     fixture: &Fixture,
@@ -47,7 +33,7 @@ pub(super) async fn exercise(
         format!("pg_try_advisory_xact_lock_shared({CATALOG_MUTATION_ADVISORY_LOCK_KEY})");
     assert!(INGRESS_API_CANDIDATE.contains(&fence_call));
     assert!(INGRESS_API_CANDIDATE.contains("waddle_ingress_definer_prepare()"));
-    assert!(RECEIPT_WRITER_CANDIDATE.contains("waddle_ingress_definer_prepare()"));
+    assert!(RECEIPT_WRITER_SOURCE.contains("__SCHEMA__.waddle_ingress_definer_prepare()"));
     assert!(LOOKUP_CANDIDATE.contains("waddle_ingress_definer_prepare()"));
     let receipts = receipt_transaction::seed(fixture, 8).await;
     let s = &fixture.target;
@@ -69,88 +55,6 @@ pub(super) async fn exercise(
         .expect("lookup candidate grants follow function definition")
         .0
         .replacen("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1);
-
-    // Reapply V1030 through the registered runner with hostile default ACLs.
-    // This is a disposable, exclusively owned schema with an empty journal.
-    // The ledger refuses an applied version above a missing one, so the
-    // later mailbox, room request and direct request migrations are undone
-    // and reapplied with it.
-    super::execute(&fixture.admin, &format!(
-        "ALTER TABLE {s}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
-         DELETE FROM {s}.ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries', 'ingress_room_requests', 'ingress_room_responses', 'ingress_room_occupants', 'ingress_direct_requests'); \
-         ALTER TABLE {s}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row; \
-         DROP TABLE {s}.ingress_room_occupants; DROP TABLE {s}.ingress_room_responses; \
-         DROP TABLE {s}.ingress_mailbox_entries; DROP TABLE {s}.ingress_mailbox_lanes; \
-         DROP TABLE {s}.ingress_room_requests; DROP TABLE {s}.ingress_direct_requests; \
-         DROP FUNCTION {function}; DROP TABLE {journal}; DELETE FROM {s}._migrations WHERE version>=1030; \
-         ALTER DEFAULT PRIVILEGES IN SCHEMA {s} GRANT ALL ON TABLES TO {r}; \
-         ALTER DEFAULT PRIVILEGES IN SCHEMA {s} GRANT EXECUTE ON FUNCTIONS TO {r}"
-    )).await;
-    let owner = Database::from_config(
-        "receipt migration owner",
-        &DatabaseConfig::new(
-            DatabaseDriver::Postgres,
-            super::super::url_with_schema(&fixture.base_url, s),
-        ),
-    )
-    .await
-    .expect("owner database");
-    assert_eq!(
-        MigrationRunner::single()
-            .run(&owner)
-            .await
-            .expect("registered V1030 through V1037"),
-        vec![1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037]
-    );
-    drop(owner);
-    super::execute(
-        &fixture.admin,
-        &format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA {s} REVOKE ALL ON TABLES FROM {r}; \
-         ALTER DEFAULT PRIVILEGES IN SCHEMA {s} REVOKE EXECUTE ON FUNCTIONS FROM {r}"
-        ),
-    )
-    .await;
-    let strict_before = attested_pool(
-        fixture.runtime_options.clone(),
-        config.clone(),
-        1,
-        Duration::from_secs(2),
-    )
-    .expect("strict profile pool");
-    // V1030 strips the default ACL from its own journal and function. The
-    // guarded tables that had to be recreated with it carry the hostile
-    // default ACL, no API grant and no API guard trigger, exactly like any
-    // guarded table a migration creates before the operator provisions it,
-    // and the strict profile refuses them until that provisioning is
-    // repeated.
-    assert!(matches!(
-        strict_before
-            .inspect_restricted_ingress_profile(api, epoch_oid)
-            .await,
-        Err(RestrictedIngressProfileError::Mismatch(
-            "guarded relation/ACL/row security"
-        ))
-    ));
-    for table in RECREATED_GUARDED_TABLES {
-        super::execute(
-            &fixture.admin,
-            &format!(
-                "REVOKE ALL ON {s}.{table} FROM {r}; \
-                 GRANT SELECT,INSERT,UPDATE,DELETE ON {s}.{table} TO {api_name}; \
-                 CREATE TRIGGER {table}_definer_api_guard_dml \
-                 BEFORE INSERT OR UPDATE OR DELETE ON {s}.{table} \
-                 FOR EACH STATEMENT EXECUTE FUNCTION {s}.waddle_ingress_definer_epoch_guard(); \
-                 ALTER TABLE {s}.{table} ENABLE ALWAYS TRIGGER {table}_definer_api_guard_dml;"
-            ),
-        )
-        .await;
-    }
-    strict_before
-        .inspect_restricted_ingress_profile(api, epoch_oid)
-        .await
-        .expect("V1030 preserves strict v2 before provisioning");
-    strict_before.close().await;
 
     // The operator must fence/drain old writers and check an empty, owner-only
     // journal before provisioning. This fixture is exclusively owned.

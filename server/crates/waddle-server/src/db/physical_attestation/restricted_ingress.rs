@@ -67,7 +67,7 @@ pub enum RestrictedIngressProfileError {
     Database(#[from] sqlx::Error),
 }
 
-const MANIFEST_VERSION: u32 = 2;
+const MANIFEST_VERSION: u32 = 3;
 
 type Result<T> = std::result::Result<T, RestrictedIngressProfileError>;
 
