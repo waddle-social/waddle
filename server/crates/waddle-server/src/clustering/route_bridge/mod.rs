@@ -76,6 +76,7 @@ const MAX_ORDERED_RELAY_CHANNEL_LOCKS: usize = 4096;
 const MAX_REMOTE_OWNER_REGISTRATION_LOCKS: usize = 4096;
 const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+mod account_authority;
 mod delivery;
 mod extension_room;
 mod mailbox;
@@ -89,6 +90,7 @@ mod registration;
 mod types;
 mod validation;
 
+pub use account_authority::ClusterAccountAuthorityPeers;
 #[cfg(test)]
 pub(crate) use delivery::MucProxyRouteAttempt;
 pub(crate) use delivery::{

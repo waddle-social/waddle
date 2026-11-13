@@ -537,7 +537,7 @@ pub(crate) async fn run_durable_sm_sweep(state: &WebSocketState) {
     else {
         return;
     };
-    if super::super::account_binding::selected_coordinators(state).is_none() {
+    if super::super::account_binding::selected_authority(state).is_none() {
         if let Err(error) = store.purge_terminal(purge_before).await {
             warn!(%error, "durable SM tombstone purge failed");
         }

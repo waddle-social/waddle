@@ -458,7 +458,11 @@ fn binding_publisher_with_endpoint(
 }
 
 fn selected_coordinator_publisher(state: &WebSocketState) -> Option<CoordinatorBindingPublisher> {
-    super::account_binding::selected_coordinators(state).map(CoordinatorBindingPublisher::new)
+    super::account_binding::selected_authority(state).map(|authority| {
+        CoordinatorBindingPublisher::new(
+            authority as std::sync::Arc<dyn crate::account_coordinator::AccountBindingAuthority>,
+        )
+    })
 }
 
 fn infallible<T>(result: Result<T, std::convert::Infallible>) -> T {
@@ -1135,7 +1139,7 @@ async fn record_account_binding(
     binding: &waddle_xmpp::ownership::BindingRef,
     resumed: bool,
 ) -> Result<Option<PublishedBinding>, String> {
-    let Some(coordinators) = super::account_binding::selected_coordinators(state) else {
+    let Some(authority) = super::account_binding::selected_authority(state) else {
         return Ok(None);
     };
     let lifetime = waddle_xmpp::ownership::joint_identity::ResourceLifetime {
@@ -1143,7 +1147,7 @@ async fn record_account_binding(
         occupancy: conn.occupancy_session,
     };
     let resume = if resumed {
-        super::account_binding::resume_evidence(&coordinators, conn, jid, binding).await
+        super::account_binding::resume_evidence(&authority, conn, jid, binding).await
     } else {
         None
     };
@@ -1157,11 +1161,7 @@ async fn record_account_binding(
             Ok(BindingPublication::Published(account)) => return Ok(account),
             Ok(BindingPublication::ReplacementPending { displaced, .. }) => {
                 if !super::account_binding::await_displaced_retirement(
-                    state,
-                    &coordinators,
-                    jid,
-                    &displaced,
-                    deadline,
+                    state, &authority, jid, &displaced, deadline,
                 )
                 .await
                 {

@@ -28,7 +28,6 @@ use waddle_xmpp::ownership::joint_identity::ResourceLifetime;
 use waddle_xmpp::ownership::{BindingRef, UserClaimIdentity};
 
 use super::authority::AccountBindingAuthority;
-use super::directory::AccountCoordinators;
 use super::error::AccountCoordinatorError;
 use super::messages::{
     BindingReply, RepairEvidence, RepairOutcome, UnregisterOutcome, UnregisterRequest,
@@ -115,11 +114,12 @@ pub enum RetireOutcome {
     Refused(AccountResourceTransitionError),
 }
 
-/// Publishes, confirms and retires bindings through the account
-/// coordinators of this node.
+/// Publishes, confirms and retires bindings through an account authority:
+/// the routed authority on a serving node, which reaches the coordinator
+/// of the node that owns the account.
 #[derive(Clone)]
 pub struct CoordinatorBindingPublisher {
-    coordinators: Arc<AccountCoordinators>,
+    authority: Arc<dyn AccountBindingAuthority>,
 }
 
 fn fresh(mutation: AccountResourceMutation) -> AccountResourceOperation {
@@ -156,8 +156,8 @@ fn step(reply: BindingReply) -> Step {
 }
 
 impl CoordinatorBindingPublisher {
-    pub fn new(coordinators: Arc<AccountCoordinators>) -> Self {
-        Self { coordinators }
+    pub fn new(authority: Arc<dyn AccountBindingAuthority>) -> Self {
+        Self { authority }
     }
 
     /// Record `binding_ref` as the binding of `jid` and publish it
@@ -175,7 +175,7 @@ impl CoordinatorBindingPublisher {
         // coordinator took for it.
         let mut repeated = false;
         loop {
-            let status = self.coordinators.slot_status(jid).await?;
+            let status = self.authority.slot_status(jid).await?;
             let claim_identity = status.claim_identity;
             let prepared = match status.binding {
                 Some((current, state)) if &current == binding_ref => match state {
@@ -203,7 +203,7 @@ impl CoordinatorBindingPublisher {
                         binding_ref: binding_ref.clone(),
                         lifetime,
                     });
-                    match step(self.coordinators.execute(jid, bind).await?) {
+                    match step(self.authority.execute(jid, bind).await?) {
                         Step::Committed(revision) => revision,
                         Step::Rejected(AccountResourceTransitionError::ClaimMismatch)
                             if !repeated =>
@@ -239,7 +239,7 @@ impl CoordinatorBindingPublisher {
         binding_ref: &BindingRef,
         receipt: SuccessfulResumeReceipt,
     ) -> Result<PublishOutcome, AccountCoordinatorError> {
-        let status = self.coordinators.slot_status(jid).await?;
+        let status = self.authority.slot_status(jid).await?;
         let claim_identity = status.claim_identity;
         let prepared = match status.binding {
             Some((current, AccountResourceBindingState::Prepared)) if &current == binding_ref => {
@@ -260,7 +260,7 @@ impl CoordinatorBindingPublisher {
                     binding_ref: binding_ref.clone(),
                     receipt,
                 });
-                match step(self.coordinators.execute(jid, resume).await?) {
+                match step(self.authority.execute(jid, resume).await?) {
                     Step::Committed(revision) => revision,
                     Step::Rejected(error) => return Ok(PublishOutcome::Refused(error)),
                     Step::Pending { .. } => return Err(AccountCoordinatorError::Diverged),
@@ -286,7 +286,7 @@ impl CoordinatorBindingPublisher {
                 binding_ref,
             )),
         });
-        Ok(match step(self.coordinators.execute(jid, publish).await?) {
+        Ok(match step(self.authority.execute(jid, publish).await?) {
             Step::Committed(revision) => PublishOutcome::Published(PublishedBinding {
                 binding_ref: binding_ref.clone(),
                 claim_identity,
@@ -305,7 +305,7 @@ impl CoordinatorBindingPublisher {
         jid: &FullJid,
         published: &PublishedBinding,
     ) -> Result<ConfirmOutcome, AccountCoordinatorError> {
-        let status = self.coordinators.slot_status(jid).await?;
+        let status = self.authority.slot_status(jid).await?;
         match status.binding {
             Some((current, AccountResourceBindingState::Published))
                 if current == published.binding_ref =>
@@ -319,7 +319,7 @@ impl CoordinatorBindingPublisher {
                         BindingEvidence::for_binding(&current),
                     ),
                 });
-                match step(self.coordinators.execute(jid, register).await?) {
+                match step(self.authority.execute(jid, register).await?) {
                     Step::Committed(_) => {}
                     Step::Rejected(error) => return Ok(ConfirmOutcome::Refused(error)),
                     Step::Pending { .. } => return Err(AccountCoordinatorError::Diverged),
@@ -331,7 +331,7 @@ impl CoordinatorBindingPublisher {
         }
         Ok(
             match self
-                .coordinators
+                .authority
                 .bind_success(jid, &published.binding_ref)
                 .await?
             {
@@ -363,7 +363,7 @@ impl CoordinatorBindingPublisher {
         evidence: RetireEvidence,
     ) -> Result<RetireOutcome, AccountCoordinatorError> {
         let started = self
-            .coordinators
+            .authority
             .unregister(
                 jid,
                 UnregisterRequest {
@@ -379,7 +379,7 @@ impl CoordinatorBindingPublisher {
             UnregisterOutcome::Rejected(error) => return Ok(RetireOutcome::Refused(error)),
         }
         let completed = self
-            .coordinators
+            .authority
             .repair(
                 jid,
                 binding_ref,
@@ -402,9 +402,8 @@ impl CoordinatorBindingPublisher {
 
     /// Retire exactly the published binding of a socket that another node
     /// hosts. The coordinator is on the node that owns the account, not on
-    /// the node that hosts the socket, so this is the same retirement. On
-    /// a node that does not own the account the call fails with the claim
-    /// error, and the caller addresses the owner instead.
+    /// the node that hosts the socket, so this is the same retirement: the
+    /// authority reaches the owner wherever the socket is.
     pub async fn retire_remote(
         &self,
         jid: &FullJid,

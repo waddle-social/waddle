@@ -1351,7 +1351,9 @@ async fn the_binding_publisher_maps_publish_confirm_and_retire_onto_the_coordina
 
     let harness = harness("account-coordinator-publisher", config()).await;
     let coordinators = Arc::new(directory(&harness.store, &harness.claims, config()));
-    let publisher = CoordinatorBindingPublisher::new(Arc::clone(&coordinators));
+    let publisher = CoordinatorBindingPublisher::new(
+        Arc::clone(&coordinators) as Arc<dyn AccountBindingAuthority>
+    );
     let jid = resource("published");
     let evidence = || RetireEvidence {
         begin: AccountResourceOperationId::fresh(),

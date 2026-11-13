@@ -11,10 +11,12 @@
 //! `docs/planning/2138-account-coordinator.md`.
 //!
 //! [`AccountCoordinators`] is the directory of coordinators on this node.
-//! A connection reaches it through [`AccountBindingAuthority`]; routing
-//! reads it through [`AccountCoordinators::view`], and only when
-//! [`AccountAuthoritySelection`] selects the coordinator. The default
-//! selection is the connection registry, which no coordinator feeds.
+//! A connection reaches its account's coordinator through
+//! [`RoutedAccountAuthority`], which serves a request here when this node
+//! owns the account and sends it to the owning node otherwise; routing
+//! reads accounts the same way, and only when [`AccountAuthoritySelection`]
+//! selects the coordinator. The default selection is the connection
+//! registry, which no coordinator feeds.
 
 mod actor;
 mod authority;
@@ -26,6 +28,7 @@ mod messages;
 mod mirror_claims;
 mod publisher;
 mod reads;
+mod routed;
 mod selection;
 
 pub use authority::AccountBindingAuthority;
@@ -45,6 +48,10 @@ pub use mirror_claims::{CoordinatorLookup, MirrorClaimStore};
 pub use publisher::{
     ConfirmOutcome, CoordinatorBindingPublisher, PublishOutcome, PublishedBinding, RetireEvidence,
     RetireOutcome,
+};
+pub use routed::{
+    AccountAuthorityAnswer, AccountAuthorityPeers, AccountAuthorityRequest, AccountOwner,
+    AccountRoutingPolicy, ForwardFailure, RoutedAccountAuthority,
 };
 pub use selection::{
     AccountAuthorityMode, AccountAuthoritySelection, AccountAuthoritySelectionError,

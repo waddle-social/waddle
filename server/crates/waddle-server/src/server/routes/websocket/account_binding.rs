@@ -44,8 +44,8 @@ use super::state::WsConnState;
 use super::stream_management::sm_show_from_name;
 use super::WebSocketState;
 use crate::account_coordinator::{
-    AccountBindingAuthority, AccountCoordinators, BindingReply, CoordinatorBindingPublisher,
-    PublishedBinding, ReleaseSessionRequest, RetireEvidence, RetireOutcome, SessionRelease,
+    AccountBindingAuthority, BindingReply, CoordinatorBindingPublisher, PublishedBinding,
+    ReleaseSessionRequest, RetireEvidence, RetireOutcome, RoutedAccountAuthority, SessionRelease,
 };
 
 /// How often a replacing connection re-reads the slot of the binding it
@@ -76,13 +76,15 @@ impl AccountBindingLink {
     }
 }
 
-/// The account coordinators, when they are the selected account authority.
-pub(super) fn selected_coordinators(state: &WebSocketState) -> Option<Arc<AccountCoordinators>> {
+/// The routed account authority, when the account coordinator is the
+/// selected account authority. It reaches the coordinator of the node that
+/// owns each account, wherever the connection is.
+pub(super) fn selected_authority(state: &WebSocketState) -> Option<Arc<RoutedAccountAuthority>> {
     state
         .deps
         .app_state
         .account_authority()
-        .coordinators()
+        .authority()
         .cloned()
 }
 
@@ -160,7 +162,7 @@ fn projected_snapshot(
 /// the session store before this runs: an enable and a resume commit there
 /// before the connection holds them as its link.
 pub(super) async fn sync_snapshot(state: &WebSocketState, conn: &mut WsConnState) {
-    let Some(coordinators) = selected_coordinators(state) else {
+    let Some(authority) = selected_authority(state) else {
         return;
     };
     let Some(jid) = conn
@@ -177,7 +179,7 @@ pub(super) async fn sync_snapshot(state: &WebSocketState, conn: &mut WsConnState
     if link.committed.as_ref() == Some(&snapshot) {
         return;
     }
-    let status = match coordinators.slot_status(&link.full_jid).await {
+    let status = match authority.slot_status(&link.full_jid).await {
         Ok(status) => status,
         Err(error) => {
             warn!(jid = %link.full_jid, %error, "account coordinator did not answer a slot read");
@@ -201,7 +203,7 @@ pub(super) async fn sync_snapshot(state: &WebSocketState, conn: &mut WsConnState
             snapshot: snapshot.clone(),
         },
     );
-    match coordinators.execute(&link.full_jid, operation).await {
+    match authority.execute(&link.full_jid, operation).await {
         Ok(reply) if committed(&reply) => link.committed = Some(snapshot),
         Ok(reply) => {
             warn!(jid = %link.full_jid, ?reply, "account coordinator refused a resource snapshot");
@@ -220,13 +222,13 @@ pub(super) async fn sync_snapshot(state: &WebSocketState, conn: &mut WsConnState
 /// resumed session. The caller then publishes the binding as a new one if
 /// the slot is free, and is refused otherwise.
 pub(super) async fn resume_evidence(
-    coordinators: &AccountCoordinators,
+    authority: &RoutedAccountAuthority,
     conn: &WsConnState,
     jid: &FullJid,
     binding: &BindingRef,
 ) -> Option<CoordinatorResume> {
     let resumed_sm = conn.durable_sm.session_binding()?;
-    let stored = match coordinators.store().load(jid).await {
+    let stored = match authority.store().load(jid).await {
         Ok(stored) => stored?,
         Err(error) => {
             warn!(%jid, %error, "the resumed resource's binding row could not be read");
@@ -257,11 +259,11 @@ pub(super) async fn resume_evidence(
 
 /// Whether `jid`'s slot still holds `binding`.
 async fn slot_holds(
-    coordinators: &AccountCoordinators,
+    authority: &RoutedAccountAuthority,
     jid: &FullJid,
     binding: &BindingRef,
 ) -> Result<bool, crate::account_coordinator::AccountCoordinatorError> {
-    Ok(coordinators
+    Ok(authority
         .slot_status(jid)
         .await?
         .binding
@@ -273,11 +275,12 @@ async fn slot_holds(
 /// paths own the work it accepted. Returns whether the slot no longer
 /// holds it.
 async fn retire_expired_binding(
-    coordinators: &Arc<AccountCoordinators>,
+    authority: &Arc<RoutedAccountAuthority>,
     jid: &FullJid,
     binding: &BindingRef,
 ) -> bool {
-    let publisher = CoordinatorBindingPublisher::new(Arc::clone(coordinators));
+    let publisher =
+        CoordinatorBindingPublisher::new(Arc::clone(authority) as Arc<dyn AccountBindingAuthority>);
     match publisher
         .retire_binding(jid, binding, RetireEvidence::recovery_owned())
         .await
@@ -309,10 +312,10 @@ pub(super) async fn release_session_bindings(
     state: &WebSocketState,
     session: waddle_xmpp::ownership::SmSessionKey,
 ) -> bool {
-    let Some(coordinators) = selected_coordinators(state) else {
+    let Some(authority) = selected_authority(state) else {
         return true;
     };
-    let resources = match coordinators.store().resources_for_session(session).await {
+    let resources = match authority.store().resources_for_session(session).await {
         Ok(resources) => resources,
         Err(error) => {
             warn!(?session, %error, "the bindings of a terminal session could not be read");
@@ -330,7 +333,7 @@ pub(super) async fn release_session_bindings(
             directed_presence: evidence.directed_presence,
             presentation_flush: evidence.presentation_flush,
         };
-        match coordinators.release_session(&full_jid, request).await {
+        match authority.release_session(&full_jid, request).await {
             Ok(SessionRelease::Released { .. } | SessionRelease::NotReferenced) => {}
             Ok(SessionRelease::HeldByConnection(..)) => {
                 debug!(jid = %full_jid, ?session, "a terminal session is still held by a connection");
@@ -354,13 +357,14 @@ pub(super) async fn release_session_bindings(
 ///
 /// The coordinator reserves the resource for the replacing binding and
 /// never retires the displaced one itself. A displaced binding on a live
-/// connection of this node is force-detached as a fresh-bind replacement,
-/// and retires through its own teardown. One whose connection is gone is
-/// retired here once the coordinator reports it expired. Returns whether
+/// connection is force-detached as a fresh-bind replacement, and retires
+/// through its own teardown: on this node directly, and on another node by
+/// asking the node that hosts the connection. One whose connection is gone
+/// is retired here once the coordinator reports it expired. Returns whether
 /// the slot was released in time.
 pub(super) async fn await_displaced_retirement(
     state: &WebSocketState,
-    coordinators: &Arc<AccountCoordinators>,
+    authority: &Arc<RoutedAccountAuthority>,
     jid: &FullJid,
     displaced: &BindingRef,
     deadline: tokio::time::Instant,
@@ -373,7 +377,7 @@ pub(super) async fn await_displaced_retirement(
         .filter(|entry| entry.binding_ref() == Some(displaced));
     // The acknowledgement is not awaited: the slot is the evidence that the
     // displaced binding retired.
-    let _ack = live.map(|entry| {
+    let _ack = live.as_ref().map(|entry| {
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
         let _ = entry.try_force_detach_and_interrupt(ForceDetachRequest {
             origin: ForceDetachOrigin::FreshBindReplacement,
@@ -383,20 +387,23 @@ pub(super) async fn await_displaced_retirement(
         });
         ack_rx
     });
+    if live.is_none() {
+        authority.displace_remote(jid, displaced).await;
+    }
     let account = jid.to_bare();
     loop {
-        match slot_holds(coordinators, jid, displaced).await {
+        match slot_holds(authority, jid, displaced).await {
             Ok(false) => return true,
             Ok(true) => {}
             Err(error) => {
                 debug!(%jid, %error, "slot read failed while a displaced binding retires");
             }
         }
-        if let Ok(expired) = coordinators.expired_bindings(&account).await {
+        if let Ok(expired) = authority.expired_bindings(&account).await {
             if expired
                 .iter()
                 .any(|(full, binding)| full == jid && binding == displaced)
-                && retire_expired_binding(coordinators, jid, displaced).await
+                && retire_expired_binding(authority, jid, displaced).await
             {
                 return true;
             }
@@ -423,16 +430,13 @@ pub(super) async fn mark_presented(
     entry: &ConnectionEntry,
     presentation: Presentation,
 ) -> bool {
-    let Some(coordinators) = selected_coordinators(state) else {
+    let Some(authority) = selected_authority(state) else {
         return true;
     };
     let Some(binding) = entry.binding_ref() else {
         return false;
     };
-    match coordinators
-        .mark_presented(jid, binding, presentation)
-        .await
-    {
+    match authority.mark_presented(jid, binding, presentation).await {
         Ok(first) => first,
         Err(error) => {
             warn!(%jid, %error, ?presentation, "a presentation could not be recorded");
@@ -448,14 +452,15 @@ pub(super) async fn retire_current(state: &WebSocketState, conn: &mut WsConnStat
     let Some(link) = conn.account_binding.take() else {
         return;
     };
-    let Some(coordinators) = selected_coordinators(state) else {
+    let Some(authority) = selected_authority(state) else {
         return;
     };
-    retire(&coordinators, &link).await;
+    retire(&authority, &link).await;
 }
 
-async fn retire(coordinators: &Arc<AccountCoordinators>, link: &AccountBindingLink) {
-    let publisher = CoordinatorBindingPublisher::new(Arc::clone(coordinators));
+async fn retire(authority: &Arc<RoutedAccountAuthority>, link: &AccountBindingLink) {
+    let publisher =
+        CoordinatorBindingPublisher::new(Arc::clone(authority) as Arc<dyn AccountBindingAuthority>);
     match BindingPublisher::retire(
         &publisher,
         &link.full_jid,
@@ -487,20 +492,20 @@ pub(super) async fn finish_teardown(
     link: Option<AccountBindingLink>,
     outcome: ConnectionShutdownOutcome,
 ) {
-    let (Some(link), Some(coordinators)) = (link, selected_coordinators(state)) else {
+    let (Some(link), Some(authority)) = (link, selected_authority(state)) else {
         return;
     };
-    if outcome == ConnectionShutdownOutcome::Detached && detach(&coordinators, &link).await {
+    if outcome == ConnectionShutdownOutcome::Detached && detach(&authority, &link).await {
         return;
     }
-    retire(&coordinators, &link).await;
+    retire(&authority, &link).await;
 }
 
 /// Record that the binding lost its transport and its session stays
 /// resumable. Returns whether the slot holds it as detached.
-async fn detach(coordinators: &AccountCoordinators, link: &AccountBindingLink) -> bool {
+async fn detach(authority: &RoutedAccountAuthority, link: &AccountBindingLink) -> bool {
     let binding = &link.published.binding_ref;
-    let status = match coordinators.slot_status(&link.full_jid).await {
+    let status = match authority.slot_status(&link.full_jid).await {
         Ok(status) => status,
         Err(error) => {
             warn!(jid = %link.full_jid, %error, "slot read failed before a detach");
@@ -528,7 +533,7 @@ async fn detach(coordinators: &AccountCoordinators, link: &AccountBindingLink) -
             custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
         },
     );
-    match coordinators.execute(&link.full_jid, operation).await {
+    match authority.execute(&link.full_jid, operation).await {
         Ok(reply) if committed(&reply) => true,
         Ok(reply) => {
             warn!(jid = %link.full_jid, ?reply, "account coordinator refused a detach");

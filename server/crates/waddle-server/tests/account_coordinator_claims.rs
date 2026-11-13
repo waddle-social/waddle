@@ -86,7 +86,9 @@ impl Harness {
             .with_mirror_holds(mirror_holds),
         );
         Self {
-            publisher: CoordinatorBindingPublisher::new(Arc::clone(&coordinators)),
+            publisher: CoordinatorBindingPublisher::new(
+                Arc::clone(&coordinators) as Arc<dyn AccountBindingAuthority>
+            ),
             coordinators,
             claim_store,
         }
