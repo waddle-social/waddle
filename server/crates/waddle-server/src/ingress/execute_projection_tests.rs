@@ -187,25 +187,6 @@ async fn sealed_inbox_push_audience(empty_original_audience: bool) {
         "projection refresh creates no durable message send ledger"
     );
     assert_eq!(fixture.count("sm_ingress_appends").await, 0);
-    // Mark-read and other unsealed callers intentionally refresh today's devices.
-    let mut read_entry = entry;
-    read_entry.unread = 0;
-    let mut current = crate::server::routes::interpret::push_inbox_update(
-        &state.deps.protocol.connection_registry,
-        Some(&state.deps.protocol.user_registry),
-        &owner,
-        &read_entry,
-    )
-    .await;
-    current.sort();
-    let mut expected = vec![phone, laptop];
-    expected.sort();
-    assert_eq!(
-        current, expected,
-        "the existing mark-read helper remains dynamic"
-    );
-    assert!(phone_receiver.try_recv().is_ok());
-    assert!(laptop_receiver.try_recv().is_ok());
     fixture.close().await;
 }
 

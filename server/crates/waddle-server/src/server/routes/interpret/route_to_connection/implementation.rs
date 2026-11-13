@@ -23,104 +23,45 @@ use super::{
 pub(in crate::server::routes::interpret::route_to_connection) type OrderedRelayDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
-/// RFC 6121 §8.5.2.1.1 bare-JID destination selection: the candidate set and
-/// priority ranking come from the actor-authoritative `UserActor` alone
-/// (ADR-0017 Phase 3 Slice 9 retires the transitional Slice-1 DashMap
-/// -liveness intersection filter).
+/// RFC 6121 §8.5.2.1.1 bare-JID destination selection, read from the
+/// account coordinator of the node that owns the account.
 ///
-/// # Candidate + ranking source: the authoritative actor, alone
+/// The routable resources (available, non-negative priority, collapsed to
+/// the highest-priority tie set) are chosen first. When none is routable,
+/// every active resource that has not announced a negative priority is
+/// chosen, so a client that binds but defers `<presence/>` still receives
+/// the stanza, while a resource that asked to be skipped for bare-JID
+/// delivery stays skipped.
 ///
-/// Tier 1 is the actor's own RFC-ranked `SelectRoutableResources` (available,
-/// non-negative-priority resources, collapsed to the max-priority tie set).
-/// Tier 2 — only when tier 1 selects nothing — is every connected resource
-/// (`GetResources`), reproducing the legacy two-call behaviour for clients
-/// that bind but defer `<presence/>`. There is no DashMap read here at all:
-/// the actor is the sole source, and the Slice-1 liveness intersection
-/// (`is_connected` filter over each tier before/after ranking) is gone.
-///
-/// # Self-healing replaces the liveness filter
-///
-/// The liveness filter existed to protect against a *stale extra*: a resource
-/// whose DashMap entry was removed at teardown but whose actor entry a
-/// lagging best-effort unregister `tell` had not yet reaped. Selecting it
-/// would have hand it to delivery, which would find the entry stale.
-/// Now that delivery (`deliver_peer_to_full` / `deliver_direct_to_full`,
-/// Slice 2) already evicts a closed-channel entry on first touch
-/// (`BroadcastOutcome::DroppedClosed` → `try_deliver`'s `remove_resource`)
-/// and routes to the detached XEP-0198 buffer, a stale extra self-heals at
-/// delivery time instead of being filtered out at selection time — the
-/// eviction the Slice-1 filter existed to pre-empt now happens naturally on
-/// the very next send attempt. The one gap self-healing does NOT close by
-/// itself is a bare-JID delivery whose *entire* selected set turns out
-/// stale: with the filter, that case selected empty and fell through to the
-/// offline/headless recipient pass; without it, `route_to_connection` must
-/// explicitly detect "nothing actually landed" after the delivery loop runs
-/// and run the headless pass itself — see the disposition tracking in
-/// [`route_to_connection`] below.
-///
-/// On any actor error (registry / user-actor busy, wedged, or state-lost) the
-/// selection degrades to empty, so the caller runs the offline/headless
-/// recipient pass (archive + inbox projection): the message is persisted, not
-/// lost, and the recipient catches up via MAM. `deps.user_registry` is `None`
-/// only in unit-test deps that do not exercise live bare-JID delivery.
+/// A selected resource whose connection is already gone is found stale at
+/// delivery, which routes it to its detached session; when nothing of the
+/// selected set lands, `route_to_connection` runs the offline/headless
+/// recipient pass itself. A coordinator that does not answer selects
+/// nothing, so the caller runs the offline/headless pass (archive and inbox
+/// projection): the message is persisted, not lost, and the recipient
+/// catches up via MAM.
 pub(in crate::server::routes::interpret::route_to_connection) async fn select_bare_jid_live_targets(
     deps: &Deps<'_>,
     bare: &BareJid,
 ) -> Vec<jid::FullJid> {
-    if let Some(state) = deps.web_socket_state {
-        if let Some(targets) = state
-            .deps
-            .app_state
-            .account_authority()
-            .bare_jid_targets(bare)
-            .await
-        {
-            // The coordinator is the selected authority. A failed read
-            // degrades like a failed actor read: no live target, so the
-            // caller persists the stanza through its offline pass.
-            return targets.unwrap_or_else(|error| {
-                tracing::warn!(
-                    %error,
-                    "account coordinator did not answer bare-JID selection; no live target"
-                );
-                Vec::new()
-            });
-        }
-    }
-    let Some(user_registry) = deps.user_registry else {
+    let Some(state) = deps.web_socket_state else {
         return Vec::new();
     };
-    let routable =
-        waddle_xmpp::registry::select_routable_resources_for_user(user_registry, bare).await;
-    if !routable.is_empty() {
-        return routable;
-    }
-    // Tier 2: no presence-available (non-negative) resource — fall back to
-    // the connected resources that have NOT advertised a negative priority.
-    // This keeps delivering to clients that bind but defer `<presence/>`
-    // (the intended legacy case: no presence yet, so no priority to honor)
-    // while conforming to RFC 6121 §8.5.2.1.1's "MUST NOT deliver the
-    // stanza to available resources with a negative priority" — a resource
-    // that explicitly asked to be skipped for bare-JID delivery stays
-    // skipped, and a user whose only resources are negative-priority falls
-    // through to the offline/headless path (§8.5.2.1.1 "SHOULD store
-    // offline"), closing the deliberate pre-cutover divergence (#1266
-    // item 4).
-    let all_connected = waddle_xmpp::registry::get_resources_for_user(user_registry, bare).await;
-    if all_connected.is_empty() {
-        return all_connected;
-    }
-    let negative: HashSet<jid::FullJid> =
-        waddle_xmpp::registry::available_resources_for_user(user_registry, bare)
-            .await
-            .into_iter()
-            .filter(|(_, priority)| *priority < 0)
-            .map(|(full, _)| full)
-            .collect();
-    all_connected
-        .into_iter()
-        .filter(|full| !negative.contains(full))
-        .collect()
+    // A failed read degrades like any failed routing read: no live target,
+    // so the caller persists the stanza through its offline pass.
+    state
+        .deps
+        .app_state
+        .account_authority()
+        .bare_jid_targets(bare)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                "account coordinator did not answer bare-JID selection; no live target"
+            );
+            Vec::new()
+        })
 }
 
 pub(in crate::server::routes::interpret::route_to_connection) fn capture_route_direct_intent(
@@ -1381,8 +1322,7 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
     {
         return outcome;
     }
-    // With the account coordinator selected the copy goes to the binding
-    // the coordinator names, on this node or as a bound request to the node
+    // The copy goes to the binding the account coordinator names, on this node or as a bound request to the node
     // that hosts it, instead of to the account's owner.
     if let Some(outcome) = crate::server::routes::interpret::deliver_to_bound_resource(
         deps,

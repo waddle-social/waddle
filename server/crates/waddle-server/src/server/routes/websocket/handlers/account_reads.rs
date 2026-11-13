@@ -1,11 +1,9 @@
-//! Account-resource reads for handlers, taken from the selected authority.
+//! Account-resource reads for handlers, taken from the account coordinator.
 //!
-//! With the connection registry selected each function is the registry or
-//! actor read the handlers have always made. With the account coordinator
-//! selected it is the coordinator's answer. A coordinator that does not
-//! answer yields an empty result and a warning, which is how these reads
-//! already behave when the actor tree does not answer; the registry is not
-//! written in that mode and is never read instead.
+//! A coordinator that does not answer yields an empty result and a warning,
+//! which is how these reads behave when any routing read fails. The
+//! connection registry is not an account authority and is never read
+//! instead.
 
 use jid::{BareJid, FullJid};
 use tracing::warn;
@@ -24,22 +22,15 @@ fn answered<T: Default>(read: &'static str, result: Result<T, AccountCoordinator
 
 /// Every connected resource of `account`, with no presence filter.
 pub(crate) async fn resources(state: &WebSocketState, account: &BareJid) -> Vec<FullJid> {
-    match state
-        .deps
-        .app_state
-        .account_authority()
-        .resources(account)
-        .await
-    {
-        Some(result) => answered("resources", result),
-        None => {
-            waddle_xmpp::registry::get_resources_for_user(
-                &state.deps.protocol.user_registry,
-                account,
-            )
-            .await
-        }
-    }
+    answered(
+        "resources",
+        state
+            .deps
+            .app_state
+            .account_authority()
+            .resources(account)
+            .await,
+    )
 }
 
 /// Every presence-available resource of `account` with its priority.
@@ -47,38 +38,28 @@ pub(crate) async fn available_resources(
     state: &WebSocketState,
     account: &BareJid,
 ) -> Vec<(FullJid, i8)> {
-    match state
-        .deps
-        .app_state
-        .account_authority()
-        .available_resources(account)
-        .await
-    {
-        Some(result) => answered("available_resources", result),
-        None => state
+    answered(
+        "available_resources",
+        state
             .deps
-            .protocol
-            .connection_registry
-            .available_resources_for_user(account),
-    }
+            .app_state
+            .account_authority()
+            .available_resources(account)
+            .await,
+    )
 }
 
 /// The connected resources of `account` that want roster pushes.
 pub(crate) async fn roster_interested(state: &WebSocketState, account: &BareJid) -> Vec<FullJid> {
-    match state
-        .deps
-        .app_state
-        .account_authority()
-        .roster_interested(account)
-        .await
-    {
-        Some(result) => answered("roster_interested", result),
-        None => state
+    answered(
+        "roster_interested",
+        state
             .deps
-            .protocol
-            .connection_registry
-            .roster_interested_resources_for_user(account),
-    }
+            .app_state
+            .account_authority()
+            .roster_interested(account)
+            .await,
+    )
 }
 
 /// The presence `resource` last announced, when it is available.
@@ -86,26 +67,22 @@ pub(crate) async fn presence_state(
     state: &WebSocketState,
     resource: &FullJid,
 ) -> Option<PresenceState> {
-    match state
-        .deps
-        .app_state
-        .account_authority()
-        .presence(resource)
-        .await
-    {
-        Some(result) => answered("presence", result).map(|presence| PresenceState {
-            show: presence
-                .show
-                .as_ref()
-                .map(|show| show_name(show).to_owned()),
-            status: presence.status,
-            priority: presence.priority,
-            payloads: presence.payloads,
-        }),
-        None => state
+    answered(
+        "presence",
+        state
             .deps
-            .protocol
-            .connection_registry
-            .presence_state(resource),
-    }
+            .app_state
+            .account_authority()
+            .presence(resource)
+            .await,
+    )
+    .map(|presence| PresenceState {
+        show: presence
+            .show
+            .as_ref()
+            .map(|show| show_name(show).to_owned()),
+        status: presence.status,
+        priority: presence.priority,
+        payloads: presence.payloads,
+    })
 }

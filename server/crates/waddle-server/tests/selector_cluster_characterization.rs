@@ -1,6 +1,6 @@
 //! Two-node characterization of the durable stream-management authority
-//! and the account coordinator (`WADDLE_XMPP_DURABLE_SM=durable`,
-//! `WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator`).
+//! and the account coordinator (`WADDLE_XMPP_DURABLE_SM=durable`; the
+//! coordinator is the only account-resource authority).
 //!
 //! Two `waddle-server` processes share one PostgreSQL database and are
 //! meshed over libp2p. Each scenario seeds its own accounts, so the rows a
@@ -8,7 +8,7 @@
 //! account's `UserActor` claim, so the node a scenario binds an account on
 //! first owns that account.
 //!
-//! A test whose name starts with `gap_` pins behaviour the selectors do not
+//! A test whose name starts with `gap_` pins behaviour the authorities do not
 //! support on a cluster: it asserts what the servers answer and its comment
 //! states the behaviour the scenario is meant to have. Closing the gap
 //! replaces the pinned answer with the intended one.
@@ -24,7 +24,7 @@ use cluster_support::{
     activate_mailbox_epoch, cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool,
     join_fanout_room, open_control_db, reset_and_enroll, reset_node_lease_tables,
     spawn_cluster_node, wait_for_cross_node_stanza, wait_for_node_lease_lapse, wait_for_readiness,
-    AccountAuthority, ClusterNode, EnrolledPool, NodeSelectors,
+    ClusterNode, EnrolledPool, NodeSelectors,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
@@ -47,9 +47,6 @@ const USERS: [&str; 5] = ["alice", "bob", "carol", "probe-a", "probe-b"];
 /// `sm_durable_sessions.state` values.
 const SESSION_LIVE: i64 = 1;
 const SESSION_DETACHED: i64 = 2;
-const SESSION_TERMINAL: i64 = 4;
-/// `sm_durable_sessions.terminal_reason` of a session ended by a bind.
-const TERMINAL_REPLACED: i64 = 3;
 
 /// `account_resource_bindings.state` values.
 const BINDING_ACTIVE: i64 = 3;
@@ -74,13 +71,6 @@ enum Delivery {
 struct Node {
     server: TestServer,
     node_id: String,
-    selectors: NodeSelectors,
-}
-
-impl Node {
-    fn coordinates_accounts(&self) -> bool {
-        self.selectors.account_authority == AccountAuthority::Coordinator
-    }
 }
 
 /// Two meshed nodes over one database.
@@ -153,12 +143,10 @@ impl Cluster {
         let a = Node {
             server: server_a,
             node_id: node_a,
-            selectors: selectors_a,
         };
         let b = Node {
             server: server_b,
             node_id: node_b,
-            selectors: selectors_b,
         };
         wait_for_cross_node_stanza(
             &a.server,
@@ -232,7 +220,7 @@ impl Cluster {
     /// a ping sent after the presence, and a coordinator node has recorded
     /// the presence, which is when a bare-JID stanza starts to select the
     /// resource.
-    async fn go_available(&self, node: &Node, client: &mut WsXmppClient, full_jid: &str) {
+    async fn go_available(&self, client: &mut WsXmppClient, full_jid: &str) {
         send(client, &Element::builder("presence", CLIENT_NS).build()).await;
         let ping = Element::builder("iq", CLIENT_NS)
             .attr(xml_ncname!("type").to_owned(), "get")
@@ -244,14 +232,12 @@ impl Cluster {
             element.is("iq", CLIENT_NS) && element.attr("id") == Some("after-presence")
         })
         .await;
-        if node.coordinates_accounts() {
-            eventually("the binding records available presence", || async {
-                binding(&self.db, full_jid)
-                    .await
-                    .filter(|row| row.presence_available)
-            })
-            .await;
-        }
+        eventually("the binding records available presence", || async {
+            binding(&self.db, full_jid)
+                .await
+                .filter(|row| row.presence_available)
+        })
+        .await;
     }
 }
 
@@ -438,7 +424,6 @@ where
 struct SessionRow {
     session_id: String,
     state: i64,
-    terminal_reason: Option<i64>,
     generation: i64,
     owner_node_id: Option<String>,
     outbound_appended: i64,
@@ -449,7 +434,7 @@ async fn sessions(db: &Database, full_jid: &str) -> Vec<SessionRow> {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
         .query(
-            "SELECT session_id, state::bigint, terminal_reason::bigint, generation, \
+            "SELECT session_id, state::bigint, generation, \
              owner_node_id, outbound_appended FROM sm_durable_sessions \
              WHERE full_jid = ? ORDER BY updated_at_ms",
             waddle_server::db_params![full_jid.to_owned()],
@@ -461,10 +446,9 @@ async fn sessions(db: &Database, full_jid: &str) -> Vec<SessionRow> {
         sessions.push(SessionRow {
             session_id: row.get(0).expect("session_id"),
             state: row.get(1).expect("state"),
-            terminal_reason: row.get(2).expect("terminal_reason"),
-            generation: row.get(3).expect("generation"),
-            owner_node_id: row.get(4).expect("owner_node_id"),
-            outbound_appended: row.get(5).expect("outbound_appended"),
+            generation: row.get(2).expect("generation"),
+            owner_node_id: row.get(3).expect("owner_node_id"),
+            outbound_appended: row.get(4).expect("outbound_appended"),
         });
     }
     sessions
@@ -484,7 +468,6 @@ async fn session_in(db: &Database, full_jid: &str, state: i64) -> SessionRow {
 struct BindingRow {
     state: i64,
     binding_ref: Option<String>,
-    sm_session_id: Option<String>,
     presence_available: bool,
     carbons_enabled: bool,
 }
@@ -493,7 +476,7 @@ async fn binding(db: &Database, full_jid: &str) -> Option<BindingRow> {
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
         .query(
-            "SELECT state::bigint, binding_ref, sm_session_id, presence_available::bigint, \
+            "SELECT state::bigint, binding_ref, presence_available::bigint, \
              carbons_enabled::bigint FROM account_resource_bindings WHERE full_jid = ?",
             waddle_server::db_params![full_jid.to_owned()],
         )
@@ -503,9 +486,8 @@ async fn binding(db: &Database, full_jid: &str) -> Option<BindingRow> {
     Some(BindingRow {
         state: row.get(0).expect("state"),
         binding_ref: row.get(1).expect("binding_ref"),
-        sm_session_id: row.get(2).expect("sm_session_id"),
-        presence_available: row.get::<i64>(3).expect("presence_available") == 1,
-        carbons_enabled: row.get::<i64>(4).expect("carbons_enabled") == 1,
+        presence_available: row.get::<i64>(2).expect("presence_available") == 1,
+        carbons_enabled: row.get::<i64>(3).expect("carbons_enabled") == 1,
     })
 }
 
@@ -558,49 +540,6 @@ async fn recv_counting(client: &mut WsXmppClient, id: &str) -> u32 {
             return counted;
         }
     }
-}
-
-/// The selectors travel with each node: a node that selects the coordinator
-/// commits a durable session and an account binding, and a node of the same
-/// cluster that selects the registry commits the durable session only.
-#[tokio::test]
-async fn each_node_serves_with_the_authorities_it_selects() {
-    let cluster = Cluster::start(
-        NodeSelectors::DURABLE_COORDINATOR,
-        NodeSelectors::DURABLE_REGISTRY,
-        Delivery::Relay,
-    )
-    .await;
-    let alice = cluster.full("alice", "phone");
-    let bob = cluster.full("bob", "desk");
-
-    let (_alice, alice_token) = cluster.resumable(&cluster.a, "alice", "phone").await;
-    let session = session_in(&cluster.db, &alice, SESSION_LIVE).await;
-    assert_eq!(session.generation, 1);
-    assert_eq!(
-        session.owner_node_id.as_deref(),
-        Some(cluster.a.node_id.as_str())
-    );
-    assert_ne!(
-        session.session_id, alice_token,
-        "the token is not the storage key"
-    );
-    let row = binding_in(&cluster.db, &alice, BINDING_ACTIVE).await;
-    assert_eq!(
-        row.sm_session_id.as_deref(),
-        Some(session.session_id.as_str())
-    );
-
-    let (_bob, _) = cluster.resumable(cluster.b(), "bob", "desk").await;
-    assert_eq!(
-        sessions(&cluster.db, &bob).await.len(),
-        1,
-        "every node commits a durable session"
-    );
-    assert!(
-        binding(&cluster.db, &bob).await.is_none(),
-        "a registry node commits no account binding"
-    );
 }
 
 /// The stream error a node answers when session initialization fails.
@@ -668,48 +607,25 @@ async fn same_node_bind_replaces_a_live_binding(selectors: NodeSelectors) {
 
 /// Binding a resource again while its durable session is detached.
 ///
-/// The bind succeeds, the detached session becomes terminal with the
-/// reason "replaced", and its resume token names no session. On a registry
-/// cluster the binder takes the session's claim and replaces it under that
-/// claim.
+/// Intended: the bind succeeds, the detached session becomes terminal with
+/// the reason "replaced", its resume token names no session, and a message
+/// to the full JID reaches the new connection.
+///
+/// Pinned gap: the detached binding holds the resource's slot at the
+/// coordinator. The bind waits for that binding to retire, which nothing
+/// does while its session stays detached, and ends in a stream error when
+/// the wait runs out.
 async fn bind_over_a_detached_session(selectors: NodeSelectors) {
     let cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let node = &cluster.a;
     let alice_jid = cluster.full("alice", "phone");
-    let (alice, token) = cluster.resumable(node, "alice", "phone").await;
+    let (alice, _token) = cluster.resumable(node, "alice", "phone").await;
     drop(alice);
-    let detached = session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
+    session_in(&cluster.db, &alice_jid, SESSION_DETACHED).await;
 
     let mut again = cluster.connect(node, "alice").await;
     let answer = bind(&mut again, "phone").await;
-    if node.coordinates_accounts() {
-        // Pinned gap: the detached binding holds the resource's slot at
-        // the coordinator. The bind waits for that binding to retire,
-        // which nothing does while its session stays detached, and ends
-        // in a stream error when the wait runs out.
-        assert_eq!(answer, internal_server_error());
-        return;
-    }
-    assert_eq!(answer, Answer::Bound(alice_jid.clone()));
-    let replaced = eventually("the detached session is replaced", || async {
-        sessions(&cluster.db, &alice_jid)
-            .await
-            .into_iter()
-            .find(|row| {
-                row.session_id == detached.session_id
-                    && row.terminal_reason == Some(TERMINAL_REPLACED)
-            })
-    })
-    .await;
-    assert_eq!(replaced.state, SESSION_TERMINAL);
-    let mut late = cluster.connect(node, "alice").await;
-    assert_eq!(
-        resume(&mut late, &token, 0).await,
-        Answer::Failed("item-not-found".to_owned())
-    );
-    let mut bob = cluster.bound(node, "bob", "desk").await;
-    send(&mut bob, &chat(&alice_jid, "after-rebind")).await;
-    recv_message_once(&mut again, "after-rebind").await;
+    assert_eq!(answer, internal_server_error());
 }
 
 /// Chat messages between accounts whose resources are on different nodes
@@ -723,10 +639,8 @@ async fn accounts_on_different_nodes_exchange_messages(
     let bob_jid = cluster.full("bob", "desk");
     let (mut alice, _) = cluster.resumable(&cluster.a, "alice", "phone").await;
     let (mut bob, _) = cluster.resumable(cluster.b(), "bob", "desk").await;
-    cluster
-        .go_available(&cluster.a, &mut alice, &alice_jid)
-        .await;
-    cluster.go_available(cluster.b(), &mut bob, &bob_jid).await;
+    cluster.go_available(&mut alice, &alice_jid).await;
+    cluster.go_available(&mut bob, &bob_jid).await;
 
     send(&mut bob, &chat(&alice_jid, "b-to-a-full")).await;
     let delivered = recv_message_once(&mut alice, "b-to-a-full").await;
@@ -794,7 +708,7 @@ async fn message_to_an_account_without_a_connection(selectors: NodeSelectors) {
 }
 
 /// Enable carbons on the resource `full_jid`, bound on `node`.
-async fn enable_carbons(cluster: &Cluster, node: &Node, client: &mut WsXmppClient, full_jid: &str) {
+async fn enable_carbons(cluster: &Cluster, client: &mut WsXmppClient, full_jid: &str) {
     let request = Element::builder("iq", CLIENT_NS)
         .attr(xml_ncname!("type").to_owned(), "set")
         .attr(xml_ncname!("id").to_owned(), "carbons")
@@ -806,14 +720,12 @@ async fn enable_carbons(cluster: &Cluster, node: &Node, client: &mut WsXmppClien
     })
     .await;
     assert_eq!(result.attr("type"), Some("result"));
-    if node.coordinates_accounts() {
-        eventually("the binding records carbons", || async {
-            binding(&cluster.db, full_jid)
-                .await
-                .filter(|row| row.carbons_enabled)
-        })
-        .await;
-    }
+    eventually("the binding records carbons", || async {
+        binding(&cluster.db, full_jid)
+            .await
+            .filter(|row| row.carbons_enabled)
+    })
+    .await;
 }
 
 fn is_carbon(element: &Element, direction: &str, id: &str) -> bool {
@@ -836,15 +748,11 @@ async fn carbons_reach_a_sibling_on_the_owning_node(selectors: NodeSelectors) {
     let bob_jid = cluster.full("bob", "desk");
     let mut laptop = cluster.bound(&cluster.a, "alice", "laptop").await;
     let mut phone = cluster.bound(&cluster.a, "alice", "phone").await;
-    cluster
-        .go_available(&cluster.a, &mut laptop, &laptop_jid)
-        .await;
-    cluster
-        .go_available(&cluster.a, &mut phone, &phone_jid)
-        .await;
-    enable_carbons(&cluster, &cluster.a, &mut phone, &phone_jid).await;
+    cluster.go_available(&mut laptop, &laptop_jid).await;
+    cluster.go_available(&mut phone, &phone_jid).await;
+    enable_carbons(&cluster, &mut phone, &phone_jid).await;
     let mut bob = cluster.bound(cluster.b(), "bob", "desk").await;
-    cluster.go_available(cluster.b(), &mut bob, &bob_jid).await;
+    cluster.go_available(&mut bob, &bob_jid).await;
 
     send(&mut bob, &chat(&laptop_jid, "inbound")).await;
     recv_message_once(&mut laptop, "inbound").await;
@@ -872,9 +780,7 @@ async fn second_resource_on_the_other_node(selectors: NodeSelectors) {
     let laptop_jid = cluster.full("alice", "laptop");
     let phone_jid = cluster.full("alice", "phone");
     let mut laptop = cluster.bound(&cluster.a, "alice", "laptop").await;
-    cluster
-        .go_available(&cluster.a, &mut laptop, &laptop_jid)
-        .await;
+    cluster.go_available(&mut laptop, &laptop_jid).await;
 
     let mut phone = cluster.connect(cluster.b(), "alice").await;
     let answer = bind(&mut phone, "phone").await;
@@ -884,13 +790,9 @@ async fn second_resource_on_the_other_node(selectors: NodeSelectors) {
         "the account stays with the node that bound it first"
     );
     assert_eq!(answer, Answer::Bound(phone_jid.clone()));
-    if cluster.b().coordinates_accounts() {
-        binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
-    }
-    cluster
-        .go_available(cluster.b(), &mut phone, &phone_jid)
-        .await;
-    enable_carbons(&cluster, cluster.b(), &mut phone, &phone_jid).await;
+    binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
+    cluster.go_available(&mut phone, &phone_jid).await;
+    enable_carbons(&cluster, &mut phone, &phone_jid).await;
     let mut bob = cluster.bound(cluster.b(), "bob", "desk").await;
     send(&mut bob, &chat(&laptop_jid, "to-the-laptop")).await;
     recv_message_once(&mut laptop, "to-the-laptop").await;
@@ -1193,9 +1095,7 @@ async fn resource_of_a_killed_node_binds_on_the_survivor(selectors: NodeSelector
         bind(&mut alice, "phone").await,
         Answer::Bound(alice_jid.clone())
     );
-    cluster
-        .go_available(&cluster.a, &mut alice, &alice_jid)
-        .await;
+    cluster.go_available(&mut alice, &alice_jid).await;
     assert_eq!(
         account_owner(&cluster.db, &cluster.bare("alice")).await,
         Some(cluster.a.node_id.clone()),
@@ -1219,7 +1119,7 @@ async fn bind_on_the_other_node_records_the_binding_at_the_owner(selectors: Node
     let desk_jid = cluster.full("alice", "desk");
     let phone_jid = cluster.full("alice", "phone");
     let mut desk = cluster.bound(&cluster.a, "alice", "desk").await;
-    cluster.go_available(&cluster.a, &mut desk, &desk_jid).await;
+    cluster.go_available(&mut desk, &desk_jid).await;
 
     let mut phone = cluster.bound(cluster.b(), "alice", "phone").await;
     assert_eq!(
@@ -1229,9 +1129,7 @@ async fn bind_on_the_other_node_records_the_binding_at_the_owner(selectors: Node
     );
     let row = binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
     assert!(row.binding_ref.is_some());
-    cluster
-        .go_available(cluster.b(), &mut phone, &phone_jid)
-        .await;
+    cluster.go_available(&mut phone, &phone_jid).await;
 
     let mut bob_a = cluster.bound(&cluster.a, "bob", "desk").await;
     send(&mut bob_a, &chat(&phone_jid, "from-the-owner-node")).await;
@@ -1253,16 +1151,12 @@ async fn second_resource_on_the_other_node_receives_sent_carbons(selectors: Node
     let phone_jid = cluster.full("alice", "phone");
     let bob_jid = cluster.full("bob", "desk");
     let mut laptop = cluster.bound(&cluster.a, "alice", "laptop").await;
-    cluster
-        .go_available(&cluster.a, &mut laptop, &laptop_jid)
-        .await;
+    cluster.go_available(&mut laptop, &laptop_jid).await;
     let mut phone = cluster.bound(cluster.b(), "alice", "phone").await;
-    cluster
-        .go_available(cluster.b(), &mut phone, &phone_jid)
-        .await;
-    enable_carbons(&cluster, cluster.b(), &mut phone, &phone_jid).await;
+    cluster.go_available(&mut phone, &phone_jid).await;
+    enable_carbons(&cluster, &mut phone, &phone_jid).await;
     let mut bob = cluster.bound(cluster.b(), "bob", "desk").await;
-    cluster.go_available(cluster.b(), &mut bob, &bob_jid).await;
+    cluster.go_available(&mut bob, &bob_jid).await;
 
     send(&mut laptop, &chat(&bob_jid, "outbound")).await;
     recv_message_once(&mut bob, "outbound").await;
@@ -1422,20 +1316,14 @@ async fn delivery_reaches_resources_on_both_nodes(selectors: NodeSelectors) {
     let phone_jid = cluster.full("alice", "phone");
     let alice = cluster.bare("alice");
     let mut laptop = cluster.bound(&cluster.a, "alice", "laptop").await;
-    cluster
-        .go_available(&cluster.a, &mut laptop, &laptop_jid)
-        .await;
+    cluster.go_available(&mut laptop, &laptop_jid).await;
     let mut phone = cluster.bound(cluster.b(), "alice", "phone").await;
-    cluster
-        .go_available(cluster.b(), &mut phone, &phone_jid)
-        .await;
+    cluster.go_available(&mut phone, &phone_jid).await;
     assert_eq!(
         account_owner(&cluster.db, &alice).await,
         Some(cluster.a.node_id.clone())
     );
-    if cluster.b().coordinates_accounts() {
-        binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
-    }
+    binding_in(&cluster.db, &phone_jid, BINDING_ACTIVE).await;
     let mut bob = cluster.bound(&cluster.a, "bob", "desk").await;
     let mut carol = cluster.bound(cluster.b(), "carol", "desk").await;
 
@@ -1562,25 +1450,6 @@ macro_rules! profile {
         }
     };
 }
-
-profile!(durable_registry, NodeSelectors::DURABLE_REGISTRY, {
-    same_node_bind_detach_and_resume => same_node_bind_detach_and_resume,
-    same_node_bind_replaces_a_live_binding => same_node_bind_replaces_a_live_binding,
-    bind_over_a_detached_session => bind_over_a_detached_session,
-    messages_through_the_mailbox => messages_through_the_mailbox,
-    messages_over_the_relay => messages_over_the_relay,
-    message_to_an_account_without_a_connection => message_to_an_account_without_a_connection,
-    carbons_reach_a_sibling_on_the_owning_node => carbons_reach_a_sibling_on_the_owning_node,
-    second_resource_on_the_other_node => second_resource_on_the_other_node,
-    groupchat_reaches_occupants_on_both_nodes => groupchat_reaches_occupants_on_both_nodes,
-    detached_session_resumes_on_the_other_node => detached_session_resumes_on_the_other_node,
-    live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
-    gap_stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
-    gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
-    session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
-    resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
-    delivery_reaches_resources_on_both_nodes => delivery_reaches_resources_on_both_nodes,
-});
 
 profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
     same_node_bind_detach_and_resume => same_node_bind_detach_and_resume,

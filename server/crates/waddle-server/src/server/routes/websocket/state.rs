@@ -1765,8 +1765,8 @@ pub(super) struct WsConnState {
     /// Mints every binding identity of this socket and records how far the
     /// current one has come.
     pub(super) bindings: super::connection::BindingLedger,
-    /// This connection's binding at the account coordinator, when the
-    /// coordinator is the selected account authority and holds one.
+    /// This connection's binding at the account coordinator, once it holds
+    /// one.
     pub(super) account_binding: Option<super::account_binding::AccountBindingLink>,
     #[cfg(test)]
     pub(super) resume_binding_attempts: Vec<waddle_xmpp::ownership::BindingRef>,

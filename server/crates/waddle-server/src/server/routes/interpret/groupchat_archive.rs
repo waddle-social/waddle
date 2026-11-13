@@ -1040,36 +1040,17 @@ pub(super) struct GroupchatInboxProjectionOutcome {
     pub notification_recovery_committed: bool,
 }
 
-/// XEP-0430 inbox push to all live resources of `user`. Decoupled
-/// from `WebSocketState` (Copilot review on PR #279) so unit tests
-/// and non-WebSocket callers can drive the projection without
-/// standing up the full route stack.
+/// XEP-0430 inbox push to all live resources of `user`.
 ///
-/// Used by the new-message archive path (which observes a fresh
-/// inbox row and broadcasts it) *and* the mark-read IQ handler
-/// (which broadcasts the read-state flip so the user's other
-/// devices clear their unread badges in real time — XEP-0430
-/// §"Mark as read" cross-device sync).
-pub(crate) async fn push_inbox_update(
-    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
-    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
-    user: &BareJid,
-    entry: &InboxEntry,
-) -> Vec<FullJid> {
-    let resources = match user_registry {
-        Some(user_registry) => {
-            waddle_xmpp::registry::get_resources_for_user(user_registry, user).await
-        }
-        None => Vec::new(),
-    };
-    push_inbox_update_to(connection_registry, &resources, entry).await
-}
-
-/// [`push_inbox_update`] for a caller with interpreter dependencies.
+/// Used by the new-message archive path (which observes a fresh inbox row
+/// and broadcasts it) and the mark-read IQ handler (which broadcasts the
+/// read-state flip so the user's other devices clear their unread badges,
+/// XEP-0430 "Mark as read" cross-device sync).
 ///
-/// With the account coordinator selected the pushed resources are the
-/// coordinator's active resources, and each push goes to the binding the
-/// coordinator names for it, on this node or on the node that hosts it.
+/// The pushed resources are the account coordinator's active resources,
+/// and each push goes to the binding the coordinator names for it, on this
+/// node or on the node that hosts it. Without the WebSocket route state no
+/// coordinator is reachable and nothing is pushed.
 /// The push is a server-generated frame, never a copy an ingress
 /// transaction owns, so it travels without the caller's append context.
 pub(crate) async fn push_inbox_update_with(
@@ -1077,24 +1058,19 @@ pub(crate) async fn push_inbox_update_with(
     user: &BareJid,
     entry: &InboxEntry,
 ) -> Vec<FullJid> {
-    let coordinator = match deps.web_socket_state {
-        Some(state) => {
-            state
-                .deps
-                .app_state
-                .account_authority()
-                .resources(user)
-                .await
-        }
-        None => None,
+    let Some(state) = deps.web_socket_state else {
+        return Vec::new();
     };
-    let Some(read) = coordinator else {
-        return push_inbox_update(deps.connection_registry, deps.user_registry, user, entry).await;
-    };
-    let resources = read.unwrap_or_else(|error| {
-        warn!(%error, %user, "account coordinator did not list resources for an inbox push");
-        Vec::new()
-    });
+    let resources = state
+        .deps
+        .app_state
+        .account_authority()
+        .resources(user)
+        .await
+        .unwrap_or_else(|error| {
+            warn!(%error, %user, "account coordinator did not list resources for an inbox push");
+            Vec::new()
+        });
     let mut frame_deps = deps.clone();
     frame_deps.ingress_append_context = None;
     let mut delivered = Vec::new();

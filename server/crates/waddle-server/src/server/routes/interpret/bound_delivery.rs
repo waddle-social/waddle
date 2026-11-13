@@ -1,5 +1,4 @@
-//! Full-JID delivery when the account coordinator is the selected
-//! authority.
+//! Full-JID delivery to the binding the account coordinator names.
 //!
 //! The coordinator names the exact binding that holds a resource. Delivery
 //! hands a stanza only to the endpoint that carries that binding:
@@ -17,8 +16,9 @@
 //!   is missing.
 //!
 //! Nothing here reads the `UserActor` resource map or the remote channel
-//! mirrors. With the registry selected every function returns `None` and
-//! the caller keeps its registry path.
+//! mirrors. Interpreter dependencies without the WebSocket route state
+//! reach no coordinator: every function then returns `None` and the caller
+//! keeps its transport path.
 
 use waddle_xmpp::ownership::{BindingRef, NodeIdentity};
 use waddle_xmpp::registry::{BroadcastOutcome, DeliveryKind, OutboundStanza};
@@ -96,8 +96,9 @@ impl BoundReach {
 
 /// Deliver one stanza to one resource through the coordinator's binding.
 ///
-/// `None` when the registry is the selected authority; the caller then
-/// keeps its registry path.
+/// `None` only for interpreter dependencies without the WebSocket route
+/// state, which reach no coordinator; the caller then keeps its transport
+/// path.
 pub(crate) async fn deliver_to_bound_resource(
     deps: &Deps<'_>,
     target: &jid::FullJid,
@@ -112,7 +113,7 @@ pub(crate) async fn deliver_to_bound_resource(
         .app_state
         .account_authority()
         .bound_resource(target)
-        .await?;
+        .await;
     let context = deps.ingress_append_context.as_ref();
     let detached = || async {
         if reach.detached {

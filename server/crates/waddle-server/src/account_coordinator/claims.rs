@@ -105,7 +105,7 @@ impl AccountClaimSource for ProcessClaimSource {
 
 /// The account claims the `UserActor` mirror of this node holds.
 ///
-/// With the coordinator selected a binding is also registered with the
+/// A binding is also registered with the
 /// account's `UserActor`, whose registry takes and releases the same
 /// `UserActor` claim row through [`MirrorClaimStore`]. The claim must
 /// outlive whichever of the two needs it longer, so each release consults

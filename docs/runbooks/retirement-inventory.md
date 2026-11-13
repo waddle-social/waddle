@@ -17,7 +17,7 @@ outside test files and test modules. `S/` is
 
 | Legacy path | Where it lives today | Replaced by | Status | Deletion check |
 |---|---|---|---|---|
-| Dual registration | `S/server/dual_registration.rs` (`mirror_register`, `mirror_register_outcome`, `mirror_unregister`). Callers: the registry binding publisher in `W/registration.rs`, which every websocket bind, rollback and teardown goes through (`withdraw_binding`, `retire_binding`, `retire_remote_binding`); `S/server/session_janitors/implementation.rs` (2), `S/clustering/route_bridge/registration/socket.rs`, `S/clustering/route_bridge/delivery/remote.rs`, `S/server/routes/interpret/deps.rs` | The account coordinator owning `connections` and `bind_slots`; one registration per binding (M3) | **present**. Actor selection is authoritative through it today | `grep -rn 'mirror_register\|mirror_unregister' S` is empty and the module is deleted |
+| Dual registration | `S/server/dual_registration.rs` (`mirror_register`, `mirror_register_outcome`, `mirror_unregister`). Callers: the registry binding publisher in `W/registration.rs`, which every websocket bind, rollback and teardown goes through (`withdraw_binding`, `retire_binding`, `retire_remote_binding`); `S/server/session_janitors/implementation.rs` (2), `S/clustering/route_bridge/registration/socket.rs`, `S/clustering/route_bridge/delivery/remote.rs`, `S/server/routes/interpret/deps.rs` | The account coordinator owning `connections` and `bind_slots`; one registration per binding (M3) | **present**. The coordinator is the only account authority; the mirror is still written for the readers listed in 2138 | `grep -rn 'mirror_register\|mirror_unregister' S` is empty and the module is deleted |
 | User-resource mirrors (account-owner copies of a socket's state on another node) | `X/registry/user_actor/implementation.rs` and `X/registry/user_registry.rs` (`users[].resources`, `pending_unregisters`); `S/clustering/route_bridge/registration/owner.rs`, `owner_update.rs`, `owner_retire.rs`, `owner_sweep.rs`; the reconciliation janitor (`Janitor::RemoteOwnerMirror` in `S/server/session_janitors/implementation.rs`) | Exact connection bindings with account-owned selection metadata, generation-fenced (M3, package E) | **present** | `UserRegistryActor` holds no per-resource clones; `route_bridge/registration/owner*.rs` and the `remote_owner_mirror` janitor are deleted; `xmpp.remote_owner_mirror.*` metrics are gone |
 | Remote channel mirrors (a remote-hosted registry entry whose channel forwards to the socket's node) | `S/clustering/route_bridge/registration/socket_forwarder.rs`, `socket.rs`; relay messages `remote_resource_register.v4`, `remote_resource_unregister.v2`, `remote_resource_update.v1`, `remote_resource_write_accepted.v1`, `remote_resource_force_detach.v3`, `remote_user_side_effect.v4` in `S/clustering/relay/implementation.rs`; compatibility handlers in `S/clustering/relay/remote_resource_compat.rs` | Delivery through the durable mailbox to the owning connection actor (M2, M4) | **present** | None of the `remote_resource_*` and `remote_user_side_effect` message IDs is registered; `socket_forwarder.rs` is deleted |
 | Routing bypasses (enqueue paths that reach a socket without the owning endpoint: direct, peer, pending, ordered and remote enqueues) | Listed call site by call site in [`2046-caller-inventory.md`](../planning/2046-caller-inventory.md) sections 8 and 10 and [`2046-current-caller-candidates.md`](../planning/2046-current-caller-candidates.md); the endpoint itself is `X/registry/connection_registry/outbound.rs` | One domain-facing addressing model: every delivery addressed to a binding and admitted by its endpoint (package B, M3) | **present**. The caller inventory is the baseline for the bypass freeze | Every row of the caller inventory's bypass table is deleted or reclassified as a documented, non-authoritative index |
@@ -48,40 +48,52 @@ actor needs one to find its pump. It is recorded under "Derived indexes
 that may remain" when that is decided, and nothing may read it to choose a
 destination.
 
-### State of the plan with both selectors available
+### State of the plan with the coordinator as the only authority
 
-`WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` (durable stream management is
-the only stream-management authority) makes the coordinator the authority on
-which resources an account has and which receive a stanza, and every
-`/ws` connection reports its binding to it. No step above is deletable
-yet, under either selection:
+The account coordinator is the only account-resource authority: startup
+always selects it, `WADDLE_XMPP_ACCOUNT_AUTHORITY` is removed and ignored
+with a startup warning, and every `/ws` connection reports its binding to
+it. Deleted with the selector:
 
-- **Step 1 is blocked by the remaining readers, not by selection.** With
-  the coordinator selected, full-JID delivery, the route bridge's
-  receiver, inbox pushes and the group-DM leave resolve a binding's
-  endpoint from the coordinator's `BindingRef`, through the local
-  connection registry or a bound direct request to the hosting node,
-  without the `UserActor`. The readers that still read the `UserActor` or
-  a remote channel mirror in that mode are listed in
+- `AccountAuthorityMode` and its `Registry` variant; an application that
+  never ran startup's selection holds `AccountAuthoritySelection::Unselected`,
+  which serves no account;
+- the registry arm of every account read (`S/account_coordinator/reads.rs`
+  callers: recipient inventory, bare-JID selection, carbons, presence probe
+  and fan-out, roster and block-list push sets, inbox pushes, the group-DM
+  leave, the route bridge's presence check and bare-JID presence fan-out).
+  A read the coordinator cannot answer is a failed read; no caller reads
+  the registry or the `UserActor` in its place.
+
+No step of the table above is deletable yet. Each was checked against the
+source after the selector was removed:
+
+- **Step 1 is blocked by the remaining readers.** The readers that still
+  read the `UserActor` or a remote channel mirror are listed in
   [`2138-account-coordinator.md`](../planning/2138-account-coordinator.md),
-  "What still writes the registry and the mirrors". Step 1 becomes
-  deletable when that list is empty and the coordinator selector is the
-  default.
-- **Steps 2 to 4** follow step 1 unchanged.
-
-Deletable once the coordinator selector defaults to the coordinator, with
-no other precondition:
-
-- the `registry` arm of every account read (`S/account_coordinator/reads.rs`
-  callers: recipient inventory, bare-JID selection, carbons, presence
-  probe and fan-out, roster and block-list push sets), with
-  `registry/selection.rs` and the `UserActor` selection messages those
-  arms call;
-- `RegistryBindingPublisher`'s confirmation as the gate on a bind, once
-  the mirror is no longer read.
+  "What still writes the registry and the mirrors". `mirror_register` and
+  `mirror_unregister` are still called from `W/registration.rs`,
+  `W/cleanup.rs`, `S/server/session_janitors/implementation.rs`,
+  `S/clustering/route_bridge/registration/socket.rs`,
+  `S/clustering/route_bridge/delivery/remote.rs` and the interpreter
+  (`S/server/routes/interpret/deps.rs`, `routing.rs`).
+- **`X/registry/selection.rs`** is still called by stream-management
+  promotion (`S/sm_promotion/live.rs`, `S/sm_promotion/pending.rs`) and by
+  `X/routing.rs`; it goes when those read the coordinator.
+- **`RegistryBindingPublisher`'s confirmation as the gate on a bind**
+  stays while the mirror is read: a binding whose registry write failed
+  would be recorded at the coordinator and unreachable by those readers.
+- **Steps 2 to 4**, the remote channel mirrors (`socket_forwarder.rs`, the
+  `remote_resource_*` relay messages) and the `owner*.rs` mirrors with the
+  `RemoteOwnerMirror` janitor follow step 1 unchanged.
+- **The `BareJid` and `FullJid` ordered lanes** of `deliver_ordered` are
+  still sent below protocol epoch 2, under the `relay` acceptance selector,
+  for an origin resource hosted through a remote channel mirror and when a
+  direct request could not be committed (row "Ordered relay lanes"). Their
+  removal, with the wire version bump to `v17`, needs those senders gone.
 
 `WsConnState` fields that D5 marks "Deleted", and why each is still
-present under both selections:
+present:
 
 | Field | Remaining users |
 |---|---|
@@ -94,10 +106,9 @@ The fields D5 assigns to the connection actor are held in `WsConnState`,
 which the actor owns through `LiveSocketState`; they have not been split
 into a separate actor-owned struct. The coordinator-owned rows
 (`carbons_enabled`, `roster_interested`, `blocklist_interested`,
-`presence_*`) are the connection's projection: with the coordinator
-selected they are sent as `UpdateSnapshot` and read by routing from the
-coordinator, and under `registry` they are still copied onto the registry
-entry. `account_binding` is the actor's handle on its coordinator
+`presence_*`) are the connection's projection: they are sent as `UpdateSnapshot` and read by routing from the
+coordinator, and are still copied onto the registry entry for the readers
+of step 1. `account_binding` is the actor's handle on its coordinator
 binding.
 
 ## Derived indexes that may remain

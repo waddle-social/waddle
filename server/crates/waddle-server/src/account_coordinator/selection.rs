@@ -1,6 +1,5 @@
 //! Which account-resource authority a serving process reads.
 
-use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
 use thiserror::Error;
@@ -20,46 +19,23 @@ use crate::account_bindings::{AccountBindingStoreError, DatabaseAccountBindingSt
 use crate::clustering::ClusteringHandles;
 use crate::db::Database;
 
-/// Environment variable naming the [`AccountAuthorityMode`].
-pub const ACCOUNT_AUTHORITY_MODE_ENV: &str = "WADDLE_XMPP_ACCOUNT_AUTHORITY";
+/// Environment variable that once chose between the connection registry and
+/// the account coordinator. The coordinator is the only account-resource
+/// authority, so the variable selects nothing; startup logs a warning when
+/// it is set so a deployment still carrying it can drop it.
+pub const REMOVED_ACCOUNT_AUTHORITY_ENV: &str = "WADDLE_XMPP_ACCOUNT_AUTHORITY";
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{ACCOUNT_AUTHORITY_MODE_ENV} must be `registry` or `coordinator`, not `{0}`")]
-pub struct InvalidAccountAuthorityMode(String);
-
-/// The configured account-resource authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AccountAuthorityMode {
-    /// The connection registry and `UserActor` are written by the
-    /// connection and read by routing.
-    #[default]
-    Registry,
-    /// Routing reads the account coordinator in
-    /// [`crate::account_coordinator`].
-    Coordinator,
-}
-
-impl FromStr for AccountAuthorityMode {
-    type Err = InvalidAccountAuthorityMode;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim() {
-            "registry" => Ok(Self::Registry),
-            "coordinator" => Ok(Self::Coordinator),
-            other => Err(InvalidAccountAuthorityMode(other.to_owned())),
-        }
-    }
-}
-
-impl AccountAuthorityMode {
-    /// Read the mode from the environment. An unset variable is
-    /// `Registry`; a value that is neither mode is an error, so a typo
-    /// cannot silently select the other authority.
-    pub fn from_env() -> Result<Self, InvalidAccountAuthorityMode> {
-        match std::env::var(ACCOUNT_AUTHORITY_MODE_ENV) {
-            Ok(value) => value.parse(),
-            Err(_) => Ok(Self::Registry),
-        }
+/// Warn when the removed selector variable is still set. Any value is
+/// ignored: `coordinator` is what startup selects anyway, and `registry`
+/// no longer exists. Rolling back to the registry is a restart on a release
+/// that still has it.
+pub fn warn_if_removed_selector_set() {
+    if let Ok(value) = std::env::var(REMOVED_ACCOUNT_AUTHORITY_ENV) {
+        tracing::warn!(
+            variable = REMOVED_ACCOUNT_AUTHORITY_ENV,
+            value = %value,
+            "the account-authority selector was removed and is ignored; the account coordinator is the only account-resource authority"
+        );
     }
 }
 
@@ -79,18 +55,23 @@ pub enum AccountAuthoritySelectionError {
     ClusterIdentityMissing,
 }
 
-/// The authority account reads consult. `Registry` carries no
-/// coordinators, so a caller cannot reach them unless the mode selected
-/// them.
+/// The account-resource authority account reads consult.
 ///
 /// `Coordinator` carries this node's own coordinators and the routed
 /// authority over them. Connections and routing go through the routed
 /// authority, which reaches the coordinator of the node that owns each
 /// account; the coordinators themselves serve only what this node owns.
+/// Startup always selects it.
+///
+/// `Unselected` is the state of an application whose startup never ran the
+/// selection, such as a unit-test fixture that publishes no coordinator. It
+/// serves no account: every read fails as
+/// [`super::AccountCoordinatorError::Unselected`] and a connection records no
+/// binding.
 #[derive(Clone, Default)]
 pub enum AccountAuthoritySelection {
     #[default]
-    Registry,
+    Unselected,
     Coordinator {
         coordinators: Arc<AccountCoordinators>,
         authority: Arc<RoutedAccountAuthority>,
@@ -98,21 +79,16 @@ pub enum AccountAuthoritySelection {
 }
 
 impl AccountAuthoritySelection {
-    /// Build the selection for `mode` over the ingress database. The
-    /// registry mode opens nothing. The coordinator mode opens the binding
-    /// store, takes claims from the cluster claim store on a clustered node
-    /// and from the process otherwise, and starts the task that reclaims
-    /// idle coordinators.
+    /// Select the account coordinator over the ingress database: open the
+    /// binding store, take claims from the cluster claim store on a
+    /// clustered node and from the process otherwise, and start the task
+    /// that reclaims idle coordinators.
     pub async fn open(
-        mode: AccountAuthorityMode,
         db: &Database,
         clustering: &ClusteringHandles,
         clustered: bool,
         durable_stream_management: bool,
     ) -> Result<Self, AccountAuthoritySelectionError> {
-        if mode == AccountAuthorityMode::Registry {
-            return Ok(Self::Registry);
-        }
         if !durable_stream_management {
             return Err(AccountAuthoritySelectionError::RequiresDurableStreamManagement);
         }
@@ -168,21 +144,20 @@ impl AccountAuthoritySelection {
         })
     }
 
-    /// This node's own coordinators, when the coordinator is the selected
-    /// authority. They serve only the accounts this node owns; a request
+    /// This node's own coordinators, once startup selected them. They serve only the accounts this node owns; a request
     /// on behalf of a connection goes through [`Self::authority`].
     pub fn coordinators(&self) -> Option<&Arc<AccountCoordinators>> {
         match self {
-            Self::Registry => None,
+            Self::Unselected => None,
             Self::Coordinator { coordinators, .. } => Some(coordinators),
         }
     }
 
     /// The authority that decides each account's requests on the node that
-    /// owns it, when the coordinator is the selected authority.
+    /// owns it, once startup selected it.
     pub fn authority(&self) -> Option<&Arc<RoutedAccountAuthority>> {
         match self {
-            Self::Registry => None,
+            Self::Unselected => None,
             Self::Coordinator { authority, .. } => Some(authority),
         }
     }

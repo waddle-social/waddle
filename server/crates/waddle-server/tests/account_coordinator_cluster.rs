@@ -1,7 +1,6 @@
 //! Two clustered nodes with the account coordinator and the durable
 //! stream-management authority selected
-//! (`WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator`,
-//! `WADDLE_XMPP_DURABLE_SM=durable`) on one PostgreSQL.
+//! (`WADDLE_XMPP_DURABLE_SM=durable`) on one PostgreSQL.
 //!
 //! On a clustered node a coordinator acts only under the account's
 //! `UserActor` claim. These tests observe that claim in
@@ -33,10 +32,7 @@ const DOMAIN: &str = "localhost";
 /// The account whose claim the tests observe.
 const ACCOUNT: &str = "admin";
 const CLIENT_NS: &str = "jabber:client";
-const SELECTORS: &[(&str, &str)] = &[
-    ("WADDLE_XMPP_ACCOUNT_AUTHORITY", "coordinator"),
-    ("WADDLE_XMPP_DURABLE_SM", "durable"),
-];
+const SELECTORS: &[(&str, &str)] = &[("WADDLE_XMPP_DURABLE_SM", "durable")];
 
 /// `account_resource_bindings.state` values.
 const STATE_ACTIVE: i64 = 3;

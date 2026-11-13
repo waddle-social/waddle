@@ -203,6 +203,19 @@ where
             Arc::new(state)
         }
     };
+    // Startup always selects the account coordinator; the fixture selects
+    // a single-node one on its own database so connections record their
+    // bindings and routing reads them as in production. A state that
+    // already carries a selection keeps it.
+    let account_authority = crate::account_coordinator::AccountAuthoritySelection::open(
+        app_state.db_pool.global(),
+        &crate::clustering::ClusteringHandles::default(),
+        false,
+        true,
+    )
+    .await
+    .expect("open the account coordinator on the fixture database");
+    app_state.publish_account_authority(account_authority);
     let mut auth_state_inner = AuthState::new(
         app_state.clone(),
         &server_config,

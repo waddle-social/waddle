@@ -543,8 +543,7 @@ pub(crate) async fn run_durable_sm_sweep(state: &WebSocketState) {
         }
         return;
     }
-    // With the account coordinator selected a resource row may name a
-    // session. The resource row releases first and the session row is
+    // A resource row may name a session. The resource row releases first and the session row is
     // deleted last, one session at a time, so one referenced session does
     // not hold back the others.
     let purgeable = match store.purgeable_terminal(purge_before, SWEEP_LIMIT).await {

@@ -315,14 +315,22 @@ and present only when it returns `true`.
 - **Connection contract.** A connection actor calls the trait
   `AccountBindingAuthority`: `slot_status`, `execute`, `bind_success`,
   `mark_presented` and `unregister`.
-- **Selector.** `AppState::account_authority()` returns the
-  `AccountAuthoritySelection` chosen by `WADDLE_XMPP_ACCOUNT_AUTHORITY`
-  (`registry` by default, `coordinator`; any other value fails startup).
-  The coordinator is selectable only together with the durable
-  stream-management authority, because a binding's session reference
-  points at the durable session relation.
+- **Selection.** Startup always selects the coordinator:
+  `AppState::account_authority()` returns the `AccountAuthoritySelection`
+  it published. There is no selector. `WADDLE_XMPP_ACCOUNT_AUTHORITY` is
+  removed and ignored; startup logs a warning when it is set, whatever its
+  value, so a deployment can drop it without failing to start. Refusing
+  the variable would turn a leftover `coordinator` value into a crash loop,
+  and `registry` is not something a restart can honour any more. The
+  coordinator opens only together with the durable stream-management
+  authority, because a binding's session reference points at the durable
+  session relation; startup always selects both. An application that never
+  ran startup's selection (a unit-test fixture that publishes nothing)
+  holds `AccountAuthoritySelection::Unselected`, which serves no account:
+  every read answers `AccountCoordinatorError::Unselected` and a
+  connection records no binding.
 
-When the coordinator is selected, these reads come from it: the recipient
+These reads come from the coordinator, and from nothing else: the recipient
 inventory; bare-JID target selection; the carbon planner's and the carbon
 fan-out's per-target policy; presence probes, including the probed
 resource's show, status, priority and payloads; presence fan-out to a
@@ -330,10 +338,13 @@ subscriber's or a user's available resources; subscription delivery and its
 roster pushes; last activity; entity-capability and PubSub fan-out targets;
 MUC invite delivery; offline-delivery and inbox-update targets; and the
 roster and block-list push sets. A read the coordinator cannot answer is an
-error at the recipient inventory and an empty set with a warning elsewhere.
-An account without a claim is answered: it has no resources.
+error at the recipient inventory and an empty set with a warning elsewhere;
+the registry and the `UserActor` are never read in its place. An account
+without a claim is answered: it has no resources. Interpreter dependencies
+built without the WebSocket route state reach no coordinator and read an
+account as having no live resource.
 
-These reads stay on the registry in both modes: the connection cleanup and
+These reads stay on the registry: the connection cleanup and
 registration paths, the cluster route bridge's registration snapshots and
 its owner-side receiver, pending-delivery flush and recovery, the
 stream-management promotion paths, the extension host's presence query, and
@@ -341,10 +352,9 @@ the admin channel command. They read a connection entry together with its
 outbound endpoint, or belong to code that writes the registry, and move
 with the switch of the writers.
 
-### What a connection sends when the coordinator is selected
+### What a connection sends to the coordinator
 
-With `WADDLE_XMPP_ACCOUNT_AUTHORITY=coordinator` every `/ws` connection
-drives the coordinator's slot for its resource
+Every `/ws` connection drives the coordinator's slot for its resource
 (`W/account_binding.rs`, `W/registration.rs`; `W` is
 `waddle-server/src/server/routes/websocket`):
 
@@ -370,8 +380,8 @@ Decisions this wiring makes:
   timeout fails the bind as an authoritative-registration failure, the
   stanza error a replacement timeout has always produced.
 - **A resume without a detached slot.** When the slot holds no detached
-  binding of the resumed session (the session was detached before the
-  coordinator was selected, or its binding was retired after a resume that
+  binding of the resumed session (the session was detached by a release
+  that ran the connection registry, or its binding was retired after a resume that
   failed late), the binding is recorded with `Bind` instead. The durable
   session committed the resume and is the authority on it; a slot that
   holds any other binding refuses.
@@ -403,11 +413,10 @@ Decisions this wiring makes:
 
 The coordinator decides which resources receive a stanza and names the
 exact binding of each. The connection registry and the account's
-`UserActor` are still written under either selection, and with the
-coordinator selected a binding is recorded in all three, because the
-readers listed below still need the legacy writes.
+`UserActor` are still written, and a binding is recorded in all three,
+because the readers listed below still need the legacy writes.
 
-**Delivery with the coordinator selected.** A stanza for a full JID goes to
+**Delivery.** A stanza for a full JID goes to
 the binding `AccountView::bindings` names (`S/server/routes/interpret/bound_delivery.rs`):
 
 - A binding this node hosts is found in the connection registry, which is
@@ -425,7 +434,7 @@ the binding `AccountView::bindings` names (`S/server/routes/interpret/bound_deli
 - A resource without an active binding takes the detached path.
 
 The `UserActor` and the remote channel mirrors are not read on these
-paths in that mode: full-JID delivery through the interpreter
+paths: full-JID delivery through the interpreter
 (`deliver_peer_to_full_with_registered_remote_at`,
 `deliver_direct_to_full_with_registered_remote_at`, the live-only DM
 attempt), the registered-remote entry points of the route bridge (which
@@ -435,8 +444,7 @@ processed copies, IQs, bare-JID presence fan-out, the target-refresh
 fallback), the direct-request worker's presence check, the inbox-update
 push and the group-DM leave (`admin/channels.rs`).
 
-Readers that still read the `UserActor` or a remote channel mirror with
-the coordinator selected:
+Readers that still read the `UserActor` or a remote channel mirror:
 
 - stream-management promotion (`sm_promotion/live.rs`,
   `sm_promotion/pending.rs`), which selects live targets and bounce
@@ -454,8 +462,9 @@ the coordinator selected:
 
 The registry's presence state, last activity and pending subscription
 stanzas are still written by the presence handlers for the same readers.
-With the registry selected every path above reads the registry and the
-`UserActor` as before.
+Until this list is empty the registry publisher stays in the bind path
+after the coordinator (see "The binding publisher"), and the deletion
+steps of the retirement inventory stay blocked.
 
 ## The binding publisher
 
@@ -478,6 +487,14 @@ coordinator:
 
 Each step reads the slot first and skips what the binding's state shows as
 done, so a repeat after a lost reply is safe.
+
+Every binding goes through both, coordinator first
+(`SelectedBindingPublisher` in `W/registration.rs`). The registry
+publisher's confirmation still gates a bind: the readers listed under "What
+still writes the registry and the mirrors" find a resource through the
+registry entry and the `UserActor` mirror it writes, so a binding whose
+registry write failed would be recorded at the coordinator and unreachable
+by them. The gate goes when that list is empty.
 
 The trait is shaped by what the coordinator needs:
 
@@ -645,6 +662,13 @@ management (F) switch together, at one point:
   made authoritative again without disconnecting those bindings, so
   rollback past that point is a restart on the previous release, with the
   durable rows as the source for resume.
+
+The coordinator is the default and the only selection: the selector and
+the registry arm of every account read are deleted. Rolling back to the
+registry is a restart on the previous release, which still reads
+`WADDLE_XMPP_ACCOUNT_AUTHORITY` and defaults to the registry; the steps
+are in [`relay-cutovers.md`](../operations/relay-cutovers.md), "Routed
+account coordinator".
 
 Deletion of `dual_registration`, the `UserActor` resource map and the
 registry's ownership of `connections` and `bind_slots` follows the switch

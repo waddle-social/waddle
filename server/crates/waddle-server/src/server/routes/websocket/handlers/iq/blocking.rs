@@ -386,9 +386,9 @@ pub(crate) async fn send_blocking_pushes(
         }
     }
 
-    // When the coordinator is the selected authority and does not answer,
-    // no live resource is pushed to; the registry is not written in that
-    // mode and is not read instead.
+    // When the account coordinator does not answer, no live resource is
+    // pushed to; the connection registry is not an account authority and is
+    // not read instead.
     let live_resources = match state
         .deps
         .app_state
@@ -396,16 +396,11 @@ pub(crate) async fn send_blocking_pushes(
         .blocklist_interested(user_bare)
         .await
     {
-        Some(Ok(resources)) => resources,
-        Some(Err(error)) => {
+        Ok(resources) => resources,
+        Err(error) => {
             warn!(jid = %user_bare, %error, "account coordinator did not answer the XEP-0191 blocklist-interest read");
             Vec::new()
         }
-        None => state
-            .deps
-            .protocol
-            .connection_registry
-            .blocklist_interested_resources_for_user(user_bare),
     };
     for resource_jid in live_resources {
         if recorded_detached.contains(&resource_jid) {
