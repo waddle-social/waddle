@@ -82,6 +82,7 @@ async fn enabled(store: &DurableSmStore, owner: &BindingRef) -> EnabledCommit {
                 principal: &alice(),
                 full_jid: &alice_phone(),
                 max_resume: Duration::from_secs(300),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 claim: None,
                 now: at(0),
             },
@@ -650,4 +651,51 @@ async fn a_restart_detaches_owned_sessions_and_a_rebind_replaces_them() {
             DurableSmState::Terminal(TerminalReason::Replaced)
         )))
     ));
+}
+
+/// A session whose owner was lost before it detached has no resource
+/// snapshot. Its resume still carries the occupancy generation the resource
+/// was bound under, recorded at enable, and replays every frame the client
+/// had not handled, in order.
+#[tokio::test]
+async fn a_resume_after_owner_loss_carries_the_enabled_occupancy_generation() {
+    let store = store("sm-durable-owner-lost-generation").await;
+    let generation = OccupancySessionGeneration::from_uuid(Uuid::from_u128(7));
+    let commit = store
+        .enable(
+            &EnableOperation::mint(),
+            EnableRequest {
+                binding: &binding(),
+                principal: &alice(),
+                full_jid: &alice_phone(),
+                max_resume: Duration::from_secs(300),
+                occupancy_session: generation,
+                claim: None,
+                now: at(0),
+            },
+        )
+        .await
+        .expect("enable commits");
+    let first = admit_owned(&store, commit.fence(), "one").await;
+    let second = admit_owned(&store, commit.fence(), "two").await;
+    let third = admit_owned(&store, commit.fence(), "three").await;
+    store
+        .detach_owners_of_previous_process(at(50))
+        .await
+        .expect("recovery");
+
+    let resumed = resume(&store, &commit, &binding(), first.wire(), at(60))
+        .await
+        .expect("resume after owner loss");
+    assert!(resumed.resource().is_none());
+    assert_eq!(resumed.occupancy_session(), Some(generation));
+    assert_eq!(
+        resumed
+            .replay()
+            .iter()
+            .map(|frame| frame.ordinal)
+            .collect::<Vec<_>>(),
+        vec![second, third],
+        "the unhandled frames are replayed once, in order"
+    );
 }

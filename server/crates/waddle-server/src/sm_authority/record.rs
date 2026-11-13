@@ -15,6 +15,7 @@ use waddle_xmpp::stream_management::durable::{
     TerminalReason,
 };
 use waddle_xmpp::stream_management::persistence::SmClaimFence;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::error::DurableSmError;
 use crate::db::{DatabaseDriver, Row, Transaction, Value};
@@ -23,7 +24,7 @@ pub(super) const COLUMNS: &str = "session_id, full_jid, state, terminal_reason, 
     binding, bare_jid, auth_context_id, auth_context_version, principal_auth_epoch, \
     owner_node_id, owner_node_epoch, claim_epoch, inbound_handled, outbound_acked, \
     outbound_exposure_ceiling, outbound_appended, outbound_unacked_bytes, max_resume_secs, \
-    detached_at_ms, enable_operation, last_operation";
+    detached_at_ms, enable_operation, last_operation, occupancy_session";
 
 /// The claim a generation was committed under on a clustered node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,10 @@ pub struct DurableSessionRecord {
     pub detached_at: Option<DateTime<Utc>>,
     pub enable_operation: SmOperationId,
     pub last_operation: SmOperationId,
+    /// The occupancy generation the resource was bound under. A connection
+    /// that resumes the session publishes its endpoint under this value.
+    /// Absent for a session enabled before the generation was recorded.
+    pub occupancy_session: Option<OccupancySessionGeneration>,
 }
 
 impl RecordedClaim {
@@ -173,6 +178,12 @@ pub(super) fn decode(row: &Row) -> Result<DurableSessionRecord, DurableSmError> 
             "enable_operation",
         )?),
         last_operation: SmOperationId::from_uuid(uuid(&row.get::<String>(21)?, "last_operation")?),
+        occupancy_session: row
+            .get::<Option<String>>(22)?
+            .map(|value| {
+                uuid(&value, "occupancy_session").map(OccupancySessionGeneration::from_uuid)
+            })
+            .transpose()?,
     })
 }
 
@@ -258,6 +269,9 @@ fn mutable_params(
         stored.detached_at.map(|at| at.timestamp_millis()),
         stored.last_operation.as_uuid().to_string(),
         now.timestamp_millis(),
+        stored
+            .occupancy_session
+            .map(|generation| generation.to_string()),
     ])
 }
 
@@ -282,8 +296,8 @@ pub(super) async fn insert(
          auth_context_id, auth_context_version, principal_auth_epoch, owner_node_id, \
          owner_node_epoch, claim_epoch, inbound_handled, outbound_acked, \
          outbound_exposure_ceiling, outbound_appended, outbound_unacked_bytes, \
-         max_resume_secs, detached_at_ms, last_operation, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         max_resume_secs, detached_at_ms, last_operation, updated_at_ms, occupancy_session) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params,
     )
     .await?;
@@ -342,8 +356,8 @@ pub(super) async fn update(
              principal_auth_epoch = ?, owner_node_id = ?, owner_node_epoch = ?, \
              claim_epoch = ?, inbound_handled = ?, outbound_acked = ?, \
              outbound_exposure_ceiling = ?, outbound_appended = ?, outbound_unacked_bytes = ?, \
-             max_resume_secs = ?, detached_at_ms = ?, last_operation = ?, updated_at_ms = ? \
-             WHERE session_id = ?",
+             max_resume_secs = ?, detached_at_ms = ?, last_operation = ?, updated_at_ms = ?, \
+             occupancy_session = ? WHERE session_id = ?",
             params,
         )
         .await?;

@@ -2114,7 +2114,7 @@ async fn upgraded_active_work_does_not_leave_an_unsettled_work_reference(fixture
             .run(&fixture.db)
             .await
             .expect("Foundation upgrade"),
-        vec![1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035]
+        vec![1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036]
     );
     assert_eq!(
         fixture.count("ingress_effect_descendants").await,

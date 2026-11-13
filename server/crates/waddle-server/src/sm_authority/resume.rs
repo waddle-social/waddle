@@ -12,6 +12,7 @@ use waddle_xmpp::stream_management::durable::{
 };
 use waddle_xmpp::stream_management::persistence::{PersistedSession, SmClaimFence};
 use waddle_xmpp::stream_management::SmResumed;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::custody::{
     load_frames, release_acknowledged, OwnerError, OwnerRejection, RetainedFrame,
@@ -94,6 +95,7 @@ pub struct ResumedCommit {
     replay: Vec<RetainedFrame>,
     replay_through: SmOrdinal,
     resource: Option<PersistedSession>,
+    occupancy_session: Option<OccupancySessionGeneration>,
     superseded: Option<BindingRef>,
 }
 
@@ -128,6 +130,17 @@ impl ResumedCommit {
     /// Absent when the previous owner never detached.
     pub fn resource(&self) -> Option<&PersistedSession> {
         self.resource.as_ref()
+    }
+
+    /// The occupancy generation the resumed resource is published under:
+    /// the detached snapshot's, or the one stored with the session when its
+    /// owner was lost before it detached. Absent only for a session enabled
+    /// before the generation was stored and never detached since.
+    pub fn occupancy_session(&self) -> Option<OccupancySessionGeneration> {
+        self.resource
+            .as_ref()
+            .map(|resource| resource.occupancy_session)
+            .or(self.occupancy_session)
     }
 
     /// The binding that owned the session when this resume took it over.
@@ -379,6 +392,7 @@ impl DurableSmStore {
                 replay,
                 replay_through: stored.window.appended(),
                 resource,
+                occupancy_session: stored.occupancy_session,
                 superseded,
             }),
             Err(cause) => Err(ResumeError::Indeterminate(cause.into())),
@@ -521,6 +535,7 @@ async fn committed_resume(
         replay_through: stored.window.appended(),
         replay,
         resource,
+        occupancy_session: stored.occupancy_session,
         // The superseded binding is cleanup evidence only and is not stored.
         superseded: None,
     })))

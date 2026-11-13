@@ -155,11 +155,12 @@ async fn revert_v1025(fixture: &IngressFixture) {
         .begin()
         .await
         .expect("downgrade fixture transaction");
-    // Undo V1035's seat identities (the column leaves with its table),
+    // Undo V1036's session occupancy generations and V1035's seat
+    // identities (each column leaves with its table),
     // V1034's guarded authority relations, V1033's direct requests,
     // V1032's room requests, V1031's mailbox, V1030's receipt journal and
     // V1029's SM frame provenance first: the ledger rejects any applied
-    // version above a missing one. SQLite's V1031 through V1035 create
+    // version above a missing one. SQLite's V1031 through V1036 create
     // nothing.
     if fixture.db.driver() == crate::db::DatabaseDriver::Postgres {
         tx.execute_batch(
@@ -371,7 +372,7 @@ ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_ch
         tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
     }
     tx.execute(
-        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035)",
+        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036)",
         (),
     )
     .await

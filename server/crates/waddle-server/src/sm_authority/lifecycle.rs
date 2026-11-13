@@ -84,6 +84,9 @@ impl DurableSmStore {
         stored.state = transition(stored.state, DurableSmEvent::Detach)
             .map_err(|_| OwnerRejection::NotOwned(stored.state))?;
         stored.inbound_handled = stored.inbound_handled.max(snapshot.inbound_handled);
+        // The owner states the generation its resource is published under,
+        // which also records it for a session enabled before it was stored.
+        stored.occupancy_session = Some(snapshot.resource.occupancy_session);
         let detached_at = *stored.detached_at.get_or_insert(now);
         let resource = PersistedSession {
             stream_id: record::stream_id(stored.session),

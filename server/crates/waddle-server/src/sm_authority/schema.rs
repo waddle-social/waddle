@@ -1,6 +1,6 @@
 //! Owner-side DDL for the durable session authority relations.
 
-use crate::db::{Database, DatabaseError};
+use crate::db::{Database, DatabaseDriver, DatabaseError};
 
 /// Create the authority relations if they are absent. This runs in the owner
 /// phase, or when a store opens an unrestricted database; the restricted
@@ -33,7 +33,8 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), DatabaseError> 
                 detached_at_ms {bigint},
                 enable_operation TEXT NOT NULL,
                 last_operation TEXT NOT NULL,
-                updated_at_ms {bigint} NOT NULL
+                updated_at_ms {bigint} NOT NULL,
+                occupancy_session TEXT
             )"
         ),
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_durable_sessions_token \
@@ -63,6 +64,36 @@ pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), DatabaseError> 
     let connection = db.guard().await?;
     for statement in statements {
         connection.execute(&statement, ()).await?;
+    }
+    // A table created before the column existed gains it here. Its rows
+    // keep NULL: sessions whose occupancy generation was never recorded.
+    match db.driver() {
+        DatabaseDriver::Postgres => {
+            connection
+                .execute(
+                    "ALTER TABLE sm_durable_sessions \
+                     ADD COLUMN IF NOT EXISTS occupancy_session TEXT",
+                    (),
+                )
+                .await?;
+        }
+        DatabaseDriver::Sqlite => {
+            let mut rows = connection
+                .query(
+                    "SELECT 1 FROM pragma_table_info('sm_durable_sessions') \
+                     WHERE name = 'occupancy_session'",
+                    (),
+                )
+                .await?;
+            if rows.next().await?.is_none() {
+                connection
+                    .execute(
+                        "ALTER TABLE sm_durable_sessions ADD COLUMN occupancy_session TEXT",
+                        (),
+                    )
+                    .await?;
+            }
+        }
     }
     Ok(())
 }

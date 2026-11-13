@@ -68,6 +68,7 @@ async fn enable_commits_a_live_generation_one_session_before_the_reply_exists() 
         principal: &alice,
         full_jid: &alice_phone(),
         max_resume: Duration::from_secs(300),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         claim: None,
         now: at(0),
     };
@@ -122,6 +123,7 @@ async fn enable_rejects_a_principal_that_is_not_the_bound_resource() {
                 principal: &mallory,
                 full_jid: &alice_phone(),
                 max_resume: Duration::from_secs(300),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 claim: None,
                 now: at(0),
             },
@@ -145,6 +147,7 @@ async fn an_abandoned_enable_operation_can_never_commit() {
         principal: &alice,
         full_jid: &alice_phone(),
         max_resume: Duration::from_secs(300),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         claim: None,
         now: at(0),
     };

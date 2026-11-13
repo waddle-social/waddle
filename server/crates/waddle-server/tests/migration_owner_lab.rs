@@ -557,7 +557,7 @@ async fn v1009_epoch_id_grant_requires_exact_guard_and_valid_pending_ledger() {
         run(&fixture)
             .await
             .expect("pending catalog from V1028 with scoped V1009 ACL"),
-        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035]
+        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036]
     );
     sqlx::query(&format!(
         "UPDATE {epoch} SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1"
@@ -657,7 +657,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     );
     assert_eq!(
         result.expect("owner commits"),
-        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035]
+        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036]
     );
     let (v1027, v1028, ack_table, rejection_table): (i64, i64, bool, bool) =
         sqlx::query_as(&format!(
@@ -849,7 +849,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         )
         .await
         .expect("apply at supported epoch"),
-        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035]
+        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036]
     );
     make_v1028_pending(&fixture).await;
     for epoch in [2_i64, 3] {
@@ -1107,7 +1107,7 @@ async fn owner_handoff_rejects_unsafe_role_graph_before_migration() {
         )
         .await
         .expect("restored graph applies migration"),
-        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035]
+        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036]
     );
     fixture.cleanup().await;
 }

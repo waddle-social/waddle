@@ -2444,12 +2444,23 @@ impl InMemorySmSessionRegistry {
                     Some(publication_guard)
                 }
             }
+            Ok(Err(ClaimError::AlreadyClaimed)) => {
+                self.cancel_claim_fence_reservation(stream_id);
+                // Expected when a resume reaches a node that does not hold
+                // the session: the caller decides whether to take the claim
+                // over from its holder.
+                tracing::debug!(
+                    stream_id = %stream_id,
+                    "SM session claim is held by another node"
+                );
+                None
+            }
             Ok(Err(error)) => {
                 self.cancel_claim_fence_reservation(stream_id);
                 tracing::warn!(
                     stream_id = %stream_id,
                     %error,
-                    "handle_sm_enable: ClaimStore ensure_claimed failed; rejecting SM enable"
+                    "SM session claim could not be taken"
                 );
                 None
             }

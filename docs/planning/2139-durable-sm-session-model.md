@@ -77,6 +77,7 @@ supplied current principal with the stored one for exact equality.
 | `max_resume_secs`, `detached_at_ms` | resume window |
 | `enable_operation`, `last_operation` | operation identities |
 | `updated_at_ms` | last write, used to age released tombstones |
+| `occupancy_session` | occupancy generation the resource is published under; set at enable and detach (V1036) |
 
 Reused relations: `sm_unacked` holds the retained frames (exact wire bytes,
 receipt time, ingress receipts, provenance) with `sequence` equal to the
@@ -224,14 +225,22 @@ holder's connection recorded without a transport and resume without its
 resource snapshot.
 
 A session whose owner was recorded as lost has no resource snapshot: the
-owner never detached. The resume transaction commits for it, but the
-snapshot is what carries the resource's occupancy generation to the resuming
-connection, and without it the connection cannot publish the resource. The
-resume is compensated to `Detached` and answered `<failed/>`
-(`item-not-found`); the client binds afresh and the retained frames are
-transferred to offline delivery when the session expires. This holds for
-every owner-lost session, whichever node recorded the loss, until the
-session's occupancy generation is stored outside the snapshot.
+owner never detached. The occupancy generation the resource was bound under
+is stored on `sm_durable_sessions.occupancy_session` (migration V1036) when
+the session is enabled and again at every detach, so the resuming
+connection publishes the resource under it and the resume succeeds whichever
+node recorded the loss: a surviving node, the orphan reaper, or the same
+node restarted on the same database. The frames the client had not handled
+are replayed once, in order, ahead of live output. The presence, carbons and
+roster and blocklist interest the lost owner held are not knowable, so the
+resumed resource starts as a freshly bound one does: unavailable, carbons
+off, no roster or blocklist push interest, and the once-per-session
+subscription flush not yet consumed. The client re-establishes them as it
+would after a fresh bind, by sending initial presence and enabling what it
+uses. A session enabled before V1036 and never detached since has no stored
+generation; its resume is compensated to `Detached` and answered
+`<failed/>` (`item-not-found`), the client binds afresh, and its retained
+frames reach offline delivery when it expires.
 
 A detach or a resume on the holder leaves the claim epoch unchanged, so a
 session resumed on the holder between this node's last read of the row and

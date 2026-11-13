@@ -12,6 +12,7 @@ use waddle_xmpp::stream_management::durable::{
 };
 use waddle_xmpp::stream_management::persistence::SmClaimFence;
 use waddle_xmpp::stream_management::SmEnabled;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::error::DurableSmError;
 use super::operations::{self, OperationKind, OperationOutcome};
@@ -57,6 +58,10 @@ pub struct EnableRequest<'a> {
     pub principal: &'a AuthenticatedPrincipalRef,
     pub full_jid: &'a FullJid,
     pub max_resume: Duration,
+    /// The occupancy generation the resource is bound under. It is stored
+    /// with the session so that a resume can publish the resource again
+    /// when the owner was lost before it detached.
+    pub occupancy_session: OccupancySessionGeneration,
     /// This node's claim on the session; required on a clustered store.
     pub claim: Option<&'a SmClaimFence>,
     pub now: DateTime<Utc>,
@@ -202,6 +207,7 @@ impl DurableSmStore {
             detached_at: None,
             enable_operation: operation.id,
             last_operation: operation.id,
+            occupancy_session: Some(request.occupancy_session),
         };
         record::insert(&mut tx, &stored, &operation.token.digest(), request.now)
             .await
