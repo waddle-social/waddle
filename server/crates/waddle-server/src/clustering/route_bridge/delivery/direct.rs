@@ -68,9 +68,9 @@ impl OrderedRelayDeliveryBridge {
     ///
     /// `None` when the mailbox does not carry it and the caller sends the
     /// relay envelope: the recipient is a room, the deployment does not
-    /// select the mailbox with durable stream management, the protocol
-    /// epoch is below the mailbox epoch, the account has no claim, or the
-    /// request could not be committed. Once a request is committed the
+    /// select the mailbox, the protocol epoch is below the mailbox epoch,
+    /// the account has no claim, or the request could not be committed.
+    /// Once a request is committed the
     /// result is always `Some`: an accepted request is `Delivered`, a
     /// rejected one is `Unavailable` so that the caller runs the fallback it
     /// runs for a refused relay send, and a request whose decision was not
@@ -87,7 +87,6 @@ impl OrderedRelayDeliveryBridge {
             return None;
         }
         let state = seed.services.web_socket_state.upgrade()?;
-        state.deps.app_state.durable_sm().store()?;
         let authority = Arc::clone(&state.deps.protocol.ingress);
         if !authority.room_requests_carried_now().await {
             return None;
