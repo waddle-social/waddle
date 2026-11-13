@@ -2,6 +2,7 @@ use thiserror::Error;
 use waddle_xmpp::stream_management::persistence::SmPersistenceError;
 
 use crate::db::DatabaseError;
+use crate::ingress_substrate::{GuardedStoreWriterError, IngressSubstrateError};
 use crate::sm_persistence::SmRuntimeAttachError;
 
 /// A failure of the durable session store that is not a decision about the
@@ -20,6 +21,11 @@ pub enum DurableSmError {
     ReplayGap { expected: u64, found: u64 },
     #[error("the transaction's lock and statement bounds could not be installed")]
     BoundsUnproven,
+    /// The session relations are epoch-guarded and the write could not prove
+    /// the live protocol epoch: it is one this binary does not implement, or
+    /// the connection is not the attested one.
+    #[error("the durable SM write could not prove the live protocol epoch")]
+    EpochUnproven(#[source] IngressSubstrateError),
     /// The attested runtime pool never runs owner DDL; it attaches instead.
     #[error("the durable SM store must attach, not bootstrap, on an attested PostgreSQL pool")]
     AttestedPoolRequiresAttach,
@@ -33,4 +39,14 @@ pub enum DurableSmError {
     ClaimRequired,
     #[error("durable SM does not support {operation}")]
     Unsupported { operation: &'static str },
+}
+
+impl From<GuardedStoreWriterError> for DurableSmError {
+    fn from(error: GuardedStoreWriterError) -> Self {
+        match error {
+            GuardedStoreWriterError::Database(error) => Self::Database(error),
+            GuardedStoreWriterError::BoundsUnproven => Self::BoundsUnproven,
+            GuardedStoreWriterError::EpochUnproven(error) => Self::EpochUnproven(error),
+        }
+    }
 }

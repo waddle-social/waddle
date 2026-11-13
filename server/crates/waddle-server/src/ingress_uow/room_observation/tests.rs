@@ -155,24 +155,29 @@ async fn revert_v1025(fixture: &IngressFixture) {
         .begin()
         .await
         .expect("downgrade fixture transaction");
-    // Undo V1033's direct requests, V1032's room requests, V1031's mailbox,
-    // V1030's receipt journal and V1029's SM frame provenance first: the
-    // ledger rejects any applied version above a missing one. SQLite's V1031,
-    // V1032 and V1033 create nothing.
+    // Undo V1034's guarded authority relations, V1033's direct requests,
+    // V1032's room requests, V1031's mailbox, V1030's receipt journal and
+    // V1029's SM frame provenance first: the ledger rejects any applied
+    // version above a missing one. SQLite's V1031 through V1034 create
+    // nothing.
     if fixture.db.driver() == crate::db::DatabaseDriver::Postgres {
         tx.execute_batch(
             "ALTER TABLE ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
-             DELETE FROM ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries', 'ingress_room_requests', 'ingress_room_responses', 'ingress_room_occupants', 'ingress_direct_requests'); \
+             DELETE FROM ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries', 'ingress_room_requests', 'ingress_room_responses', 'ingress_room_occupants', 'ingress_direct_requests', 'sm_durable_sessions', 'sm_durable_operations', 'account_resource_bindings', 'account_resource_operations'); \
              ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row; \
              DROP TABLE ingress_room_occupants; \
              DROP TABLE ingress_room_responses; \
              DROP TABLE ingress_mailbox_entries; \
              DROP TABLE ingress_mailbox_lanes; \
              DROP TABLE ingress_room_requests; \
-             DROP TABLE ingress_direct_requests;",
+             DROP TABLE ingress_direct_requests; \
+             DROP TABLE account_resource_operations; \
+             DROP TABLE account_resource_bindings; \
+             DROP TABLE sm_durable_operations; \
+             DROP TABLE sm_durable_sessions;",
         )
         .await
-        .expect("remove mailbox, room request and direct request relations");
+        .expect("remove mailbox, room request, direct request and authority relations");
         tx.execute("DROP FUNCTION waddle_p21_record_effect_receipt", ())
             .await
             .expect("remove receipt journal function");
@@ -365,7 +370,7 @@ ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_ch
         tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
     }
     tx.execute(
-        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033)",
+        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034)",
         (),
     )
     .await

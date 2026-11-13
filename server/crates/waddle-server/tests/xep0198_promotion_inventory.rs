@@ -351,7 +351,7 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
         .unwrap();
     assert_eq!(
         MigrationRunner::single().run(&fixture.db).await.unwrap(),
-        vec![1029, 1030, 1031, 1032, 1033]
+        vec![1029, 1030, 1031, 1032, 1033, 1034]
     );
     assert!(MigrationRunner::single()
         .run(&fixture.db)
@@ -414,17 +414,22 @@ async fn provenance_migration_after_owner_bootstrap(fixture: IngressFixture) {
 async fn reset_to_pre_v1029(tx: &mut waddle_server::db::Transaction<'_>, driver: DatabaseDriver) {
     if driver == DatabaseDriver::Postgres {
         // V1031's mailbox, V1032's room request and V1033's direct request
-        // relations exist only on PostgreSQL.
+        // relations exist only on PostgreSQL, and V1034 creates the guarded
+        // authority relations only there.
         tx.execute_batch(
             "ALTER TABLE ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row; \
-             DELETE FROM ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries', 'ingress_room_requests', 'ingress_room_responses', 'ingress_room_occupants', 'ingress_direct_requests'); \
+             DELETE FROM ingress_epoch_guard_manifest WHERE table_name IN ('ingress_mailbox_lanes', 'ingress_mailbox_entries', 'ingress_room_requests', 'ingress_room_responses', 'ingress_room_occupants', 'ingress_direct_requests', 'sm_durable_sessions', 'sm_durable_operations', 'account_resource_bindings', 'account_resource_operations'); \
              ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row; \
              DROP TABLE ingress_room_occupants; \
              DROP TABLE ingress_room_responses; \
              DROP TABLE ingress_mailbox_entries; \
              DROP TABLE ingress_mailbox_lanes; \
              DROP TABLE ingress_room_requests; \
-             DROP TABLE ingress_direct_requests;",
+             DROP TABLE ingress_direct_requests; \
+             DROP TABLE account_resource_operations; \
+             DROP TABLE account_resource_bindings; \
+             DROP TABLE sm_durable_operations; \
+             DROP TABLE sm_durable_sessions;",
         )
         .await
         .unwrap();

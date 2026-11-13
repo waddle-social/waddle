@@ -10,6 +10,7 @@ use super::error::DurableSmError;
 use super::record::{self, DurableSessionRecord};
 use super::schema::bootstrap_schema_owner;
 use crate::db::{Database, DatabaseDriver, Transaction};
+use crate::ingress_substrate::EnteredTransaction;
 
 /// Longest a store transaction waits for a row or relation lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -92,25 +93,18 @@ impl DurableSmStore {
     /// COMMITTED with bounded lock and statement waits, so a transaction that
     /// meets a held row lock fails as a known rejection instead of waiting
     /// without limit.
-    pub(super) async fn begin_write(&self) -> Result<Transaction<'_>, DurableSmError> {
-        let mut tx = match self.db.driver() {
-            DatabaseDriver::Sqlite => self.db.begin_immediate().await?,
-            DatabaseDriver::Postgres => self.db.begin().await?,
-        };
-        if self.db.driver() == DatabaseDriver::Postgres {
-            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                .await?;
-            if !crate::ingress_substrate::set_local_transaction_timeouts(
-                &mut tx,
-                LOCK_TIMEOUT,
-                STATEMENT_TIMEOUT,
-            )
-            .await?
-            {
-                return Err(DurableSmError::BoundsUnproven);
-            }
-        }
-        Ok(tx)
+    ///
+    /// The session relations are under the ingress epoch guard, so the
+    /// transaction proves the live protocol epoch before its first
+    /// statement: a write this binary's epoch does not cover is refused
+    /// here, and the epoch row lock precedes every session row lock.
+    pub(super) async fn begin_write(&self) -> Result<EnteredTransaction<'_>, DurableSmError> {
+        Ok(crate::ingress_substrate::begin_guarded_store_writer(
+            &self.db,
+            LOCK_TIMEOUT,
+            STATEMENT_TIMEOUT,
+        )
+        .await?)
     }
 
     /// The claim a write must assert: the one supplied on a clustered store,

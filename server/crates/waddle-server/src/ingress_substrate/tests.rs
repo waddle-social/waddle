@@ -10,7 +10,7 @@ use super::{
     Instant, MessageKey, MessageWriteOutcome, NormalizedTarget, Ordering, OriginId,
     PostgresIngressSubstrate, SemanticDigest, Sha256, SmIngressAppendKey, SmIngressId,
     SmIngressReceiptKind, StdDuration, TerminalizeOutcome, Uuid, WireHandledCount, ALIAS_RETENTION,
-    EPOCH_GUARDED_TABLES, FAIL_ORPHAN_SWEEP,
+    EPOCH_GUARDED_TABLES, FAIL_ORPHAN_SWEEP, INGRESS_GUARDED_TABLES,
 };
 use crate::db::{DatabaseConfig, MigrationRunner};
 use crate::ingress_substrate::EnteredTransaction;
@@ -2213,7 +2213,7 @@ async fn epoch_guard_manifest_matches_rust_and_live_trigger_catalog() {
     while let Some(row) = live_rows.next().await.expect("read live table row") {
         live.push(row.get::<String>(0).expect("decode live table name"));
     }
-    let mut expected_live = expected.clone();
+    let mut expected_live = INGRESS_GUARDED_TABLES.map(str::to_owned).to_vec();
     expected_live.push("ingress_epoch_guard_manifest".to_string());
     expected_live.push("ingress_protocol_epoch".to_string());
     expected_live.sort();

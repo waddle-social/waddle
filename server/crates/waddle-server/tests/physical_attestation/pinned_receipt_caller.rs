@@ -9,7 +9,7 @@ use waddle_server::db::physical_attestation::{
     ReceiptOperationAuthority, ReceiptOperationPins, ReceiptReadback,
     CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
-use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
+use waddle_server::ingress_substrate::INGRESS_GUARDED_TABLES;
 
 use super::{pinned_receipt_tests, proxy_runtime_options, test_url, Fixture, CATALOG_GRANT_LOCK};
 
@@ -127,7 +127,7 @@ async fn pinned_caller_keeps_one_transaction_and_positive_only_reconciliation() 
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
         .await
         .expect("runtime");
-    for relation in EPOCH_GUARDED_TABLES
+    for relation in INGRESS_GUARDED_TABLES
         .iter()
         .copied()
         .chain(["p21_receipt_operation_results"])

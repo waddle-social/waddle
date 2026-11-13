@@ -10,7 +10,7 @@ use waddle_server::db::physical_attestation::{
     CATALOG_MUTATION_ADVISORY_LOCK_KEY,
 };
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
-use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
+use waddle_server::ingress_substrate::INGRESS_GUARDED_TABLES;
 use waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema;
 
 use super::{
@@ -68,7 +68,7 @@ async fn restricted_ingress_profile_refuses_hostile_pg17_catalogs() {
     let s = &fixture.target;
     let r = &fixture.runtime;
     execute(&fixture.admin, &format!("CREATE ROLE {api} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT; GRANT USAGE, CREATE ON SCHEMA {s} TO {api}; GRANT SELECT ON {s}.ingress_protocol_epoch, {s}.sessions TO {api}; GRANT UPDATE(id) ON {s}.ingress_protocol_epoch, {s}.sessions TO {api}; GRANT SELECT ON {s}.ingress_epoch_guard_manifest TO {r};")).await;
-    for table in EPOCH_GUARDED_TABLES {
+    for table in INGRESS_GUARDED_TABLES {
         execute(&fixture.admin, &format!("REVOKE ALL ON {s}.{table} FROM {r}; GRANT SELECT,INSERT,UPDATE,DELETE ON {s}.{table} TO {api};")).await;
     }
     let candidate = CANDIDATE

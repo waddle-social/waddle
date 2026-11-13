@@ -24,8 +24,10 @@ const INGRESS_API_CANDIDATE: &str =
 const RECEIPT_WRITER_CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/p21_receipt_journal_postgres.sql");
 
-/// The guarded tables of the migrations above V1030. The ledger refuses an
-/// applied version above a missing one, so reapplying V1030 recreates them.
+/// The guarded ingress tables of the migrations above V1030. The ledger
+/// refuses an applied version above a missing one, so reapplying V1030
+/// recreates them. V1034's authority tables stay in place: its statements
+/// are repeatable, and the definer profile does not cover those tables.
 const RECREATED_GUARDED_TABLES: [&str; 6] = [
     "ingress_mailbox_lanes",
     "ingress_mailbox_entries",
@@ -97,8 +99,8 @@ pub(super) async fn exercise(
         MigrationRunner::single()
             .run(&owner)
             .await
-            .expect("registered V1030 through V1033"),
-        vec![1030, 1031, 1032, 1033]
+            .expect("registered V1030 through V1034"),
+        vec![1030, 1031, 1032, 1033, 1034]
     );
     drop(owner);
     super::execute(

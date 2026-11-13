@@ -525,6 +525,88 @@ pub(crate) async fn begin_unattested_raw_writer(
     Ok(EnteredTransaction { transaction: tx })
 }
 
+/// Why a guarded store writer could not begin. Nothing was written.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GuardedStoreWriterError {
+    /// The driver's own failure, kept so the store classifies lock and
+    /// statement timeouts the way it does for its other statements.
+    #[error(transparent)]
+    Database(DatabaseError),
+    #[error("the transaction's lock and statement bounds could not be installed")]
+    BoundsUnproven,
+    /// The live epoch is one this binary does not implement, or the
+    /// connection or schema is not the attested one.
+    #[error("the transaction could not prove the live protocol epoch")]
+    EpochUnproven(#[source] IngressSubstrateError),
+}
+
+impl From<IngressEntryError> for GuardedStoreWriterError {
+    fn from(error: IngressEntryError) -> Self {
+        match error {
+            IngressEntryError::Database(error) | IngressEntryError::PreparationDatabase(error) => {
+                Self::Database(error)
+            }
+            IngressEntryError::BoundsUnproven => Self::BoundsUnproven,
+            other => Self::EpochUnproven(other.into_substrate_error()),
+        }
+    }
+}
+
+/// Begin a write transaction for a store whose relations are enrolled under
+/// the epoch guard without being ingress relations: the durable session
+/// authority and the account binding store
+/// ([`AUTHORITY_GUARDED_TABLES`](super::AUTHORITY_GUARDED_TABLES)).
+///
+/// The guard trigger refuses a write to those relations at a nonzero epoch
+/// unless the transaction carries the epoch proof, and it requests the epoch
+/// row lock, which the global lock order puts before every other lock. The
+/// proof is therefore installed here, before the store's first statement:
+///
+/// - A physically attested pool goes through [`begin_ingress_entry`] under
+///   the registered guard, so the connection is attested, the epoch is
+///   proven and an epoch beyond [`supported_protocol_epoch`] is refused.
+///   `lock_timeout` and `statement_timeout` are the transaction's bounds
+///   from its first statement.
+/// - Any other handle goes through [`begin_unattested_raw_writer`], which
+///   proves the epoch when the database has the ingress foundation and reads
+///   none when it does not, so a store opened on a database without the
+///   migration catalog stays usable. The bounds are installed afterwards.
+///
+/// Like every begin of this module it returns an [`EnteredTransaction`]. The
+/// store's own statements reach the transaction through that handle.
+pub(crate) async fn begin_guarded_store_writer(
+    db: &Database,
+    lock_timeout: Duration,
+    statement_timeout: Duration,
+) -> Result<EnteredTransaction<'_>, GuardedStoreWriterError> {
+    let Some(capability) = db.attested_pg_writer_capability() else {
+        let mut entered = begin_unattested_raw_writer(db).await?;
+        if !set_local_transaction_timeouts(
+            &mut entered.transaction,
+            lock_timeout,
+            statement_timeout,
+        )
+        .await
+        .map_err(GuardedStoreWriterError::Database)?
+        {
+            return Err(GuardedStoreWriterError::BoundsUnproven);
+        }
+        return Ok(entered);
+    };
+    let entry = begin_ingress_entry(
+        db,
+        IngressEntryRequest {
+            authority: IngressEntryAuthority::InstalledGuard(&capability),
+            acquisition: IngressEntryAcquisition::WriterDefault,
+            acquisition_deadline: None,
+            explicit_timeouts: Some((lock_timeout, statement_timeout)),
+            clamp: IngressEntryClamp::CallerBounds,
+        },
+    )
+    .await?;
+    Ok(entry.into_parts().0)
+}
+
 /// Bound transaction acquisition, including pool checkout and SQLite's
 /// `BEGIN IMMEDIATE`, by the request's deadline. PostgreSQL's transaction
 /// timeouts apply only after checkout, so expiry here has its own variant.

@@ -3,7 +3,7 @@
 use super::Fixture;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
-use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
+use waddle_server::ingress_substrate::INGRESS_GUARDED_TABLES;
 
 const ROLE_GRAPH: &str =
     include_str!("../../src/db/migrations/owner/serving_role_graph_v1_candidate.sql");
@@ -445,7 +445,7 @@ async fn v1_fixed_api_runs_v1009_with_select_only_runtime_and_exact_lookup() {
     assert_ne!(new_helper.0, old_helper);
     assert_eq!(new_helper.1, lab.helper);
 
-    for table in EPOCH_GUARDED_TABLES {
+    for table in INGRESS_GUARDED_TABLES {
         let relation = format!("{}.{table}", f.schema);
         let (runtime_denied, api_exact): (bool, bool) = sqlx::query_as(
             "SELECT NOT pg_catalog.has_table_privilege($1, $3, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN') \

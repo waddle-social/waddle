@@ -61,12 +61,14 @@ pub fn mailbox_acceptance_epoch() -> ProtocolEpoch {
     ProtocolEpoch::from_storage(2)
 }
 
-/// Ingress tables protected by the epoch-proof triggers from migration V1009.
+/// The ingress substrate's own tables under the epoch-proof triggers from
+/// migration V1009. Ingress repositories write them through the typed entry,
+/// and the dark definer profile reserves them to its API role.
 ///
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 19] = [
+pub const INGRESS_GUARDED_TABLES: [&str; 19] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -87,6 +89,39 @@ pub const EPOCH_GUARDED_TABLES: [&str; 19] = [
     "ingress_room_occupants",
     "ingress_direct_requests",
 ];
+
+/// The durable session authority's and the account binding store's tables,
+/// under the same triggers since migration V1034.
+///
+/// They are not ingress tables: the runtime role writes them directly, in
+/// transactions their stores open through
+/// [`begin_guarded_store_writer`](super::begin_guarded_store_writer), and no
+/// definer API covers them. Profiles that describe the ingress heaps alone
+/// use [`INGRESS_GUARDED_TABLES`].
+pub const AUTHORITY_GUARDED_TABLES: [&str; 4] = [
+    "sm_durable_sessions",
+    "sm_durable_operations",
+    "account_resource_bindings",
+    "account_resource_operations",
+];
+
+/// Every table enrolled in `ingress_epoch_guard_manifest`: a write to any of
+/// them at a nonzero protocol epoch needs the transaction-local epoch proof,
+/// so the epoch fences a binary that does not implement it out of all of
+/// them at once.
+pub const EPOCH_GUARDED_TABLES: [&str; 23] = {
+    let mut tables = [""; 23];
+    let mut index = 0;
+    while index < INGRESS_GUARDED_TABLES.len() {
+        tables[index] = INGRESS_GUARDED_TABLES[index];
+        index += 1;
+    }
+    while index < tables.len() {
+        tables[index] = AUTHORITY_GUARDED_TABLES[index - INGRESS_GUARDED_TABLES.len()];
+        index += 1;
+    }
+    tables
+};
 
 /// Fail-closed errors for the dark ingress substrate.
 ///

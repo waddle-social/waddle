@@ -185,74 +185,148 @@ pub(crate) async fn unexpected_webhook_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    unexpected_executable_schema(tx, schema, WEBHOOK_RELATIONS).await
+    unexpected_executable_schema(tx, schema, WEBHOOK_RELATIONS, false).await
 }
 
 /// Check executable relation objects while the caller holds each table lock.
 /// The pending-delivery verifier separately checks the one permitted trigger's
-/// exact function and trigger definition. Epoch guards require their own
-/// verified allowlist before they can be enabled for these stores.
+/// exact function and trigger definition. The durable session and account
+/// binding relations are enrolled under the ingress epoch guard, so each of
+/// them must carry exactly its two guard triggers, bound to the guard
+/// functions this source tree installs; every other relation carries none.
 pub(crate) async fn unexpected_inbox_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    unexpected_executable_schema(tx, schema, INBOX_RELATIONS).await
+    unexpected_executable_schema(tx, schema, INBOX_RELATIONS, false).await
 }
 
 pub(crate) async fn unexpected_sm_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    unexpected_executable_schema(tx, schema, SM_RELATIONS).await
+    unexpected_executable_schema(tx, schema, SM_RELATIONS, false).await
 }
 
 pub(crate) async fn unexpected_durable_sm_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    unexpected_executable_schema(tx, schema, DURABLE_SM_RELATIONS).await
+    unexpected_executable_schema(tx, schema, DURABLE_SM_RELATIONS, true).await
 }
 
 pub(crate) async fn unexpected_account_binding_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    unexpected_executable_schema(tx, schema, ACCOUNT_BINDING_RELATIONS).await
+    unexpected_executable_schema(tx, schema, ACCOUNT_BINDING_RELATIONS, true).await
 }
 
 pub(crate) async fn unexpected_pending_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
 ) -> Result<Option<&'static str>, DatabaseError> {
-    unexpected_executable_schema(tx, schema, PENDING_RELATIONS).await
+    unexpected_executable_schema(tx, schema, PENDING_RELATIONS, false).await
 }
 
 async fn unexpected_executable_schema(
     tx: &mut Transaction<'_>,
     schema: &str,
     relations: &[Relation],
+    epoch_guarded: bool,
 ) -> Result<Option<&'static str>, DatabaseError> {
     for relation in relations {
         let mut rows = tx.query(
             "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw WHERE rw.ev_class = c.oid) \
-             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
+             AND (? <> 0 OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
                WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal \
                  AND NOT (c.relname = 'pending_delivery' \
-                   AND tr.tgname = 'pending_notification_recovery_ordinal_immutable')) \
+                   AND tr.tgname = 'pending_notification_recovery_ordinal_immutable'))) \
              FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r'",
-            crate::db_params![schema, relation.name],
+            crate::db_params![epoch_guarded, schema, relation.name],
         ).await?;
         let safe = match rows.next().await? {
             Some(row) => row.get::<bool>(0)?,
             None => false,
         };
         drop(rows);
-        if !safe {
+        if !safe
+            || (epoch_guarded && !epoch_guard_triggers_match(tx, schema, relation.name).await?)
+        {
             return Ok(Some(relation.name));
         }
     }
     Ok(None)
+}
+
+/// Longest guard function body read back for comparison. Both installed
+/// bodies are far shorter; a longer one is not one of them.
+const EPOCH_GUARD_BODY_LIMIT: i64 = 16_384;
+
+/// Whether `relation` carries exactly the V1009 guard pair: a statement-level
+/// trigger before INSERT, UPDATE and DELETE bound to
+/// `waddle_ingress_epoch_guard`, and one before TRUNCATE bound to
+/// `waddle_ingress_truncate_guard`. Both fire for every session
+/// (`ENABLE ALWAYS`), and both functions live in the relation's schema, are
+/// owned by its owner, run with the caller's rights and have a body this
+/// source tree installs. Foreign-key triggers are internal and not counted.
+async fn epoch_guard_triggers_match(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    relation: &str,
+) -> Result<bool, DatabaseError> {
+    let mut rows = tx
+        .query(
+            "SELECT tr.tgname::text, tr.tgtype::integer, p.proname::text, \
+               pg_catalog.left(p.prosrc, ?::integer), \
+               tr.tgenabled = 'A' AND tr.tgparentid = 0 AND tr.tgconstraint = 0 \
+               AND NOT tr.tgdeferrable AND NOT tr.tginitdeferred AND tr.tgnargs = 0 \
+               AND tr.tgattr::text = '' AND tr.tgqual IS NULL \
+               AND tr.tgoldtable IS NULL AND tr.tgnewtable IS NULL \
+               AND p.pronamespace = n.oid AND p.proowner = c.relowner AND NOT p.prosecdef \
+             FROM pg_catalog.pg_trigger tr \
+             JOIN pg_catalog.pg_class c ON c.oid = tr.tgrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_proc p ON p.oid = tr.tgfoid \
+             WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r' \
+               AND NOT tr.tgisinternal",
+            crate::db_params![EPOCH_GUARD_BODY_LIMIT, schema, relation],
+        )
+        .await?;
+    let expected = [
+        (
+            format!("{relation}_epoch_guard_dml"),
+            30_i64,
+            "waddle_ingress_epoch_guard",
+        ),
+        (
+            format!("{relation}_epoch_guard_truncate"),
+            34_i64,
+            "waddle_ingress_truncate_guard",
+        ),
+    ];
+    let mut found = [false; 2];
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(0)?;
+        let kind: i64 = row.get(1)?;
+        let function: String = row.get(2)?;
+        let body: String = row.get(3)?;
+        let shape: bool = row.get(4)?;
+        let Some(index) = expected.iter().position(|(trigger, trigger_kind, guard)| {
+            *trigger == name && *trigger_kind == kind && *guard == function
+        }) else {
+            return Ok(false);
+        };
+        if found[index]
+            || !shape
+            || !super::migrations::is_installed_epoch_guard_body(&function, &body)
+        {
+            return Ok(false);
+        }
+        found[index] = true;
+    }
+    Ok(found == [true; 2])
 }
 
 async fn verify(

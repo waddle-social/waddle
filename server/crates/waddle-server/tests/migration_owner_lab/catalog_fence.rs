@@ -201,7 +201,7 @@ async fn postgres_dark_owner_waits_for_catalog_before_ledger_or_ddl() {
     .expect("owner resumes after catalog reader");
     assert_eq!(
         result.expect("owner commits pending catalog"),
-        vec![1028, 1029, 1030, 1031, 1032, 1033]
+        vec![1028, 1029, 1030, 1031, 1032, 1033, 1034]
     );
     blocker.close().await.expect("close catalog reader");
 

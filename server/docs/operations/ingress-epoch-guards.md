@@ -7,11 +7,14 @@ can coexist with binaries that do not know this feature.
 ## Epoch-proof contract
 
 At a nonzero epoch, writes to every guarded table require two
-transaction-local GUCs. The guarded set is the 19 tables enrolled in
+transaction-local GUCs. The guarded set is the 23 tables enrolled in
 `ingress_epoch_guard_manifest`; it is mirrored by `EPOCH_GUARDED_TABLES` in
 `server/crates/waddle-server/src/ingress_substrate/substrate.rs`, and a catalog
 test (which runs only against PostgreSQL, i.e. when `WADDLE_TEST_POSTGRES_URL` is set)
-fails if the manifest, that list, or the live `ingress_*` tables diverge:
+fails if the manifest, that list, or the live `ingress_*` tables diverge.
+`EPOCH_GUARDED_TABLES` is two lists joined: `INGRESS_GUARDED_TABLES`, the 19
+ingress tables, and `AUTHORITY_GUARDED_TABLES`, the four tables of the
+durable stream-management session authority and the account binding store:
 
 | Table | Enrolled by |
 | --- | --- |
@@ -26,6 +29,25 @@ fails if the manifest, that list, or the live `ingress_*` tables diverge:
 | `ingress_mailbox_lanes`, `ingress_mailbox_entries` | V1031 |
 | `ingress_room_requests`, `ingress_room_responses`, `ingress_room_occupants` | V1032 |
 | `ingress_direct_requests` | V1033 |
+| `sm_durable_sessions`, `sm_durable_operations`, `account_resource_bindings`, `account_resource_operations` | V1034 |
+
+The four V1034 tables are not ingress tables. The runtime role writes them
+directly, with the privileges of the owner phase's grant matrix, and their
+stores open every write transaction through `begin_guarded_store_writer`
+(`ingress_substrate/typed_entry.rs`), which proves the epoch before the
+store's first statement. `pg_monitor` is granted no read on them: the rows
+hold resume-token digests, full JIDs and presence payloads. The dark definer
+profile, the serving role graph candidate and the pinned partial profile
+describe the ingress tables only. Each store's runtime attachment refuses
+its tables unless they carry exactly the guard pair, bound to the guard
+functions as V1009 or the relation-guard candidate defines them.
+
+V1034 creates the four tables if they are absent and adds the guards and
+manifest rows with repeatable statements, so a database whose owner phase
+created the tables before V1034 keeps them and their rows. A change to one
+of these tables after V1034 is a new migration, or a repeatable statement in
+the store's owner initializer (`ADD COLUMN IF NOT EXISTS`): the initializer's
+`CREATE TABLE IF NOT EXISTS` finds the table present on a migrated database.
 
 The two GUCs are:
 
@@ -47,7 +69,7 @@ The guards are statement-level `ENABLE ALWAYS` triggers. Each guard reads the
 singleton epoch row with `FOR SHARE`, so an activation update serializes behind
 in-flight epoch-0 writes: once the activation commits, the next write observes
 the new epoch and requires the proof. The manifest is append-only and records
-every protected `ingress_*` table; catalog tests verify its rows and triggers.
+every protected table; catalog tests verify its rows and triggers.
 
 Writers must follow one lock order — **epoch row, then message row, then child
 rows**. The substrate acquires the epoch row `FOR SHARE` as its first
@@ -70,7 +92,8 @@ epoch-proven.
 | 2 | As 1. On clustered PostgreSQL, remote room acceptance uses the durable mailbox and clustered room manifests are sealed, unless `WADDLE_INGRESS_REMOTE_ROOM_ACCEPTANCE=relay`. |
 
 A server implements epochs 0 through 2 and refuses a higher live epoch
-inside each ingress transaction. A server built before the mailbox implements
+inside each ingress transaction and each write transaction of the durable
+session and account binding stores. A server built before the mailbox implements
 epochs 0 and 1 and refuses a live epoch 2 the same way.
 
 ## Activation

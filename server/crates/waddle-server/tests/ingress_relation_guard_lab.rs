@@ -124,8 +124,8 @@ impl Fixture {
             .await
             .expect("migration version");
         assert_eq!(
-            last, 1033,
-            "laboratory must use the actual catalog through V1033"
+            last, 1034,
+            "laboratory must use the actual catalog through V1034"
         );
         sqlx::raw_sql(CANDIDATE)
             .execute(&mut owner_connection)
@@ -372,7 +372,14 @@ async fn candidate_guards_all_tables_with_select_only_epoch_login() {
     .fetch_all(&mut runtime)
     .await
     .expect("read actual manifest");
-    assert_eq!(manifest, TABLES);
+    // The manifest also enrolls the guarded authority tables, which sort
+    // around the ingress tables.
+    let enrolled: Vec<&str> = ["account_resource_bindings", "account_resource_operations"]
+        .into_iter()
+        .chain(TABLES)
+        .chain(["sm_durable_operations", "sm_durable_sessions"])
+        .collect();
+    assert_eq!(manifest, enrolled);
     let role_state: (String, String, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT session_user::text, current_user::text, pg_catalog.has_database_privilege(current_user, current_database(), 'TEMP'), pg_catalog.has_schema_privilege(current_user, 'guarded', 'CREATE'), pg_catalog.has_table_privilege(current_user, 'guarded.ingress_protocol_epoch', 'UPDATE'), pg_catalog.pg_has_role(current_user, $1, 'MEMBER'), pg_catalog.pg_has_role(current_user, $2, 'MEMBER'), current_user = pg_catalog.pg_get_userbyid((SELECT datdba FROM pg_catalog.pg_database WHERE datname = current_database()))"
     ).bind(&fixture.owner).bind(&fixture.migrator).fetch_one(&mut runtime).await.expect("inspect effective runtime privileges");

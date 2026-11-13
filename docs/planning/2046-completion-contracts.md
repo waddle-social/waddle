@@ -94,13 +94,28 @@ order:
 
 The new binary additionally requires an activation value that an old writer
 fails on inside its own transaction. Today the only such fence is the protocol
-epoch, and it covers the 15 guarded ingress tables
-(`EPOCH_GUARDED_TABLES` in `S/ingress_substrate/substrate.rs`). The owner
-phase advances the epoch to the value the new binary implements
-(`activate_ingress_protocol_epoch` in `S/server/runtime_owner.rs`); the
-mailbox cutover is epoch 2. The SM, binding and mailbox tables
-that M2 and M3 add are enrolled under the same guard when they are created, so
-steps 2–4 are a second line of defence and not the only one.
+epoch, and it covers the 23 guarded tables
+(`EPOCH_GUARDED_TABLES` in `S/ingress_substrate/substrate.rs`): the 19
+ingress tables, mailbox included, and the four tables of the durable
+stream-management session authority and the account binding store
+(`sm_durable_sessions`, `sm_durable_operations`, `account_resource_bindings`,
+`account_resource_operations`). The owner phase advances the epoch to the
+value the new binary implements (`activate_ingress_protocol_epoch` in
+`S/server/runtime_owner.rs`); the mailbox cutover is epoch 2. Steps 2–4 are
+therefore a second line of defence and not the only one.
+
+Migration V1034 creates the four authority tables under the guard, or adds
+the guard to tables an owner phase created before it. Both stores open every
+write transaction through `begin_guarded_store_writer`
+(`S/ingress_substrate/typed_entry.rs`): on the attested pool that is the
+typed ingress entry under the registered guard, so the connection is
+attested, the epoch is proven before the store's first statement, and a live
+epoch beyond the supported one is refused. Enrolment needs no epoch of its
+own: a binary whose stores install no proof is refused by the guard at every
+nonzero epoch, and a later activation fences this one the way it fences
+ingress writers. The stores' internal helpers still take a bare transaction,
+so the typed-entry check script does not cover them; what holds a write
+without the proof back is the trigger, at run time.
 
 Consequence: the open items that require continuous in-database fencing of old
 writers during a transition (the V1014 claim reset, pending-delivery MAM
@@ -469,8 +484,9 @@ follows, before the production activation:
 - the registration-snapshot version bump that carries `BindingRef` to remote
   mirrors, and production admission activation (D3);
 - remote resource proxy activation, cross-node force-detach and the
-  `deliver_ordered` version bump;
-- enrolment of the new SM and binding tables under the activation guard (D1).
+  `deliver_ordered` version bump.
+
+The SM and binding tables are enrolled under the activation guard (D1).
 
 The production activation waits for M1 and M2.
 
