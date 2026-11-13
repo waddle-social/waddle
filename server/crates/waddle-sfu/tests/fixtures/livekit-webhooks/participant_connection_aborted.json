@@ -1,0 +1,29 @@
+{
+  "event": "participant_connection_aborted",
+  "room": {
+    "sid": "RM_protojson",
+    "name": "general@muc.test",
+    "emptyTimeout": 300,
+    "creationTime": "1782907100",
+    "enabledCodecs": [
+      {
+        "mime": "audio/opus"
+      },
+      {
+        "mime": "video/VP8"
+      }
+    ]
+  },
+  "participant": {
+    "sid": "PA_protojson",
+    "identity": "alice@waddle.test/desktop",
+    "state": "DISCONNECTED",
+    "joinedAt": "1782907150",
+    "version": 1,
+    "attributes": {
+      "waddle.occupancy_generation": "2ad5f39a-638e-4ba3-87ab-d0a9be491f5b"
+    }
+  },
+  "id": "EV_fixture_participant_connection_aborted",
+  "createdAt": "1782907200"
+}

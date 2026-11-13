@@ -1,0 +1,77 @@
+rule_files:
+  - waddle-reliability.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: active calls with zero received events fire after the hold
+    interval: 1m
+    input_series:
+      - series: 'waddle_call_setup_ok_total{pod="one"}'
+        values: '0+1x90'
+      - series: 'waddle_call_webhook_events_total{outcome="received",pod="one"}'
+        values: '0x90'
+      # Rejections do not count as accepted deliveries.
+      - series: 'waddle_call_webhook_events_total{outcome="signature_failed",pod="one"}'
+        values: '0+1x90'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing"}'
+        eval_time: 60m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing"}'
+        eval_time: 61m
+        exp_samples:
+          - labels: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: active calls still alert when the received metric is missing
+    interval: 1m
+    input_series:
+      - series: 'waddle_call_setup_ok_total{pod="one"}'
+        values: '0+1x90'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing"}'
+        eval_time: 61m
+        exp_samples:
+          - labels: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: quiet calls and missing webhook telemetry are not a delivery outage
+    interval: 1m
+    input_series:
+      - series: 'waddle_call_setup_ok_total{pod="one"}'
+        values: '4x90'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent"}'
+        eval_time: 90m
+        exp_samples: []
+
+  - name: accepted deliveries on either server replica keep ingestion healthy
+    interval: 1m
+    input_series:
+      - series: 'waddle_call_setup_ok_total{pod="one"}'
+        values: '0+1x90'
+      - series: 'waddle_call_webhook_events_total{outcome="received",pod="one"}'
+        values: '0x90'
+      - series: 'waddle_call_webhook_events_total{outcome="received",pod="two"}'
+        values: '0+1x90'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent"}'
+        eval_time: 90m
+        exp_samples: []
+
+  - name: a newly accepted webhook resolves the delivery alert
+    interval: 1m
+    input_series:
+      - series: 'waddle_call_setup_ok_total{pod="one"}'
+        values: '0+1x90'
+      - series: 'waddle_call_webhook_events_total{outcome="received",pod="one"}'
+        values: '0x69 1x20'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing"}'
+        eval_time: 69m
+        exp_samples:
+          - labels: 'ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="LiveKitWebhookSilent"}'
+        eval_time: 70m
+        exp_samples: []
