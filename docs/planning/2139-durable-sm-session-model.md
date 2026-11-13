@@ -170,6 +170,10 @@ Recovery of each intermediate condition:
   fence without effect.
 - **Terminal with retained frames**: the rows stay in `sm_unacked` as custody
   until the consumer that transfers them to offline delivery releases them.
+  On a clustered store only the node holding the session claim transfers
+  them, and it commits each frame to offline delivery under that claim, the
+  same fence its custody release asserts; a node without the claim leaves
+  the session to the holder.
 - **Graceful shutdown**: the drain detaches each owned session as a
   transport loss does. The session stays `Detached` across the restart with
   its retained frames, each keyed by the ingress claims it was admitted

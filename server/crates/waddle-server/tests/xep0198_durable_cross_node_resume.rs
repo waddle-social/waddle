@@ -76,6 +76,7 @@ async fn cluster(extra_envs: &[(&str, &str)]) -> Option<Cluster> {
     let pool = generate_pool();
     reset_and_enroll(&db, &pool).await;
     reset_node_lease_tables(&db).await;
+    clear_owner_sessions(&db).await;
 
     let mut envs = vec![DURABLE];
     envs.extend_from_slice(extra_envs);
@@ -96,6 +97,46 @@ async fn cluster(extra_envs: &[(&str, &str)]) -> Option<Cluster> {
         node_b_id,
         owner_password,
     })
+}
+
+/// Remove the owner account's stream-management sessions, resource
+/// bindings and offline queue left by earlier scenarios.
+///
+/// Every scenario binds the same fixed account, and the nodes of an earlier
+/// scenario are gone without having ended their sessions. Left in place,
+/// those sessions expire during a later scenario and transfer their retained
+/// frames to the account's offline queue, which a later scenario reads as
+/// its own. The session and binding tables are guarded by the ingress
+/// protocol epoch, so the deletes carry the transaction-local epoch proof.
+async fn clear_owner_sessions(db: &Database) {
+    let account = format!("{OWNER}@{DOMAIN}");
+    let mut tx = db.begin().await.expect("begin");
+    tx.execute(
+        "SELECT pg_catalog.set_config('waddle.protocol_epoch', \
+             (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1), true), \
+           pg_catalog.set_config('waddle.protocol_epoch_xid', \
+             pg_catalog.pg_current_xact_id()::text, true)",
+        (),
+    )
+    .await
+    .expect("epoch proof");
+    for statement in [
+        "DELETE FROM account_resource_operations WHERE full_jid IN \
+         (SELECT full_jid FROM account_resource_bindings WHERE bare_jid = ?)",
+        "DELETE FROM account_resource_bindings WHERE bare_jid = ?",
+        "DELETE FROM sm_unacked WHERE stream_id IN \
+         (SELECT session_id FROM sm_durable_sessions WHERE bare_jid = ?)",
+        "DELETE FROM sm_sessions WHERE user_id = ?",
+        "DELETE FROM sm_durable_operations WHERE session_id IN \
+         (SELECT session_id FROM sm_durable_sessions WHERE bare_jid = ?)",
+        "DELETE FROM sm_durable_sessions WHERE bare_jid = ?",
+        "DELETE FROM pending_delivery WHERE recipient_jid = ?",
+    ] {
+        tx.execute(statement, waddle_server::db_params![account.clone()])
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    tx.commit().await.expect("commit");
 }
 
 async fn send_element(client: &mut WsXmppClient, element: Element) {
@@ -1130,9 +1171,21 @@ async fn a_message_retained_by_a_session_detached_on_another_node_is_delivered_o
 
     // The window is moved into the past; the next janitor sweep of the node
     // holding the claim expires the session and transfers what it retained.
+    // The session table is guarded by the ingress protocol epoch, so the
+    // write carries the transaction-local epoch proof every runtime write
+    // carries.
     {
-        let conn = cluster.db.guard().await.expect("guard");
-        conn.execute(
+        let mut tx = cluster.db.begin().await.expect("begin");
+        tx.execute(
+            "SELECT pg_catalog.set_config('waddle.protocol_epoch', \
+                 (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1), true), \
+               pg_catalog.set_config('waddle.protocol_epoch_xid', \
+                 pg_catalog.pg_current_xact_id()::text, true)",
+            (),
+        )
+        .await
+        .expect("epoch proof");
+        tx.execute(
             "UPDATE sm_durable_sessions \
              SET detached_at_ms = detached_at_ms - (max_resume_secs + 1) * 1000 \
              WHERE session_id = ?",
@@ -1140,6 +1193,7 @@ async fn a_message_retained_by_a_session_detached_on_another_node_is_delivered_o
         )
         .await
         .expect("elapse the resume window");
+        tx.commit().await.expect("commit");
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {

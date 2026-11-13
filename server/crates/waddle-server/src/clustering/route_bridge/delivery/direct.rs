@@ -589,6 +589,12 @@ async fn decide_bound(
         return false;
     };
     let stanza = payload_stanza(&request.payload);
+    #[cfg(feature = "test-support")]
+    crate::clustering::acceptance_seams::hold_owner_request(
+        crate::clustering::acceptance_seams::OwnerAcceptancePoint::BeforeCommit,
+        stanza,
+    )
+    .await;
     let obligation = append_obligation(&request.payload);
     let context = super::ingress_append::authorize_ingress_append(
         services,
@@ -661,6 +667,12 @@ async fn decide_bound(
     }
     let recorded = record_bound(authority, claimed, node, DirectDecision::Accepted).await;
     if recorded == Some(DirectDecision::Accepted) {
+        #[cfg(feature = "test-support")]
+        crate::clustering::acceptance_seams::hold_owner_request(
+            crate::clustering::acceptance_seams::OwnerAcceptancePoint::AfterCommit,
+            stanza,
+        )
+        .await;
         let outcome = hand_over().await;
         if !matches!(
             outcome,

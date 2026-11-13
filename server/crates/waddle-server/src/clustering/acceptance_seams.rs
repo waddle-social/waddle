@@ -7,9 +7,11 @@
 //! a suite that passes the directory to one spawned process arms that process.
 //!
 //! The seams sit on the room owner's side of a relayed XEP-0045 groupchat
-//! message, around the transaction in which the owner accepts it, and of a
+//! message, around the transaction in which the owner accepts it, of a
 //! room request (join, presence update, leave or relayed IQ), around the
-//! transaction in which the owner decides it:
+//! transaction in which the owner decides it, and of a direct request to a
+//! user whose account the node owns (`tests/xep0198_direct_lanes.rs`),
+//! around its hand-over and decision:
 //!
 //! - `hold-before-commit`: while this file exists, the owner waits before its
 //!   ingress commit, so nothing about the message is durable on the owner.

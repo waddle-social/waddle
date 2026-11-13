@@ -18,7 +18,10 @@
 //! that test the handled count activate that epoch on the shared database.
 //! The scenarios that only test recovery of one acceptance after a lost
 //! reply or an origin restart stay below that epoch, where the origin hands
-//! the stanza to the owner through the ordered relay.
+//! the stanza to the owner through the ordered relay. The epoch only ever
+//! advances and the shared database reaches epoch 2 as soon as any scenario
+//! or suite activates it, so each of those scenarios runs its nodes on a
+//! schema of its own, created empty and therefore at epoch 0.
 //!
 //! The binary needs PostgreSQL and fails without `WADDLE_TEST_POSTGRES_URL`:
 //! every scenario is about durable state shared by two processes.
@@ -75,6 +78,65 @@ async fn activate_mailbox_epoch(db: &Database) {
         .await
         .expect("activate the mailbox epoch");
     }
+}
+
+/// The shared database's ingress protocol epoch.
+async fn protocol_epoch(db: &Database) -> i64 {
+    let conn = db.guard().await.expect("epoch guard");
+    let mut rows = conn
+        .query("SELECT epoch FROM ingress_protocol_epoch WHERE id = 1", ())
+        .await
+        .expect("read the protocol epoch");
+    rows.next()
+        .await
+        .expect("protocol epoch row")
+        .expect("one protocol epoch row")
+        .get::<i64>(0)
+        .expect("protocol epoch")
+}
+
+/// Prefix of the schemas the relay scenarios run on.
+const RELAY_SCHEMA_PREFIX: &str = "waddle_test_relay_acceptance_";
+
+/// A URL of the database at `postgres_url` whose connections use a new,
+/// empty schema, so the nodes started on it build their schema at protocol
+/// epoch 0 whatever epoch the shared schema has reached. Schemas left by
+/// earlier relay scenarios are dropped first; the suite's scenarios run one
+/// at a time.
+async fn relay_epoch_url(postgres_url: &str) -> String {
+    let admin = sqlx::PgPool::connect(postgres_url)
+        .await
+        .expect("connect PostgreSQL admin pool");
+    let stale: Vec<String> = sqlx::query_scalar(
+        "SELECT nspname::text FROM pg_catalog.pg_namespace WHERE starts_with(nspname, $1)",
+    )
+    .bind(RELAY_SCHEMA_PREFIX)
+    .fetch_all(&admin)
+    .await
+    .expect("list relay scenario schemas");
+    for schema in stale {
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop an earlier relay scenario schema");
+    }
+    let schema = format!("{RELAY_SCHEMA_PREFIX}{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create the relay scenario schema");
+    admin.close().await;
+    let mut url = url::Url::parse(postgres_url).expect("parse PostgreSQL URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
 }
 
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
@@ -373,9 +435,13 @@ impl Scenario {
     }
 
     async fn start_with(acceptance: Acceptance) -> Self {
-        let postgres_url = waddle_ws_test_support::require_test_postgres_url()
+        let shared_url = waddle_ws_test_support::require_test_postgres_url()
             .expect("the remote acceptance suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
         let serial = cluster_e2e_serial_lock().lock().await;
+        let postgres_url = match acceptance {
+            Acceptance::Relay => relay_epoch_url(&shared_url).await,
+            Acceptance::Mailbox => shared_url,
+        };
         let db = open_control_db(&postgres_url).await;
         let pool = generate_pool();
         reset_and_enroll(&db, &pool).await;
@@ -396,8 +462,12 @@ impl Scenario {
         .await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
-        if matches!(acceptance, Acceptance::Mailbox) {
-            activate_mailbox_epoch(&db).await;
+        match acceptance {
+            Acceptance::Mailbox => activate_mailbox_epoch(&db).await,
+            Acceptance::Relay => assert!(
+                protocol_epoch(&db).await < 2,
+                "a relay scenario needs its nodes below the mailbox epoch"
+            ),
         }
 
         let room: jid::BareJid = format!("acceptance-{}@muc.{DOMAIN}", uuid::Uuid::new_v4())
@@ -864,11 +934,14 @@ async fn reply_loss_recovers_same_acceptance() {
 
 /// The origin process is killed after the owner has committed a groupchat
 /// message and before the owner replies. The acceptance is durable on the
-/// owner alone: the message is archived once and the owner-side occupant
-/// receives one copy. The restarted origin has no stream to resume, so the
-/// client binds again on a fresh stream whose `h` starts at zero, and its
-/// retransmission of the unacknowledged stanza is counted without a second
-/// archived message.
+/// owner: the message is archived once and the owner-side occupant receives
+/// one copy. The sender's stream-management session is durable too: the
+/// restarted origin records its lost owner and resumes it
+/// (`2139-durable-sm-session-model.md`, "Resume on a node that does not hold
+/// the claim"). Below the mailbox epoch the origin counted the stanza when
+/// its own commit succeeded, before handing it to the owner, so the resumed
+/// `h` already covers it and the client has nothing to retransmit; the
+/// message stays archived once.
 #[tokio::test]
 async fn origin_sigkill_after_owner_commit() {
     let mut scenario = Scenario::start().await;
@@ -916,15 +989,6 @@ async fn origin_sigkill_after_owner_commit() {
     )
     .await;
     wait_for_readiness(&server_a, true, Duration::from_secs(30)).await;
-    let resource = scenario
-        .sender
-        .socket
-        .full_jid
-        .as_deref()
-        .and_then(|jid| jid.parse::<jid::FullJid>().ok())
-        .expect("sender full JID")
-        .resource()
-        .to_string();
     let mut socket = WsXmppClient::connect(&server_a.ws_url())
         .await
         .expect("reconnect to the restarted origin");
@@ -949,28 +1013,21 @@ async fn origin_sigkill_after_owner_commit() {
             frame.is("resumed", SM_NS) || frame.is("failed", SM_NS)
         })
         .await;
-    assert!(
-        answer.last().is_some_and(|frame| frame.is("failed", SM_NS)),
-        "a SIGKILLed origin leaves no stream to resume: {answer:?}"
-    );
-    reconnected
-        .socket
-        .bind(&resource)
-        .await
-        .expect("bind again after the failed resume");
-    reconnected.enable_resumable_sm().await;
-    let (h, _) = reconnected.request_h(Duration::from_secs(10)).await;
+    let resumed = answer
+        .last()
+        .filter(|frame| frame.is("resumed", SM_NS))
+        .unwrap_or_else(|| panic!("the restarted origin resumes the durable session: {answer:?}"));
     assert_eq!(
-        h,
-        Some(0),
-        "a fresh stream starts its handled count at zero"
+        resumed.attr("h"),
+        Some("1"),
+        "the resumed handled count covers the stanza the origin committed"
     );
-
-    reconnected
-        .send(&groupchat(&scenario.room, "origin-kill", &body, origin))
-        .await;
-    let (h, mut sender_frames) = reconnected.request_h(Duration::from_secs(20)).await;
-    assert_eq!(h, Some(1), "the retransmitted stanza is handled once");
+    reconnected.inbound = scenario.sender.inbound;
+    reconnected.stream_id = scenario.sender.stream_id.clone();
+    // The resumed stream answers `<r/>` with the same count: nothing more
+    // was handled on it.
+    let (h, mut sender_frames) = reconnected.request_h(Duration::from_secs(10)).await;
+    assert_eq!(h, Some(1), "the resumed stream keeps its handled count");
     sender_frames.extend(reconnected.drain(Duration::from_secs(10)).await);
     witness_frames.extend(scenario.witness.drain(Duration::from_secs(1)).await);
     for copy in sender_frames
