@@ -492,15 +492,15 @@ The production activation waits for M1 and M2.
 
 ### Durable stream management on the connection
 
-With `WADDLE_XMPP_DURABLE_SM=durable` a resumable XEP-0198 session belongs
-to the durable authority (`S/sm_authority`,
+A resumable XEP-0198 session belongs to the durable authority (`S/sm_authority`,
 [`2139-durable-sm-session-model.md`](2139-durable-sm-session-model.md)), and
 the connection holds a `DurableSmLink` (`W/stream_management/durable.rs`):
 the owner fence, claim and principal it presents on each call. The
 connection's `StreamManagementState` is a projection of the authority's
 window, keyed by the session key; the client only ever holds the resume
-token. With the selector on `legacy`, the default, no store exists and no
-link is ever bound.
+token. The durable authority is the only one: `WADDLE_XMPP_DURABLE_SM`
+may be unset or `durable`, and startup refuses any other value, `legacy`
+included.
 
 - **Enable and resume** commit before any reply is built, and each reply is
   built from the commit's witness. An unknown commit outcome answers
@@ -588,12 +588,18 @@ What holds between the durable authority and the rest of the server:
 - **Janitors.** The pending-delivery claim janitor counts every
   non-terminal durable session as live, so the rows a detached durable
   session claimed are not released as orphaned.
-- **Sessions of the legacy registry.** A session enabled under `legacy`
-  is not resumable once `durable` is selected: its `previd` names no
-  durable session and is answered `<failed/>` with item-not-found, and
-  the client binds afresh. Its rows are restored into the in-memory
-  registry at startup, as every session the authority does not hold is,
-  and expire through the stream-management expiry janitor.
+- **Sessions without a durable record.** A session the in-memory registry
+  enabled before the durable authority was the only one has rows in
+  `sm_sessions` or `sm_unacked` and none in `sm_durable_sessions`. It is
+  not resumable: its `previd` names no durable session and is answered
+  `<failed/>` with item-not-found, and the client binds afresh. The owner
+  phase drains such sessions once, before a runtime attaches
+  (`S/sm_authority/legacy_drain.rs`, called from
+  `prepare_restricted_runtime_owner`); a startup that runs its own DDL
+  drains them when it opens the durable store, before the in-memory
+  registry restores anything. The rules are in
+  [`2139-durable-sm-session-model.md`](2139-durable-sm-session-model.md),
+  "Sessions without a durable record".
 - **Bindings without a connection.** The account coordinator reaper
   retires the bindings the coordinator reports as expired (their node
   lost its lease or their process ended) by `unregister` then `repair`,

@@ -22,8 +22,8 @@ use waddle_server::ingress_substrate::{
     IngressSubstrateError, AUTHORITY_GUARDED_TABLES, EPOCH_GUARDED_TABLES,
 };
 use waddle_server::sm_authority::{
-    DurableSmError, DurableSmMode, DurableSmSelection, EnableError, EnableOperation,
-    EnableRejection, EnableRequest,
+    DurableSmError, DurableSmSelection, EnableError, EnableOperation, EnableRejection,
+    EnableRequest,
 };
 use waddle_server::sm_persistence::SmRuntimeAttachError;
 use waddle_ws_test_support::require_test_postgres_url;
@@ -170,7 +170,7 @@ fn bind(claim: &UserClaimIdentity) -> AccountResourceOperation {
 }
 
 async fn open_durable_sm(main: &Database) -> Result<DurableSmSelection, DurableSmError> {
-    DurableSmSelection::open(DurableSmMode::Durable, main, false).await
+    DurableSmSelection::open(main, false).await
 }
 
 /// The owner phase leaves the four relations guarded and enrolled. Under
@@ -470,6 +470,111 @@ async fn owner_phase_guards_authority_relations_created_before_the_guard_migrati
     runtime.close().await.expect("close the runtime probe");
 
     drop(pool);
+    prepared.cleanup().await;
+}
+
+/// A stream-management session left without a durable authority record is
+/// drained by the owner phase: its retained message reaches offline storage
+/// once, its retained IQ does not, its rows are deleted, and a second owner
+/// phase changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_phase_drains_sessions_without_a_durable_record() {
+    let Some(url) = require_test_postgres_url() else {
+        return;
+    };
+    let prepared = Prepared::new(&url).await;
+    let epoch: i64 = sqlx::query_scalar(&format!(
+        "SELECT epoch FROM {SCHEMA}.ingress_protocol_epoch WHERE id = 1"
+    ))
+    .fetch_one(&prepared.admin)
+    .await
+    .expect("read the live epoch");
+    let mut tx = prepared.admin.begin().await.expect("begin the seed");
+    sqlx::query(
+        "SELECT pg_catalog.set_config('waddle.protocol_epoch', $1, true), \
+         pg_catalog.set_config('waddle.protocol_epoch_xid', \
+           pg_catalog.pg_current_xact_id()::text, true)",
+    )
+    .bind(epoch.to_string())
+    .execute(&mut *tx)
+    .await
+    .expect("install the epoch proof");
+    sqlx::query(&format!(
+        "INSERT INTO {SCHEMA}.sm_sessions (stream_id, user_id, full_jid, inbound_count, \
+             outbound_count, last_acked, detached_at_ms, max_resume_duration_ms, \
+             carbons_enabled, roster_interested, presence_available, presence_priority) \
+         VALUES ('legacy-stream', 'alice@example.test', 'alice@example.test/phone', \
+             0, 2, 0, 0, 300000, 0, 0, 1, 0)"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("seed the legacy session");
+    for (sequence, wire) in [
+        (
+            1_i64,
+            "<message xmlns='jabber:client' type='chat' id='m1' from='bob@example.test/desk' \
+             to='alice@example.test/phone'><body>retained</body></message>",
+        ),
+        (
+            2_i64,
+            "<iq xmlns='jabber:client' type='get' id='ping' from='example.test' \
+             to='alice@example.test/phone'><ping xmlns='urn:xmpp:ping'/></iq>",
+        ),
+    ] {
+        sqlx::query(&format!(
+            "INSERT INTO {SCHEMA}.sm_unacked \
+                 (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+             VALUES ('legacy-stream', $1, $2, 1700000000000)"
+        ))
+        .bind(sequence)
+        .bind(wire)
+        .execute(&mut *tx)
+        .await
+        .expect("seed a retained frame");
+    }
+    tx.commit().await.expect("commit the seed");
+
+    let stored = || async {
+        sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT count(*) FROM {SCHEMA}.pending_delivery \
+             WHERE recipient_jid = 'alice@example.test' \
+               AND transient_xml LIKE '%>retained</body>%'"
+        ))
+        .fetch_one(&prepared.admin)
+        .await
+        .expect("count offline rows")
+    };
+    let legacy_rows = || async {
+        sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT (SELECT count(*) FROM {SCHEMA}.sm_sessions) \
+                  + (SELECT count(*) FROM {SCHEMA}.sm_unacked)"
+        ))
+        .fetch_one(&prepared.admin)
+        .await
+        .expect("count stream-management rows")
+    };
+
+    prepared
+        .rerun_owner_phase()
+        .await
+        .expect("the owner phase drains the legacy session");
+    assert_eq!(stored().await, 1);
+    assert_eq!(legacy_rows().await, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {SCHEMA}.pending_delivery"))
+            .fetch_one(&prepared.admin)
+            .await
+            .expect("count every offline row"),
+        1,
+        "the retained IQ is not stored offline"
+    );
+
+    prepared
+        .rerun_owner_phase()
+        .await
+        .expect("a second owner phase finds nothing to drain");
+    assert_eq!(stored().await, 1);
+
     prepared.cleanup().await;
 }
 

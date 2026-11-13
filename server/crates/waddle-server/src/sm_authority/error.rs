@@ -37,6 +37,10 @@ pub enum DurableSmError {
     /// write the session.
     #[error("a clustered durable SM write requires the session claim")]
     ClaimRequired,
+    /// Sessions without a durable authority record could not be moved to
+    /// offline storage.
+    #[error(transparent)]
+    LegacyDrain(#[from] Box<super::legacy_drain::LegacyDrainError>),
     #[error("durable SM does not support {operation}")]
     Unsupported { operation: &'static str },
 }

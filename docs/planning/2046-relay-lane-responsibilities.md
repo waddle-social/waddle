@@ -277,8 +277,7 @@ an owner transfer does, and what must hold before the relay path is deleted.
 Decided in [`2173-direct-lanes.md`](2173-direct-lanes.md).
 
 - **Status.** Cut over for a send whose origin commits it at protocol epoch
-  2 or later under the `mailbox` selector with
-  `WADDLE_XMPP_DURABLE_SM=durable`, when the recipient account has a
+  2 or later under the `mailbox` selector, when the recipient account has a
   `UserActor` claim. Relay otherwise, and always for a send whose origin
   resource is hosted through a remote channel mirror.
 - **Identity.** `Direct(DirectRequestKey)`. A copy an ingress transaction
@@ -309,10 +308,9 @@ Decided in [`2173-direct-lanes.md`](2173-direct-lanes.md).
   writer of the "hosted elsewhere" refusal. A sweep of unconsumed
   decisions.
 - **Deletion precondition.** Every clustered deployment at epoch 2 or later
-  with the `mailbox` selector and durable stream management, the `relay`
-  selector and the `legacy` mode removed, and remote channel mirrors
-  retired; then removal of the `BareJid` and `FullJid` recipients with a
-  version bump.
+  with the `mailbox` selector, the `relay` selector removed, and remote
+  channel mirrors retired; then removal of the `BareJid` and `FullJid`
+  recipients with a version bump.
 
 ### Reserved MUC kinds
 
@@ -340,8 +338,7 @@ mailbox-epoch receiver uses the existing `UnsupportedEnvelope` reason.
 
 | Configuration | Groupchat | Join, presence, Muji | Bare and full JID |
 | --- | --- | --- | --- |
-| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox`, durable stream management | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; the relay kinds are refused by the receiver, including the leave replayed at connection end | mailbox; relay for a remote-mirror origin, an account without a claim and a request that could not be committed |
-| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox`, legacy stream management | as above | as above | relay |
+| Clustered PostgreSQL, epoch ≥ 2, selector `mailbox` | mailbox; relay only for a message committed without a source binding below epoch 2 | mailbox for client-sent joins, presence updates, leaves and Muji signalling; the relay kinds are refused by the receiver, including the leave replayed at connection end | mailbox; relay for a remote-mirror origin, an account without a claim and a request that could not be committed |
 | Clustered PostgreSQL, epoch ≥ 2, selector `relay` | relay | relay | relay |
 | Clustered PostgreSQL, epoch < 2 (no restricted owner phase) | relay | relay | relay |
 | Single node | none | none | none |
@@ -349,5 +346,4 @@ mailbox-epoch receiver uses the existing `UnsupportedEnvelope` reason.
 No part of `ordered_relay.rs`, `route_bridge/delivery/ordered*.rs` or the
 receiver is unused in every configuration, so none is deleted. Final
 removal needs every clustered deployment at epoch 2 or later with the
-`relay` selector and legacy stream management removed, and remote channel
-mirrors retired.
+`relay` selector removed, and remote channel mirrors retired.

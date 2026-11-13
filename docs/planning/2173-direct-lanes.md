@@ -56,7 +56,7 @@ mirrors").
 | D4 | The owner | The node that holds the `UserActor` claim of the recipient's bare JID, for both recipient kinds. It is the claim the relay channel already names as its target. |
 | D5 | What acceptance commits | Custody of the stanza by the recipient's session path, then the decision. See [Acceptance](#acceptance). |
 | D6 | Refusal | `Rejected` means nothing took the stanza. The origin reads it as it reads a `TargetUnavailable` refusal and runs the fallback it runs today. |
-| D7 | Gate | Protocol epoch 2 or later under the `mailbox` selector **and** `WADDLE_XMPP_DURABLE_SM=durable`, read on the origin when it sends. Otherwise the relay carries the stanza. |
+| D7 | Gate | Protocol epoch 2 or later under the `mailbox` selector, read on the origin when it sends; durable stream management is the only stream-management authority. Otherwise the relay carries the stanza. |
 | D8 | Wire | No change to `RemoteStanzaEnvelope` or the reply types. A receiver keeps accepting `BareJid` and `FullJid` payloads, because the relay still serves the cases listed under [What stays on the relay](#what-stays-on-the-relay). `deliver_ordered` stays at `v16`. |
 
 ## The request
@@ -202,8 +202,7 @@ decision is unknown.
 
 ## What stays on the relay
 
-- Every send when the gate is off: epoch below 2, the `relay` selector, or
-  `WADDLE_XMPP_DURABLE_SM=legacy`.
+- Every send when the gate is off: epoch below 2 or the `relay` selector.
 - A send whose origin resource is hosted through a remote channel mirror
   (`route_remote_resource_origin`).
 - A send for which the origin could not commit a request.

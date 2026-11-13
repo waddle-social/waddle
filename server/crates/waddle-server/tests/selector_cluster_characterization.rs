@@ -560,14 +560,14 @@ async fn recv_counting(client: &mut WsXmppClient, id: &str) -> u32 {
     }
 }
 
-/// The selectors travel with each node: a node that selects the durable
-/// authority and the coordinator commits their rows, and a node of the same
-/// cluster that selects neither commits none.
+/// The selectors travel with each node: a node that selects the coordinator
+/// commits a durable session and an account binding, and a node of the same
+/// cluster that selects the registry commits the durable session only.
 #[tokio::test]
 async fn each_node_serves_with_the_authorities_it_selects() {
     let cluster = Cluster::start(
         NodeSelectors::DURABLE_COORDINATOR,
-        NodeSelectors::default(),
+        NodeSelectors::DURABLE_REGISTRY,
         Delivery::Relay,
     )
     .await;
@@ -592,9 +592,10 @@ async fn each_node_serves_with_the_authorities_it_selects() {
     );
 
     let (_bob, _) = cluster.resumable(cluster.b(), "bob", "desk").await;
-    assert!(
-        sessions(&cluster.db, &bob).await.is_empty(),
-        "a legacy node commits no durable session"
+    assert_eq!(
+        sessions(&cluster.db, &bob).await.len(),
+        1,
+        "every node commits a durable session"
     );
     assert!(
         binding(&cluster.db, &bob).await.is_none(),

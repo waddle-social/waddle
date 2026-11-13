@@ -52,14 +52,14 @@ use waddle_xmpp::Stanza;
 
 use live::{build_online_resources, collect_live_targets};
 use pending::{insert_pending, promote_as_transient, DeliveryHandles, PromotionOrigin};
-use stanza::{parse_stanza, promote_iq, promote_presence};
+pub(crate) use stanza::parse_stanza;
+use stanza::{promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionFailureReason, PromotionSummary};
 
 mod implementation;
 pub(crate) use implementation::confirm_pending_promotion;
 use implementation::detached_session_for_terminal_entry;
-#[cfg(test)]
-use implementation::is_senderless_inbox_projection;
+pub(crate) use implementation::is_senderless_inbox_projection;
 pub(crate) use implementation::promote_displaced_sessions;
 pub(crate) use implementation::promote_guarded_sessions;
 use implementation::promote_one;

@@ -163,13 +163,12 @@ pub async fn spawn_cluster_server_with_envs(
 }
 
 /// The stream-management authority a node selects
-/// (`WADDLE_XMPP_DURABLE_SM`).
+/// (`WADDLE_XMPP_DURABLE_SM`). The durable session authority is the only
+/// one a server accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamManagementAuthority {
-    /// The in-memory session registry with detach-time persistence.
-    #[default]
-    Legacy,
     /// The durable session authority.
+    #[default]
     Durable,
 }
 
@@ -177,7 +176,6 @@ impl StreamManagementAuthority {
     /// The value the server parses from its environment.
     pub fn env_value(self) -> &'static str {
         match self {
-            Self::Legacy => "legacy",
             Self::Durable => "durable",
         }
     }
