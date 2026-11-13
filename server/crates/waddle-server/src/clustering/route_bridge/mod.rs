@@ -467,3 +467,32 @@ pub(crate) type TestRemoteFrameTransport = Arc<
 tokio::task_local! {
     pub(crate) static TEST_REMOTE_FRAME_TRANSPORT: TestRemoteFrameTransport;
 }
+
+/// A bound request as the origin would commit it for the hosting node.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct TestBoundOffer {
+    pub(crate) target: jid::FullJid,
+    pub(crate) binding: waddle_xmpp::ownership::BindingRef,
+    pub(crate) node: waddle_xmpp::ownership::NodeIdentity,
+    pub(crate) stanza: Stanza,
+    pub(crate) kind: DeliveryKind,
+    /// The append obligation the request's payload carries.
+    pub(crate) ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+}
+
+/// In-process stand-in for committing a bound request and reading the
+/// hosting node's decision: it receives the request the origin built and
+/// answers the outcome the origin reports. Absent outside the individual
+/// test task.
+#[cfg(test)]
+pub(crate) type TestBoundTransport = Arc<
+    dyn Fn(TestBoundOffer) -> Pin<Box<dyn Future<Output = FullJidDeliveryOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_BOUND_TRANSPORT: TestBoundTransport;
+}

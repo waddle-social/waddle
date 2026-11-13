@@ -274,6 +274,20 @@ async fn deliver_to_remote_binding(
     kind: DeliveryKind,
     received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
+    // A test observing cross-node delivery replaces the bound request with
+    // a controlled outcome and records what would have been carried.
+    #[cfg(test)]
+    if let Ok(outcome) =
+        super::CONTROLLED_REGISTERED_REMOTE_DELIVERY.try_with(|(outcome, targets)| {
+            targets
+                .lock()
+                .expect("controlled registered-remote targets")
+                .push((target.clone(), stanza.clone()));
+            *outcome
+        })
+    {
+        return outcome;
+    }
     let Some(bridge) = deps.web_socket_state.and_then(|state| {
         state
             .deps

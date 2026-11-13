@@ -232,11 +232,6 @@ impl OrderedRelayDeliveryBridge {
         else {
             return FullJidDeliveryOutcome::Unavailable;
         };
-        let authority = Arc::clone(&state.deps.protocol.ingress);
-        if !authority.room_requests_carried_now().await {
-            tracing::debug!(%target, "bound request not carried: the mailbox is not selected");
-            return FullJidDeliveryOutcome::Unavailable;
-        }
         let recipient = jid::Jid::from(target.clone());
         let Some(payload) = bound_payload(
             &recipient,
@@ -248,6 +243,25 @@ impl OrderedRelayDeliveryBridge {
             return FullJidDeliveryOutcome::Unavailable;
         };
         let obligation = append_obligation(&payload).cloned();
+        // A test stands in for a deployment that carries bound requests:
+        // it receives the request and answers the hosting node's decision.
+        #[cfg(test)]
+        if let Ok(transport) = super::super::TEST_BOUND_TRANSPORT.try_with(Arc::clone) {
+            return transport(super::super::TestBoundOffer {
+                target: target.clone(),
+                binding,
+                node,
+                stanza: stanza.clone(),
+                kind,
+                ingress_append: obligation,
+            })
+            .await;
+        }
+        let authority = Arc::clone(&state.deps.protocol.ingress);
+        if !authority.room_requests_carried_now().await {
+            tracing::debug!(%target, "bound request not carried: the mailbox is not selected");
+            return FullJidDeliveryOutcome::Unavailable;
+        }
         let sender = obligation
             .as_ref()
             .map(|obligation| obligation.sender_bare.clone())
