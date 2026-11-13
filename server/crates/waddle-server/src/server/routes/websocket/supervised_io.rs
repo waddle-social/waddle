@@ -182,18 +182,20 @@ impl StopSignal {
     }
 
     fn cancel_with_peer_close(&self, reason: StopReason, peer_close: Option<&CancellationToken>) {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if state.reason.is_none() {
-            Self::begin_retirement_locked(&mut state, reason);
-            if let Some(listener) = &state.listener {
+            state = Self::begin_retirement_locked(state, reason);
+            if let Some(listener) = state.listener.clone() {
                 // The listener is a synchronous lifecycle authority. It runs
                 // before cancellation becomes observable so protocol
                 // completion and every stop source share one linearization
                 // point. Listeners must not call back into this StopSignal.
-                listener(reason);
+                // A listener that unwinds leaves the stop unpublished: no
+                // reason is recorded and the token stays uncancelled.
+                state = Self::call_locked(state, || listener(reason)).0;
             }
             state.reason = Some(reason);
         }
@@ -208,24 +210,51 @@ impl StopSignal {
     }
 
     fn begin_retirement(&self, reason: StopReason) {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        Self::begin_retirement_locked(&mut state, reason);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        drop(Self::begin_retirement_locked(state, reason));
     }
 
-    fn begin_retirement_locked(state: &mut StopSignalState, reason: StopReason) {
+    fn begin_retirement_locked(
+        mut state: std::sync::MutexGuard<'_, StopSignalState>,
+        reason: StopReason,
+    ) -> std::sync::MutexGuard<'_, StopSignalState> {
         if state.retirement_started {
-            return;
+            return state;
         }
         state.retirement_started = true;
         state.retirement_reason = Some(reason);
-        if let Some(listener) = &state.retirement_listener {
-            // This callback is the synchronous owner-side retirement fence.
-            // It runs before the pump stop or graceful-shutdown signal becomes
-            // observable and must not call back into this StopSignal.
-            listener(reason);
+        let Some(listener) = state.retirement_listener.clone() else {
+            return state;
+        };
+        // This callback is the synchronous owner-side retirement fence.
+        // It runs before the pump stop or graceful-shutdown signal becomes
+        // observable and must not call back into this StopSignal.
+        Self::call_locked(state, || listener(reason)).0
+    }
+
+    /// Run `callback` while the stop state stays locked, releasing the lock
+    /// before an unwind out of the callback continues to the caller.
+    ///
+    /// Listeners and the send closure are code this signal does not own, and
+    /// every acquisition of the state lock treats poison as fail-stop. The
+    /// callback cannot reach the state, and every field is written by plain
+    /// assignment around the call, so the state released on unwind is exactly
+    /// what the caller wrote before the callback ran. Unlocking first keeps a
+    /// failed callback a failure of its own task instead of a process abort
+    /// at the next stop, send, or reason read.
+    fn call_locked<'a, R>(
+        state: std::sync::MutexGuard<'a, StopSignalState>,
+        callback: impl FnOnce() -> R,
+    ) -> (std::sync::MutexGuard<'a, StopSignalState>, R) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            Ok(result) => (state, result),
+            Err(unwind) => {
+                drop(state);
+                std::panic::resume_unwind(unwind)
+            }
         }
     }
 
@@ -234,26 +263,26 @@ impl StopSignal {
     /// check transport authority inside the closure, but must not await,
     /// cancel or re-enter this signal, or acquire actor/effect-owner locks.
     pub(crate) fn start_send_if_running<R>(&self, start_send: impl FnOnce() -> R) -> Option<R> {
-        let state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if state.reason.is_some() {
             return None;
         }
-        let result = start_send();
+        let (state, result) = Self::call_locked(state, start_send);
         drop(state);
         Some(result)
     }
 
     fn set_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         state.listener = Some(Arc::clone(&listener));
         if let Some(reason) = state.reason {
-            listener(reason);
+            drop(Self::call_locked(state, || listener(reason)));
         }
     }
 
@@ -262,13 +291,14 @@ impl StopSignal {
         reason = "connection retirement observes pump stops through the stop listener only"
     )]
     fn set_retirement_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         state.retirement_listener = Some(Arc::clone(&listener));
         if state.retirement_started {
-            listener(state.retirement_reason.unwrap_or(StopReason::Requested));
+            let reason = state.retirement_reason.unwrap_or(StopReason::Requested);
+            drop(Self::call_locked(state, || listener(reason)));
         }
     }
 
@@ -284,10 +314,10 @@ impl StopSignal {
 
     /// First cancellation reason, when present.
     pub fn reason(&self) -> Option<StopReason> {
-        match self.state.lock() {
-            Ok(state) => state.reason,
-            Err(poisoned) => poisoned.into_inner().reason,
-        }
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .reason
     }
 }
 
@@ -684,10 +714,10 @@ impl<T> WriteSender<T> {
             _ = self.shutdown.cancelled() => return Err(AdmissionError::Shutdown),
             capacity = self.sender.acquire_capacity(byte_len) => capacity?,
         };
-        let admission_open = match self.admission_open.lock() {
-            Ok(admission_open) => admission_open,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let admission_open = self
+            .admission_open
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if !*admission_open {
             return Err(AdmissionError::Shutdown);
         }
@@ -715,10 +745,10 @@ impl<T> WriteSender<T> {
 
     #[cfg(feature = "test-support")]
     pub(crate) fn lock_admission(&self) -> Result<WriteAdmissionGuard<'_, T>, AdmissionError> {
-        let admission_open = match self.admission_open.lock() {
-            Ok(admission_open) => admission_open,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let admission_open = self
+            .admission_open
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if !*admission_open {
             return Err(AdmissionError::Shutdown);
         }
@@ -1264,10 +1294,10 @@ impl IoCustodianInventory {
     /// already indexed or the bounded inventory is full.
     pub fn try_retain(&self, custodian: &IoCustodianHandle) -> Result<(), CustodianInventoryError> {
         let connection_ref = custodian.connection_ref().clone();
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if entries.contains_key(&connection_ref) {
             return Err(CustodianInventoryError::DuplicateConnection);
         }
@@ -1295,10 +1325,10 @@ impl IoCustodianInventory {
                 current.checked_add(1)
             })
             .map_err(|_| CustodianInventoryError::ReservationIdExhausted)?;
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if entries.contains_key(&connection_ref) {
             return Err(CustodianInventoryError::DuplicateConnection);
         }
@@ -1327,10 +1357,10 @@ impl IoCustodianInventory {
     /// Test-only snapshot of reserved identities, including legacy capacity holds.
     #[cfg(feature = "test-support")]
     pub fn reserved_connection_refs(&self) -> Vec<ConnectionRef> {
-        let entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         entries
             .iter()
             .filter(|(_, entry)| matches!(entry, InventoryEntry::Reserved { .. }))
@@ -1341,19 +1371,19 @@ impl IoCustodianInventory {
     /// Test-only snapshot of every indexed identity, started or not.
     #[cfg(feature = "test-support")]
     pub fn connection_refs(&self) -> Vec<ConnectionRef> {
-        let entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         entries.keys().cloned().collect()
     }
 
     /// Reacquire observation by exact physical-connection identity.
     pub fn observe(&self, connection_ref: &ConnectionRef) -> Option<IoCustodianObserver> {
-        let entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         match entries.get(connection_ref) {
             Some(InventoryEntry::Active { observer, .. }) => Some(observer.clone()),
             Some(InventoryEntry::Reserved { .. }) | None => None,
@@ -1368,10 +1398,10 @@ impl IoCustodianInventory {
         connection_ref: &ConnectionRef,
         task: JoinHandle<()>,
     ) -> Result<(), CustodianInventoryError> {
-        let entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let Some(InventoryEntry::Active { observer, .. }) = entries.get(connection_ref) else {
             task.abort();
             return Err(CustodianInventoryError::ReservationLost);
@@ -1384,10 +1414,10 @@ impl IoCustodianInventory {
             task.abort();
             return Err(CustodianInventoryError::AuxiliaryTaskAlreadyRegistered);
         }
-        let mut retained = match observer.auxiliary_task.lock() {
-            Ok(retained) => retained,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut retained = observer
+            .auxiliary_task
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if retained.is_some() {
             task.abort();
             return Err(CustodianInventoryError::AuxiliaryTaskAlreadyRegistered);
@@ -1401,10 +1431,10 @@ impl IoCustodianInventory {
     /// Number of retained observations, including pending cleanup and joined
     /// entries that have not yet been reclaimed or explicitly pruned.
     pub fn len(&self) -> usize {
-        let entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         entries.len()
     }
 
@@ -1416,10 +1446,10 @@ impl IoCustodianInventory {
     /// Remove entries only after every started pump task has returned.
     /// CleanupPending and all other unfinished states remain discoverable.
     pub fn prune_joined(&self) -> usize {
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let before = entries.len();
         entries.retain(|_, entry| match entry {
             InventoryEntry::Reserved { .. } => true,
@@ -1438,10 +1468,10 @@ impl IoCustodianInventory {
     }
 
     fn release_reservation(&self, connection_ref: &ConnectionRef, reservation_id: u64) {
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if matches!(
             entries.get(connection_ref),
             Some(InventoryEntry::Reserved {
@@ -1458,10 +1488,10 @@ impl IoCustodianInventory {
         reservation_id: u64,
         observer: IoCustodianObserver,
     ) -> Result<(), CustodianInventoryError> {
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         match entries.get(connection_ref) {
             Some(InventoryEntry::Reserved {
                 reservation_id: current,
@@ -1479,10 +1509,10 @@ impl IoCustodianInventory {
     }
 
     fn release_active_without_pumps(&self, connection_ref: &ConnectionRef, reservation_id: u64) {
-        let mut entries = match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if matches!(
             entries.get(connection_ref),
             Some(InventoryEntry::Active {
@@ -1773,10 +1803,11 @@ impl IoCustodianHandle {
     /// Terminal outcomes become available after every started pump task joins.
     /// `state()` distinguishes a full pair from an abandoned partial start.
     pub fn terminal_summary(&self) -> Option<CustodianSummary> {
-        let summary = match self.client.summary.lock() {
-            Ok(summary) => summary,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let summary = self
+            .client
+            .summary
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         summary.clone()
     }
 
@@ -1786,10 +1817,11 @@ impl IoCustodianHandle {
         if custodian_state_is_terminal(self.state()) {
             return;
         }
-        let mut admission_open = match self.client.admission_open.lock() {
-            Ok(admission_open) => admission_open,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut admission_open = self
+            .client
+            .admission_open
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         *admission_open = false;
         drop(admission_open);
         self.client.stop.begin_retirement(StopReason::Requested);
@@ -1811,10 +1843,11 @@ impl IoCustodianHandle {
         if custodian_state_is_terminal(self.state()) {
             return;
         }
-        let mut admission_open = match self.client.admission_open.lock() {
-            Ok(admission_open) => admission_open,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut admission_open = self
+            .client
+            .admission_open
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         *admission_open = false;
         drop(admission_open);
         self.client.stop.cancel(reason);
@@ -1964,10 +1997,10 @@ impl IoCustodianObserver {
     /// Terminal outcomes become available after all started tasks have joined.
     /// The summary retains typed outcomes, not error payloads.
     pub fn terminal_summary(&self) -> Option<CustodianSummary> {
-        let summary = match self.summary.lock() {
-            Ok(summary) => summary,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let summary = self
+            .summary
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         summary.clone()
     }
 
@@ -2344,10 +2377,9 @@ async fn run_io_custodian<ReadError, WriteError>(
         inbound: summarize_inbound(&joined.inbound),
         outbound: summarize_outbound(&joined.outbound),
     };
-    let mut retained_summary = match custodian_summary.lock() {
-        Ok(retained_summary) => retained_summary,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let mut retained_summary = custodian_summary
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     *retained_summary = Some(summary);
     drop(retained_summary);
     state_tx.send_replace(CustodianState::Joined);
@@ -2523,10 +2555,9 @@ async fn wait_for_auxiliary_cleanup(
 }
 
 fn take_auxiliary_task(auxiliary_task: &Mutex<Option<JoinHandle<()>>>) -> Option<JoinHandle<()>> {
-    let mut retained = match auxiliary_task.lock() {
-        Ok(retained) => retained,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let mut retained = auxiliary_task
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     retained.take()
 }
 
@@ -2598,10 +2629,9 @@ async fn monitor_reserved_reaper(setup: ReaperMonitorSetup) {
             &cleanup_pending_published,
         )
         .await;
-        let mut retained_summary = match summary.lock() {
-            Ok(retained_summary) => retained_summary,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut retained_summary = summary
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         *retained_summary = Some(CustodianSummary {
             connection_ref: connection_ref.clone(),
             inbound: InboundTerminal::NotStarted,
@@ -2785,10 +2815,9 @@ async fn run_reserved_start<ReadError, WriteError>(
         inbound: inbound_terminal,
         outbound: outbound_terminal,
     };
-    let mut retained_summary = match summary.lock() {
-        Ok(retained_summary) => retained_summary,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    let mut retained_summary = summary
+        .lock()
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     *retained_summary = Some(terminal_summary);
     drop(retained_summary);
 
@@ -2864,10 +2893,10 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
     /// abandoned requests report `NotAttempted`.
     #[cfg(feature = "test-support")]
     pub fn begin_graceful_shutdown(&self) {
-        let mut admission_open = match self.admission_open.lock() {
-            Ok(admission_open) => admission_open,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut admission_open = self
+            .admission_open
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         *admission_open = false;
         drop(admission_open);
         self.shutdown.cancel();
@@ -4115,5 +4144,46 @@ mod physical_stop_tests {
                 .is_err()
         );
         assert!(observer.terminal_summary().is_none());
+    }
+
+    #[test]
+    fn unwinding_stop_listener_leaves_the_stop_unpublished_and_the_signal_usable() {
+        let stop = StopSignal::new();
+        let panic_once = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicU64::new(0));
+        let (callback_panic, callback_calls) = (Arc::clone(&panic_once), Arc::clone(&calls));
+        stop.set_listener(Arc::new(move |_| {
+            callback_calls.fetch_add(1, Ordering::AcqRel);
+            if callback_panic.swap(false, Ordering::AcqRel) {
+                panic!("test stop listener failure");
+            }
+        }));
+
+        let failing = stop.clone();
+        let unwound = std::thread::spawn(move || failing.cancel(StopReason::Requested)).join();
+        assert!(unwound.is_err(), "the listener's unwind reaches its caller");
+        assert_eq!(stop.reason(), None);
+        assert!(!stop.is_cancelled());
+        assert_eq!(stop.start_send_if_running(|| 7), Some(7));
+
+        stop.cancel(StopReason::ShutdownDeadline);
+        assert_eq!(stop.reason(), Some(StopReason::ShutdownDeadline));
+        assert!(stop.is_cancelled());
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        assert_eq!(stop.start_send_if_running(|| 7), None);
+    }
+
+    #[test]
+    fn unwinding_send_leaves_the_signal_usable() {
+        let stop = StopSignal::new();
+        let failing = stop.clone();
+        let unwound = std::thread::spawn(move || {
+            failing.start_send_if_running(|| panic!("test send failure"))
+        })
+        .join();
+        assert!(unwound.is_err(), "the send's unwind reaches its caller");
+        assert_eq!(stop.reason(), None);
+        stop.cancel(StopReason::Requested);
+        assert_eq!(stop.reason(), Some(StopReason::Requested));
     }
 }

@@ -786,7 +786,7 @@ impl Drop for OpenJoinWait<'_> {
             self.requests
                 .undecided_joins
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .remove(&key);
         }
     }
@@ -800,7 +800,7 @@ impl OpenRoomRequests {
         if join {
             self.undecided_joins
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .insert(
                     pending.key,
                     UndecidedJoin {
@@ -824,7 +824,7 @@ impl OpenRoomRequests {
     ) -> bool {
         self.undecided_joins
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .values()
             .any(|join| {
                 join.room == *room && join.occupant == *occupant && join.generation == generation

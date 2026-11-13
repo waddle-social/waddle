@@ -83,7 +83,7 @@ impl Drop for OutboundLeaseCharge {
             .budget
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         state.count -= 1;
         state.payload_bytes -= self.payload_bytes;
     }
@@ -97,7 +97,7 @@ impl Drop for AttemptGuard {
             .0
             .stage
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if *stage == ActorOutboundStage::Attempting {
             *stage = ActorOutboundStage::AttemptedUncertain;
         }
@@ -180,10 +180,9 @@ impl ActorOutboundCustody {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, CustodyState> {
-        match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self.state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     /// Called only after the queue slot was reserved and while endpoint
@@ -221,7 +220,7 @@ impl ActorOutboundCustody {
             .lease_budget
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let Some(next_bytes) = budget.payload_bytes.checked_add(payload_bytes) else {
             return Err(outbound);
         };
@@ -287,7 +286,7 @@ impl ActorOutboundCustody {
         let outbound = record
             .outbound
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone();
         outbound
     }
@@ -309,7 +308,7 @@ impl ActorOutboundCustody {
             let mut stage = record
                 .stage
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if *stage != ActorOutboundStage::Queued {
                 return None;
             }
@@ -328,7 +327,7 @@ impl ActorOutboundCustody {
             let mut stage = record
                 .stage
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if *stage == ActorOutboundStage::AttemptedUncertain {
                 *stage = ActorOutboundStage::Flushed;
             }
@@ -345,7 +344,7 @@ impl ActorOutboundCustody {
             let mut stage = record
                 .stage
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             *stage = match *stage {
                 ActorOutboundStage::Queued => ActorOutboundStage::NotAttempted,
                 other => other,
@@ -358,7 +357,7 @@ impl ActorOutboundCustody {
         let stage = *record
             .stage
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         Some(stage)
     }
 
@@ -373,7 +372,7 @@ impl ActorOutboundCustody {
         let stage = *record
             .stage
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if stage == ActorOutboundStage::Attempting
             || (!state.sealed && stage != ActorOutboundStage::Flushed)
         {
@@ -383,7 +382,7 @@ impl ActorOutboundCustody {
         let outbound = record
             .outbound
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .take()?;
         Some((outbound, stage))
     }
@@ -403,7 +402,7 @@ impl ActorOutboundCustody {
             .lease_budget
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         budget.count == 0 && budget.payload_bytes == 0
     }
 
@@ -413,7 +412,7 @@ impl ActorOutboundCustody {
         self.lease_budget
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .count
     }
 
