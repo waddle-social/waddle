@@ -1,6 +1,7 @@
 //! XEP-0198 §4: even a single pending delivery prompts its durable custody ACK.
 
 pub mod pending_delivery_ws_support;
+mod sm_resume_token_support;
 
 use pending_delivery_ws_support::{ack, enable, message, presence, recv, PendingFixture};
 use waddle_xmpp::stream_management::{DEFAULT_ACK_REQUEST_THRESHOLD, SM_NS};
@@ -15,7 +16,9 @@ async fn single_pending_stanza_requests_ack_immediately_and_deletes_only_after_a
     assert!(queued[0].flushed_in_session.is_none());
 
     let mut recipient = fixture.connect("bob", "phone").await;
-    let session = enable(&mut recipient).await;
+    let token = enable(&mut recipient).await;
+    let session =
+        sm_resume_token_support::session_stream(&fixture.storage.database(), token.as_str()).await;
     presence(&mut recipient, 0).await;
     let mut handled = 0;
     message(&mut recipient, &mut handled, "single-pending").await;

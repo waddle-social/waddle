@@ -4,6 +4,8 @@
 //! discards the old authority's background retry proofs, so only the durable
 //! replay carrier can settle the canonical row on the new connection.
 
+mod sm_resume_token_support;
+
 use minidom::Element;
 use std::time::Duration;
 use waddle_server::db::Database;
@@ -79,8 +81,8 @@ async fn post_registration_resume_settles_replayed_receipt() {
         .expect("enabled XML");
     assert!(enabled.is("enabled", SM_NS));
     assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
-    let stream_id =
-        waddle_xmpp::pending_delivery::SmSessionId::new(enabled.attr("id").expect("resumption ID"));
+    let resume_token = enabled.attr("id").expect("resume token").to_owned();
+    let stream_id = sm_resume_token_support::session_stream(&db, &resume_token).await;
 
     db.guard()
         .await
@@ -165,7 +167,7 @@ async fn post_registration_resume_settles_replayed_receipt() {
         Element::builder("resume", SM_NS)
             .attr(
                 minidom::rxml::xml_ncname!("previd").to_owned(),
-                stream_id.as_str(),
+                resume_token.as_str(),
             )
             .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
             .build(),
@@ -181,7 +183,7 @@ async fn post_registration_resume_settles_replayed_receipt() {
         response.is("resumed", SM_NS),
         "resume response: {response:?}"
     );
-    assert_eq!(response.attr("previd"), Some(stream_id.as_str()));
+    assert_eq!(response.attr("previd"), Some(resume_token.as_str()));
     let replay: Element = resumed
         .recv()
         .await
