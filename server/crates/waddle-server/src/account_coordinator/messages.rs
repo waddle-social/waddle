@@ -145,9 +145,10 @@ pub enum SessionRelease {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdoptionReport {
     /// Bindings now held under this claim: those on live connections,
-    /// detached ones, and active ones on a lost connection whose session
-    /// can resume, which the coordinator detaches once the account is
-    /// loaded.
+    /// detached ones, and active ones on a lost connection that name a
+    /// stream-management session. Once the account is loaded the
+    /// coordinator detaches an active one whose session can resume and
+    /// retires any of them whose session has ended.
     pub adopted: Vec<(FullJid, BindingRef)>,
     /// Bindings moved to this claim but not adopted: their connection's
     /// liveness is unknown. They are not routable and stay so until they

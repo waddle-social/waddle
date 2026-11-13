@@ -1095,12 +1095,33 @@ async fn stanza_from_the_other_node_to_a_detached_session(selectors: NodeSelecto
     stanza_to_a_detached_session(selectors, false).await;
 }
 
-/// Kill node B and wait until its node lease has lapsed and node A serves.
+/// Kill node B and wait until the cluster has recorded its node lease as
+/// expired and node A serves. Until the lease is recorded as expired a
+/// claim node B holds counts as held by a live node.
 async fn kill_node_b(cluster: &mut Cluster) {
     let node = cluster.b.take().expect("node B is running");
     let node_id = node.node_id.clone();
     drop(node);
     wait_for_node_lease_lapse(&cluster.db, &node_id).await;
+    eventually("node B's lease is recorded as expired", || async {
+        let conn = cluster.db.guard().await.expect("database guard");
+        let mut rows = conn
+            .query(
+                "SELECT count(*) FROM clustering_nodes WHERE node_id = ? AND NOT expired",
+                waddle_server::db_params![node_id.clone()],
+            )
+            .await
+            .expect("node lease query");
+        let unexpired: i64 = rows
+            .next()
+            .await
+            .expect("node lease row")
+            .expect("one row")
+            .get(0)
+            .expect("unexpired count");
+        (unexpired == 0).then_some(())
+    })
+    .await;
     wait_for_readiness(&cluster.a.server, true, Duration::from_secs(30)).await;
 }
 
@@ -1130,9 +1151,8 @@ async fn session_claim_owner(db: &Database, session_id: &str) -> Option<String> 
 /// generation is stored with the session, so no resource snapshot is
 /// needed.
 ///
-/// Pinned gap on a coordinator node (see [`cross_node_resume_is_a_gap`]):
-/// the account's claim still names the dead node, so the resume is not
-/// answered `<resumed/>`.
+/// A coordinator survivor takes the account over from the dead node and
+/// moves the resource's detached binding to the resumed connection.
 async fn session_of_a_killed_node_resumes_on_the_survivor(selectors: NodeSelectors) {
     let mut cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
@@ -1154,10 +1174,6 @@ async fn session_of_a_killed_node_resumes_on_the_survivor(selectors: NodeSelecto
 
     let mut alice = cluster.connect(&cluster.a, "alice").await;
     let answer = resume(&mut alice, &token, handled - 1).await;
-    if cross_node_resume_is_a_gap(&cluster.a) {
-        assert!(!matches!(answer, Answer::Resumed(_)), "{answer:?}");
-        return;
-    }
     assert!(matches!(answer, Answer::Resumed(_)), "{answer:?}");
     recv_message_once(&mut alice, "held").await;
     let live = eventually("the session is live on the survivor", || async {
@@ -1181,31 +1197,22 @@ async fn session_of_a_killed_node_resumes_on_the_survivor(selectors: NodeSelecto
 /// The node that owns an account and hosts its resource is killed, and
 /// the client binds the same resource on the surviving node.
 ///
-/// Intended: once the dead node's lease has lapsed the bind succeeds, the
-/// survivor owns the account, and the resource receives messages for its
-/// full JID and its bare JID.
+/// Once the dead node's lease has expired the bind succeeds, the survivor
+/// owns the account, and the resource receives messages for its full JID
+/// and its bare JID. A coordinator node takes the account over from the
+/// dead node and settles the binding the dead node hosted.
 async fn resource_of_a_killed_node_binds_on_the_survivor(selectors: NodeSelectors) {
     let mut cluster = Cluster::uniform(selectors, Delivery::Mailbox).await;
     let alice_jid = cluster.full("alice", "phone");
     let (alice, _) = cluster.resumable(cluster.b(), "alice", "phone").await;
-    let dead = cluster.b().node_id.clone();
     kill_node_b(&mut cluster).await;
     drop(alice);
 
     let mut alice = cluster.connect(&cluster.a, "alice").await;
-    let answer = bind(&mut alice, "phone").await;
-    if cluster.a.coordinates_accounts() {
-        // Pinned gap: the account's claim still names the dead node, and
-        // the coordinator does not take over a claim another node's lapsed
-        // lease holds, so it does not start for the account.
-        assert_eq!(answer, internal_server_error());
-        assert_eq!(
-            account_owner(&cluster.db, &cluster.bare("alice")).await,
-            Some(dead)
-        );
-        return;
-    }
-    assert_eq!(answer, Answer::Bound(alice_jid.clone()));
+    assert_eq!(
+        bind(&mut alice, "phone").await,
+        Answer::Bound(alice_jid.clone())
+    );
     cluster
         .go_available(&cluster.a, &mut alice, &alice_jid)
         .await;
@@ -1270,6 +1277,6 @@ profile!(durable_coordinator, NodeSelectors::DURABLE_COORDINATOR, {
     gap_live_session_resumes_on_the_other_node => live_session_resumes_on_the_other_node,
     gap_stanza_from_the_same_node_to_a_detached_session => stanza_from_the_same_node_to_a_detached_session,
     gap_stanza_from_the_other_node_to_a_detached_session => stanza_from_the_other_node_to_a_detached_session,
-    gap_session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
-    gap_resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
+    session_of_a_killed_node_resumes_on_the_survivor => session_of_a_killed_node_resumes_on_the_survivor,
+    resource_of_a_killed_node_binds_on_the_survivor => resource_of_a_killed_node_binds_on_the_survivor,
 });

@@ -28,6 +28,9 @@ use crate::ingress_substrate::EnteredTransaction;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest any one statement of a store transaction runs.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+/// `sm_durable_sessions.state` of a session that has ended and cannot
+/// resume; every other state can.
+const SESSION_STATE_TERMINAL: i64 = 4;
 
 /// Account resource rows in SQLite (single node) or PostgreSQL.
 ///
@@ -418,6 +421,27 @@ impl AccountBindingStore for DatabaseAccountBindingStore {
         }
         tx.rollback().await?;
         Ok(resources)
+    }
+
+    async fn session_resumable(
+        &self,
+        session: SmSessionKey,
+    ) -> Result<bool, AccountBindingStoreError> {
+        let mut tx = self.db.begin().await?;
+        let resumable = {
+            let mut rows = tx
+                .query(
+                    "SELECT state FROM sm_durable_sessions WHERE session_id = ?",
+                    crate::db_params![session.as_uuid().to_string()],
+                )
+                .await?;
+            match rows.next().await? {
+                Some(found) => found.get::<i64>(0)? != SESSION_STATE_TERMINAL,
+                None => false,
+            }
+        };
+        tx.rollback().await?;
+        Ok(resumable)
     }
 
     async fn bound_accounts(
