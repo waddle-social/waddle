@@ -671,3 +671,13 @@ waddle-server::xep0198_direct_lanes owner_killed_before_its_decision_leaves_one_
 waddle-server::restricted_runtime_startup authority_guard::authority_relations_accept_only_matrix_writes_that_prove_the_live_epoch
 waddle-server::restricted_runtime_startup authority_guard::owner_phase_guards_authority_relations_created_before_the_guard_migration
 waddle-server::restricted_runtime_startup authority_guard::store_attachment_refuses_a_drifted_authority_guard
+
+# #2138 account claim on a clustered node: the coordinator takes the
+# account's `UserActor` claim for the first bind, reads an account without a
+# claim as an account without resources, and keeps the claim until the last
+# binding, a detached one included, is retired. Only a two-node PostgreSQL
+# run exercises the binding store's claim fence and the claim the user
+# registry shares.
+waddle-server::account_coordinator_cluster the_first_bind_takes_the_account_claim_and_the_last_unbind_releases_it
+waddle-server::account_coordinator_cluster a_message_to_an_account_without_a_claim_is_stored_for_its_next_resource
+waddle-server::account_coordinator_cluster a_detached_binding_keeps_the_account_claim_until_it_is_retired

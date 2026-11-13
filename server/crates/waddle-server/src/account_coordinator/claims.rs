@@ -1,14 +1,15 @@
 //! Where a coordinator's claim identity comes from, and which connections
 //! it may treat as live.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use jid::BareJid;
 use thiserror::Error;
 use waddle_xmpp::ownership::{
-    BindingRef, ClaimEpoch, ClaimStore, Entity, EntityType, NodeLeaseIdentity, SharedNodeIdentity,
-    SmSessionKey, UserClaimIdentity,
+    BindingRef, ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, NodeLeaseIdentity,
+    SharedNodeIdentity, SmSessionKey, StalePredicate, UserClaimIdentity,
 };
 
 /// Why this node cannot act as an account's coordinator.
@@ -24,15 +25,63 @@ pub enum AccountClaimError {
     LookupFailed,
 }
 
-/// The claim under which this node coordinates an account. Each call mints
-/// the identity of a new coordinator incarnation, so the directory asks
-/// once per coordinator it creates.
+/// What became of a claim a coordinator gave up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRelease {
+    /// The claim is released. Any node may take the account.
+    Released,
+    /// The claim stays held: this source never releases, or another holder
+    /// on this node still needs it.
+    Retained,
+}
+
+/// Whether a request may take an account's claim for this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClaimNeed {
+    /// The request reads or maintains what the account already holds. It
+    /// is served only under a claim this node holds already.
+    Existing,
+    /// The request acts for a binding of the account, so this node takes
+    /// the claim when nobody holds it.
+    Taken,
+}
+
+/// The claim under which this node coordinates an account. Each call that
+/// returns an identity mints the identity of a new coordinator incarnation,
+/// so a coordinator asks once and keeps the answer until it gives the
+/// claim up or loses it.
 #[async_trait]
 pub trait AccountClaimSource: Send + Sync + 'static {
+    /// The claim this node holds on `account` now. Takes nothing.
     async fn current_claim(
         &self,
         account: &BareJid,
     ) -> Result<UserClaimIdentity, AccountClaimError>;
+
+    /// The claim on `account`, taken for this node when the account has
+    /// none or its holder's node lease is lost. A source whose accounts
+    /// always belong to this node answers as [`Self::current_claim`] does.
+    async fn acquire_claim(
+        &self,
+        account: &BareJid,
+    ) -> Result<UserClaimIdentity, AccountClaimError> {
+        self.current_claim(account).await
+    }
+
+    /// Whether [`Self::release_claim`] can release a claim. A coordinator
+    /// of a source that cannot keeps its claim for as long as it runs.
+    fn releases_claims(&self) -> bool {
+        false
+    }
+
+    /// Give up `claim`, which the caller holds for an account without a
+    /// binding.
+    async fn release_claim(
+        &self,
+        _claim: &UserClaimIdentity,
+    ) -> Result<ClaimRelease, AccountClaimError> {
+        Ok(ClaimRelease::Retained)
+    }
 }
 
 /// Claims of a single-node process: every account belongs to this process
@@ -54,20 +103,51 @@ impl AccountClaimSource for ProcessClaimSource {
     }
 }
 
-/// Claims read from the cluster claim store. This node coordinates an
+/// The account claims the `UserActor` mirror of this node holds.
+///
+/// With the coordinator selected a binding is also registered with the
+/// account's `UserActor`, whose registry takes and releases the same
+/// `UserActor` claim row through [`MirrorClaimStore`]. The claim must
+/// outlive whichever of the two needs it longer, so each release consults
+/// the other holder. The lock is held across the claim store call that
+/// changes a hold, so a release and an acquisition of one claim cannot
+/// interleave.
+#[derive(Default)]
+pub struct MirrorClaimHolds {
+    pub(super) held: tokio::sync::Mutex<HashMap<BareJid, ClaimEpoch>>,
+}
+
+fn account_entity(account: &BareJid) -> Entity {
+    Entity::new(EntityType::UserActor, account.to_string())
+}
+
+/// Claims kept in the cluster claim store. This node coordinates an
 /// account only while the account's `UserActor` claim names this node's
-/// current incarnation under a fresh lease.
+/// current incarnation under a fresh lease. The claim is taken for the
+/// first binding of an account and released once the account holds no
+/// binding and the `UserActor` mirror no longer holds it either.
 #[derive(Clone)]
 pub struct ClaimStoreClaimSource {
     claim_store: Arc<dyn ClaimStore>,
     node_identity: SharedNodeIdentity,
+    mirror: Arc<MirrorClaimHolds>,
 }
 
 impl ClaimStoreClaimSource {
     pub fn new(claim_store: Arc<dyn ClaimStore>, node_identity: SharedNodeIdentity) -> Self {
+        Self::with_mirror(claim_store, node_identity, Arc::default())
+    }
+
+    /// A source that keeps a claim while `mirror` records a hold on it.
+    pub fn with_mirror(
+        claim_store: Arc<dyn ClaimStore>,
+        node_identity: SharedNodeIdentity,
+        mirror: Arc<MirrorClaimHolds>,
+    ) -> Self {
         Self {
             claim_store,
             node_identity,
+            mirror,
         }
     }
 }
@@ -78,10 +158,9 @@ impl AccountClaimSource for ClaimStoreClaimSource {
         &self,
         account: &BareJid,
     ) -> Result<UserClaimIdentity, AccountClaimError> {
-        let entity = Entity::new(EntityType::UserActor, account.to_string());
         let claim = self
             .claim_store
-            .current_claim(&entity)
+            .current_claim(&account_entity(account))
             .await
             .map_err(|_| AccountClaimError::LookupFailed)?
             .ok_or(AccountClaimError::Unclaimed)?;
@@ -96,6 +175,90 @@ impl AccountClaimSource for ClaimStoreClaimSource {
             NodeLeaseIdentity::from_node_identity(&claim.owner),
             claim.claim_epoch,
         ))
+    }
+
+    /// Take the claim when the account has none, keep it when this node's
+    /// current incarnation holds it, and take it over when its holder's
+    /// node lease is lost. A claim another node holds under a fresh lease
+    /// is left alone.
+    async fn acquire_claim(
+        &self,
+        account: &BareJid,
+    ) -> Result<UserClaimIdentity, AccountClaimError> {
+        let entity = account_entity(account);
+        let me = self.node_identity.current();
+        let epoch = match self.claim_store.ensure_claimed(&entity, &me).await {
+            Ok(epoch) => epoch,
+            Err(ClaimError::AlreadyClaimed) => {
+                let Some(held) = self
+                    .claim_store
+                    .current_claim(&entity)
+                    .await
+                    .map_err(|_| AccountClaimError::LookupFailed)?
+                else {
+                    // The holder released the claim between the two calls.
+                    return match self.claim_store.ensure_claimed(&entity, &me).await {
+                        Ok(epoch) => Ok(UserClaimIdentity::fresh(
+                            account.clone(),
+                            NodeLeaseIdentity::from_node_identity(&me),
+                            epoch,
+                        )),
+                        Err(ClaimError::AlreadyClaimed) => Err(AccountClaimError::HeldElsewhere),
+                        Err(_) => Err(AccountClaimError::LookupFailed),
+                    };
+                };
+                if held.owner_lease_fresh {
+                    return Err(AccountClaimError::HeldElsewhere);
+                }
+                // Losing this race means another node took the account
+                // over, or the holder's lease turned out to be fresh.
+                self.claim_store
+                    .steal_stale(&entity, held.claim_epoch, StalePredicate::OwnerStale, &me)
+                    .await
+                    .map_err(|error| match error {
+                        ClaimError::Conflict => AccountClaimError::HeldElsewhere,
+                        _ => AccountClaimError::LookupFailed,
+                    })?
+            }
+            Err(_) => return Err(AccountClaimError::LookupFailed),
+        };
+        Ok(UserClaimIdentity::fresh(
+            account.clone(),
+            NodeLeaseIdentity::from_node_identity(&me),
+            epoch,
+        ))
+    }
+
+    fn releases_claims(&self) -> bool {
+        true
+    }
+
+    async fn release_claim(
+        &self,
+        claim: &UserClaimIdentity,
+    ) -> Result<ClaimRelease, AccountClaimError> {
+        let Some(owner) = claim.owner().clustered_node() else {
+            return Ok(ClaimRelease::Retained);
+        };
+        let mut held = self.mirror.held.lock().await;
+        match held.get(claim.bare_jid()).copied() {
+            Some(epoch) if epoch == claim.claim_epoch() => return Ok(ClaimRelease::Retained),
+            // A hold recorded for another epoch is a lease the registry
+            // dropped without releasing it, when its claim was taken over.
+            Some(_) => {
+                held.remove(claim.bare_jid());
+            }
+            None => {}
+        }
+        self.claim_store
+            .release(
+                &account_entity(claim.bare_jid()),
+                &owner,
+                claim.claim_epoch(),
+            )
+            .await
+            .map_err(|_| AccountClaimError::LookupFailed)?;
+        Ok(ClaimRelease::Released)
     }
 }
 

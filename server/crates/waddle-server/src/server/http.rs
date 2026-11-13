@@ -1023,6 +1023,21 @@ async fn create_websocket_state(
     // unconditional re-wiring is needed here (re-wiring after spawn races
     // hydration; #1648 review).
     if let Some((claim_store, node_identity)) = state.clustering_claims.claim_pair() {
+        // With the account coordinator selected, an account's claim also
+        // covers bindings the registry has no entry for, so the registry's
+        // release goes through the coordinator. The selection is published
+        // before this node serves a connection; until then, and with the
+        // connection registry selected, the store is the cluster's own.
+        let coordinator_state = Arc::downgrade(&state);
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(crate::account_coordinator::MirrorClaimStore::new(
+                claim_store,
+                Arc::new(move || {
+                    coordinator_state
+                        .upgrade()
+                        .and_then(|state| state.account_authority().coordinators().cloned())
+                }),
+            ));
         if let Err(_error) = user_registry
             .tell(waddle_xmpp::registry::WireUserClusteringClaims {
                 claim_store,

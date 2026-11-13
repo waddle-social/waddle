@@ -205,3 +205,6 @@ pub(super) struct Adopt;
 
 /// Stop the coordinator if its account holds no binding and has been idle.
 pub(super) struct ReclaimIfIdle;
+
+/// Release the account's claim if the account holds no binding.
+pub(super) struct ReleaseClaimIfUnbound;

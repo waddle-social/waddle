@@ -168,50 +168,66 @@ impl CoordinatorBindingPublisher {
         binding_ref: &BindingRef,
         lifetime: ResourceLifetime,
     ) -> Result<PublishOutcome, AccountCoordinatorError> {
-        let status = self.coordinators.slot_status(jid).await?;
-        let claim_identity = status.claim_identity;
-        let prepared = match status.binding {
-            Some((current, state)) if &current == binding_ref => match state {
-                AccountResourceBindingState::Prepared => status.revision,
-                AccountResourceBindingState::Published | AccountResourceBindingState::Active => {
-                    return Ok(PublishOutcome::Published(PublishedBinding {
-                        binding_ref: current,
-                        claim_identity,
-                        revision: status.revision,
-                    }));
-                }
-                AccountResourceBindingState::Detached
-                | AccountResourceBindingState::Retiring
-                | AccountResourceBindingState::Retired => {
-                    return Ok(PublishOutcome::Refused(
-                        AccountResourceTransitionError::LifecycleConflict,
-                    ));
-                }
-            },
-            _ => {
-                let bind = fresh(AccountResourceMutation::Bind {
-                    claim_identity: claim_identity.clone(),
-                    expected_revision: status.revision,
-                    binding_ref: binding_ref.clone(),
-                    lifetime,
-                });
-                match step(self.coordinators.execute(jid, bind).await?) {
-                    Step::Committed(revision) => revision,
-                    Step::Rejected(error) => return Ok(PublishOutcome::Refused(error)),
-                    Step::Pending {
-                        displaced,
-                        revision,
-                    } => {
-                        return Ok(PublishOutcome::ReplacementPending {
+        // The account's claim is released with its last binding, which can
+        // happen between the slot read and the bind when another resource
+        // of the account retires then. The bind is then refused for naming
+        // the released claim, and is repeated once under the claim the
+        // coordinator took for it.
+        let mut repeated = false;
+        loop {
+            let status = self.coordinators.slot_status(jid).await?;
+            let claim_identity = status.claim_identity;
+            let prepared = match status.binding {
+                Some((current, state)) if &current == binding_ref => match state {
+                    AccountResourceBindingState::Prepared => status.revision,
+                    AccountResourceBindingState::Published
+                    | AccountResourceBindingState::Active => {
+                        return Ok(PublishOutcome::Published(PublishedBinding {
+                            binding_ref: current,
+                            claim_identity,
+                            revision: status.revision,
+                        }));
+                    }
+                    AccountResourceBindingState::Detached
+                    | AccountResourceBindingState::Retiring
+                    | AccountResourceBindingState::Retired => {
+                        return Ok(PublishOutcome::Refused(
+                            AccountResourceTransitionError::LifecycleConflict,
+                        ));
+                    }
+                },
+                _ => {
+                    let bind = fresh(AccountResourceMutation::Bind {
+                        claim_identity: claim_identity.clone(),
+                        expected_revision: status.revision,
+                        binding_ref: binding_ref.clone(),
+                        lifetime,
+                    });
+                    match step(self.coordinators.execute(jid, bind).await?) {
+                        Step::Committed(revision) => revision,
+                        Step::Rejected(AccountResourceTransitionError::ClaimMismatch)
+                            if !repeated =>
+                        {
+                            repeated = true;
+                            continue;
+                        }
+                        Step::Rejected(error) => return Ok(PublishOutcome::Refused(error)),
+                        Step::Pending {
                             displaced,
                             revision,
-                        })
+                        } => {
+                            return Ok(PublishOutcome::ReplacementPending {
+                                displaced,
+                                revision,
+                            })
+                        }
                     }
                 }
-            }
-        };
-        self.publish_endpoint(jid, binding_ref, claim_identity, prepared)
-            .await
+            };
+            return self
+                .publish_endpoint(jid, binding_ref, claim_identity, prepared)
+                .await;
+        }
     }
 
     /// Record a committed resume as the new binding of `jid` and publish

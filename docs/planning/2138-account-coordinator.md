@@ -35,6 +35,54 @@ for the same session, so a binding key alone would flush twice. The
 coordinator holds the only copy of these flags. A detached session carries a
 projection of them for the resume snapshot; it is not a second authority.
 
+## The account claim
+
+On a clustered node a coordinator acts under the account's `UserActor`
+claim row, and the binding store proves that exact row in every write. The
+claim follows the account's bindings:
+
+- **No claim, no bindings.** An account nobody holds a claim on has no
+  binding that could be a destination. Its view is empty, not a failed
+  read, so a stanza for it takes the offline path. A read never takes a
+  claim.
+- **The first bind takes the claim.** A request that acts for a binding
+  (`slot_status`, `execute`, `unregister`, `repair`, `release_session`)
+  takes the claim for its node
+  when the account has none, and takes it over when the holder's node
+  lease is lost. A claim another node holds under a fresh lease is left
+  alone and the request fails with the claim error.
+- **The last binding releases it.** When a retirement leaves the account
+  without a binding, a pending replacement or a retirement awaiting
+  evidence, the coordinator deletes the account's free rows and releases
+  the claim. A detached binding is a binding: the claim stays for as long
+  as the session can resume. An idle coordinator that is reclaimed
+  releases the claim the same way.
+- **A lost claim is not acted under.** When the store reports that the
+  claim a write named is not held, the coordinator drops the claim and its
+  slots. The next request for a binding takes the claim again, or fails
+  with the claim error if another node holds the account by then, and
+  loads the rows as a takeover does.
+
+A bind can race the release: it reads the slot under one claim and commits
+after another resource's retirement released it. That bind is refused with
+`ClaimMismatch`, and the publisher reads the slot again and binds once
+more under the claim taken for it.
+
+The `UserActor` mirror shares the row. While the registry and the
+`UserActor` are still written (see "What still writes the registry and
+the mirrors"), the user registry takes the same claim when it registers an
+account's first resource and releases it with the last. Its claim store is
+wrapped (`account_coordinator/mirror_claims.rs`): the wrapper records
+which claims the registry holds, and turns the registry's release into a
+request to the coordinator. The row is deleted only when neither holds
+it: the coordinator keeps a claim the registry still holds, and the
+registry's release leaves a claim under which the account still has a
+binding. Without this the registry would release the claim when a
+connection is lost, under the detached binding of its resumable session.
+
+On a single node every account belongs to the process and no claim is
+taken or released.
+
 ## Binding lifecycle
 
 A binding moves through the states the pure model in
@@ -203,8 +251,8 @@ and present only when it returns `true`.
   and the coordinator share one set of rules.
 - **Service.** `AccountCoordinators` (`waddle-server/src/account_coordinator`)
   runs one actor per bare JID with a bounded mailbox, created on demand
-  under the account's current claim and stopped when the account holds no
-  binding and has been idle. It commits a mutation in the store first and
+  under the account's claim (see "The account claim") and stopped when
+  the account holds no binding and has been idle. It commits a mutation in the store first and
   applies it to its in-memory slots second. A store failure that leaves a
   commit outcome unknown drops the in-memory slots, which are reloaded from
   the rows before the next request.
@@ -227,6 +275,7 @@ roster pushes; last activity; entity-capability and PubSub fan-out targets;
 MUC invite delivery; offline-delivery and inbox-update targets; and the
 roster and block-list push sets. A read the coordinator cannot answer is an
 error at the recipient inventory and an empty set with a warning elsewhere.
+An account without a claim is answered: it has no resources.
 
 These reads stay on the registry in both modes: the connection cleanup and
 registration paths, the cluster route bridge's registration snapshots and
@@ -288,10 +337,11 @@ Decisions this wiring makes:
   routing index states that it accepted nothing.
 - **The bind-success receipt** is read when the binding is confirmed, not
   again when the reply is written.
-- **A node that does not own the account** cannot record the binding: the
-  coordinator refuses with the claim error and the bind fails. The
-  coordinator can be selected only where a socket's node owns the claim of
-  its account.
+- **A node that does not own the account** cannot record the binding
+  while another node holds the account's claim under a fresh lease: the
+  coordinator refuses with the claim error and the bind fails. An account
+  without a claim is taken by the node of its first bind, so all resources
+  of one account must be hosted by the node that holds its claim.
 
 ### What still writes the registry and the mirrors
 

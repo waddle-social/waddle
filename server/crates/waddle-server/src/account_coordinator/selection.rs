@@ -11,7 +11,7 @@ use waddle_xmpp::telemetry::reliability::record_janitor_sweep;
 
 use super::claims::{
     AccountClaimSource, ClaimStoreClaimSource, ClusterLeaseLiveness, ConnectionLiveness,
-    LocalNodeLiveness, ProcessClaimSource,
+    LocalNodeLiveness, MirrorClaimHolds, ProcessClaimSource,
 };
 use super::config::AccountCoordinatorConfig;
 use super::directory::AccountCoordinators;
@@ -106,6 +106,7 @@ impl AccountAuthoritySelection {
             return Err(AccountAuthoritySelectionError::RequiresDurableStreamManagement);
         }
         let store = DatabaseAccountBindingStore::open(db.clone(), clustered).await?;
+        let mirror_holds = Arc::new(MirrorClaimHolds::default());
         let (claims, liveness): (Arc<dyn AccountClaimSource>, Arc<dyn ConnectionLiveness>) =
             if clustered {
                 let (Some(claim_store), Some(node_identity)) = (
@@ -116,9 +117,10 @@ impl AccountAuthoritySelection {
                 };
                 let lease = NodeLeaseIdentity::from_node_identity(&node_identity.current());
                 (
-                    Arc::new(ClaimStoreClaimSource::new(
+                    Arc::new(ClaimStoreClaimSource::with_mirror(
                         Arc::clone(&claim_store),
                         node_identity,
+                        Arc::clone(&mirror_holds),
                     )),
                     Arc::new(ClusterLeaseLiveness::new(lease, Arc::clone(&claim_store))),
                 )
@@ -129,12 +131,10 @@ impl AccountAuthoritySelection {
                 )
             };
         let config = AccountCoordinatorConfig::default();
-        let coordinators = Arc::new(AccountCoordinators::new(
-            Arc::new(store),
-            claims,
-            liveness,
-            config,
-        ));
+        let coordinators = Arc::new(
+            AccountCoordinators::new(Arc::new(store), claims, liveness, config)
+                .with_mirror_holds(mirror_holds),
+        );
         tokio::spawn(reclaim_idle_coordinators(
             Arc::downgrade(&coordinators),
             config,

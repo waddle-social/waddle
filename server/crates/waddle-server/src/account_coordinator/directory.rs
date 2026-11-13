@@ -19,14 +19,16 @@ use waddle_xmpp::telemetry::attributes::MailboxRejection;
 
 use super::actor::AccountCoordinatorActor;
 use super::authority::AccountBindingAuthority;
-use super::claims::{AccountClaimSource, ConnectionLiveness};
+use super::claims::{
+    AccountClaimError, AccountClaimSource, ClaimNeed, ConnectionLiveness, MirrorClaimHolds,
+};
 use super::config::AccountCoordinatorConfig;
 use super::error::AccountCoordinatorError;
 use super::messages::{
     AccountView, Adopt, AdoptionReport, BindSuccess, BindingReply, Execute, ExpiredBindings,
-    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseSession,
-    ReleaseSessionRequest, Repair, RepairEvidence, RepairOutcome, SessionRelease, SlotStatus,
-    Status, Unregister, UnregisterOutcome, UnregisterRequest,
+    MarkPresented, OverdueRetirements, ReadView, ReclaimIfIdle, ReleaseClaimIfUnbound,
+    ReleaseSession, ReleaseSessionRequest, Repair, RepairEvidence, RepairOutcome, SessionRelease,
+    SlotStatus, Status, Unregister, UnregisterOutcome, UnregisterRequest,
 };
 use crate::account_bindings::AccountBindingStore;
 
@@ -37,11 +39,18 @@ use crate::account_bindings::AccountBindingStore;
 /// stays until [`Self::reclaim_idle`] finds its account without a binding
 /// and idle. Requests wait a bounded time for mailbox room and for the
 /// reply; a request the mailbox refuses is a typed error and is counted.
+///
+/// A request that acts for a binding takes the account's claim for this
+/// node when nobody holds it. A read, and the maintenance of what an
+/// account already holds, is served only under a claim this node holds
+/// already. The claim is given up when the account's last binding is
+/// retired, detached bindings included.
 pub struct AccountCoordinators {
     store: Arc<dyn AccountBindingStore>,
     claims: Arc<dyn AccountClaimSource>,
     liveness: Arc<dyn ConnectionLiveness>,
     config: AccountCoordinatorConfig,
+    mirror_holds: Arc<MirrorClaimHolds>,
     actors: Mutex<HashMap<BareJid, ActorRef<AccountCoordinatorActor>>>,
 }
 
@@ -49,13 +58,13 @@ pub struct AccountCoordinators {
 /// stopped before taking the message is replaced once and the message is
 /// sent again; the message was not handled, so nothing is repeated.
 macro_rules! ask {
-    ($directory:expr, $account:expr, $message:expr) => {{
+    ($directory:expr, $account:expr, $need:expr, $message:expr) => {{
         let directory = $directory;
         let account = $account;
         let mut message = $message;
         let mut respawned = false;
         loop {
-            let actor = directory.coordinator(account).await?;
+            let actor = directory.coordinator(account, $need).await?;
             let result = actor
                 .ask(message)
                 .mailbox_timeout(directory.config.mailbox_timeout)
@@ -97,8 +106,21 @@ impl AccountCoordinators {
             claims,
             liveness,
             config,
+            mirror_holds: Arc::default(),
             actors: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Share the record of the account claims the `UserActor` mirror
+    /// holds, which the claim source consults before it releases a claim.
+    pub fn with_mirror_holds(mut self, mirror_holds: Arc<MirrorClaimHolds>) -> Self {
+        self.mirror_holds = mirror_holds;
+        self
+    }
+
+    /// The account claims the `UserActor` mirror of this node holds.
+    pub fn mirror_holds(&self) -> &Arc<MirrorClaimHolds> {
+        &self.mirror_holds
     }
 
     /// The durable rows the coordinators commit to. Reads of it are not
@@ -107,21 +129,27 @@ impl AccountCoordinators {
         &self.store
     }
 
-    /// The running coordinator of `account`, created under the account's
-    /// current claim when there is none.
+    /// The running coordinator of `account`. When there is none, one is
+    /// created under the claim this node holds on the account, which is
+    /// taken first when `need` allows it.
     async fn coordinator(
         &self,
         account: &BareJid,
+        need: ClaimNeed,
     ) -> Result<ActorRef<AccountCoordinatorActor>, AccountCoordinatorError> {
         let mut actors = self.actors.lock().await;
         if let Some(actor) = actors.get(account).filter(|actor| actor.is_alive()) {
             return Ok(actor.clone());
         }
-        let claim_identity = self.claims.current_claim(account).await?;
+        let claim_identity = match need {
+            ClaimNeed::Existing => self.claims.current_claim(account).await?,
+            ClaimNeed::Taken => self.claims.acquire_claim(account).await?,
+        };
         let actor = AccountCoordinatorActor::spawn_with_mailbox(
             AccountCoordinatorActor::new(
                 claim_identity,
                 Arc::clone(&self.store),
+                Arc::clone(&self.claims),
                 Arc::clone(&self.liveness),
                 self.config,
             ),
@@ -145,8 +173,41 @@ impl AccountCoordinators {
 
     /// One coherent read of the account's resources. An error is a failed
     /// read, never an account without resources.
+    ///
+    /// An account nobody holds a claim on has no binding that could be a
+    /// destination, because the claim is released only with the account's
+    /// last binding. Its view is empty, and the read takes no claim.
     pub async fn view(&self, account: &BareJid) -> Result<AccountView, AccountCoordinatorError> {
-        ask!(self, account, ReadView)
+        // The macro returns early from its enclosing block when the
+        // account has no claim, so the block scopes that to the read.
+        let view = async { ask!(self, account, ClaimNeed::Existing, ReadView) }.await;
+        match view {
+            Err(AccountCoordinatorError::Claim(AccountClaimError::Unclaimed)) => {
+                Ok(AccountView::default())
+            }
+            view => view,
+        }
+    }
+
+    /// Release the claim of `account` if this node holds it and the
+    /// account holds no binding. Returns whether the claim was released.
+    /// The `UserActor` mirror calls this when it gives up its own hold.
+    pub async fn release_claim_if_unbound(
+        &self,
+        account: &BareJid,
+    ) -> Result<bool, AccountCoordinatorError> {
+        let released =
+            async { ask!(self, account, ClaimNeed::Existing, ReleaseClaimIfUnbound) }.await;
+        match released {
+            // The claim is absent or belongs to another node: this node
+            // has nothing to release.
+            Err(AccountCoordinatorError::Claim(
+                AccountClaimError::Unclaimed
+                | AccountClaimError::HeldElsewhere
+                | AccountClaimError::Stale,
+            )) => Ok(false),
+            released => released,
+        }
     }
 
     /// Complete a retirement whose endpoint evidence is overdue.
@@ -160,6 +221,7 @@ impl AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Taken,
             Repair {
                 full_jid: full_jid.clone(),
                 binding_ref: binding_ref.clone(),
@@ -181,6 +243,7 @@ impl AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Taken,
             ReleaseSession {
                 full_jid: full_jid.clone(),
                 request,
@@ -194,7 +257,7 @@ impl AccountCoordinators {
         &self,
         account: &BareJid,
     ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
-        ask!(self, account, OverdueRetirements)
+        ask!(self, account, ClaimNeed::Existing, OverdueRetirements)
     }
 
     /// The account's bindings whose connection is gone: its node lost its
@@ -205,7 +268,7 @@ impl AccountCoordinators {
         &self,
         account: &BareJid,
     ) -> Result<Vec<(FullJid, BindingRef)>, AccountCoordinatorError> {
-        ask!(self, account, ExpiredBindings)
+        ask!(self, account, ClaimNeed::Existing, ExpiredBindings)
     }
 
     /// Take over an account whose claim moved to this node: replace any
@@ -218,7 +281,7 @@ impl AccountCoordinators {
         if let Some(previous) = self.actors.lock().await.remove(account) {
             previous.kill();
         }
-        ask!(self, account, Adopt)
+        ask!(self, account, ClaimNeed::Existing, Adopt)
     }
 
     /// Stop every coordinator whose account holds no binding and has been
@@ -264,6 +327,7 @@ impl AccountBindingAuthority for AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Taken,
             Status {
                 full_jid: full_jid.clone(),
             }
@@ -279,6 +343,7 @@ impl AccountBindingAuthority for AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Taken,
             Execute {
                 full_jid: full_jid.clone(),
                 operation,
@@ -295,6 +360,7 @@ impl AccountBindingAuthority for AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Existing,
             BindSuccess {
                 full_jid: full_jid.clone(),
                 binding_ref: binding_ref.clone(),
@@ -312,6 +378,7 @@ impl AccountBindingAuthority for AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Existing,
             MarkPresented {
                 full_jid: full_jid.clone(),
                 binding_ref: binding_ref.clone(),
@@ -329,6 +396,7 @@ impl AccountBindingAuthority for AccountCoordinators {
         ask!(
             self,
             &account,
+            ClaimNeed::Taken,
             Unregister {
                 full_jid: full_jid.clone(),
                 request,
