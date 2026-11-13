@@ -1397,6 +1397,7 @@ async fn caps_element_in_broadcast_presence_is_the_publishing_clients_own() {
     bob.send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("bob available");
+    await_frames_handled(&mut bob, "bob-available-handled").await;
 
     alice
         .send(
@@ -1423,4 +1424,21 @@ async fn caps_element_in_broadcast_presence_is_the_publishing_clients_own() {
 
     let _ = bob.close().await;
     let _ = alice.close().await;
+}
+
+/// Wait until the server has handled every frame `client` sent before this
+/// call. A connection reads its next frame only after the previous one's
+/// presence change has reached the account coordinator, which routing reads,
+/// so the ping's result proves the earlier presence is routable.
+async fn await_frames_handled(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send ping");
+    let _ = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("ping result");
 }

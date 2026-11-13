@@ -5,6 +5,7 @@
 //! requiring another presence stanza.
 
 pub mod pending_delivery_ws_support;
+mod sm_resume_token_support;
 
 use pending_delivery_ws_support::{
     ack, barrier_without_message, enable, message, presence, recv, PendingFixture,
@@ -21,7 +22,10 @@ async fn unacknowledged_predecessor_defers_then_retries_offline_delivery_on_anot
     assert!(first.payload.is_archived());
 
     let mut phone = fixture.connect("bob", "phone").await;
-    let phone_session = enable(&mut phone).await;
+    let phone_token = enable(&mut phone).await;
+    let phone_session =
+        sm_resume_token_support::session_stream(&fixture.storage.database(), phone_token.as_str())
+            .await;
     presence(&mut phone, 0).await;
     let mut phone_handled = 0;
     message(&mut phone, &mut phone_handled, "pending-a").await;
@@ -61,7 +65,10 @@ async fn unacknowledged_predecessor_defers_then_retries_offline_delivery_on_anot
         ).await.expect("release observation trigger");
     }
     let mut tablet = fixture.connect("bob", "tablet").await;
-    let tablet_session = enable(&mut tablet).await;
+    let tablet_token = enable(&mut tablet).await;
+    let tablet_session =
+        sm_resume_token_support::session_stream(&fixture.storage.database(), tablet_token.as_str())
+            .await;
     presence(&mut tablet, 0).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

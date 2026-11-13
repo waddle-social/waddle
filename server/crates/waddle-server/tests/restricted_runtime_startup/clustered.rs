@@ -1011,7 +1011,9 @@ async fn owner_phase_builds_the_replay_dedup_index_over_retained_rows_or_fails_c
             "INSERT INTO {SCHEMA}.sm_unacked \
              (stream_id, sequence, stanza_xml, original_receipt_at_ms, origin_stream_id, \
               inbound_seq) \
-             VALUES ('retained-stream', {sequence}, '<message/>', 1, 'origin-stream', {inbound})"
+             VALUES ('retained-stream', {sequence}, \
+              '<message xmlns=''jabber:client'' to=''bob@localhost'' type=''chat''>\
+              <body>retained</body></message>', 1, 'origin-stream', {inbound})"
         )
     };
     execute(&provisioned.admin, &insert(1, 7)).await;
@@ -1034,9 +1036,14 @@ async fn owner_phase_builds_the_replay_dedup_index_over_retained_rows_or_fails_c
         .await
         .expect("count retained replay rows");
     assert_eq!(retained, 2, "the failed phase must keep every retained row");
-    // The phase stopped before any clustering store or clustered grant.
-    assert!(!relation_exists(&provisioned.admin, "clustering_claims").await);
-    assert!(!relation_exists(&provisioned.admin, "clustering_keypool").await);
+    // The phase stopped before the clustering plan's keypair pool. The
+    // claim relations come from the schema baseline and exist either way.
+    for relation in KEYPAIR_TABLES {
+        assert!(
+            !relation_exists(&provisioned.admin, relation).await,
+            "{relation} was created by a failed owner phase"
+        );
+    }
 
     // Without the duplicate the same phase builds the index over the row
     // that remains and completes.
@@ -1049,11 +1056,19 @@ async fn owner_phase_builds_the_replay_dedup_index_over_retained_rows_or_fails_c
         .await
         .expect("owner phase completes over duplicate-free retained rows");
     assert!(index_exists(provisioned.admin.clone()).await);
+    // The session has no durable record, so the completed phase moved its
+    // retained message to offline storage once the index was built.
     let retained: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {SCHEMA}.sm_unacked"))
         .fetch_one(&provisioned.admin)
         .await
         .expect("count retained replay rows");
-    assert_eq!(retained, 1);
+    assert_eq!(retained, 0);
+    let offline: i64 =
+        sqlx::query_scalar(&format!("SELECT count(*) FROM {SCHEMA}.pending_delivery"))
+            .fetch_one(&provisioned.admin)
+            .await
+            .expect("count offline rows");
+    assert_eq!(offline, 1, "the retained message reaches offline storage");
     provisioned.cleanup().await;
 }
 
@@ -1392,7 +1407,8 @@ async fn clustered_restricted_startup_refuses_an_unprepared_or_pending_database(
         ("WADDLE_CLUSTERING_LISTEN_ADDRS", "/ip4/127.0.0.1/tcp/0"),
     ];
 
-    // Prepared without the clustering section: no claim relation exists.
+    // Prepared without the clustering section: the claim relations exist
+    // from the schema baseline, but no keypair pool was enrolled.
     let prepared = Prepared::new(&url).await;
     let before = catalog_entries(&prepared.admin).await;
     let (output, listener_published) = prepared.refused_startup(&clustered).await;
@@ -1404,7 +1420,12 @@ async fn clustered_restricted_startup_refuses_an_unprepared_or_pending_database(
         !listener_published,
         "a refused startup published a listener"
     );
-    assert!(!relation_exists(&prepared.admin, "clustering_claims").await);
+    for relation in KEYPAIR_TABLES {
+        assert!(
+            !relation_exists(&prepared.admin, relation).await,
+            "a refused clustered startup created {relation}"
+        );
+    }
     assert_catalog_unchanged(
         &prepared.admin,
         &before,

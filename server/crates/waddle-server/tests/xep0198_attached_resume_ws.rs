@@ -434,10 +434,17 @@ mod seams {
         )
         .await;
         seam.continue_finalization();
+        wait_for(
+            &seam,
+            format!("completion-failure-injected {stream_id} {ALICE_PHONE} durable-session"),
+        )
+        .await;
+        // The seam fails the durable completion as an unavailable store
+        // would: the session returns to detached and the resume is refused.
         let failed = recv(&mut replacement).await;
         assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
         assert!(failed
-            .get_child("resource-constraint", xmpp_parsers::ns::XMPP_STANZAS)
+            .get_child("internal-server-error", xmpp_parsers::ns::XMPP_STANZAS)
             .is_some());
         assert_replaced_transport_closes(&mut owner).await;
 
@@ -705,13 +712,13 @@ mod seams {
         seam.continue_finalization();
         wait_for(
             &seam,
-            format!("gap-injected {stream_id} {ALICE_PHONE} claimed-session"),
+            format!("completion-failure-injected {stream_id} {ALICE_PHONE} durable-session"),
         )
         .await;
         let failed = recv(&mut replacement).await;
         assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
         assert!(failed
-            .get_child("resource-constraint", xmpp_parsers::ns::XMPP_STANZAS)
+            .get_child("internal-server-error", xmpp_parsers::ns::XMPP_STANZAS)
             .is_some());
         wait_for(
             &seam,

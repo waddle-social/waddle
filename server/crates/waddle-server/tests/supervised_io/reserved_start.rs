@@ -879,13 +879,17 @@ async fn no_start_capacity_waits_for_both_socket_halves_to_drop() {
             .expect("starter reaches the first-pump barrier")
             .expect("first-pump barrier notification");
         let observer = inventory_observer(&inventory, &connection_ref).await;
+        // Cancellation takes effect only once the starter yields. The stage
+        // barrier stays closed until a half's Drop proves the starter was
+        // torn down, so the starter cannot find an open barrier mid-poll and
+        // run to completion ahead of the abort.
         start.abort();
-        let _ = start_release.send(());
 
         let first_drop = timeout(TEST_TIMEOUT, dropped_half.recv())
             .await
             .expect("one physical half starts dropping")
             .expect("drop event");
+        let _ = start_release.send(());
         assert!(
             !observer.startup_completion_is_finished(),
             "startup completion cannot publish while either Drop is blocked"

@@ -201,12 +201,49 @@ static FAILED_RESUME_SEAM: LazyLock<Option<FailedResumeSeam>> = LazyLock::new(||
     })
 });
 
+/// Durable session keys of the resumes this process looked up, each with
+/// the `previd` the client presented for it. The client only ever sees the
+/// resume token, so a suite arms the failed-resume seam with the token while
+/// the connection names the session by its key.
+static DURABLE_RESUME_TARGETS: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = LazyLock::new(Default::default);
+
+/// Record that a resume presenting `previd` targets the durable session
+/// `session_key`.
+pub(in crate::server::routes::websocket) fn observe_durable_resume_target(
+    previd: &str,
+    session_key: &str,
+) {
+    if FAILED_RESUME_SEAM.is_none() {
+        return;
+    }
+    if let Ok(mut targets) = DURABLE_RESUME_TARGETS.lock() {
+        targets.insert(session_key.to_owned(), previd.to_owned());
+    }
+}
+
 impl FailedResumeSeam {
     fn armed_stream(&self) -> Option<String> {
         std::fs::read_to_string(&self.arm_file)
             .ok()
             .and_then(|armed| armed.lines().next().map(str::trim).map(str::to_owned))
             .filter(|stream_id| !stream_id.is_empty())
+    }
+
+    /// The armed stream id when `stream_id` names the armed session, either
+    /// directly or as the durable session key of the armed resume token.
+    /// Events are recorded under this id, the one the suite knows.
+    fn armed_id_for(&self, stream_id: &str) -> Option<String> {
+        let armed = self.armed_stream()?;
+        if armed == stream_id {
+            return Some(armed);
+        }
+        let presented = DURABLE_RESUME_TARGETS
+            .lock()
+            .ok()
+            .and_then(|targets| targets.get(stream_id).cloned())?;
+        (presented == armed).then_some(armed)
     }
 
     fn armed_mode(&self, expected: &str) -> bool {
@@ -229,10 +266,10 @@ impl FailedResumeSeam {
     }
 }
 
-/// Pause at the exact post-publication/pre-finalization boundary and inject a
-/// replay gap into the already-claimed session. The test then resumes the
-/// ordinary `complete_claim_if_resumable` path, which must produce the real
-/// `ReplayWindowTruncated` finalization and binding rollback.
+/// Pause at the exact post-publication/pre-finalization boundary and arrange
+/// for the durable resume's completion to fail. The test then resumes the
+/// ordinary completion path, which must abandon the hydration and roll the
+/// binding back.
 pub(in crate::server::routes::websocket) async fn pause_published_resume_finalization(
     state: &WebSocketState,
     conn: &super::state::WsConnState,
@@ -245,12 +282,14 @@ pub(in crate::server::routes::websocket) async fn pause_published_resume_finaliz
     let Some(stream_id) = conn.pending_resume_stream_id.as_deref() else {
         return;
     };
-    if seam.account != jid.to_bare()
-        || seam.jid != *jid
-        || seam.armed_stream().as_deref() != Some(stream_id)
-    {
+    if seam.account != jid.to_bare() || seam.jid != *jid {
         return;
     }
+    let Some(armed_id) = seam.armed_id_for(stream_id) else {
+        return;
+    };
+    let session_key = stream_id;
+    let stream_id = armed_id.as_str();
     let lifecycle_is_running = conn.socket_lifecycle.as_ref().is_some_and(|lifecycle| {
         lifecycle.state() == waddle_xmpp::registry::SocketCleanupState::Running
     });
@@ -334,17 +373,39 @@ pub(in crate::server::routes::websocket) async fn pause_published_resume_finaliz
     while !seam.continue_file.exists() {
         tokio::time::sleep(HOLD_POLL_INTERVAL).await;
     }
-    let gap_through = conn.pending_resume_h.unwrap_or_default().wrapping_add(1);
-    match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .set_claimed_replay_gap_for_test(stream_id, gap_through)
-    {
-        Ok(true) => seam.record("gap-injected", stream_id, jid, "claimed-session"),
-        Ok(false) => seam.record("gap-not-injected", stream_id, jid, "claim-missing"),
-        Err(error) => seam.record("gap-not-injected", stream_id, jid, &error.to_string()),
+    // The durable authority committed the resume before publication; the
+    // one way it fails afterwards is a completion that does not land, which
+    // returns the session to detached and the resume answers `<failed/>`.
+    match FAILED_DURABLE_COMPLETIONS.lock() {
+        Ok(mut sessions) => {
+            sessions.insert(session_key.to_owned());
+            seam.record(
+                "completion-failure-injected",
+                stream_id,
+                jid,
+                "durable-session",
+            );
+        }
+        Err(_) => seam.record(
+            "completion-failure-not-injected",
+            stream_id,
+            jid,
+            "poisoned",
+        ),
     }
+}
+
+/// Durable sessions whose next resume completion the failed-resume seam
+/// fails.
+static FAILED_DURABLE_COMPLETIONS: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
+
+/// Whether the failed-resume seam fails this completion of the durable
+/// session `session_key`. Each injection fails one completion.
+pub(in crate::server::routes::websocket) fn fail_durable_completion(session_key: &str) -> bool {
+    FAILED_DURABLE_COMPLETIONS
+        .lock()
+        .is_ok_and(|mut sessions| sessions.remove(session_key))
 }
 
 static TEARDOWN_CUSTODY_EVENTS: LazyLock<Option<PathBuf>> =
@@ -398,11 +459,11 @@ pub(in crate::server::routes::websocket) fn observe_failed_resume_handoff(
     let Some(seam) = FAILED_RESUME_SEAM.as_ref() else {
         return;
     };
-    if seam.jid == *jid
-        && seam.armed_stream().as_deref() == Some(stream_id)
-        && seam.armed_mode("queue-accepted-frame")
-    {
-        seam.record("handoff", stream_id, jid, &format!("blocked={blocked}"));
+    if seam.jid != *jid || !seam.armed_mode("queue-accepted-frame") {
+        return;
+    }
+    if let Some(armed_id) = seam.armed_id_for(stream_id) {
+        seam.record("handoff", &armed_id, jid, &format!("blocked={blocked}"));
     }
 }
 
@@ -420,18 +481,17 @@ pub(in crate::server::routes::websocket) fn delay_failed_resume_cleanup(
     let Some(seam) = FAILED_RESUME_SEAM.as_ref() else {
         return;
     };
-    if seam.account != jid.to_bare()
-        || seam.jid != *jid
-        || seam.armed_stream().as_deref() != Some(stream_id)
-    {
+    if seam.account != jid.to_bare() || seam.jid != *jid {
         return;
     }
-    seam.record("detached", stream_id, jid, "lifecycle=detached");
+    let Some(stream_id) = seam.armed_id_for(stream_id) else {
+        return;
+    };
+    seam.record("detached", &stream_id, jid, "lifecycle=detached");
     let seam = seam.clone();
     let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
     let jid = jid.clone();
     let owner = *owner;
-    let stream_id = stream_id.to_owned();
     tokio::spawn(async move {
         while !seam.cleanup_release_file.exists() {
             tokio::time::sleep(HOLD_POLL_INTERVAL).await;
