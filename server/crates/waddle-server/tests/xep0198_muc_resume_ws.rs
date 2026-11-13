@@ -3,6 +3,8 @@
 //! A real authenticated WebSocket resume must retain the original occupancy
 //! generation and deliver room messages without a MUC rejoin or departure.
 
+mod sm_resume_token_support;
+
 use jid::{BareJid, FullJid};
 use minidom::Element;
 use std::time::Duration;
@@ -167,7 +169,8 @@ async fn successful_resume_preserves_room_generation_without_leave_or_rejoin() {
         .expect("enabled XML");
     assert!(enabled.is("enabled", SM_NS));
     assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
-    let stream = SmSessionId::new(enabled.attr("id").expect("resumable stream ID"));
+    let token = enabled.attr("id").expect("resume token").to_owned();
+    let stream = sm_resume_token_support::session_stream(&storage.database(), &token).await;
     let handled = join(&mut original, &alice_occupant).await;
     // Drain the original join from the observer before testing continuity.
     let initial: Element = observer
@@ -194,7 +197,7 @@ async fn successful_resume_preserves_room_generation_without_leave_or_rejoin() {
         Element::builder("resume", SM_NS)
             .attr(
                 minidom::rxml::xml_ncname!("previd").to_owned(),
-                stream.as_str(),
+                token.as_str(),
             )
             .attr(
                 minidom::rxml::xml_ncname!("h").to_owned(),
@@ -213,7 +216,7 @@ async fn successful_resume_preserves_room_generation_without_leave_or_rejoin() {
         response.is("resumed", SM_NS),
         "expected successful resume: {response:?}"
     );
-    assert_eq!(response.attr("previd"), Some(stream.as_str()));
+    assert_eq!(response.attr("previd"), Some(token.as_str()));
     assert_eq!(
         response
             .attr("h")
@@ -290,7 +293,7 @@ async fn fresh_bind_retires_previous_room_generation(detach_for_resume: bool) {
         .await;
         let enabled: Element = original.recv().await.unwrap().parse().unwrap();
         assert!(enabled.is("enabled", SM_NS));
-        Some(SmSessionId::new(enabled.attr("id").unwrap()))
+        Some(enabled.attr("id").unwrap().to_owned())
     } else {
         None
     };
@@ -305,7 +308,8 @@ async fn fresh_bind_retires_previous_room_generation(detach_for_resume: bool) {
         let storage = DatabaseSmPersistence::open(Some(&database_url))
             .await
             .unwrap();
-        wait_for_detached(&storage, stream, 1).await;
+        let stream = sm_resume_token_support::session_stream(&storage.database(), stream).await;
+        wait_for_detached(&storage, &stream, 1).await;
     }
 
     // A fresh bind of the same full JID is a new occupancy, even if the old

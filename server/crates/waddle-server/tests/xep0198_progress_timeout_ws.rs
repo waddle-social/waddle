@@ -1,11 +1,12 @@
 //! XEP-0198 §5: the runtime's no-progress reconnect preserves the server session.
 
+mod sm_resume_token_support;
+
 use minidom::Element;
 use std::collections::VecDeque;
 use std::time::Duration;
 use waddle_server::sm_persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
 use waddle_xmpp_client::stream_management::{SmState, SM_PROGRESS_TIMEOUT_MS};
 use waddle_xmpp_client::{
@@ -232,7 +233,9 @@ async fn progress_timeout_resumes_retained_state_but_logout_ends_the_session() {
         .poll_stream_management_clock(sent_at + chrono::Duration::minutes(1))
         .is_empty());
 
-    let session_id = SmSessionId::new(retained.previd().as_str());
+    let session_id =
+        sm_resume_token_support::session_stream(&storage.database(), retained.previd().as_str())
+            .await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(session) = storage
