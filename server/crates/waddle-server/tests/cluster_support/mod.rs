@@ -471,6 +471,15 @@ pub fn cluster_e2e_serial_lock() -> &'static tokio::sync::Mutex<()> {
 /// `lone_survivor_and_isolation_fencing` needs a truthful "other live node"
 /// count before any survivor janitor has had time to run the stale-node
 /// watchdog.
+///
+/// The account resource bindings recorded by earlier scenarios are removed
+/// with them. A binding's connection is known to be gone only through its
+/// node's lapsed lease row; once that row is deleted the binding's liveness
+/// is unknown, so no coordinator ever retires it, and the fixed accounts
+/// every scenario binds would fill up with dead resources until a bind is
+/// refused at the account's resource limit. The binding tables are guarded
+/// by the ingress protocol epoch, so the deletes carry the transaction-local
+/// epoch proof.
 pub async fn reset_node_lease_tables(db: &Database) {
     use waddle_xmpp::ownership::ClaimStore as _;
     let store = PostgresClaimStore::new(db.clone());
@@ -485,6 +494,24 @@ pub async fn reset_node_lease_tables(db: &Database) {
     conn.execute("DELETE FROM clustering_nodes", ())
         .await
         .expect("clean nodes");
+    drop(conn);
+    let mut tx = db.begin().await.expect("begin");
+    tx.execute(
+        "SELECT pg_catalog.set_config('waddle.protocol_epoch', \
+             (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1), true), \
+           pg_catalog.set_config('waddle.protocol_epoch_xid', \
+             pg_catalog.pg_current_xact_id()::text, true)",
+        (),
+    )
+    .await
+    .expect("epoch proof");
+    tx.execute("DELETE FROM account_resource_operations", ())
+        .await
+        .expect("clean account resource operations");
+    tx.execute("DELETE FROM account_resource_bindings", ())
+        .await
+        .expect("clean account resource bindings");
+    tx.commit().await.expect("commit");
 }
 
 /// Poll a spawned cluster server's `/ready` endpoint once; `None` if the

@@ -352,7 +352,14 @@ pub(super) async fn settle_terminal_session(
         }
     };
     let detached = DetachedSession {
-        promotion_custody: PromotionCaptureCustody::never_claimed(),
+        // On a cluster each transferred frame is committed to offline
+        // delivery under the session claim this node holds, the same fence
+        // the custody release below asserts; a frame committed under no
+        // fence would be refused as not owned.
+        promotion_custody: claim.clone().map_or_else(
+            PromotionCaptureCustody::never_claimed,
+            PromotionCaptureCustody::claimed,
+        ),
         stream_id: stream_id.to_string(),
         user_id: record.full_jid.to_bare().to_string(),
         jid: record.full_jid.clone(),
