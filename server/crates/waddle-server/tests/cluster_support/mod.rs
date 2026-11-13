@@ -151,6 +151,151 @@ pub async fn spawn_cluster_server_with_envs(
     bootstrap_ports: &[u16],
     extra_envs: &[(&str, &str)],
 ) -> (TestServer, String, String) {
+    spawn_node(
+        postgres_url,
+        pool_env,
+        swarm_port,
+        bootstrap_ports,
+        &[],
+        extra_envs,
+    )
+    .await
+}
+
+/// The stream-management authority a node selects
+/// (`WADDLE_XMPP_DURABLE_SM`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamManagementAuthority {
+    /// The in-memory session registry with detach-time persistence.
+    #[default]
+    Legacy,
+    /// The durable session authority.
+    Durable,
+}
+
+impl StreamManagementAuthority {
+    /// The value the server parses from its environment.
+    pub fn env_value(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Durable => "durable",
+        }
+    }
+}
+
+/// The account-resource authority a node selects
+/// (`WADDLE_XMPP_ACCOUNT_AUTHORITY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccountAuthority {
+    /// The connection registry and `UserActor`.
+    #[default]
+    Registry,
+    /// The account coordinator.
+    Coordinator,
+}
+
+impl AccountAuthority {
+    /// The value the server parses from its environment.
+    pub fn env_value(self) -> &'static str {
+        match self {
+            Self::Registry => "registry",
+            Self::Coordinator => "coordinator",
+        }
+    }
+}
+
+/// The authorities one node selects at startup. The default is what a
+/// server selects when neither variable is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NodeSelectors {
+    pub stream_management: StreamManagementAuthority,
+    pub account_authority: AccountAuthority,
+}
+
+impl NodeSelectors {
+    /// Durable stream management with the account coordinator. The
+    /// coordinator refuses to start without durable stream management, so
+    /// this is the only combination that selects it.
+    pub const DURABLE_COORDINATOR: Self = Self {
+        stream_management: StreamManagementAuthority::Durable,
+        account_authority: AccountAuthority::Coordinator,
+    };
+
+    /// Durable stream management with the connection registry.
+    pub const DURABLE_REGISTRY: Self = Self {
+        stream_management: StreamManagementAuthority::Durable,
+        account_authority: AccountAuthority::Registry,
+    };
+
+    /// The selector variables of a node's environment. Both are always
+    /// stated, so a node started through [`spawn_cluster_node`] never
+    /// depends on the server's defaults.
+    pub fn envs(self) -> [(&'static str, &'static str); 2] {
+        [
+            (
+                waddle_server::sm_authority::DURABLE_SM_MODE_ENV,
+                self.stream_management.env_value(),
+            ),
+            (
+                waddle_server::account_coordinator::ACCOUNT_AUTHORITY_MODE_ENV,
+                self.account_authority.env_value(),
+            ),
+        ]
+    }
+}
+
+/// One node of a harness cluster: where it listens, whom it dials, which
+/// authorities it selects and which accounts it seeds.
+///
+/// Every node is its own `waddle-server` process, so the selectors travel
+/// in that process's environment and two nodes of one test may select
+/// different authorities.
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterNode<'a> {
+    pub postgres_url: &'a str,
+    pub pool_env: &'a str,
+    pub swarm_port: u16,
+    pub bootstrap_ports: &'a [u16],
+    pub selectors: NodeSelectors,
+    /// Accounts seeded beside the fixed account and
+    /// [`CLUSTER_PEER_USERNAME`], as `(localpart, password)`. Nodes that
+    /// name the same account must name the same password: each node
+    /// reseeds the account in the shared database when it starts.
+    pub accounts: &'a [(&'a str, &'a str)],
+    /// Further variables, applied after the harness's own and after the
+    /// selectors.
+    pub extra_envs: &'a [(&'a str, &'a str)],
+}
+
+/// Spawn the node `node` describes. Returns the server handle plus its
+/// published (node_id, peer_id), like [`spawn_cluster_server`].
+pub async fn spawn_cluster_node(node: ClusterNode<'_>) -> (TestServer, String, String) {
+    let mut envs: Vec<(&str, &str)> = node.selectors.envs().to_vec();
+    envs.extend_from_slice(node.extra_envs);
+    spawn_node(
+        node.postgres_url,
+        node.pool_env,
+        node.swarm_port,
+        node.bootstrap_ports,
+        node.accounts,
+        &envs,
+    )
+    .await
+}
+
+async fn spawn_node(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+    accounts: &[(&str, &str)],
+    extra_envs: &[(&str, &str)],
+) -> (TestServer, String, String) {
+    let accounts: Vec<(String, String)> =
+        std::iter::once(&(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD))
+            .chain(accounts)
+            .map(|(username, password)| ((*username).to_owned(), (*password).to_owned()))
+            .collect();
     let postgres_url = postgres_url.to_string();
     let pool_env = pool_env.to_string();
     let bootstrap_ports = bootstrap_ports.to_vec();
@@ -246,10 +391,11 @@ pub async fn spawn_cluster_server_with_envs(
                 .map(|(key, value)| (key.as_str(), value.as_str())),
         );
 
-        let server = TestServer::start_with_extra_envs(
-            &[(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD)],
-            &envs,
-        );
+        let accounts: Vec<(&str, &str)> = accounts
+            .iter()
+            .map(|(username, password)| (username.as_str(), password.as_str()))
+            .collect();
+        let server = TestServer::start_with_extra_envs(&accounts, &envs);
 
         // The node-id file is written during clustering bring-up, which
         // precedes HTTP readiness — but poll defensively anyway.
@@ -424,6 +570,95 @@ pub async fn wait_for_cross_node_registration(first: &TestServer, second: &TestS
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     holder.close().await.expect("close the local mesh probe");
+}
+
+/// Wait until a stanza `first` accepts for a resource `second` hosts
+/// reaches that resource: the two nodes are then connected.
+///
+/// Unlike [`wait_for_cross_node_registration`] this binds each probe on
+/// the node that takes its account's claim, so it also holds for nodes
+/// that refuse to bind a resource of an account another node owns. The
+/// probe stanza is an IQ, which is answered with an error and never stored
+/// while the recipient's node is unknown to the sender's.
+pub async fn wait_for_cross_node_stanza(
+    first: &TestServer,
+    second: &TestServer,
+    sender: (&str, &str),
+    recipient: (&str, &str),
+) {
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
+
+    let mut sender_probe =
+        WsXmppClient::connect_and_auth(&first.ws_url(), "localhost", sender.0, sender.1, "mesh")
+            .await
+            .expect("mesh probe binds on the first node");
+    let mut recipient_probe = WsXmppClient::connect_and_auth(
+        &second.ws_url(),
+        "localhost",
+        recipient.0,
+        recipient.1,
+        "mesh",
+    )
+    .await
+    .expect("mesh probe binds on the second node");
+    let to = format!("{}@localhost/mesh", recipient.0);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut attempt = 0_u32;
+    'connected: loop {
+        attempt += 1;
+        let id = format!("mesh-{attempt}");
+        let ping = Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(xml_ncname!("type").to_owned(), "get")
+            .attr(xml_ncname!("id").to_owned(), id.as_str())
+            .attr(xml_ncname!("to").to_owned(), to.as_str())
+            .append(Element::builder("ping", "urn:xmpp:ping").build())
+            .build();
+        sender_probe
+            .send(&String::from(&ping))
+            .await
+            .expect("send the mesh probe");
+        let listen_until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < listen_until {
+            if let Ok(frame) = recipient_probe
+                .recv_timeout(Duration::from_millis(100))
+                .await
+            {
+                if frame.contains("urn:xmpp:ping") {
+                    break 'connected;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no stanza crossed between the nodes within 30 s"
+        );
+    }
+    sender_probe
+        .close()
+        .await
+        .expect("close the sending mesh probe");
+    recipient_probe
+        .close()
+        .await
+        .expect("close the receiving mesh probe");
+}
+
+/// Advance the shared database to the mailbox protocol epoch, at which
+/// nodes that select the mailbox carry remote room requests and direct
+/// stanzas as mailbox entries instead of ordered-relay messages.
+pub async fn activate_mailbox_epoch(db: &Database) {
+    let conn = db.guard().await.expect("epoch guard");
+    for _ in 0..2 {
+        conn.execute(
+            "UPDATE ingress_protocol_epoch SET epoch = epoch + 1, activated_at = now(), \
+             lineage_uuid = (SELECT lineage_uuid::uuid FROM _lineage WHERE id = 1) \
+             WHERE id = 1 AND epoch < 2",
+            (),
+        )
+        .await
+        .expect("activate the mailbox epoch");
+    }
 }
 
 pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
